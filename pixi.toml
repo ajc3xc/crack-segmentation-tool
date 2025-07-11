@@ -1,0 +1,30 @@
+[workspace]
+channels = ["agd-lbr", "conda-forge"]
+name = "crack-segmentation-tool"
+platforms = ["win-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+agd = ">=0.2.16,<0.3"
+hfm = "==0.2.13"
+scikit-image = ">=0.25.2,<0.26"
+matplotlib = ">=3.10.3,<4"
+scipy = ">=1.16.0,<2"
+numpy = "<2"
+ipykernel = ">=6.29.5,<7"
+python = ">=3.11.13,<3.12"
+jupyter = ">=1.1.1,<2"
+jupyterlab = ">=4.4.4,<5"
+pip = ">=25.1.1,<26"
+
+[pypi-dependencies]
+opencv-python-headless = ">=4.11.0.86, <5"
+pyqt5 = ">=5.15.11, <6"
+opencv-python = ">=4.11.0.86, <5"
+opencv-contrib-python = ">=4.11.0.86, <5"
+ipykernel = "*"
+cowpy = ">=1.1.5, <2"
+plotly = ">=6.2.0, <7"
+scikit-fmm = ">=2025.6.23, <2026"
