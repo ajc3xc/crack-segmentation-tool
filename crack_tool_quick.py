@@ -1231,17 +1231,19 @@ class CrackToolsApplication(Ui_MainWindow):
         try:
             xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
 
-            # Make sure track_e1 and track_e2 are in crop coordinates!
-            # Shift to full-image coordinates:
-            edge_x = np.concatenate((self.track_e1[1][::-1], self.track_e2[1])) + xmin
-            edge_y = np.concatenate((self.track_e1[0][::-1], self.track_e2[0])) + ymin
+            # Coordinates for mask must be relative to the crop
+            edge_x_crop = np.concatenate((self.track_e1[1][::-1], self.track_e2[1]))
+            edge_y_crop = np.concatenate((self.track_e1[0][::-1], self.track_e2[0]))
 
-            # Create mask on the full image with full-image coordinates
-                        # Create a mask in the cropped region
-            mask_crop = ct.segmentation.create_mask(self.image_crop, 
-                                                    np.concatenate((self.track_e1[1][::-1], self.track_e2[1])),
-                                                    np.concatenate((self.track_e1[0][::-1], self.track_e2[0])))
-            # Paste the crop mask into the full image
+            # Make sure these are within [0, w) and [0, h)
+            # print("Mask on crop coords:", edge_x_crop, edge_y_crop)
+
+            mask_crop = ct.segmentation.create_mask(
+                self.image_crop,
+                edge_y_crop, edge_x_crop  # NB: some libraries expect (row, col)
+            )
+
+            # Now paste the crop mask into the correct region in the full image
             full_mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
             h, w = mask_crop.shape
             full_mask[ymin:ymin+h, xmin:xmin+w] = mask_crop
@@ -1264,7 +1266,7 @@ class CrackToolsApplication(Ui_MainWindow):
             scaled_pixmap = pixmap.scaled(self.all_segments_display.width(), self.all_segments_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
             self.all_segments_display.setPixmap(scaled_pixmap)
 
-            # Shift polyline coordinates for display on full image
+            # For display, shift polylines to full image
             pts1 = (np.array(self.track_e1).transpose(1, 0) + np.array([xmin, ymin])).reshape((-1, 1, 2)).astype(np.int32)
             pts2 = (np.array(self.track_e2).transpose(1, 0) + np.array([xmin, ymin])).reshape((-1, 1, 2)).astype(np.int32)
             im = self.image.astype(np.uint8).copy()
@@ -1276,6 +1278,7 @@ class CrackToolsApplication(Ui_MainWindow):
 
         except Exception as e:
             error(e)
+
 
         # plt.imshow(m)
         # plt.plot(self.track_e1[0],self.track_e1[1],'r')
