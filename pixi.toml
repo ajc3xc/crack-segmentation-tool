@@ -9,7 +9,7 @@ version = "0.1.0"
 [dependencies]
 agd = ">=0.2.16,<0.3"
 hfm = "==0.2.13"
-scikit-image = ">=0.25.2,<0.26"
+scikit-image = "<0.20"
 matplotlib = ">=3.10.3,<4"
 scipy = ">=1.16.0,<2"
 numpy = "<2"
