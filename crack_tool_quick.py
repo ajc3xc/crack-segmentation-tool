@@ -386,7 +386,20 @@ class CrackToolsApplication(Ui_MainWindow):
             if os.path.exists(self.ann_name):
                 with open(self.ann_name) as f:
                     self.annotation = json.load(f)
+                # ---- ADD THIS BLOCK ----
+                # Always reconstruct self.mask from crack_pixels when loading!
+                self.mask = []
+                if 'annotations' in self.annotation and 'crack_pixels' in self.annotation['annotations']:
+                    crack_pixels = self.annotation['annotations']['crack_pixels']
+                    if crack_pixels:
+                        m = np.zeros((self.image.shape[0], self.image.shape[1]), dtype=np.uint8)
+                        c = np.array(crack_pixels)
+                        if c.size > 0:
+                            m[list(c[:, 0]), list(c[:, 1])] = 1
+                            self.mask.append(m)
+                # ------------------------
                 if 'annotations' in self.annotation.keys():
+                    # ... (keep the rest of your block unchanged)
                     if 'crack_pixels' in self.annotation['annotations'].keys():
                         crack_pixels = self.annotation['annotations']['crack_pixels']
                         if crack_pixels != []:
