@@ -734,13 +734,6 @@ class CrackToolsApplication(Ui_MainWindow):
             self.update_os_button.setStyleSheet("background-color : lightblue")
             
             # Debug: Visualize crop and points
-            plt.figure("Cropped Image"); plt.imshow(self.image_crop[...,0], cmap='gray')
-            if hasattr(self, 'pts_crop'):
-                pts_ = np.array(self.pts_crop)
-                plt.scatter(pts_[:,0], pts_[:,1], c='r', marker='o')
-            plt.title("Cropped Image with Points")
-            plt.show()
-            print("update_image_crop: crop shape:", self.image_crop.shape, "pts_crop:", self.pts_crop)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -1244,9 +1237,16 @@ class CrackToolsApplication(Ui_MainWindow):
             edge_y = np.concatenate((self.track_e1[0][::-1], self.track_e2[0])) + ymin
 
             # Create mask on the full image with full-image coordinates
-            mask_FM = ct.segmentation.create_mask(self.image, edge_y, edge_x)
+                        # Create a mask in the cropped region
+            mask_crop = ct.segmentation.create_mask(self.image_crop, 
+                                                    np.concatenate((self.track_e1[1][::-1], self.track_e2[1])),
+                                                    np.concatenate((self.track_e1[0][::-1], self.track_e2[0])))
+            # Paste the crop mask into the full image
+            full_mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
+            h, w = mask_crop.shape
+            full_mask[ymin:ymin+h, xmin:xmin+w] = mask_crop
 
-            self.mask.append(mask_FM)
+            self.mask.append(full_mask)
             track = [list(x) for x in self.track]
 
             self.cracks_stored_endpoints[len(self.cracks_stored_endpoints.keys())] = [
