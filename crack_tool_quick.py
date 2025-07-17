@@ -35,7 +35,7 @@ from PyQt5.QtGui import QPainter, QPen, QColor, QCursor
 from PyQt5.QtCore import Qt, QPoint, QPointF
 
 class CrackAnnotator(QtWidgets.QWidget):
-    def __init__(self, image=None):
+    def __init__(self, image=None, boxes=None):
         super().__init__()
         # Store & prepare image
         self.orig_image = image
@@ -57,6 +57,9 @@ class CrackAnnotator(QtWidgets.QWidget):
         self.hover_index = None
         self.hover_line_index = None
 
+        # Bounding boxes
+        self.boxes = boxes if boxes is not None else []
+        
         # Zoom state
         self.scale = 1.0
         self.setMouseTracking(True)
@@ -129,6 +132,13 @@ class CrackAnnotator(QtWidgets.QWidget):
         if self.image_pixmap:
             qp.drawPixmap(0, 0, self.image_pixmap.scaled(
                 self.width(), self.height(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+            
+        # Draw bounding boxes in BLUE
+        pen_box = QPen(QColor(0, 128, 255), 3)
+        qp.setPen(pen_box)
+        for bbox in self.boxes:
+            xmin, ymin, xmax, ymax = [int(round(v * self.scale)) for v in bbox]
+            qp.drawRect(xmin, ymin, xmax - xmin, ymax - ymin)
 
         # Draw connections
         for idx, (i1, i2) in enumerate(self.connections):
@@ -540,6 +550,9 @@ class CrackToolsApplication(Ui_MainWindow):
 
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QSizePolicy, QApplication, QMessageBox, QScrollArea
 
+        # Get all boxes for this image
+        boxes = self.get_all_bounding_boxes()
+
         dlg = QDialog(self.MainWindow)
         dlg.setWindowTitle("Mark Endpoints & Connections")
         dlg.setWindowModality(Qt.ApplicationModal)
@@ -551,7 +564,7 @@ class CrackToolsApplication(Ui_MainWindow):
         mode_btn.setCheckable(True)
         layout.addWidget(mode_btn)
 
-        annot = CrackAnnotator(image=self.original_image)
+        annot = CrackAnnotator(image=self.original_image, boxes=boxes)
         annot.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
 
         scroll = QScrollArea()
@@ -608,46 +621,8 @@ class CrackToolsApplication(Ui_MainWindow):
 
         color = "lightblue" if self.endpoint_pairs else "red"
         self.update_image_crop_button.setStyleSheet(f"background-color: {color}")
-
-    def update_image_crop(self):
-        try :
-            y_margin = self.y_margin_box.value()
-            x_margin = self.x_margin_box.value()
-            downsample_factor = self.downsample_factor_box.value()
-            color_channel = [0 if self.color_chenel_box.currentText()=='R' else 1 if self.color_chenel_box.currentText()=='B' else 2]
-            if self.end_points == []:
-                self.select_end_points()
-            self.pts = self.end_points
-            black_crack = [0 if self.crack_color_box.currentText() =='Bright crack' else 1 ][0]
-            if black_crack==1:
-                func = np.min
-            elif  black_crack==0:
-                func = np.max
-            self.image_crop,self.pts_crop = ct.tools.image_crop(self.original_image,self.pts[0],self.pts[1],self.pts,y_margin,x_margin)
-            self.image_crop_down = skimage.measure.block_reduce(self.image_crop, block_size=(downsample_factor, downsample_factor, 1),
-                                                    func=func, cval=0, func_kwargs=None)
-            self.pts_crop_down = [x / downsample_factor for x in self.pts_crop]
-            self.image_down = skimage.measure.block_reduce(self.original_image, block_size=(downsample_factor, downsample_factor, 1),
-                                                    func=func, cval=0, func_kwargs=None)
-            self.pts_down = [x / downsample_factor for x in self.pts]
-            gs_image = self.image_crop_down[:,:,color_channel].astype(np.uint8)
-            gs_image = cv2.circle(gs_image,center = (int(self.pts_crop_down[0][0]),int(self.pts_crop_down[0][1])),
-                                radius = 2,color = (0,255,0),thickness = 2)
-            gs_image = cv2.circle(gs_image,center = (int(self.pts_crop_down[1][0]),int(self.pts_crop_down[1][1])),
-                                radius = 2,color = (0,255,0),thickness = 2)
-            qimage = QImage(gs_image.astype(dtype=np.uint8), gs_image.shape[1], gs_image.shape[0], 
-                            gs_image.strides[0], QImage.Format_Grayscale8)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.image_crop_down_display.width(), self.image_crop_down_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.image_crop_down_display.setPixmap(scaled_pixmap)
-            self.x_size_show.display(self.image_crop_down.shape[1])
-            self.y_size_show.display(self.image_crop_down.shape[0])
-            self.update_os_button.setStyleSheet("background-color : lightblue")
-        except Exception as e:
-            error(e)
-            self.update_os_button.setStyleSheet("background-color : red")
             
-    def update_image_crop(self):
+    '''def update_image_crop(self):
         try:
             y_margin = self.y_margin_box.value()
             x_margin = self.x_margin_box.value()
@@ -691,8 +666,67 @@ class CrackToolsApplication(Ui_MainWindow):
             import traceback
             traceback.print_exc()
             error(f"update_image_crop: {e}")
-            self.update_os_button.setStyleSheet("background-color : red")
+            self.update_os_button.setStyleSheet("background-color : red")'''
+            
+    def update_image_crop(self):
+        try:
+            y_margin = self.y_margin_box.value()
+            x_margin = self.x_margin_box.value()
+            downsample_factor = self.downsample_factor_box.value()
+            color_channel = [0 if self.color_chenel_box.currentText()=='R' else 1 if self.color_chenel_box.currentText()=='B' else 2]
 
+            # Ensure self.pts are always numpy arrays
+            self.pts = [np.array(pt) for pt in self.pts]
+
+            black_crack = [0 if self.crack_color_box.currentText() =='Bright crack' else 1 ][0]
+            func = np.min if black_crack==1 else np.max
+
+            self.image_crop, self.pts_crop = ct.tools.image_crop(
+                self.original_image, self.pts[0], self.pts[1], self.pts, y_margin, x_margin
+            )
+
+            # --- Apply bounding box cropping if self.active_bbox exists ---
+            if hasattr(self, "active_bbox") and self.active_bbox is not None:
+                xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
+                img_h, img_w = self.image_crop.shape[:2]
+                xmin = max(0, min(xmin, img_w-1))
+                xmax = max(0, min(xmax, img_w-1))
+                ymin = max(0, min(ymin, img_h-1))
+                ymax = max(0, min(ymax, img_h-1))
+                self.image_crop = self.image_crop[ymin:ymax, xmin:xmax]
+                # Shift points into the new crop coordinates
+                self.pts_crop = [np.array([x-xmin, y-ymin]) for x, y in self.pts_crop]
+
+            self.image_crop_down = skimage.measure.block_reduce(
+                self.image_crop, block_size=(downsample_factor, downsample_factor, 1),
+                func=func, cval=0, func_kwargs=None)
+            self.pts_crop_down = [np.array(x) / downsample_factor for x in self.pts_crop]
+            self.image_down = skimage.measure.block_reduce(
+                self.original_image, block_size=(downsample_factor, downsample_factor, 1),
+                func=func, cval=0, func_kwargs=None)
+            self.pts_down = [np.array(x) / downsample_factor for x in self.pts]
+            gs_image = self.image_crop_down[:,:,color_channel].astype(np.uint8)
+            h, w = gs_image.shape[:2]
+            for idx, pt in enumerate(self.pts_crop_down):
+                x, y = int(round(pt[0])), int(round(pt[1]))
+                if 0 <= x < w and 0 <= y < h:
+                    gs_image = cv2.circle(gs_image, center=(x, y), radius=2, color=(0,255,0), thickness=2)
+                else:
+                    print(f"Warning: Skipping drawing point ({x},{y}) out of image bounds ({w},{h})")
+
+            qimage = QImage(gs_image.astype(dtype=np.uint8), gs_image.shape[1], gs_image.shape[0],
+                            gs_image.strides[0], QImage.Format_Grayscale8)
+            pixmap = QPixmap.fromImage(qimage)
+            scaled_pixmap = pixmap.scaled(self.image_crop_down_display.width(), self.image_crop_down_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+            self.image_crop_down_display.setPixmap(scaled_pixmap)
+            self.x_size_show.display(self.image_crop_down.shape[1])
+            self.y_size_show.display(self.image_crop_down.shape[0])
+            self.update_os_button.setStyleSheet("background-color : lightblue")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            error(f"update_image_crop: {e}")
+            self.update_os_button.setStyleSheet("background-color : red")
 
     def check_wavelet(self):
         try:
@@ -1227,25 +1261,26 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
             
-    def run_pipeline(self):
+    def get_all_bounding_boxes(self):
         """
-        Runs OS, cost map, crack track, segmentation in sequence,
-        then saves and displays the result automatically.
+        Return a list of all saved bounding boxes as [ [xmin, ymin, xmax, ymax], ... ]
         """
+        boxes = []
         try:
-            self.update_image_crop()        # If needed
-            self.update_os()
-            self.update_cost()
-            self.midline_tracking()
-            self.edge_mask()
-            self.edge_tracking()
-            self.save_current_segment()
-            print("Pipeline complete – segmentation saved and displayed.")
+            if 'box' in self.annotation['annotations']:
+                for box_k in self.annotation['annotations']['box']:
+                    bb = self.annotation['annotations']['box'][box_k]['bounding_box']
+                    # bb: [[x0, y0], [x1, y1]]
+                    xs = [bb[0][0], bb[1][0]]
+                    ys = [bb[0][1], bb[1][1]]
+                    xmin, xmax = min(xs), max(xs)
+                    ymin, ymax = min(ys), max(ys)
+                    boxes.append([xmin, ymin, xmax, ymax])
         except Exception as e:
-            print(f"Pipeline failed: {e}")
-            # Optional: show a popup or error message
+            print(f"Could not parse bounding boxes: {e}")
+        return boxes
             
-    def run_pipeline(self):
+    '''def run_pipeline(self):
         """
         For each endpoint-pair in self.endpoint_pairs,
         run crop → OS → cost → midline → edges → save.
@@ -1303,7 +1338,83 @@ class CrackToolsApplication(Ui_MainWindow):
         elif errors:
             print("\n".join(errors))
         else:
+            print("✔ All endpoint‐groups processed.")'''
+            
+    def run_pipeline(self):
+        """
+        For each endpoint-pair in self.endpoint_pairs,
+        run crop → OS → cost → midline → edges → save,
+        **but only if both endpoints are inside the same bounding box.**
+        """
+        print("Running pipeline for all endpoint pairs and bounding boxes...")
+
+        boxes = self.get_all_bounding_boxes()
+        if not boxes:
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Critical)
+            msg.setText("No bounding boxes found! Please draw at least one bounding box before running the pipeline.")
+            msg.setWindowTitle("No Bounding Boxes")
+            msg.exec_()
+            return
+
+        if not hasattr(self, "endpoint_pairs") or not self.endpoint_pairs or len(self.endpoint_pairs) == 0:
+            print("No endpoint pairs set. Prompting user to select endpoints...")
+            self.select_end_points()
+            if not hasattr(self, "endpoint_pairs") or not self.endpoint_pairs or len(self.endpoint_pairs) == 0:
+                msg = QMessageBox()
+                msg.setIcon(QMessageBox.Critical)
+                msg.setText("No endpoint pairs selected!\n\nPlease use 'Select Endpoints' and create at least one connection before running the pipeline.")
+                msg.setWindowTitle("No Endpoint Pairs")
+                msg.exec_()
+                return
+
+        num_success = 0
+        errors = []
+        for idx, pair in enumerate(self.endpoint_pairs):
+            found_box = None
+            for bidx, bbox in enumerate(boxes):
+                xmin, ymin, xmax, ymax = bbox
+                p0, p1 = pair
+                # Check both endpoints inside box
+                if (xmin <= p0[0] <= xmax and ymin <= p0[1] <= ymax and
+                    xmin <= p1[0] <= xmax and ymin <= p1[1] <= ymax):
+                    found_box = bbox
+                    break
+            if not found_box:
+                print(f"Skipping branch {idx+1} (endpoints {pair}): Not in any bounding box.")
+                continue
+
+            self.pts = [np.array(pair[0]), np.array(pair[1])]
+            self.end_points = [np.array(pair[0]), np.array(pair[1])]
+            self.active_bbox = found_box  # Store for cropping step
+
+            print(f"Running pipeline for endpoint pair {idx+1} in box {found_box}: {pair}")
+            try:
+                self.update_image_crop()   # This will use self.active_bbox for cropping!
+                print(f"  Cropping around points: {self.end_points} in box {found_box}")
+                self.update_os()
+                self.update_cost()
+                self.midline_tracking()
+                self.edge_mask()
+                self.edge_tracking()
+                self.save_current_segment()
+                num_success += 1
+            except Exception as e:
+                print(f"Exception for endpoints {pair}: {e}")
+                errors.append(f"Failed for endpoints {pair}: {e}")
+                continue
+
+        if errors and num_success == 0:
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Critical)
+            msg.setText("\n".join(errors))
+            msg.setWindowTitle("Pipeline Error")
+            msg.exec_()
+        elif errors:
+            print("\n".join(errors))
+        else:
             print("✔ All endpoint‐groups processed.")
+
 
 if __name__ == "__main__":
     import sys
