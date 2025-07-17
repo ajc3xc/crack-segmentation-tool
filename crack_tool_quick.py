@@ -29,6 +29,203 @@ def error():
     msg.setWindowTitle("Error")
     msg.exec_()
     
+from PyQt5.QtWidgets import QDialog, QVBoxLayout, QPushButton
+from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QWidget, QVBoxLayout, QFileDialog
+from PyQt5.QtGui import QPainter, QPen, QColor, QCursor
+from PyQt5.QtCore import Qt, QPoint, QPointF
+
+class CrackAnnotator(QWidget):
+    def __init__(self, image=None):
+        super().__init__()
+        # — store & prepare image —
+        self.orig_image = image
+        if image is not None:
+            h, w, _ = image.shape
+            # convert to QPixmap once
+            qimg = QImage(image.data, w, h, image.strides[0], QImage.Format_RGB888)
+            self.image_pixmap = QPixmap.fromImage(qimg)
+            self.setMinimumSize(w, h)
+            self.resize(w, h)
+        else:
+            self.image_pixmap = None
+
+
+        # — annotation state —
+        self.points = []           # List[(x,y)]
+        self.connections = []      # List[(i_from, i_to)]
+        self.point_radius = 7
+        self.connection_mode = False
+        self.connecting_index = None
+        self.hover_index = None
+        self.hover_line_index = None
+
+        # — zoom & pan state —
+        self.scale = 1.0
+        self.offset = QPoint(0, 0)
+        self._panning = False
+        self._last_pan = QPoint()
+
+        self.setMouseTracking(True)
+        self.setMinimumSize(700, 500)
+
+    def toggle_mode(self):
+        self.connection_mode = not self.connection_mode
+        self.connecting_index = None
+        self.update()
+
+    # — zoom with wheel —
+    def wheelEvent(self, event):
+        f = 1.2 if event.angleDelta().y() > 0 else 1/1.2
+        # Zoom centered on cursor:
+        old_pos = event.pos()
+        img_before = QPointF((old_pos.x()-self.offset.x())/self.scale,
+                             (old_pos.y()-self.offset.y())/self.scale)
+        self.scale *= f
+        img_after = QPointF(img_before.x()*self.scale + self.offset.x(),
+                             img_before.y()*self.scale + self.offset.y())
+        self.offset += (old_pos - img_after.toPoint())
+        self.update()
+
+    # — pan with middle-mouse —
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MiddleButton:
+            self._panning = True
+            self._last_pan = event.pos()
+        else:
+            # map to image coords for annotation logic:
+            p = self._to_image_coords(event.pos())
+            self._handle_annotation_click(p)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._panning:
+            delta = event.pos() - self._last_pan
+            self.offset += delta
+            self._last_pan = event.pos()
+        else:
+            p = self._to_image_coords(event.pos())
+            self.hover_index    = self._find_point_at(p)
+            if self.connection_mode and self.connecting_index is None and self.hover_index is None:
+                self.hover_line_index = self._find_line_at(p)
+            else:
+                self.hover_line_index = None
+        self.update()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MiddleButton:
+            self._panning = False
+        super().mouseReleaseEvent(event)
+
+    def _to_image_coords(self, pos):
+        """Convert widget coords → image coords."""
+        x = (pos.x() - self.offset.x()) / self.scale
+        y = (pos.y() - self.offset.y()) / self.scale
+        return (x, y)
+
+    def _handle_annotation_click(self, pos):
+        """Copy of original mousePressEvent logic, but using pos=(x,y)."""
+        point_i = self._find_point_at(pos)
+        line_i  = self._find_line_at(pos)
+        if not self.connection_mode:
+            if point_i is None:
+                self.points.append(pos)
+            else:
+                # remove that point & any connections to it
+                self.connections = [(i1,i2)
+                    for i1,i2 in self.connections
+                    if i1!=point_i and i2!=point_i]
+                self.points.pop(point_i)
+                # shift down subsequent indices
+                self.connections = [(
+                    i1-(i1>point_i),
+                    i2-(i2>point_i))
+                    for i1,i2 in self.connections]
+        else:
+            if line_i is not None and self.connecting_index is None and point_i is None:
+                self.connections.pop(line_i)
+            elif point_i is not None:
+                if self.connecting_index is None:
+                    self.connecting_index = point_i
+                elif self.connecting_index!=point_i:
+                    c = (self.connecting_index, point_i)
+                    if c not in self.connections:
+                        self.connections.append(c)
+                    self.connecting_index = None
+                else:
+                    self.connecting_index = None
+            else:
+                self.connecting_index = None
+
+    def paintEvent(self, event):
+        qp = QPainter(self)
+        qp.setRenderHint(QPainter.Antialiasing)
+
+        # 1) draw background image with pan/zoom
+        if self.image_pixmap:
+            qp.translate(self.offset)
+            qp.scale(self.scale, self.scale)
+            qp.drawPixmap(0, 0, self.image_pixmap)
+
+        # 2) draw connections
+        for idx, (i1,i2) in enumerate(self.connections):
+            x1,y1 = self.points[i1]; x2,y2 = self.points[i2]
+            p1 = QPoint(int(round(x1)), int(round(y1)))
+            p2 = QPoint(int(round(x2)), int(round(y2)))
+            if (self.connection_mode and self.connecting_index is None
+                and idx==self.hover_line_index and self.hover_index is None):
+                pen = QPen(QColor(100,220,140), 6)
+            else:
+                pen = QPen(QColor(80,80,220), 4)
+            qp.setPen(pen)
+            qp.drawLine(p1, p2)
+            self._draw_arrowhead(qp, p1, p2)
+
+        # 3) draw points
+        for i,(x,y) in enumerate(self.points):
+            center = QPoint(int(round(x)), int(round(y)))
+            brush = (QColor(0,200,0) if i==self.hover_index
+                     or (self.connection_mode and i==self.connecting_index)
+                     else QColor(200,80,80))
+            qp.setBrush(brush)
+            qp.setPen(Qt.NoPen)
+            qp.drawEllipse(center, self.point_radius, self.point_radius)
+
+    # — originals from connect_full_test.py: :contentReference[oaicite:2]{index=2} :contentReference[oaicite:3]{index=3}
+    def _draw_arrowhead(self, qp, p1, p2):
+        import math
+        angle = math.atan2(p2.y()-p1.y(), p2.x()-p1.x())
+        sz = 10
+        dx1, dy1 = sz*math.cos(angle-math.pi/8), sz*math.sin(angle-math.pi/8)
+        dx2, dy2 = sz*math.cos(angle+math.pi/8), sz*math.sin(angle+math.pi/8)
+        left  = QPoint(int(p2.x()-dx1), int(p2.y()-dy1))
+        right = QPoint(int(p2.x()-dx2), int(p2.y()-dy2))
+        qp.setPen(Qt.NoPen); qp.setBrush(QColor(80,80,220))
+        qp.drawPolygon(p2, left, right)
+
+    def _find_point_at(self, pos):
+        for i,(x,y) in enumerate(self.points):
+            if (x-pos[0])**2 + (y-pos[1])**2 <= self.point_radius**2:
+                return i
+        return None
+
+    def _find_line_at(self, pos):
+        thr = 7
+        for idx,(i1,i2) in enumerate(self.connections):
+            x1,y1 = self.points[i1]; x2,y2 = self.points[i2]
+            if self._dist_point_to_segment(pos,(x1,y1),(x2,y2)) < thr:
+                return idx
+        return None
+
+    def _dist_point_to_segment(self, p, a, b):
+        import numpy as np
+        p,a,b = np.array(p), np.array(a), np.array(b)
+        if np.all(a==b):
+            return np.linalg.norm(p-a)
+        t = max(0, min(1, np.dot(p-a, b-a)/np.dot(b-a, b-a)))
+        proj = a + t*(b-a)
+        return np.linalg.norm(p-proj)
+    
 class CrackToolsApplication(Ui_MainWindow):
     '''def setupUi(self,MainWindow):
         super().setupUi(MainWindow)
@@ -361,6 +558,72 @@ class CrackToolsApplication(Ui_MainWindow):
             error()
             self.update_image_crop_button.setStyleSheet("background-color : red")
             self.middle_point_button.setStyleSheet("background-color : red")
+
+    def select_end_points(self):
+        if not hasattr(self, "original_image") or self.original_image is None:
+            error()
+            return
+
+        #from connect_full_test import CrackAnnotator
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QSizePolicy, QApplication
+
+        dlg = QDialog(self.MainWindow)
+        dlg.setWindowTitle("Mark Endpoints & Connections")
+        dlg.setWindowModality(Qt.ApplicationModal)
+        dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowMaximizeButtonHint)
+        layout = QVBoxLayout(dlg)
+
+        # Mode toggle button
+        mode_btn = QPushButton("Switch to Connection Mode")
+        mode_btn.setCheckable(True)
+        layout.addWidget(mode_btn)
+
+        from PyQt5.QtWidgets import QScrollArea
+
+        annot = CrackAnnotator(image=self.original_image)
+        annot.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(annot)
+        layout.addWidget(scroll, 1)  # stretch=1
+
+
+        # Mode button updates
+        def update_mode_text():
+            if annot.connection_mode:
+                mode_btn.setText("Switch to Point Mode")
+                mode_btn.setStyleSheet("background: #97e297;")
+            else:
+                mode_btn.setText("Switch to Connection Mode")
+                mode_btn.setStyleSheet("background: #e2c297;")
+        mode_btn.clicked.connect(lambda: (annot.toggle_mode(), update_mode_text()))
+        update_mode_text()  # Set the initial text
+
+        # OK and Cancel buttons
+        btn_layout = QHBoxLayout()
+        btn_done   = QPushButton("Done")
+        btn_cancel = QPushButton("Cancel")
+        btn_done.clicked.connect(dlg.accept)
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_layout.addWidget(btn_done)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+
+        # Maximize dialog to full screen (after it is set up)
+        dlg.showMaximized()
+        QApplication.processEvents()  # Ensure layout is updated
+
+        # Run the dialog
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        pts = annot.points
+        conns = annot.connections
+        self.endpoint_pairs = [[pts[a], pts[b]] for a, b in conns]
+
+        color = "lightblue" if self.endpoint_pairs else "red"
+        self.update_image_crop_button.setStyleSheet(f"background-color: {color}")
 
     def update_image_crop(self):
         try :
@@ -950,6 +1213,31 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             print(f"Pipeline failed: {e}")
             # Optional: show a popup or error message
+            
+    def run_pipeline(self):
+        """
+        For each endpoint‐pair in self.endpoint_pairs,
+        run crop → OS → cost → midline → edges → save.
+        """
+        if not self.endpoint_pairs:
+            error()
+            return
+
+        for pair in self.endpoint_pairs:
+            self.pts = pair
+            try:
+                self.update_image_crop()
+                self.update_os()
+                self.update_cost()
+                self.midline_tracking()
+                self.edge_mask()
+                self.edge_tracking()
+                self.save_current_segment()
+            except Exception as e:
+                print(f"⚠ Pipeline failed for endpoints {pair}: {e}")
+
+        print("✔ All endpoint‐groups processed.")
+
 
 if __name__ == "__main__":
     import sys
