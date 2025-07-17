@@ -722,7 +722,7 @@ class Ui_MainWindow(object):
     def retranslateUi(self, MainWindow):
         _translate = QtCore.QCoreApplication.translate
         MainWindow.setWindowTitle(_translate("MainWindow", "MainWindow"))
-        self.folder_line_edit.setText(_translate("MainWindow", "C:\\Users\\20214106\\Desktop\\cracktools_gui\\crack images"))
+        self.folder_line_edit.setText(_translate("MainWindow", r"C:\Users\13144\Documents\Masters_Thesis\datasets\rgb"))
         self.SelectFolderButton.setToolTip(_translate("MainWindow", "<html><head/><body><p>Draw counturs of a crack manually</p><p>Wheel mause to zoom in/out</p><p>LMB hold to draw</p><p>LMB release to fix contur part</p><p>RMB to erase previouse contur part</p></body></html>"))
         self.SelectFolderButton.setText(_translate("MainWindow", "Select Folder"))
         self.PreviousImageButton.setText(_translate("MainWindow", "Previous"))
