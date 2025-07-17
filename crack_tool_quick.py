@@ -141,6 +141,7 @@ class CrackAnnotator(QtWidgets.QWidget):
             qp.drawRect(xmin, ymin, xmax - xmin, ymax - ymin)
 
         # Draw connections
+        # Draw connections in PURPLE
         for idx, (i1, i2) in enumerate(self.connections):
             x1, y1 = self.points[i1]
             x2, y2 = self.points[i2]
@@ -148,9 +149,9 @@ class CrackAnnotator(QtWidgets.QWidget):
             p2 = QPoint(int(round(x2 * self.scale)), int(round(y2 * self.scale)))
             if (self.connection_mode and self.connecting_index is None
                     and idx == self.hover_line_index and self.hover_index is None):
-                pen = QPen(QColor(100, 220, 140), 6)
+                pen = QPen(QColor(0, 0, 0), 6)  # BLACK (highlight)
             else:
-                pen = QPen(QColor(80, 80, 220), 4)
+                pen = QPen(QColor(0, 0, 0), 4)  # BLACK (normal)
             qp.setPen(pen)
             qp.drawLine(p1, p2)
             self._draw_arrowhead(qp, p1, p2)
@@ -670,33 +671,33 @@ class CrackToolsApplication(Ui_MainWindow):
             
     def update_image_crop(self):
         try:
-            y_margin = self.y_margin_box.value()
-            x_margin = self.x_margin_box.value()
             downsample_factor = self.downsample_factor_box.value()
             color_channel = [0 if self.color_chenel_box.currentText()=='R' else 1 if self.color_chenel_box.currentText()=='B' else 2]
 
-            # Ensure self.pts are always numpy arrays
-            self.pts = [np.array(pt) for pt in self.pts]
+            # Use only the bounding box for cropping!
+            if not (hasattr(self, "active_bbox") and self.active_bbox is not None):
+                raise ValueError("No active bounding box for cropping.")
+            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
+            # Sanity check
+            if xmax <= xmin or ymax <= ymin:
+                print(f"Invalid bounding box cropping window: ({xmin},{ymin}) to ({xmax},{ymax}), skipping.")
+                return
 
+            # Crop the image to the bounding box
+            self.image_crop = self.original_image[ymin:ymax, xmin:xmax]
+            # Shift endpoints relative to bbox origin
+            self.pts_crop = [np.array([pt[0]-xmin, pt[1]-ymin]) for pt in self.pts]
+
+            # Sanity check: make sure all shifted points are in bounds
+            img_h, img_w = self.image_crop.shape[:2]
+            for pt in self.pts_crop:
+                if not (0 <= pt[0] < img_w and 0 <= pt[1] < img_h):
+                    print(f"Endpoint {pt} not in bbox-cropped image ({img_w},{img_h}), skipping this segment.")
+                    return
+
+            # Downsample as before
             black_crack = [0 if self.crack_color_box.currentText() =='Bright crack' else 1 ][0]
             func = np.min if black_crack==1 else np.max
-
-            self.image_crop, self.pts_crop = ct.tools.image_crop(
-                self.original_image, self.pts[0], self.pts[1], self.pts, y_margin, x_margin
-            )
-
-            # --- Apply bounding box cropping if self.active_bbox exists ---
-            if hasattr(self, "active_bbox") and self.active_bbox is not None:
-                xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
-                img_h, img_w = self.image_crop.shape[:2]
-                xmin = max(0, min(xmin, img_w-1))
-                xmax = max(0, min(xmax, img_w-1))
-                ymin = max(0, min(ymin, img_h-1))
-                ymax = max(0, min(ymax, img_h-1))
-                self.image_crop = self.image_crop[ymin:ymax, xmin:xmax]
-                # Shift points into the new crop coordinates
-                self.pts_crop = [np.array([x-xmin, y-ymin]) for x, y in self.pts_crop]
-
             self.image_crop_down = skimage.measure.block_reduce(
                 self.image_crop, block_size=(downsample_factor, downsample_factor, 1),
                 func=func, cval=0, func_kwargs=None)
@@ -713,7 +714,6 @@ class CrackToolsApplication(Ui_MainWindow):
                     gs_image = cv2.circle(gs_image, center=(x, y), radius=2, color=(0,255,0), thickness=2)
                 else:
                     print(f"Warning: Skipping drawing point ({x},{y}) out of image bounds ({w},{h})")
-
             qimage = QImage(gs_image.astype(dtype=np.uint8), gs_image.shape[1], gs_image.shape[0],
                             gs_image.strides[0], QImage.Format_Grayscale8)
             pixmap = QPixmap.fromImage(qimage)
@@ -1384,19 +1384,27 @@ class CrackToolsApplication(Ui_MainWindow):
                 print(f"Skipping branch {idx+1} (endpoints {pair}): Not in any bounding box.")
                 continue
 
+            # Set endpoints and bbox for cropping, no margin needed
             self.pts = [np.array(pair[0]), np.array(pair[1])]
             self.end_points = [np.array(pair[0]), np.array(pair[1])]
-            self.active_bbox = found_box  # Store for cropping step
+            self.active_bbox = found_box
 
             print(f"Running pipeline for endpoint pair {idx+1} in box {found_box}: {pair}")
             try:
-                self.update_image_crop()   # This will use self.active_bbox for cropping!
+                print('image crop')
+                self.update_image_crop()   # Crops only to bounding box!
                 print(f"  Cropping around points: {self.end_points} in box {found_box}")
+                print("os")
                 self.update_os()
+                print("cost")
                 self.update_cost()
+                print("midline")
                 self.midline_tracking()
+                print("edge mask")
                 self.edge_mask()
+                print("edge tracking")
                 self.edge_tracking()
+                print("save segment")
                 self.save_current_segment()
                 num_success += 1
             except Exception as e:
