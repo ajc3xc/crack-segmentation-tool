@@ -125,7 +125,7 @@ class CrackAnnotator(QtWidgets.QWidget):
             self.hover_line_index = None
         self.update()
 
-    def paintEvent(self, event):
+    '''def paintEvent(self, event):
         qp = QPainter(self)
         qp.setRenderHint(QPainter.Antialiasing)
         # Draw image: NO SCALING (widget is already scaled)
@@ -163,7 +163,68 @@ class CrackAnnotator(QtWidgets.QWidget):
                      else QColor(200, 80, 80))
             qp.setBrush(brush)
             qp.setPen(Qt.NoPen)
-            qp.drawEllipse(center, int(self.point_radius * self.scale), int(self.point_radius * self.scale))
+            qp.drawEllipse(center, int(self.point_radius * self.scale), int(self.point_radius * self.scale))'''
+    
+    def paintEvent(self, event):
+        qp = QPainter(self)
+        qp.setRenderHint(QPainter.Antialiasing)
+        # --- Compute scale and offset for aspect-fit ---
+        if self.image_pixmap:
+            img_w, img_h = self.img_w, self.img_h
+            win_w, win_h = self.width(), self.height()
+            scale = min(win_w / img_w, win_h / img_h)
+            xoff = int((win_w - img_w * scale) / 2)
+            yoff = int((win_h - img_h * scale) / 2)
+            self._last_draw_scale = scale
+            self._last_draw_xoff = xoff
+            self._last_draw_yoff = yoff
+            # Draw image centered and scaled
+            qp.drawPixmap(
+                xoff, yoff,
+                int(img_w * scale), int(img_h * scale),
+                self.image_pixmap
+            )
+        else:
+            scale, xoff, yoff = 1.0, 0, 0
+            self._last_draw_scale = scale
+            self._last_draw_xoff = xoff
+            self._last_draw_yoff = yoff
+
+        # --- Draw bounding boxes in BLUE ---
+        pen_box = QPen(QColor(0, 128, 255), 3)
+        qp.setPen(pen_box)
+        for bbox in self.boxes:
+            xmin, ymin, xmax, ymax = [float(v) for v in bbox]
+            xmin_ = int(round(xmin * scale + xoff))
+            ymin_ = int(round(ymin * scale + yoff))
+            xmax_ = int(round(xmax * scale + xoff))
+            ymax_ = int(round(ymax * scale + yoff))
+            qp.drawRect(xmin_, ymin_, xmax_ - xmin_, ymax_ - ymin_)
+
+        # --- Draw connections in PURPLE ---
+        for idx, (i1, i2) in enumerate(self.connections):
+            x1, y1 = self.points[i1]
+            x2, y2 = self.points[i2]
+            p1 = QPoint(int(round(x1 * scale + xoff)), int(round(y1 * scale + yoff)))
+            p2 = QPoint(int(round(x2 * scale + xoff)), int(round(y2 * scale + yoff)))
+            if (self.connection_mode and self.connecting_index is None
+                    and idx == self.hover_line_index and self.hover_index is None):
+                pen = QPen(QColor(0, 0, 0), 6)  # BLACK (highlight)
+            else:
+                pen = QPen(QColor(0, 0, 0), 4)  # BLACK (normal)
+            qp.setPen(pen)
+            qp.drawLine(p1, p2)
+            self._draw_arrowhead(qp, p1, p2)
+
+        # --- Draw points ---
+        for i, (x, y) in enumerate(self.points):
+            center = QPoint(int(round(x * scale + xoff)), int(round(y * scale + yoff)))
+            brush = (QColor(0, 200, 0) if i == self.hover_index
+                    or (self.connection_mode and i == self.connecting_index)
+                    else QColor(200, 80, 80))
+            qp.setBrush(brush)
+            qp.setPen(Qt.NoPen)
+            qp.drawEllipse(center, int(self.point_radius * scale), int(self.point_radius * scale))
 
     def toggle_mode(self):
         self.connection_mode = not self.connection_mode
