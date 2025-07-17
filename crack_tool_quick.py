@@ -685,6 +685,16 @@ class CrackToolsApplication(Ui_MainWindow):
 
             # Crop the image to the bounding box
             self.image_crop = self.original_image[ymin:ymax, xmin:xmax]
+            # Ensure the crop is not too small for tracking/segmentation
+            min_crop_size = 32  # Or whatever your algorithm needs (try 32 as safe default)
+            h, w = self.image_crop.shape[:2]
+            if h < min_crop_size or w < min_crop_size:
+                print(f"Skipping segment: Crop too small for processing ({w}x{h})")
+                # Optionally set a flag to skip the rest of the pipeline for this segment
+                self.skip_current_segment = True
+                return
+            else:
+                self.skip_current_segment = False
             # Shift endpoints relative to bbox origin
             self.pts_crop = [np.array([pt[0]-xmin, pt[1]-ymin]) for pt in self.pts]
 
@@ -1048,23 +1058,23 @@ class CrackToolsApplication(Ui_MainWindow):
     def edge_mask(self):
         try:
             window_half_size = int(self.edge_filter_size_box.value()/2)
-
-            y_margin = self.y_margin_box.value()
-            x_margin = self.x_margin_box.value()
-
-
             black_crack = [-1 if self.crack_color_box.currentText() =='Bright crack' else 1 ][0]
             color_channel = [0 if self.color_chenel_box.currentText()=='R' else 1 if self.color_chenel_box.currentText()=='B' else 2][0]
-            self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(self.original_image[:,:,color_channel]*black_crack,np.array(self.track),window_half_size=window_half_size)
+            # Compute edge masks using the cropped image and coordinates
+            self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(
+                self.image_crop[:,:,color_channel]*black_crack,
+                np.array(self.track_crop), window_half_size=window_half_size)
 
-            self.edge_mask1_crop,pts_crop = ct.tools.image_crop(self.edge_mask1[:,:,np.newaxis],self.pts[0],self.pts[1],self.pts,y_margin,x_margin)
-            self.edge_mask2_crop,pts_crop = ct.tools.image_crop(self.edge_mask2[:,:,np.newaxis],self.pts[0],self.pts[1],self.pts,y_margin,x_margin)
+            # Do NOT crop again! Just normalize and display edge_mask1
+            edge_mask1 = self.edge_mask1
+            edge_mask1 = edge_mask1 - np.min(edge_mask1)
+            if np.max(edge_mask1) != 0:
+                edge_mask1 = (edge_mask1*255/np.max(edge_mask1)).astype(dtype=np.uint8)
+            else:
+                edge_mask1 = (edge_mask1*255).astype(dtype=np.uint8)
 
-            edge_mask1_crop = self.edge_mask1_crop - np.min(self.edge_mask1_crop)
-            edge_mask1_crop = (edge_mask1_crop*255/np.max(edge_mask1_crop)).astype(dtype=np.uint8)
-
-            qimage = QImage(edge_mask1_crop.astype(dtype=np.uint8), edge_mask1_crop.shape[1], edge_mask1_crop.shape[0], 
-                            edge_mask1_crop.strides[0], QImage.Format_Grayscale8)
+            qimage = QImage(edge_mask1.astype(dtype=np.uint8), edge_mask1.shape[1], edge_mask1.shape[0],
+                            edge_mask1.strides[0], QImage.Format_Grayscale8)
             pixmap = QPixmap.fromImage(qimage)
             scaled_pixmap = pixmap.scaled(self.edge_map_display.width(), self.edge_map_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
             self.edge_map_display.setPixmap(scaled_pixmap)
@@ -1073,12 +1083,10 @@ class CrackToolsApplication(Ui_MainWindow):
             error(e)
             self.edge_tracks_button.setStyleSheet("background-color : red")
 
-    def edge_tracking(self):
-        try :
-            color_channel = [0 if self.color_chenel_box.currentText()=='R' else 1 if self.color_chenel_box.currentText()=='B' else 2][0]
-            y_margin = self.y_margin_box.value()
-            x_margin = self.x_margin_box.value()
 
+    def edge_tracking(self):
+        try:
+            color_channel = [0 if self.edge_track_color_box.currentText()=='R' else 1 if self.edge_track_color_box.currentText()=='B' else 2][0]
             w = self.edge_track_width_box.value()
             if self.edge_track_color_box.currentText() == "R":
                 color = (255,0,0)
@@ -1093,21 +1101,24 @@ class CrackToolsApplication(Ui_MainWindow):
             l = self.l_box.value()
             p = self.p_box.value()
 
-            track_e1_crop, track_e2_crop = ct.segmentation.edges_tracking(self.image_crop[:,:,color_channel], self.pts_crop, 
-                                                        self.edge_mask1_crop,self.edge_mask2_crop, mu = mu,l = l, p = p)
+            # Use cropped image and masks directly
+            track_e1_crop, track_e2_crop = ct.segmentation.edges_tracking(
+                self.image_crop[:,:,color_channel],
+                self.pts_crop,
+                self.edge_mask1, self.edge_mask2, mu=mu, l=l, p=p)
             track_e1_crop = track_e1_crop[::-1]
             track_e2_crop = track_e2_crop[::-1]
-
             track_e1_crop[0] = track_e1_crop[0] - 0.5
             track_e2_crop[0] = track_e2_crop[0] - 0.5
-
             track_e1_crop[1] = track_e1_crop[1] - 0.5
             track_e2_crop[1] = track_e2_crop[1] - 0.5
 
-            self.track_e1 = ct.tools.track_crop_to_full(track_e1_crop,self.pts[0],self.pts[1],y_margin,x_margin)
-            self.track_e2 = ct.tools.track_crop_to_full(track_e2_crop,self.pts[0],self.pts[1],y_margin,x_margin)
+            # If you want to convert to full-image coordinates, shift by bbox origin:
+            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
+            self.track_e1 = [track_e1_crop[0] + xmin, track_e1_crop[1] + ymin]
+            self.track_e2 = [track_e2_crop[0] + xmin, track_e2_crop[1] + ymin]
 
-
+            # For display, use crop coordinates:
             pts1 = np.array(track_e1_crop).transpose(1,0).reshape((-1,1,2)).astype(np.int32)
             pts2 = np.array(track_e2_crop).transpose(1,0).reshape((-1,1,2)).astype(np.int32)
             im = self.image_crop.astype(np.uint8)
@@ -1119,11 +1130,9 @@ class CrackToolsApplication(Ui_MainWindow):
             scaled_pixmap = pixmap.scaled(self.edge_tracks_display.width(), self.edge_tracks_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
             self.edge_tracks_display.setPixmap(scaled_pixmap)
             self.edge_tracks_full_screen_button.setStyleSheet("background-color : lightblue")
-            self.edge_tracks_full_screen_button.setStyleSheet("background-color : lightblue")
             self.save_current_segment_button.setStyleSheet("background-color : lightblue")
         except Exception as e:
             error(e)
-            self.edge_tracks_full_screen_button.setStyleSheet("background-color : reed")
             self.edge_tracks_full_screen_button.setStyleSheet("background-color : red")
             self.save_current_segment_button.setStyleSheet("background-color : red")
 
@@ -1357,7 +1366,16 @@ class CrackToolsApplication(Ui_MainWindow):
             msg.exec_()
             return
 
+        self.select_end_points()
         if not hasattr(self, "endpoint_pairs") or not self.endpoint_pairs or len(self.endpoint_pairs) == 0:
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Critical)
+            msg.setText("No endpoint pairs selected!\n\nPlease use 'Select Endpoints' and create at least one connection before running the pipeline.")
+            msg.setWindowTitle("No Endpoint Pairs")
+            msg.exec_()
+            return
+
+        '''if not hasattr(self, "endpoint_pairs") or not self.endpoint_pairs or len(self.endpoint_pairs) == 0:
             print("No endpoint pairs set. Prompting user to select endpoints...")
             self.select_end_points()
             if not hasattr(self, "endpoint_pairs") or not self.endpoint_pairs or len(self.endpoint_pairs) == 0:
@@ -1366,7 +1384,7 @@ class CrackToolsApplication(Ui_MainWindow):
                 msg.setText("No endpoint pairs selected!\n\nPlease use 'Select Endpoints' and create at least one connection before running the pipeline.")
                 msg.setWindowTitle("No Endpoint Pairs")
                 msg.exec_()
-                return
+                return'''
 
         num_success = 0
         errors = []
@@ -1393,6 +1411,9 @@ class CrackToolsApplication(Ui_MainWindow):
             try:
                 print('image crop')
                 self.update_image_crop()   # Crops only to bounding box!
+                if hasattr(self, "skip_current_segment") and self.skip_current_segment:
+                    print(f"Segment {idx+1}: Skipped further processing due to too-small crop.")
+                    continue
                 print(f"  Cropping around points: {self.end_points} in box {found_box}")
                 print("os")
                 self.update_os()
