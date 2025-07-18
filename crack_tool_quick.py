@@ -623,27 +623,37 @@ class CrackToolsApplication(Ui_MainWindow):
     def clear_segmentation(self):
         """
         Remove only the most recent (last-added) segmentation, not all.
-        This means:
-        - Pop the last mask from self.mask (if any)
-        - Remove the highest-key endpoint from self.cracks_stored_endpoints (if any)
-        - Remove the highest-key track from self.crack_tracks (if any)
-        - Update the annotation file and refresh the image
+        Handles cases where nothing is left to remove.
         """
         try:
-            # Remove last mask
+            # Remove last mask (if any)
             if hasattr(self, 'mask') and len(self.mask) > 0:
                 self.mask.pop()
+            else:
+                print("No mask left to remove.")
+
             # Remove last endpoints (if any)
             if hasattr(self, 'cracks_stored_endpoints') and len(self.cracks_stored_endpoints) > 0:
-                last_key = max(map(int, self.cracks_stored_endpoints.keys()))
+                int_keys = list(map(int, self.cracks_stored_endpoints.keys()))
+                last_key = max(int_keys)
                 del self.cracks_stored_endpoints[str(last_key)]
+            else:
+                print("No endpoints left to remove.")
+
             # Remove last track (if any)
             if hasattr(self, 'crack_tracks') and len(self.crack_tracks) > 0:
-                last_key = max(map(int, self.crack_tracks.keys()))
+                int_keys = list(map(int, self.crack_tracks.keys()))
+                last_key = max(int_keys)
                 del self.crack_tracks[str(last_key)]
+            else:
+                print("No tracks left to remove.")
 
             # Update annotation data
             self.annotation["annotations"]["cracks end-points"] = self.cracks_stored_endpoints
+
+            # Update all_masks in annotation for persistence
+            self.annotation["annotations"]["all_masks"] = [m.tolist() for m in self.mask]
+
             m = np.sum(np.array(self.mask), axis=0) if len(self.mask) > 0 else np.zeros_like(self.original_image[..., 0])
             m[m >= 1] = 1.0
             crack_pixels = np.argwhere(m == 1.0)
@@ -1481,6 +1491,10 @@ class CrackToolsApplication(Ui_MainWindow):
             crack_pixels = np.argwhere(m==1.0)
             self.annotation["annotations"]["crack_pixels"] = crack_pixels.tolist()
             self.annotation["annotations"]['tracks'] = self.crack_tracks
+
+            # --- CRITICAL: Save all masks as well! ---
+            self.annotation["annotations"]["all_masks"] = [m.tolist() for m in self.mask]
+
             json_file = json.dumps(self.annotation)
             with open(os.path.splitext(os.path.splitext(self.name)[0])[0] + '.json', 'w') as f:        
                 f.write(json_file)
