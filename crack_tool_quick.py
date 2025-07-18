@@ -124,46 +124,6 @@ class CrackAnnotator(QtWidgets.QWidget):
         else:
             self.hover_line_index = None
         self.update()
-
-    '''def paintEvent(self, event):
-        qp = QPainter(self)
-        qp.setRenderHint(QPainter.Antialiasing)
-        # Draw image: NO SCALING (widget is already scaled)
-        if self.image_pixmap:
-            qp.drawPixmap(0, 0, self.image_pixmap.scaled(
-                self.width(), self.height(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
-            
-        # Draw bounding boxes in BLUE
-        pen_box = QPen(QColor(0, 128, 255), 3)
-        qp.setPen(pen_box)
-        for bbox in self.boxes:
-            xmin, ymin, xmax, ymax = [int(round(v * self.scale)) for v in bbox]
-            qp.drawRect(xmin, ymin, xmax - xmin, ymax - ymin)
-
-        # Draw connections
-        # Draw connections in PURPLE
-        for idx, (i1, i2) in enumerate(self.connections):
-            x1, y1 = self.points[i1]
-            x2, y2 = self.points[i2]
-            p1 = QPoint(int(round(x1 * self.scale)), int(round(y1 * self.scale)))
-            p2 = QPoint(int(round(x2 * self.scale)), int(round(y2 * self.scale)))
-            if (self.connection_mode and self.connecting_index is None
-                    and idx == self.hover_line_index and self.hover_index is None):
-                pen = QPen(QColor(0, 0, 0), 6)  # BLACK (highlight)
-            else:
-                pen = QPen(QColor(0, 0, 0), 4)  # BLACK (normal)
-            qp.setPen(pen)
-            qp.drawLine(p1, p2)
-            self._draw_arrowhead(qp, p1, p2)
-        # Draw points
-        for i, (x, y) in enumerate(self.points):
-            center = QPoint(int(round(x * self.scale)), int(round(y * self.scale)))
-            brush = (QColor(0, 200, 0) if i == self.hover_index
-                     or (self.connection_mode and i == self.connecting_index)
-                     else QColor(200, 80, 80))
-            qp.setBrush(brush)
-            qp.setPen(Qt.NoPen)
-            qp.drawEllipse(center, int(self.point_radius * self.scale), int(self.point_radius * self.scale))'''
     
     def paintEvent(self, event):
         qp = QPainter(self)
