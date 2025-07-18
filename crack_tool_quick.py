@@ -325,7 +325,7 @@ class CrackToolsApplication(Ui_MainWindow):
             self.update_os_button.clicked.disconnect()
         except Exception:
             pass
-        self.update_os_button.setText("Run Full Pipeline")
+        self.update_os_button.setText("Run Pipeline")
         self.update_os_button.clicked.connect(self.run_pipeline)
 
         self.update_track_display_button.clicked.connect(self.update_track_display)
@@ -352,6 +352,7 @@ class CrackToolsApplication(Ui_MainWindow):
         self.save_current_segment_button.setStyleSheet("background-color : red")
         self.draw_segment_button.setStyleSheet("background-color : red")
         self.show_os_button.setStyleSheet("background-color : red")
+
 
         # self.draw_segment_button.setStyleSheet("background-color : red")
 ####################### Select Image Tab ########################################
@@ -381,6 +382,7 @@ class CrackToolsApplication(Ui_MainWindow):
         self.files_list.setCurrentItem(items[0])
 
     def change_image(self):
+            self.bb_pts_list = []  # Reset on image load!
             w = self.segment_width_box_2.value()
             if self.track_color_box.currentText() == "R":
                 color = (1,0,0)
@@ -410,7 +412,11 @@ class CrackToolsApplication(Ui_MainWindow):
                 # ---- ADD THIS BLOCK ----
                 # Always reconstruct self.mask from crack_pixels when loading!
                 self.mask = []
-                if 'annotations' in self.annotation and 'crack_pixels' in self.annotation['annotations']:
+                if 'annotations' in self.annotation and 'all_masks' in self.annotation['annotations']:
+                    all_masks = self.annotation['annotations']['all_masks']
+                    for m_arr in all_masks:
+                        self.mask.append(np.array(m_arr, dtype=np.uint8))
+                elif 'annotations' in self.annotation and 'crack_pixels' in self.annotation['annotations']:
                     crack_pixels = self.annotation['annotations']['crack_pixels']
                     if crack_pixels:
                         m = np.zeros((self.image.shape[0], self.image.shape[1]), dtype=np.uint8)
@@ -466,7 +472,7 @@ class CrackToolsApplication(Ui_MainWindow):
                 self.annotation["annotations"]["cracks end-points"] = []
                 self.annotation["annotations"]["crack_pixels"] = []
                 self.annotation["annotations"]['tracks'] = []
-                self.annotation["annotations"]['box'] = {}  
+                self.annotation["annotations"]['box'] = {} 
 
 
     def next_image(self):
@@ -495,63 +501,161 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
         
+    # In CrackToolsApplication
+
     def draw_box(self):
         self.image_size = self.select_image_size_2.value()
-        self.bb_pts,_ = ct.tools.Draw().bounding_box(self.image[:,:,::-1],self.image_size)
-        self.bb_pts = np.array(self.bb_pts,dtype = np.int32)
-        self.saved = False
-        if len(np.array(self.bb_pts))==2:
-            cv2.line(self.image,(self.bb_pts[0,0],self.bb_pts[0,1]),(self.bb_pts[1,0],self.bb_pts[0,1]),(0,255,0),5)
-            cv2.line(self.image,(self.bb_pts[0,0],self.bb_pts[0,1]),(self.bb_pts[0,0],self.bb_pts[1,1]),(0,255,0),5)
-            cv2.line(self.image,(self.bb_pts[1,0],self.bb_pts[1,1]),(self.bb_pts[0,0],self.bb_pts[1,1]),(0,255,0),5)
-            cv2.line(self.image,(self.bb_pts[1,0],self.bb_pts[1,1]),(self.bb_pts[1,0],self.bb_pts[0,1]),(0,255,0),5)
+        if not hasattr(self, "bb_pts_list"):
+            self.bb_pts_list = []
+        print("DRAW BOX: List before session:", self.bb_pts_list)
 
-            # self.image[self.bb_pts[0,0],self.bb_pts[1,0],:] = [0,255,0]
-            # self.image[self.bb_pts[1,1],self.bb_pts[0,1],:] = [0,255,0]
-            # self.image[self.bb_pts[1,1],self.bb_pts[1,0],:] = [0,255,0]
-            im = self.image.astype(np.uint8)
-            qimage = QImage(im, im.shape[1], im.shape[0], 
-                im.strides[0], QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.ImageScreen.setPixmap(scaled_pixmap)
+        # Build the display image (show blue for saved, green for pending)
+        display_image = self.original_image.copy()
+        # Blue = saved boxes
+        if 'annotations' in self.annotation and 'box' in self.annotation['annotations']:
+            for box_k, box_data in self.annotation['annotations']['box'].items():
+                bb = np.array(box_data['bounding_box'], dtype=np.int32)
+                cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0, 128, 255), 3)
+        # Green = pending
+        for bb in self.bb_pts_list:
+            cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0, 255, 0), 3)
+
+        # Show in Qt preview
+        im = display_image.copy()
+        qimage = QImage(im.astype(np.uint8), im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimage)
+        scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+        self.ImageScreen.setPixmap(scaled_pixmap)
+
+        # User draws one box on top of this image (which already shows all previous boxes)
+        bb_pts, _ = ct.tools.Draw().bounding_box(display_image[:, :, ::-1], self.image_size)
+        bb_pts = np.array(bb_pts, dtype=np.int32)
+        self.bb_pts_list.append(bb_pts)
+        print("DRAW BOX: List after session:", self.bb_pts_list)
+        # Force a preview update here!
+        self.update_green_preview()
+            
+    def update_green_preview(self):
+        """Show the current image with all pending green and saved blue boxes."""
+        display_image = self.original_image.copy()
+        # Draw saved boxes (blue)
+        if 'annotations' in self.annotation and 'box' in self.annotation['annotations']:
+            for box_k, box_data in self.annotation['annotations']['box'].items():
+                bb = np.array(box_data['bounding_box'], dtype=np.int32)
+                cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0, 128, 255), 3)
+        # Draw pending (green)
+        for bb in self.bb_pts_list:
+            cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0, 255, 0), 3)
+
+        im = display_image.copy()
+        qimage = QImage(im.astype(np.uint8), im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimage)
+        scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+        self.ImageScreen.setPixmap(scaled_pixmap)
+        
+    def delete_last_unsaved_box(self):
+        if hasattr(self, "bb_pts_list") and self.bb_pts_list:
+            self.bb_pts_list.pop()
+            print("Deleted last unsaved box. Remaining:", len(self.bb_pts_list))
+            self.update_green_preview()
+        else:
+            print("No unsaved boxes to delete.")
 
     def save_box(self):
         class_ = self.ClassSpinBox.value()
-        if self.saved == False:
-            self.saved = True
-            if len(self.bb_pts)>0:
-                if len(np.fromiter(self.annotation['annotations']['box'].keys(),float))==0:
-                    self.annotation['annotations']['box'][1] = {'bounding_box':self.bb_pts.tolist(),'class':class_}
-                    json_file = json.dumps(self.annotation)
-                    with open(self.ann_name, 'w') as f:        
-                        f.write(json_file)   
-                        print('saved')
-                else:
-                    self.annotation['annotations']['box'][int(np.max(np.fromiter(self.annotation['annotations']['box'].keys(),float))+1)] = {'bounding_box':self.bb_pts.tolist(),'class':class_}
-                    with open(self.ann_name, 'w') as fp:
-                        json.dump(self.annotation, fp)
-                    print('saved')
-            else:
-                print('no box to save')
-        
+        if not hasattr(self, 'bb_pts_list') or len(self.bb_pts_list) == 0:
+            print('No new boxes to save.')
+            return
+
+        # Ensure annotation structure
+        if 'annotations' not in self.annotation:
+            self.annotation['annotations'] = {}
+        if 'box' not in self.annotation['annotations']:
+            self.annotation['annotations']['box'] = {}
+
+        box_dict = self.annotation['annotations']['box']
+        existing_keys = [int(k) for k in box_dict.keys()] if box_dict else []
+        next_idx = max(existing_keys) + 1 if existing_keys else 1
+
+        # Save each pending box with a unique key
+        print(self.bb_pts_list)
+        for bb_pts in self.bb_pts_list:
+            box_dict[str(next_idx)] = {
+                'bounding_box': bb_pts.tolist(),
+                'class': class_
+            }
+            next_idx += 1
+
+        # Write to file
+        with open(self.ann_name, 'w') as f:
+            json.dump(self.annotation, f)
+        print(f'Saved {len(self.bb_pts_list)} box(es).')
+
+        # Clear pending after save!
+        self.bb_pts_list = []
+
         self.change_image()
 
     def clear_boxes(self):
-        self.annotation['annotations']['box'] = {}
-        with open(self.ann_name, 'w') as fp:
-            json.dump(self.annotation, fp)
-        print('saved')
-        self.change_image()
+        # Remove only the box with the highest key (most recently added)
+        box_dict = self.annotation['annotations'].get('box', {})
+        if box_dict:
+            # keys are strings, convert to int for comparison
+            max_key = max(map(int, box_dict.keys()))
+            del box_dict[str(max_key)]
+            print(f"Removed box with key {max_key}")
+            # Save and update
+            with open(self.ann_name, 'w') as fp:
+                json.dump(self.annotation, fp)
+            self.change_image()
+        else:
+            print("No boxes to remove.")
 
-    def clear_segmentation(self):
+    '''def clear_segmentation(self):
         self.annotation["annotations"]["cracks end-points"] = []
         self.annotation["annotations"]["crack_pixels"] = []
         self.annotation["annotations"]['tracks'] = []
         with open(self.ann_name, 'w') as fp:
             json.dump(self.annotation, fp)
         print('saved')
-        self.change_image()
+        self.change_image()'''
+        
+    def clear_segmentation(self):
+        """
+        Remove only the most recent (last-added) segmentation, not all.
+        This means:
+        - Pop the last mask from self.mask (if any)
+        - Remove the highest-key endpoint from self.cracks_stored_endpoints (if any)
+        - Remove the highest-key track from self.crack_tracks (if any)
+        - Update the annotation file and refresh the image
+        """
+        try:
+            # Remove last mask
+            if hasattr(self, 'mask') and len(self.mask) > 0:
+                self.mask.pop()
+            # Remove last endpoints (if any)
+            if hasattr(self, 'cracks_stored_endpoints') and len(self.cracks_stored_endpoints) > 0:
+                last_key = max(map(int, self.cracks_stored_endpoints.keys()))
+                del self.cracks_stored_endpoints[str(last_key)]
+            # Remove last track (if any)
+            if hasattr(self, 'crack_tracks') and len(self.crack_tracks) > 0:
+                last_key = max(map(int, self.crack_tracks.keys()))
+                del self.crack_tracks[str(last_key)]
+
+            # Update annotation data
+            self.annotation["annotations"]["cracks end-points"] = self.cracks_stored_endpoints
+            m = np.sum(np.array(self.mask), axis=0) if len(self.mask) > 0 else np.zeros_like(self.original_image[..., 0])
+            m[m >= 1] = 1.0
+            crack_pixels = np.argwhere(m == 1.0)
+            self.annotation["annotations"]["crack_pixels"] = crack_pixels.tolist()
+            self.annotation["annotations"]['tracks'] = self.crack_tracks
+
+            with open(self.ann_name, 'w') as fp:
+                json.dump(self.annotation, fp)
+            print('Removed last segmentation, saved.')
+            self.change_image()
+        except Exception as e:
+            error(f"Failed to remove last segmentation: {e}")
 
     def annotation_full_screen(self):
         try:
@@ -1415,66 +1519,6 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             print(f"Could not parse bounding boxes: {e}")
         return boxes
-            
-    '''def run_pipeline(self):
-        """
-        For each endpoint-pair in self.endpoint_pairs,
-        run crop → OS → cost → midline → edges → save.
-        Ensures subfunctions always have self.end_points set as expected.
-        """
-        print("Running pipeline for all endpoint pairs...")
-
-        # If no endpoint pairs, try to select them now:
-        if not hasattr(self, "endpoint_pairs") or not self.endpoint_pairs or len(self.endpoint_pairs) == 0:
-            print("No endpoint pairs set. Prompting user to select endpoints...")
-            self.select_end_points()
-            if not hasattr(self, "endpoint_pairs") or not self.endpoint_pairs or len(self.endpoint_pairs) == 0:
-                msg = QMessageBox()
-                msg.setIcon(QMessageBox.Critical)
-                msg.setText("No endpoint pairs selected!\n\nPlease use 'Select Endpoints' and create at least one connection before running the pipeline.")
-                msg.setWindowTitle("No Endpoint Pairs")
-                msg.exec_()
-                return
-
-        num_success = 0
-        errors = []
-        for idx, pair in enumerate(self.endpoint_pairs):
-            # Always set BOTH variables for subfunction compatibility
-            self.pts = list(pair)
-            self.end_points = list(pair)
-            print(f"Running pipeline for endpoint pair {idx+1}: {pair}")
-            try:
-                print(".")
-                self.update_image_crop()
-                print(f"  Cropping around points: {self.end_points}")
-                print("0")
-                self.update_os()
-                print("1")
-                self.update_cost()
-                print("2")
-                self.midline_tracking()
-                print("3")
-                self.edge_mask()
-                print("4")
-                self.edge_tracking()
-                print("5")
-                self.save_current_segment()
-                num_success += 1
-            except Exception as e:
-                print(f"Exception for endpoints {pair}: {e}")
-                errors.append(f"Failed for endpoints {pair}: {e}")
-                continue
-
-        if errors and num_success == 0:
-            msg = QMessageBox()
-            msg.setIcon(QMessageBox.Critical)
-            msg.setText("\n".join(errors))
-            msg.setWindowTitle("Pipeline Error")
-            msg.exec_()
-        elif errors:
-            print("\n".join(errors))
-        else:
-            print("✔ All endpoint‐groups processed.")'''
             
     def run_pipeline(self):
         """

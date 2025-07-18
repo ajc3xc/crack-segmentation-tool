@@ -732,7 +732,7 @@ class Ui_MainWindow(object):
         self.draw_box_button.setText(_translate("MainWindow", "Draw box"))
         self.label_29.setText(_translate("MainWindow", "Class"))
         self.label_36.setText(_translate("MainWindow", "0-crack;"))
-        self.clear_boxes_button.setText(_translate("MainWindow", "Clear boxes"))
+        self.clear_boxes_button.setText(_translate("MainWindow", "Clear last box"))
         self.label_37.setText(_translate("MainWindow", "Image size:"))
         self.save_b_button.setText(_translate("MainWindow", "Save box"))
         self.label_38.setText(_translate("MainWindow", "1-corosion"))
