@@ -1091,23 +1091,88 @@ class CrackToolsApplication(Ui_MainWindow):
             sigmas = self.sigmas_line_edit.text()
             sigmas = [float(i) for i in sigmas.split(sep = ',')]
             sigmas_ext = 1
+            start_time = time.time()
             self.multiscalecostLIFExtReg = ct.os.MultiScaleVesselness(self.osGFCost.real,ksi,1,sigmas,"LIF",sigmas_ext = sigmas_ext)
-
+            print(f"MultiScaleVesselness took {time.time() - start_time:.2f} seconds")
+            
+            start_time = time.time()
             costmultiscale = ct.os.MultiScaleVesselnessFilter(self.multiscalecostLIFExtReg)
+            print(f"MultiScaleVesselnessFilter took {time.time() - start_time:.2f} seconds")
+            start_time = time.time()
             self.costFunction = ct.os.CostFunction(costmultiscale,lambdaa = lambdaa, p = p)
+            print(f"CostFunction took {time.time() - start_time:.2f} seconds")
             c00 = np.min(ct.os.Rescale(self.costFunction),axis = 0)
+            #c00 = np.max(ct.os.Rescale(self.costFunction), axis=0)
             self.update_cost_bar.setValue(100)
             c00 = c00 - np.min(c00)
             c00 = (c00*255/np.max(c00)).astype(dtype=np.uint8)
+            print("c00 shape:", c00.shape)
             qimage = QImage(c00.astype(dtype=np.uint8), c00.shape[1], c00.shape[0], 
                             c00.strides[0], QImage.Format_Grayscale8)
             pixmap = QPixmap.fromImage(qimage)
             scaled_pixmap = pixmap.scaled(self.cost_display.width(), self.cost_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
             self.cost_display.setPixmap(scaled_pixmap)
+            print("c00 shape:", c00.shape)
             self.midline_track_button.setStyleSheet("background-color : lightblue")
         except Exception as e:
             error(e)
             self.midline_track_button.setStyleSheet("background-color : red")
+            
+    '''def update_cost(self):
+        try:
+            import time  # If not already imported elsewhere
+            self.update_cost_bar.setValue(0)
+            lambdaa = self.lambda_box.value()
+            p = self.power_box.value()
+            ksi = 1
+            zeta = 1
+            sigmas = self.sigmas_line_edit.text()
+            sigmas = [float(i) for i in sigmas.split(sep=',')]
+            sigmas_ext = 1
+
+            start_time = time.time()
+            # Multi-scale vesselness (new, fast version, outputs [n_scales, H, W])
+            self.multiscalecostLIFExtReg = ct.os.MultiScaleVesselness(
+                self.osGFCost.real, ksi, 1, sigmas, "LIF", sigmas_ext=sigmas_ext
+            )
+            print(f"MultiScaleVesselness took {time.time() - start_time:.2f} seconds")
+
+            start_time = time.time()
+            costmultiscale = ct.os.MultiScaleVesselnessFilter(self.multiscalecostLIFExtReg)
+            print(f"MultiScaleVesselnessFilter took {time.time() - start_time:.2f} seconds")
+
+            start_time = time.time()
+            self.costFunction = ct.os.CostFunction(costmultiscale, lambdaa=lambdaa, p=p)
+            print(f"CostFunction took {time.time() - start_time:.2f} seconds")
+
+            c00 = ct.os.Rescale(self.costFunction)  # <- already 2D!
+            self.update_cost_bar.setValue(100)
+            c00 = c00 - np.min(c00)
+            if np.max(c00) > 0:
+                c00 = (c00 * 255 / np.max(c00))
+            else:
+                c00 = np.zeros_like(c00)
+            c00 = np.nan_to_num(c00).astype(np.uint8)
+            c00 = c00.astype(np.uint8)
+
+            # Ensure c00 is 2D for QImage
+            if c00.ndim != 2:
+                raise ValueError(f"Cost map 'c00' is not 2D: shape {c00.shape}")
+            #print("c00 shape:", c00.shape)
+            qimage = QImage(c00.astype(dtype=np.uint8), c00.shape[1], c00.shape[0],
+                            c00.strides[0], QImage.Format_Grayscale8)
+            #print(".")
+            pixmap = QPixmap.fromImage(qimage)
+            #print("..")
+            scaled_pixmap = pixmap.scaled(self.cost_display.width(), self.cost_display.height(),
+                                        Qt.KeepAspectRatio, Qt.FastTransformation)
+            #print("...")
+            self.cost_display.setPixmap(scaled_pixmap)
+            #print("....")
+            self.midline_track_button.setStyleSheet("background-color : lightblue")
+        except Exception as e:
+            error(e)
+            self.midline_track_button.setStyleSheet("background-color : red")'''
 
     def midline_tracking(self):
         try :
@@ -1130,8 +1195,8 @@ class CrackToolsApplication(Ui_MainWindow):
             x_margin = self.x_margin_box.value()
             downsample_factor = self.downsample_factor_box.value()
 
-
             track_crop_down = ct.tracking.fast_marching(self.costFunction,self.pts_crop_down[0],self.pts_crop_down[1],g11=g11,g22=g22,g33=g33)
+            print(".")
             track_crop_down[0] = track_crop_down[0]-0.5
             track_crop_down[1] = track_crop_down[1]-0.5
             track_crop = track_crop_down.copy()
@@ -1139,11 +1204,12 @@ class CrackToolsApplication(Ui_MainWindow):
             track_crop[1] = track_crop_down[1]*downsample_factor
             self.track_crop = track_crop
             track = ct.tools.track_crop_to_full(track_crop,self.pts[0],self.pts[1],y_margin,x_margin)
+            print("..")
             self.track = track
             pts = np.array(track_crop).transpose(1,0).reshape((-1,1,2)).astype(np.int32)
             im = self.image_crop.astype(np.uint8)
             im = cv2.polylines(im, [pts], False, color, w)
-
+            print("...")
             qimage = QImage(im, im.shape[1], im.shape[0], 
                             im.strides[0], QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qimage)
@@ -1153,20 +1219,11 @@ class CrackToolsApplication(Ui_MainWindow):
             self.update_track_display_button.setStyleSheet("background-color : lightblue")
             self.track_full_screen_button.setStyleSheet("background-color : lightblue")
             self.edge_mask_button.setStyleSheet("background-color : lightblue")
-            
-            # Debug: Visualize crop and track
-            '''plt.figure("Track on Crop"); plt.imshow(self.image_crop[...,0], cmap='gray')
-            if hasattr(self, 'track_crop'):
-                plt.plot(self.track_crop[0], self.track_crop[1], 'r-')
-            plt.title("Track over Crop")
-            plt.show()'''
-            print("midline_tracking: track_crop shape:", np.array(self.track_crop).shape)
         except Exception as e:
             error(e)
             self.update_track_display_button.setStyleSheet("background-color : red")
             self.track_full_screen_button.setStyleSheet("background-color : red")
             self.edge_mask_button.setStyleSheet("background-color : red")
-
     
     def update_track_display(self):
         try :
@@ -1560,19 +1617,9 @@ class CrackToolsApplication(Ui_MainWindow):
             msg.exec_()
             return
 
-        '''if not hasattr(self, "endpoint_pairs") or not self.endpoint_pairs or len(self.endpoint_pairs) == 0:
-            print("No endpoint pairs set. Prompting user to select endpoints...")
-            self.select_end_points()
-            if not hasattr(self, "endpoint_pairs") or not self.endpoint_pairs or len(self.endpoint_pairs) == 0:
-                msg = QMessageBox()
-                msg.setIcon(QMessageBox.Critical)
-                msg.setText("No endpoint pairs selected!\n\nPlease use 'Select Endpoints' and create at least one connection before running the pipeline.")
-                msg.setWindowTitle("No Endpoint Pairs")
-                msg.exec_()
-                return'''
-
         num_success = 0
         errors = []
+        from time import time
         for idx, pair in enumerate(self.endpoint_pairs):
             found_box = None
             for bidx, bbox in enumerate(boxes):
@@ -1601,15 +1648,26 @@ class CrackToolsApplication(Ui_MainWindow):
                     continue
                 print(f"  Cropping around points: {self.end_points} in box {found_box}")
                 print("os")
+                start_time = time()
                 self.update_os()
+                print(f"os time: {time() - start_time:.2f} seconds")
+                start_time = time()
                 print("cost")
                 self.update_cost()
-                print("midline")
+                print(f"cost time: {time() - start_time:.2f} seconds")
+                #return
+                start_time = time()
+                print("midline tracking")
                 self.midline_tracking()
+                print(f"midline tracking time: {time() - start_time:.2f} seconds")
+                start_time = time()
                 print("edge mask")
                 self.edge_mask()
+                print(f"edge mask time: {time() - start_time:.2f} seconds")
+                start_time = time()
                 print("edge tracking")
                 self.edge_tracking()
+                print(f"edge tracking time: {time() - start_time:.2f} seconds")
                 print("save segment")
                 self.save_current_segment()
                 num_success += 1

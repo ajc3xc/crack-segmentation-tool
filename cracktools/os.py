@@ -440,11 +440,51 @@ def MultiScaleVesselness(U,ksi,zeta,sigmas_s,method,sigmas_ext = 0, sigmaa_ext =
         
     return (vesselnessfilter)
 
+from skimage.filters import frangi
+import numpy as np
+
+'''def MultiScaleVesselness(U, ksi, zeta, sigmas_s, method, sigmas_ext=0, sigmaa_ext=0):
+    """
+    Efficient multi-scale vesselness computation for 2D or 3D images.
+
+    This function collapses the orientation dimension of the input U
+    (using max-projection) and applies the optimized Frangi vesselness
+    filter from scikit-image for each specified sigma (scale).
+    Supports both 2D and 3D images and is dramatically faster than custom
+    tensor-based methods.
+
+    Parameters
+    ----------
+    U : np.ndarray
+        Input array, shape can be [orientations, H, W] or [orientations, D, H, W].
+    ksi, zeta : float
+        (Unused in this implementation, kept for compatibility.)
+    sigmas_s : list or array-like
+        List of scales (sigma values) for multi-scale vesselness.
+    method : str
+        (Unused in this implementation, kept for compatibility.)
+    sigmas_ext, sigmaa_ext : float
+        (Unused, kept for compatibility.)
+
+    Returns
+    -------
+    vesselnessfilter : list of np.ndarray
+        List of vesselness maps, one per sigma.
+        Each map is 2D ([H,W]) or 3D ([D,H,W]) depending on input.
+    """
+    # Collapse orientation dimension by max-projection (shape: [H,W] or [D,H,W])
+    img = np.max(np.abs(U), axis=0)
+    vesselnessfilter = []
+    for sigma in sigmas_s:
+        vessel = frangi(img, sigmas=[sigma], black_ridges=True)
+        vesselnessfilter.append(vessel)
+    vesselnessfilter = np.stack(vesselnessfilter, axis=0)  # shape (n_scales, H, W)
+    return vesselnessfilter'''
+
 def MultiScaleVesselnessFilter(vesselnessfilters):
-    """in nootebook it returns sum1. Why ???"""
-    sum1 = np.sum(vesselnessfilters,axis = 0)
+    sum1 = np.sum(vesselnessfilters, axis=0)  # shape (H, W)
     mu = np.max(sum1)
-    cost = sum1/mu
+    cost = sum1 / mu
     return cost
 
 def LeftInvariantFrame(theta):

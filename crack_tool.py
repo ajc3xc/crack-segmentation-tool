@@ -550,7 +550,8 @@ class CrackToolsApplication(Ui_MainWindow):
             scaled_pixmap = pixmap.scaled(self.cost_display.width(), self.cost_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
             self.cost_display.setPixmap(scaled_pixmap)
             self.midline_track_button.setStyleSheet("background-color : lightblue")
-        except:
+        except Exception as e:
+            print(e)
             error()
             self.midline_track_button.setStyleSheet("background-color : red")
 

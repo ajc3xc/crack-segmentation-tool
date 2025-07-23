@@ -350,6 +350,40 @@ def runReedsSheppGF(sides, dims, seeds, tips, metric):
     print('Done.')
     return geos
 
+def GLIFtoEuclideanOld_vec(nt):
+    """
+    Vectorized version of GLIFtoEuclideanOld for all t.
+    Returns [nt, 3, 3].
+    """
+    t = np.arange(nt) * 2 * np.pi / nt
+    LIF = np.zeros((nt, 3, 3))
+    LIF[:, 0, 0] = np.cos(t)
+    LIF[:, 0, 1] = np.sin(t)
+    LIF[:, 1, 0] = -np.sin(t)
+    LIF[:, 1, 1] = np.cos(t)
+    LIF[:, 2, 2] = 1.0
+    return LIF
+
+def ReedsSheppMetricGFOld(GF, dims, g11, g22, g33):
+    """
+    Fast vectorized version for [nt, nx, ny, 3, 3] metric tensor.
+    Assumes GF = identity, as in your default code.
+    """
+    nt, nx, ny = dims[0], dims[1], dims[2]
+    LIFtoEuclidean = GLIFtoEuclideanOld_vec(nt)     # shape (nt,3,3)
+    LIFtoEuclideaninv = np.linalg.inv(LIFtoEuclidean)  # shape (nt,3,3)
+    # Constant GF metric (diagonal)
+    GFmat = np.diag([g11, g22, g33])   # shape (3,3)
+
+    # Compose the metric for all t: M_t = LIFinv_t @ GFmat @ LIFinv_t^T
+    # Vectorized batch multiply
+    M = LIFtoEuclideaninv @ GFmat @ np.transpose(LIFtoEuclideaninv, (0,2,1))  # (nt,3,3)
+
+    # Now tile to all spatial locations (nx, ny)
+    metric = np.tile(M[:, None, None, :, :], (1, nx, ny, 1, 1))
+    return metric
+
+from time import time
 def fast_marching(os_cost,start_point,end_point,g11=1,g22=100,g33=100):
     NxCost = os_cost.shape[1]
     NyCost = os_cost.shape[2]
@@ -363,9 +397,13 @@ def fast_marching(os_cost,start_point,end_point,g11=1,g22=100,g33=100):
     dims = np.array([NoCost,NxCost,NyCost])
     sidesLIFmetric = np.array([[0,NxCost],[0,NyCost],[0,2*np.pi - s_theta]])
 
+    start_time = time()
     metricLIFOld = ReedsSheppMetricGFOld(gfLIF,dims,g11,g22,g33)
+    print(f"ReedsSheppMetricGFOld = {time() - start_time}")
     
+    start_time = time()
     metricLIFinclCostOld = IncludeCost(os_cost**2, metricLIFOld)
+    print(f"total time = {time() - start_time}")
 
     metricLIFinclCostOld1 = metricLIFinclCostOld.transpose((3,4,1,2,0))
 
@@ -379,9 +417,64 @@ def fast_marching(os_cost,start_point,end_point,g11=1,g22=100,g33=100):
 
     metricLIFinclCostOld = np.reshape(metricLIFinclCostOld,(3,3,dims[0],dims[1],dims[2]))
 
+    start_time = time()
     geos1 = runReedsSheppGF(sides, [dims[1],dims[2],dims[0]], [seeds], [tips], metricLIFinclCostOld1)
+    print(f"runReedsSheppGF = {time() - start_time}")
 
     return [geos1[0][:,1],geos1[0][:,0]]
+
+'''def fast_marching(os_cost, start_point, end_point, g11=1, g22=100, g33=100, lamb=1.0):
+    """
+    Fast 2D geodesic fast marching using FastGeodis.
+    Accepts [orientations, H, W] or [H, W] cost maps.
+    Returns [x_path, y_path] arrays (same as before).
+    """
+    import torch
+    import FastGeodis
+    import numpy as np
+
+    if os_cost.ndim == 3:
+        os_cost = np.max(os_cost, axis=0)
+    os_cost = os_cost.astype('float32')
+    # INVERT if your crack has HIGH values (easy) but cost needs to be LOW
+    if np.max(os_cost) > 0:
+        os_cost = os_cost / np.max(os_cost)
+    print("os_cost stats:", np.min(os_cost), np.max(os_cost), np.unique(os_cost)[:10])
+    # Invert if needed (crack = easy)
+    if np.mean(os_cost) > 0.5:
+        print("Inverting cost map for FastGeodis...")
+        os_cost = 1.0 - os_cost
+
+    H, W = os_cost.shape
+    sy, sx = np.clip(int(start_point[0]), 0, H-1), np.clip(int(start_point[1]), 0, W-1)
+    ey, ex = np.clip(int(end_point[0]), 0, H-1), np.clip(int(end_point[1]), 0, W-1)
+    start_point = (sy, sx)
+    end_point = (ey, ex)
+
+    img_pt = torch.from_numpy(os_cost).unsqueeze(0).unsqueeze(0)
+    seed = np.zeros_like(os_cost, dtype=np.float32)
+    seed[sy, sx] = 1.0
+    mask_pt = torch.from_numpy(seed).unsqueeze(0).unsqueeze(0)
+
+    dist = FastGeodis.geodesic2d_fastmarch(img_pt, mask_pt, lamb=lamb)[0,0].cpu().numpy()
+    print("dist min/max:", np.nanmin(dist), np.nanmax(dist))
+
+    from skimage.graph import route_through_array
+    try:
+        path_indices, _ = route_through_array(dist, end_point, start_point, fully_connected=True)
+        path_indices = np.array(path_indices)
+        x_path = path_indices[:, 1]
+        y_path = path_indices[:, 0]
+        return [x_path, y_path]
+    except Exception as e:
+        print("Pathfinding failed:", e)
+        # fallback: try directly on os_cost (lowest-cost path, not geodesic)
+        print("Trying direct pathfinding on cost map...")
+        path_indices, _ = route_through_array(os_cost, end_point, start_point, fully_connected=True)
+        path_indices = np.array(path_indices)
+        x_path = path_indices[:, 1]
+        y_path = path_indices[:, 0]
+        return [x_path, y_path]'''
 
 def fast_marching_2d(cost,start_point,end_point,l = 1, p = 6):
     mu = 0
