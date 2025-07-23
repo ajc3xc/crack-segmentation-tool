@@ -1655,7 +1655,7 @@ class CrackToolsApplication(Ui_MainWindow):
                 print("cost")
                 self.update_cost()
                 print(f"cost time: {time() - start_time:.2f} seconds")
-                return
+                #return
                 start_time = time()
                 print("midline tracking")
                 self.midline_tracking()

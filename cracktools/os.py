@@ -294,41 +294,6 @@ def LeftInvariantDerivative(osObj,sigmaSpatial,sigmaOD,order,symmetry,anglesMatr
             
         return der
 
-def OrientationScoreTensor3(osObj,sigmaSpatial,sigmaOrientation,method):
-    if method == "LIF":
-        order_list = [11,22]
-    else :
-        order_list = [11,21,31,12,22,32,13,23,33]
-    sigmaOD = sigmaOrientation / osObj.AngularResolution
-    tensor = np.zeros((*osObj.Data.shape,3,3))
-    
-    angles = np.arange(0,abs(osObj.Symmetry),osObj.AngularResolution)
-    anglesMatrix = np.zeros_like(osObj.Data.real)
-    for i in range(0,osObj.Data.real.shape[0]):
-        anglesMatrix[i,:,:] = angles[i]
-        
-    symmetry = osObj.Symmetry
-    der = []
-    for order in order_list:
-        if order!= 31 and order!= 32:
-            order = IntegerDigits(order)
-            der = LeftInvariantDerivative(osObj,sigmaSpatial,sigmaOD,order[::-1],symmetry,anglesMatrix)
-            
-        elif order== 31:
-            order = IntegerDigits(order)
-            der2 = LeftInvariantDerivative(osObj,sigmaSpatial,sigmaOD,[2],symmetry,anglesMatrix)
-            der13 = LeftInvariantDerivative(osObj,sigmaSpatial,sigmaOD,[3,1],symmetry,anglesMatrix)
-            der = der2+der13
-        elif order == 32:
-            order = IntegerDigits(order)
-            der23 = LeftInvariantDerivative(osObj,sigmaSpatial,sigmaOD,[3,2],symmetry,anglesMatrix)
-            der1 = LeftInvariantDerivative(osObj,sigmaSpatial,sigmaOD,[1],symmetry,anglesMatrix)
-            der = der23-der1
-            
-        
-        tensor[:,:,:,order[1]-1,order[0]-1] = der        
-    return tensor
-
 def OrientationScoreTensor3(osObj, sigmaSpatial, sigmaOrientation, method):
     # Only 2 cases: LIF (most used) or all components
     if method == "LIF":
@@ -488,10 +453,6 @@ def CostFunctionVesselnessFiltering(U,ksi,zeta,sigma_s, method,sigmas_ext = 0, s
     Hess = np.zeros((No,Nx,Ny,3,3))
     Hess_old = Hess.copy()
     start_time = time()
-    '''for i in range(No):
-        for j in range(Nx):
-            for z in range(Ny):
-                Hess_old[i,j,z,:,:] = b'''
     Hess = np.broadcast_to(b, (No, Nx, Ny, 3, 3)).copy()
     #print(np.count_nonzero(Hess != Hess_old))
 
