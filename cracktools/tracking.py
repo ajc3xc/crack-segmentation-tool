@@ -350,6 +350,44 @@ def runReedsSheppGF(sides, dims, seeds, tips, metric):
     print('Done.')
     return geos
 
+'''def runReedsSheppGF(sides, dims, seeds, tips, metric):
+    """
+    GPU-accelerated replacement for agd's Riemann3_Periodic geodesic solver.
+    Uses FastGeodis.generalised_geodesic3d for 3D or 2D equivalents.
+    """
+    import torch
+    import numpy as np
+    import FastGeodis
+
+    # Convert metric tensor to cost per voxel (e.g., determinant or trace)
+    # Here we use trace(metric) so that path cost ~ ∫ trace(metric) along path
+    # metric shape: (3,3,D,H,W)
+    cost = np.trace(metric, axis1=0, axis2=1)
+    cost = cost.astype('float32')
+    cost = cost / cost.max()
+
+    # Prepare tensors
+    cost_pt = torch.from_numpy(cost).unsqueeze(0).unsqueeze(0)  # [1,1,D,H,W]
+    seed = np.zeros_like(cost, dtype=np.float32)
+    sy, sx, st = seeds[0][::-1]  # assuming seeds=[ [x,y,theta], ... ]
+    seed[st, sy, sx] = 1.0
+    mask_pt = torch.from_numpy(seed).unsqueeze(0).unsqueeze(0)
+
+    if cost.ndim == 3:
+        dist = FastGeodis.generalised_geodesic3d(cost_pt, mask_pt).cpu().numpy()[0,0]
+    else:
+        dist = FastGeodis.generalised_geodesic2d(cost_pt, mask_pt).cpu().numpy()[0,0]
+
+    from skimage.graph import route_through_array
+    # convert seeds/tips from (x,y,t) to (t,y,x)
+    start = tuple(int(v) for v in seeds[0][::-1])
+    end   = tuple(int(v) for v in tips[0][::-1])
+    path, _ = route_through_array(dist, start, end, fully_connected=True)
+    path = np.array(path)
+    x_path = path[:, 2]
+    y_path = path[:, 1]
+    return [x_path, y_path]'''
+
 def GLIFtoEuclideanOld_vec(nt):
     """
     Vectorized version of GLIFtoEuclideanOld for all t.
@@ -422,59 +460,6 @@ def fast_marching(os_cost,start_point,end_point,g11=1,g22=100,g33=100):
     print(f"runReedsSheppGF = {time() - start_time}")
 
     return [geos1[0][:,1],geos1[0][:,0]]
-
-'''def fast_marching(os_cost, start_point, end_point, g11=1, g22=100, g33=100, lamb=1.0):
-    """
-    Fast 2D geodesic fast marching using FastGeodis.
-    Accepts [orientations, H, W] or [H, W] cost maps.
-    Returns [x_path, y_path] arrays (same as before).
-    """
-    import torch
-    import FastGeodis
-    import numpy as np
-
-    if os_cost.ndim == 3:
-        os_cost = np.max(os_cost, axis=0)
-    os_cost = os_cost.astype('float32')
-    # INVERT if your crack has HIGH values (easy) but cost needs to be LOW
-    if np.max(os_cost) > 0:
-        os_cost = os_cost / np.max(os_cost)
-    print("os_cost stats:", np.min(os_cost), np.max(os_cost), np.unique(os_cost)[:10])
-    # Invert if needed (crack = easy)
-    if np.mean(os_cost) > 0.5:
-        print("Inverting cost map for FastGeodis...")
-        os_cost = 1.0 - os_cost
-
-    H, W = os_cost.shape
-    sy, sx = np.clip(int(start_point[0]), 0, H-1), np.clip(int(start_point[1]), 0, W-1)
-    ey, ex = np.clip(int(end_point[0]), 0, H-1), np.clip(int(end_point[1]), 0, W-1)
-    start_point = (sy, sx)
-    end_point = (ey, ex)
-
-    img_pt = torch.from_numpy(os_cost).unsqueeze(0).unsqueeze(0)
-    seed = np.zeros_like(os_cost, dtype=np.float32)
-    seed[sy, sx] = 1.0
-    mask_pt = torch.from_numpy(seed).unsqueeze(0).unsqueeze(0)
-
-    dist = FastGeodis.geodesic2d_fastmarch(img_pt, mask_pt, lamb=lamb)[0,0].cpu().numpy()
-    print("dist min/max:", np.nanmin(dist), np.nanmax(dist))
-
-    from skimage.graph import route_through_array
-    try:
-        path_indices, _ = route_through_array(dist, end_point, start_point, fully_connected=True)
-        path_indices = np.array(path_indices)
-        x_path = path_indices[:, 1]
-        y_path = path_indices[:, 0]
-        return [x_path, y_path]
-    except Exception as e:
-        print("Pathfinding failed:", e)
-        # fallback: try directly on os_cost (lowest-cost path, not geodesic)
-        print("Trying direct pathfinding on cost map...")
-        path_indices, _ = route_through_array(os_cost, end_point, start_point, fully_connected=True)
-        path_indices = np.array(path_indices)
-        x_path = path_indices[:, 1]
-        y_path = path_indices[:, 0]
-        return [x_path, y_path]'''
 
 def fast_marching_2d(cost,start_point,end_point,l = 1, p = 6):
     mu = 0

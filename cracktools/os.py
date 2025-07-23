@@ -329,6 +329,89 @@ def OrientationScoreTensor3(osObj,sigmaSpatial,sigmaOrientation,method):
         tensor[:,:,:,order[1]-1,order[0]-1] = der        
     return tensor
 
+def OrientationScoreTensor3(osObj, sigmaSpatial, sigmaOrientation, method):
+    # Only 2 cases: LIF (most used) or all components
+    if method == "LIF":
+        order_list = [11, 22]
+    else:
+        order_list = [11, 21, 31, 12, 22, 32, 13, 23, 33]
+
+    sigmaOD = sigmaOrientation / osObj.AngularResolution
+    shape = osObj.Data.shape + (3, 3)
+    tensor = np.zeros(shape, dtype=osObj.Data.dtype)
+
+    # Vectorized: orientations axis
+    angles = np.arange(0, abs(osObj.Symmetry), osObj.AngularResolution)
+    anglesMatrix = angles[:, None, None]  # (No, 1, 1), will broadcast
+
+    symmetry = osObj.Symmetry
+
+    # Helper for all derivatives, batched
+    def get_derivative(order):
+        # order: e.g. [1,1] (for dx-dx), [2,1] (dy-dx), [3,1] (dtheta-dx), etc
+        # Map to string for caching?
+        n = np.sum(np.array(order) == 1) + np.sum(np.array(order) == 2) + 1
+        scaledSigmaSpatial = 1 / np.sqrt(n) * sigmaSpatial
+        angularOrder = np.sum(np.array(order) == 3)
+
+        # --- Orientation Derivative (for all orientations at once) ---
+        periodicOS = CreatePeriodicOrientationAxes(osObj.Data, symmetry)
+        sigma = scaledSigmaSpatial
+        trunc = (4 * scaledSigmaSpatial + 1) / sigma
+        # Gaussian blur, spatial, but NOT along orientation axis
+        spatialBlurredOs = skimage.filters.gaussian(periodicOS, sigma=[0, sigma, sigma], truncate=trunc, preserve_range=True)
+        # Gaussian derivative along orientation axis (batched)
+        derivative = scipy.ndimage.gaussian_filter(
+            spatialBlurredOs, [sigmaOD, 0.125, 0.125], order=[angularOrder, 0, 0], mode="wrap"
+        )
+        # Only keep first No slices if duplicated for symmetry
+        if symmetry == np.pi or symmetry == -np.pi:
+            derivative = derivative[0:osObj.Data.shape[0], :, :]
+        derivative = derivative / (osObj.AngularResolution ** angularOrder)
+
+        # --- Spatial Derivative(s) (for all orientations at once) ---
+        for dirr in order:
+            if dirr == 3:
+                continue  # orientation derivative done above
+            if symmetry == np.pi:
+                symmetry1 = -np.pi
+            elif symmetry == -np.pi:
+                symmetry1 = np.pi
+            elif symmetry == 2 * np.pi:
+                symmetry1 = 2 * np.pi
+            else:
+                symmetry1 = symmetry
+
+            # "periodicOS" for spatial, now it's orientation-batched already!
+            orientationBlurredOS = CreatePeriodicOrientationAxes(derivative, symmetry1)
+            trunc2 = (4 * scaledSigmaSpatial + 1) / scaledSigmaSpatial
+            # Only first No orientations needed
+            if symmetry1 == np.pi or symmetry1 == -np.pi:
+                orientationBlurredOS = orientationBlurredOS[0:osObj.Data.shape[0], :, :]
+            # dx, dy are both batched for all orientations
+            dx = norm_gaussian_filter(orientationBlurredOS, [0, scaledSigmaSpatial, scaledSigmaSpatial],
+                                      order=[0, 1, 0], truncate=trunc2, mode="nearest")
+            dy = norm_gaussian_filter(orientationBlurredOS, [0, scaledSigmaSpatial, scaledSigmaSpatial],
+                                      order=[0, 0, 1], truncate=trunc2, mode="nearest")
+            # orientation-batched angles
+            cos_theta = np.cos(anglesMatrix)
+            sin_theta = np.sin(anglesMatrix)
+            if dirr == 1:
+                derivative = dx * cos_theta + dy * sin_theta
+            elif dirr == 2:
+                derivative = -dx * sin_theta + dy * cos_theta
+
+        return derivative
+
+    # Vectorized, no unnecessary axis shuffling
+    for order in order_list:
+        # order as [i, j] (two digits)
+        order_digits = IntegerDigits(order)
+        der = get_derivative(order_digits[::-1])
+        tensor[..., order_digits[1] - 1, order_digits[0] - 1] = der
+
+    return tensor
+
 def CreatePeriodicOrientationAxes(os,symmetry):
     if symmetry == np.pi or symmetry == 2*np.pi:
         return os
@@ -380,28 +463,40 @@ def norm_gaussian_filter(data,sigma,order,truncate = 4,mode = "wrap"):
 #                                     order=order,truncate=truncate, mode=mode)
     return r
 
+from time import time
 def CostFunctionVesselnessFiltering(U,ksi,zeta,sigma_s, method,sigmas_ext = 0, sigmaa_ext = 0):
     Nx = U.shape[1]
     Ny = U.shape[2]
     No = U.shape[0]
     betha = 0.75/sigma_s
     sigma1 = 0.5
+    start_time = time()
     obj = ObjPositionOrientationData(U,2*np.pi,Wavelets = None,InputData = None,DcFilterImage = 0)
+    print(f"ObjPositionOrientationData time: {time() - start_time}")
+    start_time = time()
     H = OrientationScoreTensor3(obj,0.5*sigma_s**2, 0.5*(2*betha*sigma_s)**2,method)
+    print(f"OrientationScoreTensor3 time: {time() - start_time}")
 
     M = np.diag([1/ksi,zeta/ksi,1])
 
     if sigmas_ext!=0 or sigmaa_ext !=  0:
+        start_time = time()
         H = ExternalRegularization(H,obj.FullOrientationList,sigmas_ext,sigmaa_ext)
+        print(f"ExternalRegularization time: {time() - start_time}")
     a = np.ones((3,3))
     b = np.dot(M,np.dot(a,M))
     Hess = np.zeros((No,Nx,Ny,3,3))
-    for i in range(No):
+    Hess_old = Hess.copy()
+    start_time = time()
+    '''for i in range(No):
         for j in range(Nx):
             for z in range(Ny):
-                Hess[i,j,z,:,:] = b
+                Hess_old[i,j,z,:,:] = b'''
+    Hess = np.broadcast_to(b, (No, Nx, Ny, 3, 3)).copy()
+    #print(np.count_nonzero(Hess != Hess_old))
 
     Hess = Hess*H
+    print(f"Hess time: {time() - start_time}")
 
     if method == "LIF":
         lambda1 = Hess[:,:,:,0,0]
@@ -439,47 +534,6 @@ def MultiScaleVesselness(U,ksi,zeta,sigmas_s,method,sigmas_ext = 0, sigmaa_ext =
         vesselnessfilter.append(vesselnessErosion)
         
     return (vesselnessfilter)
-
-from skimage.filters import frangi
-import numpy as np
-
-'''def MultiScaleVesselness(U, ksi, zeta, sigmas_s, method, sigmas_ext=0, sigmaa_ext=0):
-    """
-    Efficient multi-scale vesselness computation for 2D or 3D images.
-
-    This function collapses the orientation dimension of the input U
-    (using max-projection) and applies the optimized Frangi vesselness
-    filter from scikit-image for each specified sigma (scale).
-    Supports both 2D and 3D images and is dramatically faster than custom
-    tensor-based methods.
-
-    Parameters
-    ----------
-    U : np.ndarray
-        Input array, shape can be [orientations, H, W] or [orientations, D, H, W].
-    ksi, zeta : float
-        (Unused in this implementation, kept for compatibility.)
-    sigmas_s : list or array-like
-        List of scales (sigma values) for multi-scale vesselness.
-    method : str
-        (Unused in this implementation, kept for compatibility.)
-    sigmas_ext, sigmaa_ext : float
-        (Unused, kept for compatibility.)
-
-    Returns
-    -------
-    vesselnessfilter : list of np.ndarray
-        List of vesselness maps, one per sigma.
-        Each map is 2D ([H,W]) or 3D ([D,H,W]) depending on input.
-    """
-    # Collapse orientation dimension by max-projection (shape: [H,W] or [D,H,W])
-    img = np.max(np.abs(U), axis=0)
-    vesselnessfilter = []
-    for sigma in sigmas_s:
-        vessel = frangi(img, sigmas=[sigma], black_ridges=True)
-        vesselnessfilter.append(vessel)
-    vesselnessfilter = np.stack(vesselnessfilter, axis=0)  # shape (n_scales, H, W)
-    return vesselnessfilter'''
 
 def MultiScaleVesselnessFilter(vesselnessfilters):
     sum1 = np.sum(vesselnessfilters, axis=0)  # shape (H, W)
