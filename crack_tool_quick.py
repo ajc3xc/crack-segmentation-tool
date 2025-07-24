@@ -1554,6 +1554,15 @@ class CrackToolsApplication(Ui_MainWindow):
         run crop → OS → cost → midline → edges → save,
         **but only if both endpoints are inside the same bounding box.**
         """
+        import cupy as cp, gc
+
+        # After pipeline run or in exception handler
+        gc.collect()
+        mempool = cp.get_default_memory_pool()
+        pinned = cp.get_default_pinned_memory_pool()
+        mempool.free_all_blocks()
+        pinned.free_all_blocks()
+        print("✅ GPU memory freed from CuPy pool")
         print("Running pipeline for all endpoint pairs and bounding boxes...")
 
         boxes = self.get_all_bounding_boxes()
@@ -1617,6 +1626,7 @@ class CrackToolsApplication(Ui_MainWindow):
                 self.midline_tracking()
                 print(f"midline tracking time: {time() - start_time:.2f} seconds")
                 start_time = time()
+                return
                 print("edge mask")
                 self.edge_mask()
                 print(f"edge mask time: {time() - start_time:.2f} seconds")

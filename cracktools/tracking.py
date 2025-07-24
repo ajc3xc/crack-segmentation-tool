@@ -359,37 +359,135 @@ def runReedsSheppGF(sides, dims, seeds, tips, metric):
     print('Done.')
     return geos
 
-'''def runReedsSheppGF(sides, dims, seeds, tips, metric):
-    sides = cp.asarray(sides, dtype=cp.float64)
-    dims = cp.asarray(dims, dtype=cp.int32)
-    seeds = cp.asarray(seeds, dtype=cp.float64)
-    tips  = cp.asarray(tips, dtype=cp.float64)
-    metric = cp.asarray(metric, dtype=cp.float64)
-    metric = Riemann(metric)   # retains float64 internally
+'''import numpy as np
+import torch
+import FastGeodis as fg
+
+def runReedsSheppGF(sides, dims, seeds, tips, metric):
+    """
+    Fast GPU geodesic with FastGeodis, matching your signature.
+    metric: (3, 3, Nt, Nx, Ny)
+    dims: [Nx, Ny, Nt]
+    seeds: list of [x, y, t] (single or multiple points)
+    """
+    # Convert metric to cost volume
+    # Typical vesselness geodesic: use trace or norm of metric as cost
+    cost = np.trace(metric, axis1=0, axis2=1).astype(np.float32)  # shape (Nt, Nx, Ny)
+
+    # Seeds to mask
+    seeds_mask = np.zeros_like(cost, dtype=np.float32)
+    for s in seeds:
+        # [x, y, t] → [t, x, y] for mask
+        t = int(s[2] * cost.shape[0] / (2*np.pi)) if s[2] > 2 else int(s[2])
+        seeds_mask[t, int(s[0]), int(s[1])] = 1.0
+
+    # Prepare as torch tensors, permuted to (B, X, Y, T)
+    cost_t = torch.from_numpy(cost).permute(1, 2, 0).unsqueeze(0).cuda()  # [1, Nx, Ny, Nt]
+    seeds_t = torch.from_numpy(seeds_mask).permute(1, 2, 0).unsqueeze(0).cuda()
+    print(cost_t.shape, seeds.shape, seeds_t.shape)
+
+    # Spacing
+    Nx, Ny, Nt = dims
+    spacing = [1.0, 1.0, 2*np.pi/Nt]  # adjust if pixel size or theta discretization is not 1.0
+    v=1e10;lamb=1.0;iter=4
+    cost_t = cost_t.unsqueeze(0)    # Remove batch dim
+    seeds_t = seeds_t.unsqueeze(0)  # Remove batch dim
+
+
+    # Geodesic computation
+    #print(type(cost_t), type(seeds_t),type(spacing), type(g11), type(g22), type(g33))
+    print(cost_t.shape, seeds_t.shape)
     print(".")
-    metric = Riemann(metric)
-    print("..")
-    hfmIn = Eikonal.dictIn({
-        'model' : 'Riemann3_Periodic',
-        'seeds' : seeds,
-        'arrayOrdering' : 'RowMajor',
-        'tips' : tips,
-        'mode':'gpu',
-        'metric' : metric})
-    print("...")
-    hfmIn.SetRect(sides = sides, dims = dims)
-    if hfmIn.mode=='gpu': 
-        hfmIn.update({'model':'Riemann3','periodic':(True,False,False)})
-        hfmIn.update({'precision': 'double'})
-    hfmIn['gridScales'] = hfmIn['gridScales'].astype(cp.float64)
-    hfmIn['dims'] = hfmIn['dims'].astype(cp.int32)
-    hfmIn['origin'] = hfmIn['origin'].astype(cp.float64)
-    print("....")
-    hfmOut = hfmIn.Run()
-    print(".....")
-    geos = [g.T.get().astype(np.float64) for g in hfmOut['geodesics']]
-    print('Done.')
-    return geos'''
+    geo = fg.generalised_geodesic3d(
+        cost_t,
+        seeds_t,
+        spacing,
+        v,
+        lamb,
+        iter  # this is your iter count, e.g. 4
+    )
+    geo = geo[0].cpu().numpy().transpose(2, 0, 1)  # (Nt, Nx, Ny)
+
+    # If you want the geodesic path: use a path extraction on geo map (not included here)
+    # geos1 = [x_path, y_path, t_path]  # Extract using minimum cost backtracking, etc.
+
+    return geo  # shape (Nt, Nx, Ny), analogous to geodesic field you use downstream'''
+
+import numpy as np
+import torch
+import FastGeodis as fg
+
+'''import numpy as np
+import torch
+import FastGeodis as fg
+
+def runReedsSheppGF(sides, dims, seeds, tips, metric, visualize=True):
+    """
+    Pseudo-3D FastGeodis geodesic over (x, y, θ), running on CPU.
+    Args:
+        sides: unused
+        dims: [Nx, Ny, Nt]
+        seeds: list of [x, y, t] seed locations
+        tips: unused
+        metric: (3, 3, Nt, Nx, Ny) tensor
+    Returns:
+        geo: geodesic distance map, shape (Nt, Nx, Ny)
+    """
+    # Convert metric to scalar cost
+    raw_cost = np.trace(metric, axis1=0, axis2=1).astype(np.float32)  # (Nt, Nx, Ny)
+
+    # Optionally invert cost for crack-following
+    cost = 1.0 / (raw_cost + 1e-5)
+
+    # Build binary seed mask
+    seeds_mask = np.zeros_like(cost, dtype=np.float32)
+    for s in seeds:
+        t = int(s[2] * cost.shape[0] / (2 * np.pi)) if s[2] > 2 else int(s[2])
+        x, y = int(s[0]), int(s[1])
+        seeds_mask[t, x, y] = 1.0
+
+    # Reorder for pseudo-3D [1,1,X,Y,Theta]
+    cost_t = torch.from_numpy(cost).permute(1, 2, 0).unsqueeze(0).unsqueeze(0).contiguous()
+    seeds_t = torch.from_numpy(seeds_mask).permute(1, 2, 0).unsqueeze(0).unsqueeze(0).contiguous()
+    cost_t = cost_t.to(torch.float32)
+    seeds_t = seeds_t.to(torch.float32)
+
+    # Spacing for [X, Y, θ]
+    Nt, Nx, Ny = dims
+    spacing = [1.0, 1.0, 2 * np.pi / Nt]
+
+    # Geodesic params
+    v = 1e10
+    lamb = 0.3       # try 0.2–0.5 for better crack flow
+    iterations = 4
+
+    print("Running FastGeodis in pseudo-3D mode:")
+    print("cost_t:", cost_t.shape)
+    print("seeds_t:", seeds_t.shape)
+    print("spacing:", spacing)
+
+    geo = fg.generalised_geodesic3d(cost_t, seeds_t, spacing, v, lamb, iterations)
+    geo = geo.squeeze(0).squeeze(0).permute(2, 0, 1).numpy()  # (Nt, Nx, Ny)
+
+    # Optional debug visual
+    if visualize:
+        mid_theta = Nt // 2
+        plt.figure(figsize=(12,4))
+        plt.subplot(1,3,1)
+        plt.imshow(raw_cost[mid_theta], cmap='gray')
+        plt.title("Raw cost at θ~π/2")
+
+        plt.subplot(1,3,2)
+        plt.imshow(seeds_mask[mid_theta], cmap='hot')
+        plt.title("Seeds")
+
+        plt.subplot(1,3,3)
+        plt.imshow(geo[mid_theta], cmap='inferno')
+        plt.title("Geodesic θ~π/2")
+        plt.tight_layout()
+        plt.show()
+
+    return geo'''
 
 def GLIFtoEuclideanOld_vec(nt):
     """
@@ -442,10 +540,16 @@ def fast_marching(os_cost,start_point,end_point,g11=1,g22=100,g33=100):
     start_time = time()
     metricLIFOld = ReedsSheppMetricGFOld(gfLIF,dims,g11,g22,g33)
     print(f"ReedsSheppMetricGFOld = {time() - start_time}")
+    import cupy as cp, gc
+    gc.collect()
+    mempool = cp.get_default_memory_pool()
+    pinned = cp.get_default_pinned_memory_pool()
+    mempool.free_all_blocks()
+    pinned.free_all_blocks()
     
     start_time = time()
     metricLIFinclCostOld = IncludeCost(os_cost**2, metricLIFOld)
-    print(f"total time = {time() - start_time}")
+    print(f"IncludeCost time = {time() - start_time}")
 
     metricLIFinclCostOld1 = metricLIFinclCostOld.transpose((3,4,1,2,0))
 

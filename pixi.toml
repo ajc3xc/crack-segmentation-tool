@@ -26,6 +26,6 @@ opencv-python = ">=4.11.0.86, <5"
 opencv-contrib-python = ">=4.11.0.86, <5"
 plotly = ">=6.2.0, <7"
 scikit-fmm = ">=2025.6.23, <2026"
-fastgeodis = ">=1.0.5, <2"
 agd = ">=0.2.16, <0.3"
-#pip install fastgeodis
+fastgeodis = ">=1.0.5, <2"
+#pip install --upgrade --force-reinstall torch --index-url https://download.pytorch.org/whl/cu118
