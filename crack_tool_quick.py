@@ -771,52 +771,6 @@ class CrackToolsApplication(Ui_MainWindow):
         color = "lightblue" if self.endpoint_pairs else "red"
         self.update_image_crop_button.setStyleSheet(f"background-color: {color}")
             
-    '''def update_image_crop(self):
-        try:
-            y_margin = self.y_margin_box.value()
-            x_margin = self.x_margin_box.value()
-            downsample_factor = self.downsample_factor_box.value()
-            color_channel = [0 if self.color_chenel_box.currentText()=='R' else 1 if self.color_chenel_box.currentText()=='B' else 2]
-
-            # Ensure end_points is set and is a list of two numpy arrays
-            if self.end_points == []:
-                self.select_end_points()
-            # Convert all points to np.array for safety
-            self.pts = [np.array(pt) for pt in self.end_points]
-            black_crack = [0 if self.crack_color_box.currentText() =='Bright crack' else 1 ][0]
-            func = np.min if black_crack==1 else np.max
-
-            self.image_crop, self.pts_crop = ct.tools.image_crop(
-                self.original_image,
-                self.pts[0], self.pts[1], self.pts, y_margin, x_margin
-            )
-            self.image_crop_down = skimage.measure.block_reduce(
-                self.image_crop, block_size=(downsample_factor, downsample_factor, 1),
-                func=func, cval=0, func_kwargs=None)
-            self.pts_crop_down = [np.array(x) / downsample_factor for x in self.pts_crop]
-            self.image_down = skimage.measure.block_reduce(
-                self.original_image, block_size=(downsample_factor, downsample_factor, 1),
-                func=func, cval=0, func_kwargs=None)
-            self.pts_down = [np.array(x) / downsample_factor for x in self.pts]
-            gs_image = self.image_crop_down[:,:,color_channel].astype(np.uint8)
-            gs_image = cv2.circle(gs_image, center=(int(self.pts_crop_down[0][0]), int(self.pts_crop_down[0][1])),
-                                radius=2, color=(0,255,0), thickness=2)
-            gs_image = cv2.circle(gs_image, center=(int(self.pts_crop_down[1][0]), int(self.pts_crop_down[1][1])),
-                                radius=2, color=(0,255,0), thickness=2)
-            qimage = QImage(gs_image.astype(dtype=np.uint8), gs_image.shape[1], gs_image.shape[0],
-                            gs_image.strides[0], QImage.Format_Grayscale8)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.image_crop_down_display.width(), self.image_crop_down_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.image_crop_down_display.setPixmap(scaled_pixmap)
-            self.x_size_show.display(self.image_crop_down.shape[1])
-            self.y_size_show.display(self.image_crop_down.shape[0])
-            self.update_os_button.setStyleSheet("background-color : lightblue")
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            error(f"update_image_crop: {e}")
-            self.update_os_button.setStyleSheet("background-color : red")'''
-            
     def update_image_crop(self):
         try:
             downsample_factor = self.downsample_factor_box.value()
@@ -1655,7 +1609,7 @@ class CrackToolsApplication(Ui_MainWindow):
                 print("cost")
                 self.update_cost()
                 print(f"cost time: {time() - start_time:.2f} seconds")
-                #return
+                return
                 start_time = time()
                 print("midline tracking")
                 self.midline_tracking()

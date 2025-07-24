@@ -1,5 +1,5 @@
 [workspace]
-channels = ["agd-lbr", "conda-forge"]
+channels = ["rapidsai", "agd-lbr", "conda-forge"]
 name = "crack-segmentation-tool"
 platforms = ["win-64"]
 version = "0.1.0"
@@ -7,6 +7,9 @@ version = "0.1.0"
 [tasks]
 
 [dependencies]
+cuda-version = "==11.8"
+cudatoolkit = "==11.8"
+cupy        = "*"
 agd = ">=0.2.16,<0.3"
 hfm = "==0.2.13"
 scikit-image = "<0.20"

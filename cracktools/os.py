@@ -377,6 +377,95 @@ def OrientationScoreTensor3(osObj, sigmaSpatial, sigmaOrientation, method):
 
     return tensor
 
+import cupy as cp
+import cupyx.scipy.ndimage as nd
+
+def OrientationScoreTensor3_gpu(osObj, sigmaSpatial, sigmaOrientation, method):
+    """
+    CuPy version, strictly matches original, including all axes, truncation, symmetry, etc.
+    """
+    if method == "LIF":
+        order_list = [11, 22]
+    else:
+        order_list = [11, 21, 31, 12, 22, 32, 13, 23, 33]
+
+    sigmaOD = sigmaOrientation / osObj.AngularResolution
+    shape = osObj.Data.shape + (3, 3)
+    tensor = cp.zeros(shape, dtype=cp.float32)
+
+    angles = cp.arange(0, abs(osObj.Symmetry), osObj.AngularResolution)
+    anglesMatrix = angles[:, None, None]
+    symmetry = osObj.Symmetry
+    No = osObj.Data.shape[0]
+
+    def get_derivative(order):
+        n = cp.sum(cp.array(order) == 1) + cp.sum(cp.array(order) == 2) + 1
+        scaledSigmaSpatial = 1 / cp.sqrt(n) * sigmaSpatial
+        angularOrder = cp.sum(cp.array(order) == 3)
+
+        # --- Orientation Derivative ---
+        # Handle symmetry: if symmetry == -pi, need to duplicate and conjugate
+        periodicOS = cp.array(osObj.Data, dtype=cp.float32)
+        if symmetry == cp.pi or symmetry == 2 * cp.pi:
+            pass  # no change
+        elif symmetry == -cp.pi:
+            periodicOS = cp.concatenate([periodicOS, cp.conj(periodicOS)], axis=0)
+
+        sigma = scaledSigmaSpatial
+        trunc = (4 * scaledSigmaSpatial + 1) / sigma
+
+        # (1) First, spatial blur along axes 1 and 2 (not orientation)
+        spatialBlurredOs = nd.gaussian_filter(
+            periodicOS, sigma=[0, sigma, sigma], truncate=trunc, mode="nearest"
+        )
+        # (2) Then, orientation derivative along axis 0 (orientation axis)
+        derivative = nd.gaussian_filter(
+            spatialBlurredOs, sigma=[sigmaOD, 0.125, 0.125],
+            order=[angularOrder, 0, 0], mode="wrap", truncate=4
+        )
+        # Only keep the first No slices if symmetry duplicated
+        if symmetry == cp.pi or symmetry == -cp.pi:
+            derivative = derivative[0:No, :, :]
+        derivative = derivative / (osObj.AngularResolution ** angularOrder)
+
+        # --- Spatial Derivative(s) ---
+        for dirr in order:
+            if dirr == 3:
+                continue
+            if symmetry == cp.pi:
+                symmetry1 = -cp.pi
+            elif symmetry == -cp.pi:
+                symmetry1 = cp.pi
+            elif symmetry == 2 * cp.pi:
+                symmetry1 = 2 * cp.pi
+            else:
+                symmetry1 = symmetry
+
+            orientationBlurredOS = derivative
+            if symmetry1 == cp.pi or symmetry1 == -cp.pi:
+                orientationBlurredOS = orientationBlurredOS[0:No, :, :]
+            trunc2 = (4 * scaledSigmaSpatial + 1) / scaledSigmaSpatial
+
+            # Apply correct spatial derivative for dirr (1 = x, 2 = y)
+            dx = nd.gaussian_filter(orientationBlurredOS, [0, scaledSigmaSpatial, scaledSigmaSpatial],
+                                   order=[0, 1, 0], truncate=trunc2, mode="nearest")
+            dy = nd.gaussian_filter(orientationBlurredOS, [0, scaledSigmaSpatial, scaledSigmaSpatial],
+                                   order=[0, 0, 1], truncate=trunc2, mode="nearest")
+            cos_theta = cp.cos(anglesMatrix)
+            sin_theta = cp.sin(anglesMatrix)
+            if dirr == 1:
+                derivative = dx * cos_theta + dy * sin_theta
+            elif dirr == 2:
+                derivative = -dx * sin_theta + dy * cos_theta
+        return derivative
+
+    for order in order_list:
+        order_digits = [int(x) for x in str(order)]
+        der = get_derivative(order_digits[::-1])
+        tensor[..., order_digits[1] - 1, order_digits[0] - 1] = der
+
+    return tensor  # return to numpy array if you want
+
 def CreatePeriodicOrientationAxes(os,symmetry):
     if symmetry == np.pi or symmetry == 2*np.pi:
         return os
@@ -439,25 +528,26 @@ def CostFunctionVesselnessFiltering(U,ksi,zeta,sigma_s, method,sigmas_ext = 0, s
     obj = ObjPositionOrientationData(U,2*np.pi,Wavelets = None,InputData = None,DcFilterImage = 0)
     print(f"ObjPositionOrientationData time: {time() - start_time}")
     start_time = time()
-    H = OrientationScoreTensor3(obj,0.5*sigma_s**2, 0.5*(2*betha*sigma_s)**2,method)
+    H = OrientationScoreTensor3_gpu(obj,0.5*sigma_s**2, 0.5*(2*betha*sigma_s)**2,method)
     print(f"OrientationScoreTensor3 time: {time() - start_time}")
 
-    M = np.diag([1/ksi,zeta/ksi,1])
+    M = cp.diag([1/ksi,zeta/ksi,1])
 
     if sigmas_ext!=0 or sigmaa_ext !=  0:
         start_time = time()
         H = ExternalRegularization(H,obj.FullOrientationList,sigmas_ext,sigmaa_ext)
         print(f"ExternalRegularization time: {time() - start_time}")
-    a = np.ones((3,3))
-    b = np.dot(M,np.dot(a,M))
-    Hess = np.zeros((No,Nx,Ny,3,3))
+    a = cp.ones((3,3))
+    b = cp.dot(M,cp.dot(a,M))
+    Hess = cp.zeros((No,Nx,Ny,3,3))
     Hess_old = Hess.copy()
     start_time = time()
-    Hess = np.broadcast_to(b, (No, Nx, Ny, 3, 3)).copy()
+    Hess = cp.broadcast_to(b, (No, Nx, Ny, 3, 3)).copy()
     #print(np.count_nonzero(Hess != Hess_old))
 
     Hess = Hess*H
     print(f"Hess time: {time() - start_time}")
+    start_time = time()
 
     if method == "LIF":
         lambda1 = Hess[:,:,:,0,0]
@@ -468,13 +558,14 @@ def CostFunctionVesselnessFiltering(U,ksi,zeta,sigma_s, method,sigmas_ext = 0, s
 
     S = lambda1**2 + c**2
     R = lambda1/c
-    sigma2 = 0.2*np.max(abs(S))
-    cost = np.exp(-R**2/(2*sigma1**2)) * (1 - np.exp(-S/(2*sigma2)))
-    Qgreater0 = 1-np.heaviside(-Q,0)
+    sigma2 = 0.2*cp.max(abs(S))
+    cost = cp.exp(-R**2/(2*sigma1**2)) * (1 - cp.exp(-S/(2*sigma2)))
+    Qgreater0 = 1-cp.heaviside(-Q,0)
 
     cost = cost*Qgreater0
+    print(f"Remaining costfunctionvesselnessfiltering: {time() - start_time}")
     
-    return cost
+    return cost.get()
 
 def CostFunction(oc,lambdaa, p):
     cost = 1/(1 + lambdaa*(oc)**p)
