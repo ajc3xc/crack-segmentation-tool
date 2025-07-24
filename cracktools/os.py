@@ -211,7 +211,8 @@ def CheckWavelet(window_size = 70,size = 75, nOrientations = 32, design = "N",
     #         plt.imshow(os_check[i,:,:].imag)
     #         plt.show()
     return os_check[display_orientations,:,:].real
-            
+
+from time import time            
 def OrientationScoreTransform(im, size, nOrientations, design = "N", inflectionPoint = 0.8, mnOrder = 8, splineOrder = 3,
                               overlapFactor = 1, dcStdDev = 8, directional = False):
     
@@ -227,15 +228,18 @@ def OrientationScoreTransform(im, size, nOrientations, design = "N", inflectionP
                       seen as subsampling the angular direction
     """
     im = np.pad(im, pad_width=((size, size), (size, size)), mode='symmetric')
+    start_time = time()
     cws = CakeWaveletStack(size, nOrientations, design, inflectionPoint, mnOrder, splineOrder, overlapFactor,
                     dcStdDev, directional)
     
-#     print(cws.shape)
+    print(f"CakeWaveletStack time: {time() - start_time}")
+    start_time = time()
     cwsP = np.pad(cws, ([0,0],[np.floor((im.shape[0]-cws.shape[1])/2).astype(int),
                            np.ceil((im.shape[0]-cws.shape[1])/2).astype(int)],
                     [np.floor((im.shape[1]-cws.shape[2])/2).astype(int),
                      np.ceil((im.shape[1]-cws.shape[2])/2).astype(int)]), mode='constant')
-    os = WaveletTransform2D(im, cwsP.real)
+    os = WaveletTransform2D(cp.asarray(im), cp.asarray(cwsP.real))
+    print(f"Wavelet Transform 2D time: {time() - start_time}")
     os = os[:,size:-size,size:-size]
     return os
 
@@ -245,15 +249,32 @@ def plot_orientation_score(os,display_orientations=[0]):
         plt.show()
 
 def WaveletTransform2D(im, kernels):
-    os = np.zeros((kernels.shape[0],im.shape[0],im.shape[1]),dtype=np.complex_)
-    imf = np.fft.fftn(im)
+    os = cp.zeros((kernels.shape[0],im.shape[0],im.shape[1]),dtype=np.complex_)
+    imf = cp.fft.fftn(im)
     for i in range(kernels.shape[0]):
         v = kernels[i,:,:]
-        v = np.fft.fftn(v)
-        v = np.fft.ifftn(v * imf)
-        v = RotateRight(v, np.ceil( 0.1 + np.array(im.shape) / 2).astype(int))
+        v = cp.fft.fftn(v)
+        v = cp.fft.ifftn(v * imf)
+        v = RotateRight(v, cp.ceil( 0.1 + cp.array(im.shape) / 2).astype(int))
         os[i,:,:] = v
     return os
+
+def WaveletTransform2D(im, kernels):
+    # im: shape (H, W)
+    # kernels: shape (N, H, W)
+    N = kernels.shape[0]
+    H, W = im.shape
+    imf = np.fft.fftn(im)                     # (H, W)
+    kernelsf = np.fft.fftn(kernels, axes=(1,2)) # (N, H, W)
+    # Broadcasting: kernelsf * imf[None, :, :]
+    result_f = kernelsf * imf[None, :, :]       # (N, H, W)
+    result = np.fft.ifftn(result_f, axes=(1,2)) # (N, H, W)
+
+    # Apply RotateRight to each orientation in batch
+    k = np.ceil(0.1 + np.array(im.shape) / 2).astype(int)
+    result = np.roll(result, shift=-k[0], axis=1)
+    result = np.roll(result, shift=-k[1], axis=2)
+    return result
 
 def Rescale(data):
     return (data - np.min(data)) / (np.max(data) - np.min(data))
@@ -294,7 +315,7 @@ def LeftInvariantDerivative(osObj,sigmaSpatial,sigmaOD,order,symmetry,anglesMatr
             
         return der
 
-def OrientationScoreTensor3(osObj, sigmaSpatial, sigmaOrientation, method):
+'''def OrientationScoreTensor3(osObj, sigmaSpatial, sigmaOrientation, method):
     # Only 2 cases: LIF (most used) or all components
     if method == "LIF":
         order_list = [11, 22]
@@ -375,12 +396,12 @@ def OrientationScoreTensor3(osObj, sigmaSpatial, sigmaOrientation, method):
         der = get_derivative(order_digits[::-1])
         tensor[..., order_digits[1] - 1, order_digits[0] - 1] = der
 
-    return tensor
+    return tensor'''
 
 import cupy as cp
 import cupyx.scipy.ndimage as nd
 
-def OrientationScoreTensor3_gpu(osObj, sigmaSpatial, sigmaOrientation, method):
+'''def OrientationScoreTensor3_gpu(osObj, sigmaSpatial, sigmaOrientation, method):
     """
     CuPy version, strictly matches original, including all axes, truncation, symmetry, etc.
     """
@@ -464,7 +485,95 @@ def OrientationScoreTensor3_gpu(osObj, sigmaSpatial, sigmaOrientation, method):
         der = get_derivative(order_digits[::-1])
         tensor[..., order_digits[1] - 1, order_digits[0] - 1] = der
 
-    return tensor  # return to numpy array if you want
+    return tensor  # return to numpy array if you want'''
+
+def OrientationScoreTensor3_gpu(osObj, sigmaSpatial, sigmaOrientation, method):
+    import cupy as cp
+    import cupyx.scipy.ndimage as nd
+
+    if method == "LIF":
+        order_list = [11, 22]
+    else:
+        order_list = [11, 21, 31, 12, 22, 32, 13, 23, 33]
+
+    sigmaOD = sigmaOrientation / osObj.AngularResolution
+    shape = osObj.Data.shape + (3, 3)
+    tensor = cp.zeros(shape, dtype=cp.float32)
+
+    angles = cp.arange(0, abs(osObj.Symmetry), osObj.AngularResolution)
+    anglesMatrix = angles[:, None, None]
+    symmetry = osObj.Symmetry
+    No = osObj.Data.shape[0]
+
+    # Caching dictionary
+    cache = {}
+
+    def get_spatial_blur(data, sigma):
+        # Only compute if not in cache
+        key = f"spatial_{sigma}"
+        if key not in cache:
+            cache[key] = nd.gaussian_filter(data, sigma=[0, sigma, sigma], truncate=(4 * sigma + 1) / sigma, mode="nearest")
+        return cache[key]
+
+    def get_orientation_blur(data, sigmaOD, angularOrder):
+        key = f"orient_{sigmaOD}_{angularOrder}"
+        if key not in cache:
+            cache[key] = nd.gaussian_filter(data, sigma=[sigmaOD, 0.125, 0.125], order=[angularOrder, 0, 0], mode="wrap", truncate=4)
+        return cache[key]
+
+    for order in order_list:
+        order_digits = [int(x) for x in str(order)][::-1]
+        n = cp.sum(cp.array(order_digits) == 1) + cp.sum(cp.array(order_digits) == 2) + 1
+        scaledSigmaSpatial = 1 / cp.sqrt(n) * sigmaSpatial
+        angularOrder = cp.sum(cp.array(order_digits) == 3)
+
+        # periodicOS handling
+        periodicOS = cp.array(osObj.Data, dtype=cp.float32)
+        if symmetry == cp.pi or symmetry == 2 * cp.pi:
+            pass
+        elif symmetry == -cp.pi:
+            periodicOS = cp.concatenate([periodicOS, cp.conj(periodicOS)], axis=0)
+
+        # -- Cache spatial blur --
+        spatialBlurredOs = get_spatial_blur(periodicOS, scaledSigmaSpatial)
+
+        # -- Cache orientation blur --
+        derivative = get_orientation_blur(spatialBlurredOs, sigmaOD, angularOrder)
+        if symmetry == cp.pi or symmetry == -cp.pi:
+            derivative = derivative[0:No, :, :]
+        derivative = derivative / (osObj.AngularResolution ** angularOrder)
+
+        for dirr in order_digits:
+            if dirr == 3:
+                continue
+            if symmetry == cp.pi:
+                symmetry1 = -cp.pi
+            elif symmetry == -cp.pi:
+                symmetry1 = cp.pi
+            elif symmetry == 2 * cp.pi:
+                symmetry1 = 2 * cp.pi
+            else:
+                symmetry1 = symmetry
+
+            orientationBlurredOS = derivative
+            if symmetry1 == cp.pi or symmetry1 == -cp.pi:
+                orientationBlurredOS = orientationBlurredOS[0:No, :, :]
+            trunc2 = (4 * scaledSigmaSpatial + 1) / scaledSigmaSpatial
+
+            dx = nd.gaussian_filter(orientationBlurredOS, [0, scaledSigmaSpatial, scaledSigmaSpatial],
+                                   order=[0, 1, 0], truncate=trunc2, mode="nearest")
+            dy = nd.gaussian_filter(orientationBlurredOS, [0, scaledSigmaSpatial, scaledSigmaSpatial],
+                                   order=[0, 0, 1], truncate=trunc2, mode="nearest")
+            cos_theta = cp.cos(anglesMatrix)
+            sin_theta = cp.sin(anglesMatrix)
+            if dirr == 1:
+                derivative = dx * cos_theta + dy * sin_theta
+            elif dirr == 2:
+                derivative = -dx * sin_theta + dy * cos_theta
+
+        tensor[..., order_digits[1] - 1, order_digits[0] - 1] = derivative
+
+    return tensor
 
 def CreatePeriodicOrientationAxes(os,symmetry):
     if symmetry == np.pi or symmetry == 2*np.pi:
@@ -517,16 +626,16 @@ def norm_gaussian_filter(data,sigma,order,truncate = 4,mode = "wrap"):
 #                                     order=order,truncate=truncate, mode=mode)
     return r
 
-from time import time
 def CostFunctionVesselnessFiltering(U,ksi,zeta,sigma_s, method,sigmas_ext = 0, sigmaa_ext = 0):
     Nx = U.shape[1]
     Ny = U.shape[2]
     No = U.shape[0]
     betha = 0.75/sigma_s
     sigma1 = 0.5
+    from time import time
     start_time = time()
     obj = ObjPositionOrientationData(U,2*np.pi,Wavelets = None,InputData = None,DcFilterImage = 0)
-    print(f"ObjPositionOrientationData time: {time() - start_time}")
+    #print(f"ObjPositionOrientationData time: {time() - start_time}")
     start_time = time()
     H = OrientationScoreTensor3_gpu(obj,0.5*sigma_s**2, 0.5*(2*betha*sigma_s)**2,method)
     print(f"OrientationScoreTensor3 time: {time() - start_time}")
@@ -536,14 +645,17 @@ def CostFunctionVesselnessFiltering(U,ksi,zeta,sigma_s, method,sigmas_ext = 0, s
     if sigmas_ext!=0 or sigmaa_ext !=  0:
         start_time = time()
         H = ExternalRegularization(H,obj.FullOrientationList,sigmas_ext,sigmaa_ext)
-        print(f"ExternalRegularization time: {time() - start_time}")
+        #print(f"ExternalRegularization time: {time() - start_time}")
     a = cp.ones((3,3))
     b = cp.dot(M,cp.dot(a,M))
-    Hess = cp.zeros((No,Nx,Ny,3,3))
-    Hess_old = Hess.copy()
+    #Hess = cp.zeros((No,Nx,Ny,3,3))
+    #Hess_old = Hess.copy()
     start_time = time()
-    Hess = cp.broadcast_to(b, (No, Nx, Ny, 3, 3)).copy()
+    #Hess = cp.broadcast_to(b, (No, Nx, Ny, 3, 3)).copy()
     #print(np.count_nonzero(Hess != Hess_old))
+    Hess = cp.empty((No, Nx, Ny, 3, 3), dtype=cp.float32)
+    Hess[:] = b  # This uses broadcasting internally, but is more memory-friendly than .broadcast_to().copy()
+
 
     Hess = Hess*H
     print(f"Hess time: {time() - start_time}")
@@ -563,7 +675,7 @@ def CostFunctionVesselnessFiltering(U,ksi,zeta,sigma_s, method,sigmas_ext = 0, s
     Qgreater0 = 1-cp.heaviside(-Q,0)
 
     cost = cost*Qgreater0
-    print(f"Remaining costfunctionvesselnessfiltering: {time() - start_time}")
+    #print(f"Remaining costfunctionvesselnessfiltering: {time() - start_time}")
     
     return cost.get()
 
@@ -576,7 +688,10 @@ def MultiScaleVesselness(U,ksi,zeta,sigmas_s,method,sigmas_ext = 0, sigmaa_ext =
     vesselnessfilter = []
     for sigma in sigmas_s:
         print(sigma)
+        start_time = time()
         vesselness = CostFunctionVesselnessFiltering(U,ksi,zeta,sigma, method,sigmaa_ext = sigmaa_ext)
+        print(f"CostFunctionVesselnessFiltering time: {time() - start_time}")
+        start_time = time()
         pad = 5
         vesselness_pad = np.pad(vesselness,pad,mode = 'wrap')
 
@@ -584,6 +699,7 @@ def MultiScaleVesselness(U,ksi,zeta,sigmas_s,method,sigmas_ext = 0, sigmaa_ext =
         vesselnessErosion =  vesselnessErosion[pad:-pad,pad:-pad,pad:-pad]
         vesselnessErosion[:,:5,:] = 0
         vesselnessfilter.append(vesselnessErosion)
+        print(f"vesselness remaining time: {time() - start_time}")
         
     return (vesselnessfilter)
 

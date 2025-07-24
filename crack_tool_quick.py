@@ -925,11 +925,14 @@ class CrackToolsApplication(Ui_MainWindow):
             overlapFactor = self.wavelet_overlap_factor_box.value()
             dcStdDev = self.wavelet_STD_box.value()
             directional = False
+            from time import time
+            start_time = time()
             self.osGFCost = ct.os.OrientationScoreTransform(self.image_crop_down[:,:,color_channel]/255*black_crack, size = size, 
                                             nOrientations = nOrientations, design = design, 
                                             inflectionPoint = inflectionPoint, mnOrder = mnOrder, 
                                             splineOrder = splineOrder, overlapFactor = overlapFactor, 
                                             dcStdDev = dcStdDev, directional = directional)
+            print(f"OrientationScoreTransform time: {time() - start_time}")
             self.os_progress_bar.setValue(100)
             self.update_cost_button.setStyleSheet("background-color : lightblue")
             self.show_os_button.setStyleSheet("background-color : lightblue")
@@ -1609,7 +1612,6 @@ class CrackToolsApplication(Ui_MainWindow):
                 print("cost")
                 self.update_cost()
                 print(f"cost time: {time() - start_time:.2f} seconds")
-                return
                 start_time = time()
                 print("midline tracking")
                 self.midline_tracking()

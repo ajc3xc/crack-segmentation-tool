@@ -3,6 +3,8 @@ import scipy.interpolate
 import matplotlib.pyplot as plt
 # import sys
 
+import cupy as cp
+
 def tang_len(start_point_x,start_point_y,end_point_x,end_point_y):
     """Function defines oriantation and direction of line that connects two points"""
     dx = end_point_x - start_point_x
@@ -335,58 +337,59 @@ def IncludeCost(cost,metric):
     return metric
 
 def runReedsSheppGF(sides, dims, seeds, tips, metric):
+    print(".")
+    #metric = Riemann(cp.asarray(metric))
     metric = Riemann(xp.array(metric))
+    print("..")
     hfmIn = Eikonal.dictIn({
         'model' : 'Riemann3_Periodic',
         'seeds' : seeds,
         'arrayOrdering' : 'RowMajor',
         'tips' : tips,
+        #'mode':'gpu',
         'metric' : metric})
+    print("...")
     hfmIn.SetRect(sides = sides, dims = dims)
 #     if hfmIn.mode=='gpu': 
 #     hfmIn.update({'model':'Riemann3','periodic':(True,False,False)})
+    print("....")
     hfmOut = hfmIn.Run()
+    print(".....")
     geos = [g.T for g in hfmOut['geodesics']]
     print('Done.')
     return geos
 
 '''def runReedsSheppGF(sides, dims, seeds, tips, metric):
-    """
-    GPU-accelerated replacement for agd's Riemann3_Periodic geodesic solver.
-    Uses FastGeodis.generalised_geodesic3d for 3D or 2D equivalents.
-    """
-    import torch
-    import numpy as np
-    import FastGeodis
-
-    # Convert metric tensor to cost per voxel (e.g., determinant or trace)
-    # Here we use trace(metric) so that path cost ~ ∫ trace(metric) along path
-    # metric shape: (3,3,D,H,W)
-    cost = np.trace(metric, axis1=0, axis2=1)
-    cost = cost.astype('float32')
-    cost = cost / cost.max()
-
-    # Prepare tensors
-    cost_pt = torch.from_numpy(cost).unsqueeze(0).unsqueeze(0)  # [1,1,D,H,W]
-    seed = np.zeros_like(cost, dtype=np.float32)
-    sy, sx, st = seeds[0][::-1]  # assuming seeds=[ [x,y,theta], ... ]
-    seed[st, sy, sx] = 1.0
-    mask_pt = torch.from_numpy(seed).unsqueeze(0).unsqueeze(0)
-
-    if cost.ndim == 3:
-        dist = FastGeodis.generalised_geodesic3d(cost_pt, mask_pt).cpu().numpy()[0,0]
-    else:
-        dist = FastGeodis.generalised_geodesic2d(cost_pt, mask_pt).cpu().numpy()[0,0]
-
-    from skimage.graph import route_through_array
-    # convert seeds/tips from (x,y,t) to (t,y,x)
-    start = tuple(int(v) for v in seeds[0][::-1])
-    end   = tuple(int(v) for v in tips[0][::-1])
-    path, _ = route_through_array(dist, start, end, fully_connected=True)
-    path = np.array(path)
-    x_path = path[:, 2]
-    y_path = path[:, 1]
-    return [x_path, y_path]'''
+    sides = cp.asarray(sides, dtype=cp.float64)
+    dims = cp.asarray(dims, dtype=cp.int32)
+    seeds = cp.asarray(seeds, dtype=cp.float64)
+    tips  = cp.asarray(tips, dtype=cp.float64)
+    metric = cp.asarray(metric, dtype=cp.float64)
+    metric = Riemann(metric)   # retains float64 internally
+    print(".")
+    metric = Riemann(metric)
+    print("..")
+    hfmIn = Eikonal.dictIn({
+        'model' : 'Riemann3_Periodic',
+        'seeds' : seeds,
+        'arrayOrdering' : 'RowMajor',
+        'tips' : tips,
+        'mode':'gpu',
+        'metric' : metric})
+    print("...")
+    hfmIn.SetRect(sides = sides, dims = dims)
+    if hfmIn.mode=='gpu': 
+        hfmIn.update({'model':'Riemann3','periodic':(True,False,False)})
+        hfmIn.update({'precision': 'double'})
+    hfmIn['gridScales'] = hfmIn['gridScales'].astype(cp.float64)
+    hfmIn['dims'] = hfmIn['dims'].astype(cp.int32)
+    hfmIn['origin'] = hfmIn['origin'].astype(cp.float64)
+    print("....")
+    hfmOut = hfmIn.Run()
+    print(".....")
+    geos = [g.T.get().astype(np.float64) for g in hfmOut['geodesics']]
+    print('Done.')
+    return geos'''
 
 def GLIFtoEuclideanOld_vec(nt):
     """
@@ -434,6 +437,7 @@ def fast_marching(os_cost,start_point,end_point,g11=1,g22=100,g33=100):
 
     dims = np.array([NoCost,NxCost,NyCost])
     sidesLIFmetric = np.array([[0,NxCost],[0,NyCost],[0,2*np.pi - s_theta]])
+    print("Initial constructions donne")
 
     start_time = time()
     metricLIFOld = ReedsSheppMetricGFOld(gfLIF,dims,g11,g22,g33)
@@ -457,6 +461,8 @@ def fast_marching(os_cost,start_point,end_point,g11=1,g22=100,g33=100):
 
     start_time = time()
     geos1 = runReedsSheppGF(sides, [dims[1],dims[2],dims[0]], [seeds], [tips], metricLIFinclCostOld1)
+    #geos1 = runReedsSheppGF(cp.asarray(sides, dtype=cp.float32), cp.asarray([dims[1],dims[2],dims[0]]), [cp.asarray(seeds, dtype=cp.float32)], [cp.asarray(tips, dtype=cp.float32)], cp.asarray(metricLIFinclCostOld1, dtype=cp.float32))
+    #geos1 = runReedsSheppGF(cp.asarray(sides), cp.asarray([dims[1],dims[2],dims[0]]), [cp.asarray(seeds, dtype=cp.float64)], [cp.asarray(tips, dtype=cp.float64)], cp.asarray(metricLIFinclCostOld1, dtype=cp.float64))
     print(f"runReedsSheppGF = {time() - start_time}")
 
     return [geos1[0][:,1],geos1[0][:,0]]

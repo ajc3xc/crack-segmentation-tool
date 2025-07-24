@@ -145,6 +145,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/zipp-3.23.0-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/zlib-ng-2.2.4-hbb528cf_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/zstd-1.5.7-hbeecb71_2.conda
+      - pypi: https://files.pythonhosted.org/packages/5b/2e/dd5a698f3c9559de3310b0bff75e30edec43d3b6758f50206ceee72c8c2b/agd-0.2.16-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/eb/dd/8220b4787908c4ba14f97f92a09690524184199efabffac537d1afaba314/FastGeodis-1.0.5.tar.gz
       - pypi: https://files.pythonhosted.org/packages/4d/36/2a115987e2d8c300a974597416d9de88f2444426de9571f4b59b2cca3acc/filelock-3.18.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl
@@ -184,6 +185,10 @@ packages:
   purls: []
   size: 49468
   timestamp: 1718213032772
+- pypi: https://files.pythonhosted.org/packages/5b/2e/dd5a698f3c9559de3310b0bff75e30edec43d3b6758f50206ceee72c8c2b/agd-0.2.16-py3-none-any.whl
+  name: agd
+  version: 0.2.16
+  sha256: 3713f7f4d387d690d8332025270c7d97f70677f8e8c2bac36b50a0d9d37fbae7
 - conda: https://conda.anaconda.org/agd-lbr/noarch/agd-0.2.16-py_0.tar.bz2
   sha256: 7f6e77d7e26aeeec141f7993d63fc0e9e56b2a4d24cc45ab05ece421e9458e3d
   md5: 13e297eadeec01a000d8b5cf7cf871fb
