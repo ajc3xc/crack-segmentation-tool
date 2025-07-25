@@ -356,8 +356,8 @@ def runReedsSheppGF(sides, dims, seeds, tips, metric):
         'metric' : metric})
     print("...")
     hfmIn.SetRect(sides = sides, dims = dims)
-#     if hfmIn.mode=='gpu': 
-#     hfmIn.update({'model':'Riemann3','periodic':(True,False,False)})
+    if hfmIn.mode=='gpu': 
+        hfmIn.update({'model':'Riemann3','periodic':(True,False,False)})
     print("....")
     hfmOut = hfmIn.Run()
     print(".....")
@@ -454,25 +454,6 @@ def GLIFtoEuclideanOld_vec(nt):
     LIF[:, 1, 1] = np.cos(t)
     LIF[:, 2, 2] = 1.0
     return LIF
-
-'''def ReedsSheppMetricGFOld(GF, dims, g11, g22, g33):
-    """
-    Fast vectorized version for [nt, nx, ny, 3, 3] metric tensor.
-    Assumes GF = identity, as in your default code.
-    """
-    nt, nx, ny = dims[0], dims[1], dims[2]
-    LIFtoEuclidean = GLIFtoEuclideanOld_vec(nt)     # shape (nt,3,3)
-    LIFtoEuclideaninv = np.linalg.inv(LIFtoEuclidean)  # shape (nt,3,3)
-    # Constant GF metric (diagonal)
-    GFmat = np.diag([g11, g22, g33])   # shape (3,3)
-
-    # Compose the metric for all t: M_t = LIFinv_t @ GFmat @ LIFinv_t^T
-    # Vectorized batch multiply
-    M = LIFtoEuclideaninv @ GFmat @ np.transpose(LIFtoEuclideaninv, (0,2,1))  # (nt,3,3)
-
-    # Now tile to all spatial locations (nx, ny)
-    metric = np.tile(M[:, None, None, :, :], (1, nx, ny, 1, 1))
-    return metric'''
 
 def ReedsSheppMetricGFOld(GF, dims, g11, g22, g33):
     """

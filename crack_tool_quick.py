@@ -192,9 +192,10 @@ class CrackAnnotator(QtWidgets.QWidget):
         self.update()
 
     def _to_image_coords(self, pos):
-        x = pos.x() / self.scale
-        y = pos.y() / self.scale
-        return (x, y)
+        # Use values set by paintEvent (scale/offset to match the drawn image)
+        x_img = (pos.x() - getattr(self, "_last_draw_xoff", 0)) / getattr(self, "_last_draw_scale", 1)
+        y_img = (pos.y() - getattr(self, "_last_draw_yoff", 0)) / getattr(self, "_last_draw_scale", 1)
+        return (x_img, y_img)
 
     def _find_point_at(self, pos):
         for i, (x, y) in enumerate(self.points):
@@ -233,59 +234,6 @@ class CrackAnnotator(QtWidgets.QWidget):
         qp.drawPolygon(p2, left, right)
    
 class CrackToolsApplication(Ui_MainWindow):
-    '''def setupUi(self,MainWindow):
-        super().setupUi(MainWindow)
-        self.MainWindow = MainWindow
-        self.SelectFolderButton.clicked.connect(self.select_folder)
-        self.PreviousImageButton.clicked.connect(self.previous_image)
-        self.NextImageButton.clicked.connect(self.next_image)
-        self.draw_box_button.clicked.connect(self.draw_box)
-        self.save_b_button.clicked.connect(self.save_box)
-        self.clear_boxes_button.clicked.connect(self.clear_boxes)  
-        self.clear_segmentation_button.clicked.connect(self.clear_segmentation) 
-        self.files_list.itemSelectionChanged.connect(self.name_selected)
-
-        self.select_points_button.clicked.connect(self.select_end_points)
-        self.update_image_crop_button.clicked.connect(self.update_image_crop)
-        self.wavelet_button.clicked.connect(self.check_wavelet)
-        self.middle_point_button.clicked.connect(self.select_middle_point)
-        self.middpoint_update_button.clicked.connect(self.update_midpoint_image)
-        self.update_os_button.clicked.connect(self.update_os)
-        self.show_os_button.clicked.connect(self.show_os)
-        self.update_cost_button.clicked.connect(self.update_cost)
-        self.midline_track_button.clicked.connect(self.midline_tracking)
-        self.update_track_display_button.clicked.connect(self.update_track_display)
-        self.track_full_screen_button.clicked.connect(self.track_full_screen)
-        self.edge_mask_button.clicked.connect(self.edge_mask)
-        self.edge_tracks_button.clicked.connect(self.edge_tracking)
-        self.edge_tracks_full_screen_button.clicked.connect(self.edge_tracks_full_screen)
-        self.save_current_segment_button.clicked.connect(self.save_current_segment)
-        self.draw_segment_button.clicked.connect(self.draw_segment)
-        self.save_manuall_segment_button.clicked.connect(self.save_manual_segment)
-        self.manual_segment_full_screen_button.clicked.connect(self.manual_segment_full_screen)
-
-        # self.save_manuall_segment_button.clicked.connect(self.save_manual_segment)
-        # self.manual_segment_full_screen_button.clicked.connect(self.manual_segment_full_screen)
-        self.n = -1
-        self.saved = False
-
-
-        # self.select_points_button.setStyleSheet("background-color : red")
-        self.update_image_crop_button.setStyleSheet("background-color : red")
-        self.middle_point_button.setStyleSheet("background-color : red")
-        self.middpoint_update_button.setStyleSheet("background-color : red")
-        self.update_os_button.setStyleSheet("background-color : red")
-        self.update_cost_button.setStyleSheet("background-color : red")
-        self.midline_track_button.setStyleSheet("background-color : red")
-        self.update_track_display_button.setStyleSheet("background-color : red")
-        self.track_full_screen_button.setStyleSheet("background-color : red")
-        self.edge_mask_button.setStyleSheet("background-color : red")
-        self.edge_tracks_button.setStyleSheet("background-color : red")
-        self.edge_tracks_full_screen_button.setStyleSheet("background-color : red")
-        self.save_current_segment_button.setStyleSheet("background-color : red")
-        self.draw_segment_button.setStyleSheet("background-color : red")
-        self.show_os_button.setStyleSheet("background-color : red")'''
-    
     def setupUi(self, MainWindow):
         super().setupUi(MainWindow)
         self.MainWindow = MainWindow
@@ -387,7 +335,7 @@ class CrackToolsApplication(Ui_MainWindow):
             import gc; gc.collect()
 
             # ---- Now load new image list ----
-            self.image_names = ct.tools.get_files(folder=dir, formats=['jpg','png'], basename=False)
+            self.image_names = ct.tools.get_files(folder=dir, formats=['jpeg','jpg','png'], basename=False)
             for filename in self.image_names:
                 self.files_list.addItem(os.path.basename(filename))
             if self.image_names:
@@ -771,15 +719,6 @@ class CrackToolsApplication(Ui_MainWindow):
             #self.update_green_preview()
         else:
             print("No boxes to remove.")
-
-    '''def clear_segmentation(self):
-        self.annotation["annotations"]["cracks end-points"] = []
-        self.annotation["annotations"]["crack_pixels"] = []
-        self.annotation["annotations"]['tracks'] = []
-        with open(self.ann_name, 'w') as fp:
-            json.dump(self.annotation, fp)
-        print('saved')
-        self.change_image()'''
         
     def clear_segmentation(self):
         """
@@ -797,7 +736,8 @@ class CrackToolsApplication(Ui_MainWindow):
             if hasattr(self, 'cracks_stored_endpoints') and len(self.cracks_stored_endpoints) > 0:
                 int_keys = list(map(int, self.cracks_stored_endpoints.keys()))
                 last_key = max(int_keys)
-                del self.cracks_stored_endpoints[str(last_key)]
+                print(last_key, int_keys, self.cracks_stored_endpoints.keys())
+                del self.cracks_stored_endpoints[last_key]
             else:
                 print("No endpoints left to remove.")
 
@@ -1235,62 +1175,6 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
             self.midline_track_button.setStyleSheet("background-color : red")
-            
-    '''def update_cost(self):
-        try:
-            import time  # If not already imported elsewhere
-            self.update_cost_bar.setValue(0)
-            lambdaa = self.lambda_box.value()
-            p = self.power_box.value()
-            ksi = 1
-            zeta = 1
-            sigmas = self.sigmas_line_edit.text()
-            sigmas = [float(i) for i in sigmas.split(sep=',')]
-            sigmas_ext = 1
-
-            start_time = time.time()
-            # Multi-scale vesselness (new, fast version, outputs [n_scales, H, W])
-            self.multiscalecostLIFExtReg = ct.os.MultiScaleVesselness(
-                self.osGFCost.real, ksi, 1, sigmas, "LIF", sigmas_ext=sigmas_ext
-            )
-            print(f"MultiScaleVesselness took {time.time() - start_time:.2f} seconds")
-
-            start_time = time.time()
-            costmultiscale = ct.os.MultiScaleVesselnessFilter(self.multiscalecostLIFExtReg)
-            print(f"MultiScaleVesselnessFilter took {time.time() - start_time:.2f} seconds")
-
-            start_time = time.time()
-            self.costFunction = ct.os.CostFunction(costmultiscale, lambdaa=lambdaa, p=p)
-            print(f"CostFunction took {time.time() - start_time:.2f} seconds")
-
-            c00 = ct.os.Rescale(self.costFunction)  # <- already 2D!
-            self.update_cost_bar.setValue(100)
-            c00 = c00 - np.min(c00)
-            if np.max(c00) > 0:
-                c00 = (c00 * 255 / np.max(c00))
-            else:
-                c00 = np.zeros_like(c00)
-            c00 = np.nan_to_num(c00).astype(np.uint8)
-            c00 = c00.astype(np.uint8)
-
-            # Ensure c00 is 2D for QImage
-            if c00.ndim != 2:
-                raise ValueError(f"Cost map 'c00' is not 2D: shape {c00.shape}")
-            #print("c00 shape:", c00.shape)
-            qimage = QImage(c00.astype(dtype=np.uint8), c00.shape[1], c00.shape[0],
-                            c00.strides[0], QImage.Format_Grayscale8)
-            #print(".")
-            pixmap = QPixmap.fromImage(qimage)
-            #print("..")
-            scaled_pixmap = pixmap.scaled(self.cost_display.width(), self.cost_display.height(),
-                                        Qt.KeepAspectRatio, Qt.FastTransformation)
-            #print("...")
-            self.cost_display.setPixmap(scaled_pixmap)
-            #print("....")
-            self.midline_track_button.setStyleSheet("background-color : lightblue")
-        except Exception as e:
-            error(e)
-            self.midline_track_button.setStyleSheet("background-color : red")'''
 
     def midline_tracking(self):
         try :
@@ -1709,7 +1593,7 @@ class CrackToolsApplication(Ui_MainWindow):
             print(f"Could not parse bounding boxes: {e}")
         return boxes
             
-    def run_pipeline(self):
+    '''def run_pipeline(self):
         """
         For each endpoint-pair in self.endpoint_pairs,
         run crop → OS → cost → midline → edges → save,
@@ -1812,7 +1696,133 @@ class CrackToolsApplication(Ui_MainWindow):
         elif errors:
             print("\n".join(errors))
         else:
-            print("✔ All endpoint‐groups processed.")
+            print("✔ All endpoint‐groups processed.")'''
+    
+    def run_pipeline(self):
+        """
+        For each bounding box:
+        - Compute OS/cost ONCE per box
+        - For each endpoint-pair inside the box, do midline/edge tracking/saving.
+        """
+        import cupy as cp, gc
+
+        gc.collect()
+        mempool = cp.get_default_memory_pool()
+        pinned = cp.get_default_pinned_memory_pool()
+        mempool.free_all_blocks()
+        pinned.free_all_blocks()
+        print("✅ GPU memory freed from CuPy pool")
+        print("Running optimized pipeline for all endpoint pairs and bounding boxes...")
+
+        boxes = self.get_all_bounding_boxes()
+        if not boxes:
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Critical)
+            msg.setText("No bounding boxes found! Please draw at least one bounding box before running the pipeline.")
+            msg.setWindowTitle("No Bounding Boxes")
+            msg.exec_()
+            return
+
+        self.endpoint_pairs = None
+        self.select_end_points()
+        if not hasattr(self, "endpoint_pairs") or not self.endpoint_pairs or len(self.endpoint_pairs) == 0:
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Critical)
+            msg.setText("No endpoint pairs selected!\n\nPlease use 'Select Endpoints' and create at least one connection before running the pipeline.")
+            msg.setWindowTitle("No Endpoint Pairs")
+            msg.exec_()
+            return
+
+        # Step 1: Group endpoint pairs by bounding box
+        box_to_pairs = {}
+        for pair in self.endpoint_pairs:
+            for bbox in boxes:
+                xmin, ymin, xmax, ymax = bbox
+                p0, p1 = pair
+                if (xmin <= p0[0] <= xmax and ymin <= p0[1] <= ymax and
+                    xmin <= p1[0] <= xmax and ymin <= p1[1] <= ymax):
+                    key = tuple(bbox)
+                    if key not in box_to_pairs:
+                        box_to_pairs[key] = []
+                    box_to_pairs[key].append(pair)
+                    break  # Each pair should only be in one box
+
+        num_success = 0
+        errors = []
+        from time import time
+
+        for box_idx, (bbox_key, pairs) in enumerate(box_to_pairs.items()):
+            bbox = list(bbox_key)
+            xmin, ymin, xmax, ymax = bbox
+            print(f"\n=== Processing bounding box {box_idx+1}/{len(box_to_pairs)}: {bbox} ===")
+            try:
+                # --- Crop image ONCE for this box ---
+                # We'll use the first pair just to set up the crop
+                first_pair = pairs[0]
+                self.pts = [np.array(first_pair[0]), np.array(first_pair[1])]
+                self.end_points = [np.array(first_pair[0]), np.array(first_pair[1])]
+                self.active_bbox = bbox
+                self.update_image_crop()   # Crops only to bounding box!
+
+                if hasattr(self, "skip_current_segment") and self.skip_current_segment:
+                    print(f"Skipping all pairs in this box: Crop too small.")
+                    continue
+
+                # --- Compute OS and cost ONCE for the box ---
+                print("os (once per box)")
+                start_time = time()
+                self.update_os()
+                print(f"os time: {time() - start_time:.2f} seconds")
+                print("cost (once per box)")
+                start_time = time()
+                self.update_cost()
+                print(f"cost time: {time() - start_time:.2f} seconds")
+
+                # --- Now do midline/edge/save for EACH pair in this box ---
+                for idx, pair in enumerate(pairs):
+                    print(f"  > Branch {idx+1}/{len(pairs)} in box: endpoints {pair}")
+                    self.pts = [np.array(pair[0]), np.array(pair[1])]
+                    self.end_points = [np.array(pair[0]), np.array(pair[1])]
+                    # Need to update the crop-shifted points
+                    xmin, ymin, xmax, ymax = bbox
+                    self.pts_crop = [np.array(pt) - np.array([xmin, ymin]) for pt in self.pts]
+
+                    # Downsample if needed (keep logic from update_image_crop)
+                    downsample_factor = self.downsample_factor_box.value()
+                    self.pts_crop_down = [x / downsample_factor for x in self.pts_crop]
+
+                    try:
+                        print("    midline tracking")
+                        start_time = time()
+                        self.midline_tracking()
+                        print(f"    midline tracking time: {time() - start_time:.2f} seconds")
+                        print("    edge mask")
+                        self.edge_mask()
+                        print("    edge tracking")
+                        self.edge_tracking()
+                        print("    save segment")
+                        self.save_current_segment()
+                        num_success += 1
+                    except Exception as e:
+                        print(f"    Exception for endpoints {pair}: {e}")
+                        errors.append(f"Failed for endpoints {pair}: {e}")
+                        continue
+
+            except Exception as e:
+                print(f"Exception for bounding box {bbox}: {e}")
+                errors.append(f"Failed for bounding box {bbox}: {e}")
+                continue
+
+        if errors and num_success == 0:
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Critical)
+            msg.setText("\n".join(errors))
+            msg.setWindowTitle("Pipeline Error")
+            msg.exec_()
+        elif errors:
+            print("\n".join(errors))
+        else:
+            print("✔ All endpoint-groups processed (optimized by box).")
 
 
 if __name__ == "__main__":
