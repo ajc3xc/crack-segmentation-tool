@@ -770,6 +770,63 @@ class CrackToolsApplication(Ui_MainWindow):
             self.change_image()
         except Exception as e:
             error(f"Failed to remove last segmentation: {e}")
+    
+    def clear_segmentation(self):
+        try:
+            # Remove last mask (if any)
+            if hasattr(self, 'mask') and len(self.mask) > 0:
+                self.mask.pop()
+            else:
+                print("No mask left to remove.")
+
+            # Remove last endpoints (if any)
+            if hasattr(self, 'cracks_stored_endpoints') and len(self.cracks_stored_endpoints) > 0:
+                keys = list(self.cracks_stored_endpoints.keys())
+                print("cracks_stored_endpoints keys before deletion:", keys)
+                int_keys = [int(k) for k in keys]
+                last_key = str(max(int_keys))
+                if last_key in self.cracks_stored_endpoints:
+                    del self.cracks_stored_endpoints[last_key]
+                    print(f"Deleted cracks_stored_endpoints key: {last_key}")
+                else:
+                    print(f"Key {last_key} not found in cracks_stored_endpoints! (Current keys: {keys})")
+            else:
+                print("No endpoints left to remove.")
+
+            # Remove last track (if any)
+            if hasattr(self, 'crack_tracks') and len(self.crack_tracks) > 0:
+                keys = list(self.crack_tracks.keys())
+                print("crack_tracks keys before deletion:", keys)
+                int_keys = [int(k) for k in keys]
+                last_key = str(max(int_keys))
+                if last_key in self.crack_tracks:
+                    del self.crack_tracks[last_key]
+                    print(f"Deleted crack_tracks key: {last_key}")
+                else:
+                    print(f"Key {last_key} not found in crack_tracks! (Current keys: {keys})")
+            else:
+                print("No tracks left to remove.")
+
+            # Ensure keys are strings
+            self.cracks_stored_endpoints = {str(k): v for k, v in self.cracks_stored_endpoints.items()}
+            self.crack_tracks = {str(k): v for k, v in self.crack_tracks.items()}
+
+            self.annotation["annotations"]["cracks end-points"] = self.cracks_stored_endpoints
+            self.annotation["annotations"]["all_masks"] = [m.tolist() for m in self.mask]
+            m = np.sum(np.array(self.mask), axis=0) if len(self.mask) > 0 else np.zeros_like(self.original_image[..., 0])
+            m[m >= 1] = 1.0
+            crack_pixels = np.argwhere(m == 1.0)
+            self.annotation["annotations"]["crack_pixels"] = crack_pixels.tolist()
+            self.annotation["annotations"]['tracks'] = self.crack_tracks
+
+            with open(self.ann_name, 'w') as fp:
+                json.dump(self.annotation, fp)
+            print('Removed last segmentation, saved.')
+            self.change_image()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            error(f"Failed to remove last segmentation: {e}")
 
     def annotation_full_screen(self):
         try:
@@ -779,7 +836,7 @@ class CrackToolsApplication(Ui_MainWindow):
             error(e)
 ################################################################################################################
 
-    def select_end_points(self):
+    '''def select_end_points(self):
         try :
             self.image_size = self.select_image_size.value()
             ptss = ct.tools.Draw().points(self.image[:,:,::-1],self.image_size,move_x = 0,move_y = 0)
@@ -794,9 +851,9 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
             self.update_image_crop_button.setStyleSheet("background-color : red")
-            self.middle_point_button.setStyleSheet("background-color : red")
+            self.middle_point_button.setStyleSheet("background-color : red")'''
 
-    def select_end_points(self):
+    '''def select_end_points(self):
         if not hasattr(self, "original_image") or self.original_image is None:
             error("No original image found.")
             return
@@ -866,6 +923,103 @@ class CrackToolsApplication(Ui_MainWindow):
             return
 
         # At this point, connections must exist!
+        pts = annot.points
+        conns = annot.connections
+        print(f"Selected points: {pts}")
+        self.endpoint_pairs = [(pts[a], pts[b]) for a, b in conns]
+        print(f"Selected endpoint pairs: {self.endpoint_pairs}")
+
+        color = "lightblue" if self.endpoint_pairs else "red"
+        self.update_image_crop_button.setStyleSheet(f"background-color: {color}")'''
+    
+    def select_end_points(self):
+        if not hasattr(self, "original_image") or self.original_image is None:
+            error("No original image found.")
+            return
+
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QSizePolicy, QApplication, QMessageBox, QScrollArea
+
+        boxes = self.get_all_bounding_boxes()
+
+        dlg = QDialog(self.MainWindow)
+        dlg.setWindowTitle("Mark Endpoints & Connections")
+        dlg.setWindowModality(Qt.ApplicationModal)
+        dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowMaximizeButtonHint)
+        layout = QVBoxLayout(dlg)
+
+        mode_btn = QPushButton("Switch to Connection Mode")
+        mode_btn.setCheckable(True)
+        layout.addWidget(mode_btn)
+
+        annot = CrackAnnotator(image=self.original_image, boxes=boxes)
+        annot.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(annot)
+        layout.addWidget(scroll, 1)
+
+        def update_mode_text():
+            if annot.connection_mode:
+                mode_btn.setText("Switch to Point Mode")
+                mode_btn.setStyleSheet("background: #97e297;")
+            else:
+                mode_btn.setText("Switch to Connection Mode")
+                mode_btn.setStyleSheet("background: #e2c297;")
+        mode_btn.clicked.connect(lambda: (annot.toggle_mode(), update_mode_text()))
+        update_mode_text()
+
+        btn_layout = QHBoxLayout()
+        btn_done   = QPushButton("Done")
+        btn_cancel = QPushButton("Cancel")
+        btn_layout.addWidget(btn_done)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+
+        def point_in_any_box(pt, boxes):
+            x, y = pt
+            for xmin, ymin, xmax, ymax in boxes:
+                if xmin <= x <= xmax and ymin <= y <= ymax:
+                    return True
+            return False
+
+        def on_done():
+            pts = annot.points
+            conns = annot.connections
+
+            # Must have at least one connection
+            if len(conns) == 0:
+                msg = QMessageBox(dlg)
+                msg.setIcon(QMessageBox.Warning)
+                msg.setText("Please create at least one connection between two points before proceeding.")
+                msg.setWindowTitle("No Connections")
+                msg.exec_()
+                return
+
+            # --- Enforce ALL points are inside a box ---
+            bad_pts = [pt for pt in pts if not point_in_any_box(pt, boxes)]
+            if bad_pts:
+                msg = QMessageBox(dlg)
+                msg.setIcon(QMessageBox.Warning)
+                msg.setText(
+                    "All points must be inside a bounding box!\n\n"
+                    + "\n".join([f"Point {i}: {pt}" for i, pt in enumerate(bad_pts)])
+                )
+                msg.setWindowTitle("Points Outside Box")
+                msg.exec_()
+                return  # Stay in dialog
+
+            dlg.accept()
+
+        btn_done.clicked.connect(on_done)
+        btn_cancel.clicked.connect(dlg.reject)
+
+        dlg.showMaximized()
+        QApplication.processEvents()
+
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
         pts = annot.points
         conns = annot.connections
         print(f"Selected points: {pts}")
@@ -1308,133 +1462,120 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
             self.edge_tracks_button.setStyleSheet("background-color : red")
-
+            
     def edge_tracking(self):
         try:
             color_channel = [0 if self.edge_track_color_box.currentText() == 'R'
                             else 1 if self.edge_track_color_box.currentText() == 'B' else 2][0]
             w = self.edge_track_width_box.value()
-            if self.edge_track_color_box.currentText() == "R":
-                color = (255, 0, 0)
-            elif self.edge_track_color_box.currentText() == "G":
-                color = (0, 255, 0)
-            elif self.edge_track_color_box.currentText() == "B":
-                color = (0, 0, 255)
-            elif self.edge_track_color_box.currentText() == "W":
-                color = (255, 255, 255)
+            color_map = {"R": (255,0,0), "G": (0,255,0), "B": (0,0,255), "W": (255,255,255)}
+            color = color_map.get(self.edge_track_color_box.currentText(), (255,0,0))
 
             mu = self.mu_box.value()
             l = self.l_box.value()
             p = self.p_box.value()
 
-            # Use ONLY bbox-crop image and masks
+            img = self.image_crop
+            mask1 = self.edge_mask1_crop
+            mask2 = self.edge_mask2_crop
+
+            # Defensive checks
+            if img is None or img.size == 0 or mask1 is None or mask2 is None or mask1.size == 0 or mask2.size == 0:
+                error("Edge masks or crop are empty. Run edge_mask first or check box/crop size.")
+                return
+            if not hasattr(self, "pts_crop") or len(self.pts_crop) < 2:
+                error("No crop midline points found. Did you select endpoints?")
+                return
+
+            pts_ok = all(0 <= x < img.shape[1] and 0 <= y < img.shape[0] for x, y in self.pts_crop)
+            if not pts_ok:
+                error("Some midline points are out of crop bounds. Please check endpoints and box selection.")
+                return
+
+            # Edge tracking
             track_e1_crop, track_e2_crop = ct.segmentation.edges_tracking(
-                self.image_crop[:, :, color_channel],
+                img[:, :, color_channel],
                 self.pts_crop,
-                self.edge_mask1, self.edge_mask2, mu=mu, l=l, p=p
+                mask1, mask2, mu=mu, l=l, p=p
             )
-            track_e1_crop = track_e1_crop[::-1]
-            track_e2_crop = track_e2_crop[::-1]
-            track_e1_crop[0] = track_e1_crop[0] - 0.5
-            track_e2_crop[0] = track_e2_crop[0] - 0.5
-            track_e1_crop[1] = track_e1_crop[1] - 0.5
-            track_e2_crop[1] = track_e2_crop[1] - 0.5
+            # track_eX_crop: [Y, X], offset for pixel center
+            track_e1_crop = [track_e1_crop[0] - 0.5, track_e1_crop[1] - 0.5]
+            track_e2_crop = [track_e2_crop[0] - 0.5, track_e2_crop[1] - 0.5]
 
-            # Save crop-coords for later
-            self.track_e1 = [track_e1_crop[0], track_e1_crop[1]]
-            self.track_e2 = [track_e2_crop[0], track_e2_crop[1]]
+            self.track_e1 = track_e1_crop
+            self.track_e2 = track_e2_crop
 
-            # For display, use crop coordinates only!
-            pts1 = np.array(track_e1_crop).transpose(1, 0).reshape((-1, 1, 2)).astype(np.int32)
-            pts2 = np.array(track_e2_crop).transpose(1, 0).reshape((-1, 1, 2)).astype(np.int32)
-            im = self.image_crop.astype(np.uint8)
-            im = cv2.polylines(im, [pts1], False, color, w)
-            im = cv2.polylines(im, [pts2], False, color, w)
-            qimage = QImage(im, im.shape[1], im.shape[0],
-                            im.strides[0], QImage.Format_RGB888)
+            # Debug: overlay edge tracks
+            im_disp = img.copy().astype(np.uint8)
+            pts1 = np.array(self.track_e1).T.reshape((-1,1,2)).astype(np.int32)
+            pts2 = np.array(self.track_e2).T.reshape((-1,1,2)).astype(np.int32)
+            im_disp = cv2.polylines(im_disp, [pts1], False, color, w)
+            im_disp = cv2.polylines(im_disp, [pts2], False, color, w)
+
+            qimage = QImage(im_disp, im_disp.shape[1], im_disp.shape[0], im_disp.strides[0], QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.edge_tracks_display.width(), self.edge_tracks_display.height(),
-                                        Qt.KeepAspectRatio, Qt.FastTransformation)
+            scaled_pixmap = pixmap.scaled(self.edge_tracks_display.width(), self.edge_tracks_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
             self.edge_tracks_display.setPixmap(scaled_pixmap)
             self.edge_tracks_full_screen_button.setStyleSheet("background-color : lightblue")
             self.save_current_segment_button.setStyleSheet("background-color : lightblue")
+
         except Exception as e:
+            import traceback; traceback.print_exc()
             error(e)
             self.edge_tracks_full_screen_button.setStyleSheet("background-color : red")
             self.save_current_segment_button.setStyleSheet("background-color : red")
 
     def edge_tracking(self):
-        try:
-            color_channel = [0 if self.edge_track_color_box.currentText() == 'R'
-                            else 1 if self.edge_track_color_box.currentText() == 'B' else 2][0]
+        try :
+            color_channel = [0 if self.color_chenel_box.currentText()=='R' else 1 if self.color_chenel_box.currentText()=='B' else 2][0]
+            y_margin = self.y_margin_box.value()
+            x_margin = self.x_margin_box.value()
+
             w = self.edge_track_width_box.value()
             if self.edge_track_color_box.currentText() == "R":
-                color = (255, 0, 0)
+                color = (255,0,0)
             elif self.edge_track_color_box.currentText() == "G":
-                color = (0, 255, 0)
+                color = (0,255,0)
             elif self.edge_track_color_box.currentText() == "B":
-                color = (0, 0, 255)
+                color = (0,0,255)
             elif self.edge_track_color_box.currentText() == "W":
-                color = (255, 255, 255)
-            else:
-                color = (255, 0, 0)  # Default to red
+                color = (255,255,255)
 
             mu = self.mu_box.value()
             l = self.l_box.value()
             p = self.p_box.value()
 
-            # Debug: print shapes to verify everything matches
-            print("[Edge tracking debug]")
-            print("image_crop:", self.image_crop.shape)
-            print("edge_mask1_crop:", self.edge_mask1_crop.shape)
-            print("edge_mask2_crop:", self.edge_mask2_crop.shape)
-            print("pts_crop:", self.pts_crop)
-
-            # --- Save debug views to disk ---
-            import matplotlib.pyplot as plt
-            plt.imsave("debug_image_crop.png", self.image_crop[..., color_channel], cmap='gray')
-            plt.imsave("debug_edge_mask1_crop.png", self.edge_mask1_crop, cmap='gray')
-            plt.imsave("debug_edge_mask2_crop.png", self.edge_mask2_crop, cmap='gray')
-            # Overlay midline
-            crop_show = self.image_crop[..., color_channel].copy()
-            for x, y in self.pts_crop:
-                if 0 <= int(y) < crop_show.shape[0] and 0 <= int(x) < crop_show.shape[1]:
-                    crop_show[int(y), int(x)] = 255
-            plt.imsave("debug_crop_with_points.png", crop_show, cmap='gray')
-
-            # Use ONLY bbox-crop image and masks for edge tracking
-            track_e1_crop, track_e2_crop = ct.segmentation.edges_tracking(
-                self.image_crop[:, :, color_channel],
-                self.pts_crop,
-                self.edge_mask1_crop, self.edge_mask2_crop, mu=mu, l=l, p=p
-            )
+            track_e1_crop, track_e2_crop = ct.segmentation.edges_tracking(self.image_crop[:,:,color_channel], self.pts_crop, 
+                                                        self.edge_mask1_crop,self.edge_mask2_crop, mu = mu,l = l, p = p)
             track_e1_crop = track_e1_crop[::-1]
             track_e2_crop = track_e2_crop[::-1]
+
             track_e1_crop[0] = track_e1_crop[0] - 0.5
             track_e2_crop[0] = track_e2_crop[0] - 0.5
+
             track_e1_crop[1] = track_e1_crop[1] - 0.5
             track_e2_crop[1] = track_e2_crop[1] - 0.5
 
-            # Save crop-coords for later
-            self.track_e1 = [track_e1_crop[0], track_e1_crop[1]]
-            self.track_e2 = [track_e2_crop[0], track_e2_crop[1]]
+            self.track_e1 = ct.tools.track_crop_to_full(track_e1_crop,self.pts[0],self.pts[1],y_margin,x_margin)
+            self.track_e2 = ct.tools.track_crop_to_full(track_e2_crop,self.pts[0],self.pts[1],y_margin,x_margin)
 
-            # For display, use crop coordinates only!
-            pts1 = np.array(track_e1_crop).transpose(1, 0).reshape((-1, 1, 2)).astype(np.int32)
-            pts2 = np.array(track_e2_crop).transpose(1, 0).reshape((-1, 1, 2)).astype(np.int32)
-            im = self.image_crop.astype(np.uint8).copy()
+
+            pts1 = np.array(track_e1_crop).transpose(1,0).reshape((-1,1,2)).astype(np.int32)
+            pts2 = np.array(track_e2_crop).transpose(1,0).reshape((-1,1,2)).astype(np.int32)
+            im = self.image_crop.astype(np.uint8)
             im = cv2.polylines(im, [pts1], False, color, w)
             im = cv2.polylines(im, [pts2], False, color, w)
-            qimage = QImage(im, im.shape[1], im.shape[0],
+            qimage = QImage(im, im.shape[1], im.shape[0], 
                             im.strides[0], QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.edge_tracks_display.width(), self.edge_tracks_display.height(),
-                                        Qt.KeepAspectRatio, Qt.FastTransformation)
+            scaled_pixmap = pixmap.scaled(self.edge_tracks_display.width(), self.edge_tracks_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
             self.edge_tracks_display.setPixmap(scaled_pixmap)
             self.edge_tracks_full_screen_button.setStyleSheet("background-color : lightblue")
+            self.edge_tracks_full_screen_button.setStyleSheet("background-color : lightblue")
             self.save_current_segment_button.setStyleSheet("background-color : lightblue")
-        except Exception as e:
-            error(e)
+        except :
+            error()
+            self.edge_tracks_full_screen_button.setStyleSheet("background-color : reed")
             self.edge_tracks_full_screen_button.setStyleSheet("background-color : red")
             self.save_current_segment_button.setStyleSheet("background-color : red")
 
@@ -1510,11 +1651,78 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
 
+    def save_current_segment(self):
+        try:
+            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
+            h_crop, w_crop = self.image_crop.shape[:2]
 
-        # plt.imshow(m)
-        # plt.plot(self.track_e1[0],self.track_e1[1],'r')
-        # plt.plot(self.track_e2[0],self.track_e2[1],'r')
-        # plt.show()
+            # --- Prepare edge track points (crop coordinates) ---
+            # track_eX: [Y, X] lists
+            e1_y, e1_x = np.array(self.track_e1[0]), np.array(self.track_e1[1])
+            e2_y, e2_x = np.array(self.track_e2[0]), np.array(self.track_e2[1])
+
+            # Reverse for polygon consistency and concatenate (crop coordinates)
+            edge_y_crop = np.concatenate((e1_y[::-1], e2_y))
+            edge_x_crop = np.concatenate((e1_x[::-1], e2_x))
+
+            # Clip to crop bounds just in case
+            edge_x_crop = np.clip(edge_x_crop, 0, w_crop-1)
+            edge_y_crop = np.clip(edge_y_crop, 0, h_crop-1)
+
+            # --- Create mask on the crop only ---
+            mask_crop = ct.segmentation.create_mask(
+                self.image_crop,
+                edge_y_crop, edge_x_crop  # Usually (row, col)
+            )
+
+            # --- Paste crop mask into correct region of full image ---
+            full_mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
+            h_mask, w_mask = mask_crop.shape
+            full_mask[ymin:ymin+h_mask, xmin:xmin+w_mask] = mask_crop
+
+            self.mask.append(full_mask)
+
+            # --- Store the track (in global image coordinates) ---
+            # Shift crop coordinates by xmin/ymin for storage in full image
+            e1_x_full = e1_x + xmin
+            e1_y_full = e1_y + ymin
+            e2_x_full = e2_x + xmin
+            e2_y_full = e2_y + ymin
+
+            # Combine for saving, or keep as a dict for multi-branch (more robust!)
+            track = {
+                "edge1": [e1_x_full.tolist(), e1_y_full.tolist()],
+                "edge2": [e2_x_full.tolist(), e2_y_full.tolist()],
+            }
+            self.crack_tracks[len(self.crack_tracks)] = track
+
+            # --- Endpoints (shifted to full-image coordinates) ---
+            self.cracks_stored_endpoints[len(self.cracks_stored_endpoints)] = [
+                (int(self.pts[0][0] + xmin), int(self.pts[0][1] + ymin)),
+                (int(self.pts[1][0] + xmin), int(self.pts[1][1] + ymin))
+            ]
+
+            # --- Show all masks combined ---
+            m = np.sum(np.array(self.mask), axis=0)
+            m[m >= 1] = 255
+            m = m.astype(dtype=np.uint8)
+            qimage = QImage(m, m.shape[1], m.shape[0], m.strides[0], QImage.Format_Grayscale8)
+            pixmap = QPixmap.fromImage(qimage)
+            scaled_pixmap = pixmap.scaled(self.all_segments_display.width(), self.all_segments_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+            self.all_segments_display.setPixmap(scaled_pixmap)
+
+            # --- Overlay polylines on the full image for visual feedback ---
+            pts1_full = np.stack([e1_x_full, e1_y_full], axis=1).reshape((-1, 1, 2)).astype(np.int32)
+            pts2_full = np.stack([e2_x_full, e2_y_full], axis=1).reshape((-1, 1, 2)).astype(np.int32)
+            im = self.image.astype(np.uint8).copy()
+            im = cv2.polylines(im, [pts1_full], False, (0, 255, 0), 1)
+            im = cv2.polylines(im, [pts2_full], False, (0, 255, 0), 1)
+            self.image = im
+
+            self.save_annotation()
+
+        except Exception as e:
+            error(f"save_current_segment error: {e}")
 
     def draw_segment(self):
         try:
