@@ -135,40 +135,46 @@ def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp,mu 
     
     return [track_e1[:,0],track_e1[:,1]], [track_e2[:,0],track_e2[:,1]]
 
-'''def create_mask(image,x,y):
-    flat_x = np.array(x)
-    flat_y = np.array(y)
-
-    zeros = np.ones_like(image)*255
-    mask_contour = drow_mask_lines(zeros,flat_x,flat_y,color = (0,0,0),t=1,close_contur=True)
-    labels = measure.label(mask_contour[:,:,0],connectivity=1)
-    labels[labels!=1] = 0
-
-    
-    kernel = np.array([[0,1,0],
-                      [1,1,1],
-                      [0,1,0]],dtype = np.uint8)
-    mask = np.array((labels),dtype = np.uint8)
-
-    mask = np.array(mask,dtype = float)
-    mask = mask*-1+1
-
-    # mask[mask_contour[:,:,0] == 0] = 0
-    mask = cv2.erode(mask, kernel, iterations=1)
-    return mask'''
-    
 def create_mask(image, x, y):
-    flat_x = np.array(x)
-    flat_y = np.array(y)
-    h, w = image.shape[:2]
-    # Optional: Clip points to stay inside crop, but don't force away from border
-    flat_x = np.clip(flat_x, 0, w-1)
-    flat_y = np.clip(flat_y, 0, h-1)
+    # x and y: concatenated as [top_edge (reversed), bottom_edge]
+    flat_x = np.array(x, dtype=np.int32)
+    flat_y = np.array(y, dtype=np.int32)
+    
+    # Make a (N, 2) array for points in (col, row) format
+    pts = np.vstack([flat_x, flat_y]).T.reshape((-1, 1, 2))
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, [pts], 1)
+    return mask
 
-    zeros = np.zeros((h, w), dtype=np.uint8)
-    pts = np.vstack([flat_x, flat_y]).T.astype(np.int32)
-    cv2.fillPoly(zeros, [pts], color=1)  # or 255 if you prefer
-    return zeros.astype(float)
+import numpy as np
+import cv2
+from scipy.ndimage import binary_fill_holes
+from skimage.morphology import binary_opening, disk
+
+def create_mask(image, x, y):
+    """
+    Create a filled binary mask for a crack defined by (x, y) edge coordinates.
+    - Fills the area inside the crack polyline.
+    - Optionally smooths edges with a small morphological opening.
+    - Returns a float mask (1.0 = crack, 0.0 = background).
+    """
+    # Convert x/y to int and format as OpenCV expects
+    flat_x = np.array(x, dtype=np.int32)
+    flat_y = np.array(y, dtype=np.int32)
+    pts = np.vstack([flat_x, flat_y]).T.reshape((-1, 1, 2))
+
+    # 1. Draw and fill the polygon
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, [pts], 1)
+
+    # 2. Fill any holes (robust for possible open paths)
+    mask_filled = binary_fill_holes(mask > 0)
+
+    # 3. (Optional) Clean rough edges with morphological opening
+    mask_clean = binary_opening(mask_filled, disk(1))
+
+    # 4. Return as float (if you want to match previous behavior)
+    return mask_clean.astype(float)
 
 def redrow_lines(img,counturs_x,counturs_y,t,scale):
     flat_x = [item for sublist in counturs_x for item in sublist]
