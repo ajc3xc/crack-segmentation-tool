@@ -326,7 +326,7 @@ def GGF(g11,g22,g33,GFtoLIFinv,LIFtoEuclideaninv):
 def GLIFtoEuclideanOld(theta):
     return np.array([[np.cos(theta),np.sin(theta),0],[-np.sin(theta),np.cos(theta),0],[0,0,1]])
 
-def IncludeCost(cost,metric):
+'''def IncludeCost(cost,metric):
     cost = cost**2
     cost = np.expand_dims(cost,axis=3)
     cost = np.concatenate([cost,cost,cost],axis = 3)
@@ -334,7 +334,13 @@ def IncludeCost(cost,metric):
     cost = np.concatenate([cost,cost,cost],axis = 4)
 
     metric = metric*cost
-    return metric
+    return metric'''
+
+def IncludeCost(cost, metric):
+    cost_sq = cost**2  # (nt, nx, ny)
+    cost_exp = cost_sq[:, :, :, None, None]  # shape: (nt, nx, ny, 1, 1)
+    metric_exp = metric[:, None, None, :, :]  # shape: (nt, 1, 1, 3, 3)
+    return cost_exp * metric_exp  # broadcast to (nt, nx, ny, 3, 3)
 
 def runReedsSheppGF(sides, dims, seeds, tips, metric):
     print(".")
@@ -358,60 +364,6 @@ def runReedsSheppGF(sides, dims, seeds, tips, metric):
     geos = [g.T for g in hfmOut['geodesics']]
     print('Done.')
     return geos
-
-'''import numpy as np
-import torch
-import FastGeodis as fg
-
-def runReedsSheppGF(sides, dims, seeds, tips, metric):
-    """
-    Fast GPU geodesic with FastGeodis, matching your signature.
-    metric: (3, 3, Nt, Nx, Ny)
-    dims: [Nx, Ny, Nt]
-    seeds: list of [x, y, t] (single or multiple points)
-    """
-    # Convert metric to cost volume
-    # Typical vesselness geodesic: use trace or norm of metric as cost
-    cost = np.trace(metric, axis1=0, axis2=1).astype(np.float32)  # shape (Nt, Nx, Ny)
-
-    # Seeds to mask
-    seeds_mask = np.zeros_like(cost, dtype=np.float32)
-    for s in seeds:
-        # [x, y, t] → [t, x, y] for mask
-        t = int(s[2] * cost.shape[0] / (2*np.pi)) if s[2] > 2 else int(s[2])
-        seeds_mask[t, int(s[0]), int(s[1])] = 1.0
-
-    # Prepare as torch tensors, permuted to (B, X, Y, T)
-    cost_t = torch.from_numpy(cost).permute(1, 2, 0).unsqueeze(0).cuda()  # [1, Nx, Ny, Nt]
-    seeds_t = torch.from_numpy(seeds_mask).permute(1, 2, 0).unsqueeze(0).cuda()
-    print(cost_t.shape, seeds.shape, seeds_t.shape)
-
-    # Spacing
-    Nx, Ny, Nt = dims
-    spacing = [1.0, 1.0, 2*np.pi/Nt]  # adjust if pixel size or theta discretization is not 1.0
-    v=1e10;lamb=1.0;iter=4
-    cost_t = cost_t.unsqueeze(0)    # Remove batch dim
-    seeds_t = seeds_t.unsqueeze(0)  # Remove batch dim
-
-
-    # Geodesic computation
-    #print(type(cost_t), type(seeds_t),type(spacing), type(g11), type(g22), type(g33))
-    print(cost_t.shape, seeds_t.shape)
-    print(".")
-    geo = fg.generalised_geodesic3d(
-        cost_t,
-        seeds_t,
-        spacing,
-        v,
-        lamb,
-        iter  # this is your iter count, e.g. 4
-    )
-    geo = geo[0].cpu().numpy().transpose(2, 0, 1)  # (Nt, Nx, Ny)
-
-    # If you want the geodesic path: use a path extraction on geo map (not included here)
-    # geos1 = [x_path, y_path, t_path]  # Extract using minimum cost backtracking, etc.
-
-    return geo  # shape (Nt, Nx, Ny), analogous to geodesic field you use downstream'''
 
 import numpy as np
 import torch
@@ -503,7 +455,7 @@ def GLIFtoEuclideanOld_vec(nt):
     LIF[:, 2, 2] = 1.0
     return LIF
 
-def ReedsSheppMetricGFOld(GF, dims, g11, g22, g33):
+'''def ReedsSheppMetricGFOld(GF, dims, g11, g22, g33):
     """
     Fast vectorized version for [nt, nx, ny, 3, 3] metric tensor.
     Assumes GF = identity, as in your default code.
@@ -520,7 +472,27 @@ def ReedsSheppMetricGFOld(GF, dims, g11, g22, g33):
 
     # Now tile to all spatial locations (nx, ny)
     metric = np.tile(M[:, None, None, :, :], (1, nx, ny, 1, 1))
-    return metric
+    return metric'''
+
+def ReedsSheppMetricGFOld(GF, dims, g11, g22, g33):
+    """
+    Memory-efficient version of ReedsSheppMetricGFOld.
+    Assumes GF is unused (typically identity) and omits full spatial tiling.
+
+    Returns:
+        (nt, 3, 3) metric tensor to be broadcast later.
+    """
+    nt, nx, ny = dims[0], dims[1], dims[2]
+    LIFtoEuclidean = GLIFtoEuclideanOld_vec(nt)     # (nt, 3, 3)
+    LIFtoEuclideaninv = np.linalg.inv(LIFtoEuclidean)
+
+    # Diagonal GF metric
+    GFmat = np.diag([g11, g22, g33])
+
+    # Compose per-theta metric: M_t = LIFinv @ GF @ LIFinv^T
+    M = LIFtoEuclideaninv @ GFmat @ np.transpose(LIFtoEuclideaninv, (0, 2, 1))  # (nt, 3, 3)
+
+    return M
 
 from time import time
 def fast_marching(os_cost,start_point,end_point,g11=1,g22=100,g33=100):
@@ -570,6 +542,35 @@ def fast_marching(os_cost,start_point,end_point,g11=1,g22=100,g33=100):
     print(f"runReedsSheppGF = {time() - start_time}")
 
     return [geos1[0][:,1],geos1[0][:,0]]
+
+'''def fast_marching(os_cost, start_point, end_point, g11=1, g22=100, g33=100):
+    import numpy as np
+    from time import time
+
+    NoCost, NxCost, NyCost = os_cost.shape
+    s_theta = 2 * np.pi / NoCost
+
+    dims = np.array([NoCost, NxCost, NyCost])
+    sides = np.array([[0, NxCost], [0, NyCost], [0, 2 * np.pi - s_theta]])
+    
+    # Efficient metric computation (no full tiling)
+    metric_t = ReedsSheppMetricGFOld(None, dims, g11, g22, g33)  # shape (nt, 3, 3)
+
+    # Apply cost**2 to (nt, nx, ny), broadcast and multiply with (nt, 3, 3)
+    cost_squared = os_cost ** 2
+    metricLIFinclCostOld = cost_squared[..., None, None] * metric_t[:, None, None, :, :]  # (nt, nx, ny, 3, 3)
+
+    # Transpose to match expected (3, 3, Nt, Nx, Ny)
+    metricLIFinclCostOld1 = metricLIFinclCostOld.transpose(3, 4, 0, 1, 2)
+
+    # Prepare seeds and tips
+    seeds = np.array([*start_point[::-1], np.pi / 2])
+    tips = np.array([*end_point[::-1], np.pi / 2])
+
+    # Geodesic computation
+    geos1 = runReedsSheppGF(sides, [NxCost, NyCost, NoCost], [seeds], [tips], metricLIFinclCostOld1)
+
+    return [geos1[0][:, 1], geos1[0][:, 0]]'''
 
 def fast_marching_2d(cost,start_point,end_point,l = 1, p = 6):
     mu = 0

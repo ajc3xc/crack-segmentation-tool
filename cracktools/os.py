@@ -402,7 +402,7 @@ import cupy as cp
 import cupyx.scipy.ndimage as nd
 #from cupyx import fuse
 
-def OrientationScoreTensor3_gpu(osObj, sigmaSpatial, sigmaOrientation, method):
+'''def OrientationScoreTensor3_gpu(osObj, sigmaSpatial, sigmaOrientation, method):
 
     if method == "LIF":
         order_list = [11, 22]
@@ -484,6 +484,94 @@ def OrientationScoreTensor3_gpu(osObj, sigmaSpatial, sigmaOrientation, method):
             elif dirr == 2:
                 derivative = -dx * sin_theta + dy * cos_theta
 
+        tensor[..., order_digits[1] - 1, order_digits[0] - 1] = derivative
+
+    return tensor'''
+
+@cp.fuse()
+def rotate_directional(dx, dy, cos_theta, sin_theta, dirr):
+    return cp.where(
+        dirr == 1,
+        dx * cos_theta + dy * sin_theta,
+        -dx * sin_theta + dy * cos_theta
+    )
+
+def OrientationScoreTensor3_gpu(osObj, sigmaSpatial, sigmaOrientation, method):
+    if method == "LIF":
+        order_list = [11, 22]
+    else:
+        order_list = [11, 21, 31, 12, 22, 32, 13, 23, 33]
+
+    sigmaOD = sigmaOrientation / osObj.AngularResolution
+    shape = osObj.Data.shape + (3, 3)
+    tensor = cp.zeros(shape, dtype=cp.float32)
+
+    symmetry = osObj.Symmetry
+    No = osObj.Data.shape[0]
+    angles = cp.arange(0, abs(symmetry), osObj.AngularResolution)
+    anglesMatrix = angles[:, None, None]
+    cos_theta = cp.cos(anglesMatrix)
+    sin_theta = cp.sin(anglesMatrix)
+
+    # Handle symmetry
+    periodicOS = cp.array(osObj.Data, dtype=cp.float32)
+    if symmetry == -cp.pi:
+        periodicOS = cp.concatenate([periodicOS, cp.conj(periodicOS)], axis=0)
+
+    # Cache dictionary
+    cache = {}
+
+    def get_spatial_blur(data, sigma):
+        key = f"spatial_{sigma:.4f}"
+        if key not in cache:
+            cache[key] = nd.gaussian_filter(data, sigma=[0, sigma, sigma],
+                                            truncate=(4 * sigma + 1) / sigma, mode="nearest")
+        return cache[key]
+
+    def get_orientation_blur(data, sigmaOD, angularOrder):
+        key = f"orient_{sigmaOD:.4f}_{angularOrder}"
+        if key not in cache:
+            cache[key] = nd.gaussian_filter(data, sigma=[sigmaOD, 0.125, 0.125],
+                                            order=[angularOrder, 0, 0], mode="wrap", truncate=4)
+        return cache[key]
+
+    for order in order_list:
+        order_digits = [int(x) for x in str(order)][::-1]
+        n = cp.sum(cp.array(order_digits) == 1) + cp.sum(cp.array(order_digits) == 2) + 1
+        scaledSigmaSpatial = 1.0 / cp.sqrt(n) * sigmaSpatial
+        angularOrder = cp.sum(cp.array(order_digits) == 3)
+
+        # --- Filtering ---
+        spatialBlurred = get_spatial_blur(periodicOS, float(scaledSigmaSpatial))
+        orientBlurred = get_orientation_blur(spatialBlurred, float(sigmaOD), int(angularOrder))
+
+        if symmetry in [cp.pi, -cp.pi]:
+            orientBlurred = orientBlurred[:No]
+
+        derivative = orientBlurred / (osObj.AngularResolution ** angularOrder)
+
+        for dirr in order_digits:
+            if dirr == 3:
+                continue
+
+            if symmetry in [cp.pi, -cp.pi]:
+                orientationBlurredOS = derivative[:No]
+            else:
+                orientationBlurredOS = derivative
+
+            trunc2 = (4 * scaledSigmaSpatial + 1) / scaledSigmaSpatial
+
+            dx = nd.gaussian_filter(orientationBlurredOS,
+                                    sigma=[0, scaledSigmaSpatial, scaledSigmaSpatial],
+                                    order=[0, 1, 0], truncate=trunc2, mode="nearest")
+
+            dy = nd.gaussian_filter(orientationBlurredOS,
+                                    sigma=[0, scaledSigmaSpatial, scaledSigmaSpatial],
+                                    order=[0, 0, 1], truncate=trunc2, mode="nearest")
+
+            derivative = rotate_directional(dx, dy, cos_theta, sin_theta, dirr)
+
+        # Fill output tensor
         tensor[..., order_digits[1] - 1, order_digits[0] - 1] = derivative
 
     return tensor

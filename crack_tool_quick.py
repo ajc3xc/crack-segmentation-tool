@@ -359,11 +359,43 @@ class CrackToolsApplication(Ui_MainWindow):
     def select_folder(self):
         try:
             dir = self.folder_line_edit.text().replace(" \ ", "/" )
-            self.image_names = ct.tools.get_files(folder = dir,formats = ['jpg','png'],basename = False)
+            # Only act if the folder is actually new
+            if hasattr(self, 'current_folder') and dir == self.current_folder:
+                return  # Do nothing if it's the same folder
+
+            self.current_folder = dir  # Save for next check
+
+            # ---- Wipe all memory/state/arrays for previous folder ----
+            self.files_list.clear()
+            self.image_names = []
+            self.n = 0
+
+            # Only clear variables if switching folder
+            for attr in [
+                'mask', 'crack_tracks', 'cracks_stored_endpoints',
+                'track_crop', 'track',
+                'image', 'original_image', 'image_crop', 'image_crop_down', 'image_down',
+                'osGFCost', 'multiscalecostLIFExtReg', 'costFunction',
+                'bb_pts_list', 'mid_pt', 'end_points', 'points_pairs_list', 'annotation'
+            ]:
+                if hasattr(self, attr):
+                    try:
+                        delattr(self, attr)
+                    except Exception:
+                        pass
+
+            import gc; gc.collect()
+
+            # ---- Now load new image list ----
+            self.image_names = ct.tools.get_files(folder=dir, formats=['jpg','png'], basename=False)
             for filename in self.image_names:
                 self.files_list.addItem(os.path.basename(filename))
-            self.n = 0
-            self.change_image()
+            if self.image_names:
+                self.n = 0
+                self.change_image()
+            else:
+                self.ImageScreen.clear()
+                self.filename_label_2.setText("No images found in folder.")
         except Exception as e:
             error(e)
 
@@ -503,7 +535,7 @@ class CrackToolsApplication(Ui_MainWindow):
         
     # In CrackToolsApplication
 
-    def draw_box(self):
+    '''def draw_box(self):
         self.image_size = self.select_image_size_2.value()
         if not hasattr(self, "bb_pts_list"):
             self.bb_pts_list = []
@@ -533,19 +565,71 @@ class CrackToolsApplication(Ui_MainWindow):
         self.bb_pts_list.append(bb_pts)
         print("DRAW BOX: List after session:", self.bb_pts_list)
         # Force a preview update here!
-        self.update_green_preview()
+        self.update_green_preview()'''
+        
+    def draw_box(self):
+        if not hasattr(self, 'original_image') or self.original_image is None:
+            error("No image loaded. Please select a folder and an image first.")
+            return
+        self.image_size = self.select_image_size_2.value()
+        if not hasattr(self, "bb_pts_list"):
+            self.bb_pts_list = []
+        print("DRAW BOX: List before session:", self.bb_pts_list)
+        
+        display_image = self.original_image.copy()
+        if 'annotations' in self.annotation and 'box' in self.annotation['annotations']:
+            for box_k, box_data in self.annotation['annotations']['box'].items():
+                bb = np.array(box_data['bounding_box'], dtype=np.int32)
+                cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0, 128, 255), 3)
+        for bb in self.bb_pts_list:
+            if len(bb) == 2:  # Add this safety check
+                cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0, 255, 0), 3)
+
+        # --- Get the display size: ---
+        screen_rect = QtWidgets.QApplication.desktop().screenGeometry()
+        print(display_image.shape, screen_rect.width(), screen_rect.height())
+        target_w = max(display_image.shape[1], int(screen_rect.width()))
+        target_h = max(display_image.shape[0], int(screen_rect.height()))
+
+        # --- Upscale image if needed ---
+        scale_factor = 1.0
+        h, w = display_image.shape[:2]
+        if h < target_h or w < target_w:
+            scale_factor = min(target_w / w, target_h / h)
+            new_w = int(w * scale_factor)
+            new_h = int(h * scale_factor)
+            display_for_box = cv2.resize(display_image, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+        else:
+            display_for_box = display_image
+
+        qimage = QImage(display_for_box.astype(np.uint8), display_for_box.shape[1], display_for_box.shape[0], display_for_box.strides[0], QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimage)
+        scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+        self.ImageScreen.setPixmap(scaled_pixmap)
+
+        bb_pts, _ = ct.tools.Draw().bounding_box(display_for_box[:, :, ::-1], self.image_size)
+        bb_pts = (np.array(bb_pts, dtype=np.float32) / scale_factor).astype(np.int32)
+
+        # Only append and update if a box was actually drawn:
+        if bb_pts.shape == (2, 2):  # (top-left, bottom-right)
+            self.bb_pts_list.append(bb_pts)
+            print("DRAW BOX: List after session:", self.bb_pts_list)
+            self.update_green_preview()
+        else:
+            print("No box drawn, nothing to add.")
             
     def update_green_preview(self):
-        """Show the current image with all pending green and saved blue boxes."""
         display_image = self.original_image.copy()
         # Draw saved boxes (blue)
         if 'annotations' in self.annotation and 'box' in self.annotation['annotations']:
             for box_k, box_data in self.annotation['annotations']['box'].items():
                 bb = np.array(box_data['bounding_box'], dtype=np.int32)
-                cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0, 128, 255), 3)
+                if len(bb) == 2:
+                    cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0, 128, 255), 3)
         # Draw pending (green)
         for bb in self.bb_pts_list:
-            cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0, 255, 0), 3)
+            if len(bb) == 2:
+                cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0, 255, 0), 3)
 
         im = display_image.copy()
         qimage = QImage(im.astype(np.uint8), im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
@@ -595,8 +679,12 @@ class CrackToolsApplication(Ui_MainWindow):
         self.bb_pts_list = []
 
         self.change_image()
+        #self.update_green_preview()
 
     def clear_boxes(self):
+        if not hasattr(self, 'annotations'):
+            error("No image loaded. Please select a folder and an image first.")
+            return
         # Remove only the box with the highest key (most recently added)
         box_dict = self.annotation['annotations'].get('box', {})
         if box_dict:
@@ -608,6 +696,7 @@ class CrackToolsApplication(Ui_MainWindow):
             with open(self.ann_name, 'w') as fp:
                 json.dump(self.annotation, fp)
             self.change_image()
+            #self.update_green_preview()
         else:
             print("No boxes to remove.")
 
@@ -1626,7 +1715,7 @@ class CrackToolsApplication(Ui_MainWindow):
                 self.midline_tracking()
                 print(f"midline tracking time: {time() - start_time:.2f} seconds")
                 start_time = time()
-                return
+                #return
                 print("edge mask")
                 self.edge_mask()
                 print(f"edge mask time: {time() - start_time:.2f} seconds")
