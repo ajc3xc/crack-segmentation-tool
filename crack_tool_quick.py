@@ -51,7 +51,10 @@ class CrackAnnotator(QtWidgets.QWidget):
         # Annotation state
         self.points = []  # List[(x, y)]
         self.connections = []  # List[(i_from, i_to)]
-        self.point_radius = 7
+        h, w, _ = image.shape
+        # --- Adaptive point radius ---
+        min_dim = min(w, h)
+        self.point_radius = max(3, min(20, int(0.005 * min_dim)))  # Between 4 and 18 px
         self.connection_mode = False
         self.connecting_index = None
         self.hover_index = None
@@ -736,8 +739,8 @@ class CrackToolsApplication(Ui_MainWindow):
             if hasattr(self, 'cracks_stored_endpoints') and len(self.cracks_stored_endpoints) > 0:
                 int_keys = list(map(int, self.cracks_stored_endpoints.keys()))
                 last_key = max(int_keys)
-                print(last_key, int_keys, self.cracks_stored_endpoints.keys())
-                del self.cracks_stored_endpoints[last_key]
+                #print(last_key, int_keys, self.cracks_stored_endpoints.keys())
+                del self.cracks_stored_endpoints[str(last_key)]
             else:
                 print("No endpoints left to remove.")
 
@@ -889,7 +892,7 @@ class CrackToolsApplication(Ui_MainWindow):
             # Crop the image to the bounding box
             self.image_crop = self.original_image[ymin:ymax, xmin:xmax]
             # Ensure the crop is not too small for tracking/segmentation
-            min_crop_size = 32  # Or whatever your algorithm needs (try 32 as safe default)
+            min_crop_size = 16  # Or whatever your algorithm needs (try 32 as safe default)
             h, w = self.image_crop.shape[:2]
             if h < min_crop_size or w < min_crop_size:
                 print(f"Skipping segment: Crop too small for processing ({w}x{h})")
@@ -1198,7 +1201,7 @@ class CrackToolsApplication(Ui_MainWindow):
             downsample_factor = self.downsample_factor_box.value()
 
             track_crop_down = ct.tracking.fast_marching(self.costFunction,self.pts_crop_down[0],self.pts_crop_down[1],g11=g11,g22=g22,g33=g33)
-            print(".")
+            #print(".")
             track_crop_down[0] = track_crop_down[0]-0.5
             track_crop_down[1] = track_crop_down[1]-0.5
             track_crop = track_crop_down.copy()
@@ -1206,12 +1209,12 @@ class CrackToolsApplication(Ui_MainWindow):
             track_crop[1] = track_crop_down[1]*downsample_factor
             self.track_crop = track_crop
             track = ct.tools.track_crop_to_full(track_crop,self.pts[0],self.pts[1],y_margin,x_margin)
-            print("..")
+            #print("..")
             self.track = track
             pts = np.array(track_crop).transpose(1,0).reshape((-1,1,2)).astype(np.int32)
             im = self.image_crop.astype(np.uint8)
             im = cv2.polylines(im, [pts], False, color, w)
-            print("...")
+            #print("...")
             qimage = QImage(im, im.shape[1], im.shape[0], 
                             im.strides[0], QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qimage)
@@ -1359,7 +1362,7 @@ class CrackToolsApplication(Ui_MainWindow):
             error(e)
             self.edge_tracks_full_screen_button.setStyleSheet("background-color : red")
             self.save_current_segment_button.setStyleSheet("background-color : red")
-            
+
     def edge_tracking(self):
         try:
             color_channel = [0 if self.edge_track_color_box.currentText() == 'R'
@@ -1373,12 +1376,33 @@ class CrackToolsApplication(Ui_MainWindow):
                 color = (0, 0, 255)
             elif self.edge_track_color_box.currentText() == "W":
                 color = (255, 255, 255)
+            else:
+                color = (255, 0, 0)  # Default to red
 
             mu = self.mu_box.value()
             l = self.l_box.value()
             p = self.p_box.value()
 
-            # USE THE CROP MASKS
+            # Debug: print shapes to verify everything matches
+            print("[Edge tracking debug]")
+            print("image_crop:", self.image_crop.shape)
+            print("edge_mask1_crop:", self.edge_mask1_crop.shape)
+            print("edge_mask2_crop:", self.edge_mask2_crop.shape)
+            print("pts_crop:", self.pts_crop)
+
+            # --- Save debug views to disk ---
+            import matplotlib.pyplot as plt
+            plt.imsave("debug_image_crop.png", self.image_crop[..., color_channel], cmap='gray')
+            plt.imsave("debug_edge_mask1_crop.png", self.edge_mask1_crop, cmap='gray')
+            plt.imsave("debug_edge_mask2_crop.png", self.edge_mask2_crop, cmap='gray')
+            # Overlay midline
+            crop_show = self.image_crop[..., color_channel].copy()
+            for x, y in self.pts_crop:
+                if 0 <= int(y) < crop_show.shape[0] and 0 <= int(x) < crop_show.shape[1]:
+                    crop_show[int(y), int(x)] = 255
+            plt.imsave("debug_crop_with_points.png", crop_show, cmap='gray')
+
+            # Use ONLY bbox-crop image and masks for edge tracking
             track_e1_crop, track_e2_crop = ct.segmentation.edges_tracking(
                 self.image_crop[:, :, color_channel],
                 self.pts_crop,
@@ -1398,7 +1422,7 @@ class CrackToolsApplication(Ui_MainWindow):
             # For display, use crop coordinates only!
             pts1 = np.array(track_e1_crop).transpose(1, 0).reshape((-1, 1, 2)).astype(np.int32)
             pts2 = np.array(track_e2_crop).transpose(1, 0).reshape((-1, 1, 2)).astype(np.int32)
-            im = self.image_crop.astype(np.uint8)
+            im = self.image_crop.astype(np.uint8).copy()
             im = cv2.polylines(im, [pts1], False, color, w)
             im = cv2.polylines(im, [pts2], False, color, w)
             qimage = QImage(im, im.shape[1], im.shape[0],

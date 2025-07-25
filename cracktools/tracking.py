@@ -343,10 +343,10 @@ def IncludeCost(cost, metric):
     return cost_exp * metric_exp  # broadcast to (nt, nx, ny, 3, 3)
 
 def runReedsSheppGF(sides, dims, seeds, tips, metric):
-    print(".")
+    #print(".")
     #metric = Riemann(cp.asarray(metric))
     metric = Riemann(xp.array(metric))
-    print("..")
+    #print("..")
     hfmIn = Eikonal.dictIn({
         'model' : 'Riemann3_Periodic',
         'seeds' : seeds,
@@ -354,13 +354,13 @@ def runReedsSheppGF(sides, dims, seeds, tips, metric):
         'tips' : tips,
         #'mode':'gpu',
         'metric' : metric})
-    print("...")
+    #print("...")
     hfmIn.SetRect(sides = sides, dims = dims)
     if hfmIn.mode=='gpu': 
         hfmIn.update({'model':'Riemann3','periodic':(True,False,False)})
-    print("....")
+    #print("....")
     hfmOut = hfmIn.Run()
-    print(".....")
+    #print(".....")
     geos = [g.T for g in hfmOut['geodesics']]
     print('Done.')
     return geos
