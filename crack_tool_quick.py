@@ -534,38 +534,6 @@ class CrackToolsApplication(Ui_MainWindow):
             error(e)
         
     # In CrackToolsApplication
-
-    '''def draw_box(self):
-        self.image_size = self.select_image_size_2.value()
-        if not hasattr(self, "bb_pts_list"):
-            self.bb_pts_list = []
-        print("DRAW BOX: List before session:", self.bb_pts_list)
-
-        # Build the display image (show blue for saved, green for pending)
-        display_image = self.original_image.copy()
-        # Blue = saved boxes
-        if 'annotations' in self.annotation and 'box' in self.annotation['annotations']:
-            for box_k, box_data in self.annotation['annotations']['box'].items():
-                bb = np.array(box_data['bounding_box'], dtype=np.int32)
-                cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0, 128, 255), 3)
-        # Green = pending
-        for bb in self.bb_pts_list:
-            cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0, 255, 0), 3)
-
-        # Show in Qt preview
-        im = display_image.copy()
-        qimage = QImage(im.astype(np.uint8), im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(qimage)
-        scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-        self.ImageScreen.setPixmap(scaled_pixmap)
-
-        # User draws one box on top of this image (which already shows all previous boxes)
-        bb_pts, _ = ct.tools.Draw().bounding_box(display_image[:, :, ::-1], self.image_size)
-        bb_pts = np.array(bb_pts, dtype=np.int32)
-        self.bb_pts_list.append(bb_pts)
-        print("DRAW BOX: List after session:", self.bb_pts_list)
-        # Force a preview update here!
-        self.update_green_preview()'''
         
     def draw_box(self):
         if not hasattr(self, 'original_image') or self.original_image is None:
@@ -588,8 +556,8 @@ class CrackToolsApplication(Ui_MainWindow):
         # --- Get the display size: ---
         screen_rect = QtWidgets.QApplication.desktop().screenGeometry()
         print(display_image.shape, screen_rect.width(), screen_rect.height())
-        target_w = max(display_image.shape[1], int(screen_rect.width()))
-        target_h = max(display_image.shape[0], int(screen_rect.height()))
+        target_w = max(display_image.shape[1], int(screen_rect.width()) * 2.5)
+        target_h = max(display_image.shape[0], int(screen_rect.height()) * 2.5)
 
         # --- Upscale image if needed ---
         scale_factor = 1.0
@@ -617,6 +585,110 @@ class CrackToolsApplication(Ui_MainWindow):
             self.update_green_preview()
         else:
             print("No box drawn, nothing to add.")
+            
+    def draw_box(self):
+        # --- Check image loaded ---
+        if not hasattr(self, 'original_image') or self.original_image is None:
+            error("No image loaded. Please select a folder and an image first.")
+            return
+
+        # --- Optional: Get snapping status and margin ---
+        # If you use a checkbox in your UI, use that, or set True/False here:
+        '''snap_enabled = getattr(self, 'snap_box_edges_checkbox', None)
+        if snap_enabled is not None:
+            snap_to_edge = snap_enabled.isChecked()
+        else:
+            snap_to_edge = True  # Change to False to disable snapping'''
+        snap_to_edge = True
+
+        snap_margin = 10 # pixels
+
+        def snap_point(pt, img_shape, margin=snap_margin):
+            """Snap point (x,y) to the image edge if within 'margin' pixels."""
+            x, y = pt
+            w, h = img_shape[:2]
+            print(x,h, y,w)
+            
+            if abs(x) < margin:
+                x = 0
+            elif abs(x - (w-1)) < margin:
+                x = w-1
+            if abs(y) < margin:
+                y = 0
+            elif abs(y - (h-1)) < margin:
+                y = h-1
+            return int(x), int(y)
+
+        self.image_size = self.select_image_size_2.value()
+        self.bb_pts_list = getattr(self, 'bb_pts_list', [])
+        display_image = self.original_image.copy()
+
+        # Draw saved (blue) and pending (green) boxes
+        for box_dict in (self.annotation.get('annotations', {}).get('box') or {}).values():
+            bb = np.array(box_dict['bounding_box'], dtype=np.int32)
+            cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0,128,255), 3)
+        for bb in self.bb_pts_list:
+            if bb.shape == (2,2):
+                cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0,255,0), 3)
+
+        screen_rect = QtWidgets.QApplication.desktop().screenGeometry()
+        min_w = int(screen_rect.width() * 0.25)
+        min_h = int(screen_rect.height() * 0.25)
+        h, w = display_image.shape[:2]
+        scale_factor = min(max(min_w / w if w<min_w else 1.0,
+                            min_h / h if h<min_h else 1.0), 5.0)
+
+        if scale_factor > 1.0:
+            new_w, new_h = int(w * scale_factor), int(h * scale_factor)
+            display_for_box = cv2.resize(display_image, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+        else:
+            display_for_box = display_image
+
+        qimage = QImage(display_for_box[..., ::-1].astype(np.uint8),
+                        display_for_box.shape[1], display_for_box.shape[0],
+                        display_for_box.strides[0], QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimage)
+        self.ImageScreen.setPixmap(pixmap.scaled(
+            self.ImageScreen.width(), self.ImageScreen.height(),
+            Qt.KeepAspectRatio, Qt.FastTransformation))
+
+        bb_pts, _ = ct.tools.Draw().bounding_box(display_for_box[..., ::-1], self.image_size)
+        if bb_pts is None or len(bb_pts) != 2:
+            error("Box not completed. Ensure both corners are inside the cursor region.")
+            return
+
+        # --- Convert and snap points if enabled ---
+        bb_pts = (np.array(bb_pts, dtype=np.float32) / scale_factor)
+        if snap_to_edge:
+            bb_pts[0] = snap_point(bb_pts[0], self.original_image.shape)
+            bb_pts[1] = snap_point(bb_pts[1], self.original_image.shape)
+        bb_pts = bb_pts.astype(np.int32)
+
+        self.bb_pts_list.append(bb_pts)
+        print("DRAW BOX: added", bb_pts)
+        self.update_green_preview()
+
+        # --------- SNAP TO EDGE if enabled ----------
+        def snap_to_edge(pt, img_shape, margin=5):
+            x, y = pt
+            h, w = img_shape[:2]
+            if abs(x) < margin:
+                x = 0
+            elif abs(x - (w-1)) < margin:
+                x = w-1
+            if abs(y) < margin:
+                y = 0
+            elif abs(y - (h-1)) < margin:
+                y = h-1
+            return int(x), int(y)
+
+        #if self.snap_to_edge_checkbox.isChecked():
+        bb_pts = np.array([snap_to_edge(pt, self.original_image.shape, margin=5) for pt in bb_pts], dtype=int)
+        # --------------------------------------------
+
+        self.bb_pts_list.append(bb_pts)
+        print("DRAW BOX: added", bb_pts)
+        self.update_green_preview()
             
     def update_green_preview(self):
         display_image = self.original_image.copy()
@@ -682,7 +754,7 @@ class CrackToolsApplication(Ui_MainWindow):
         #self.update_green_preview()
 
     def clear_boxes(self):
-        if not hasattr(self, 'annotations'):
+        if not hasattr(self, 'annotation'):
             error("No image loaded. Please select a folder and an image first.")
             return
         # Remove only the box with the highest key (most recently added)
