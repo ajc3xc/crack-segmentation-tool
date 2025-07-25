@@ -135,7 +135,7 @@ def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp,mu 
     
     return [track_e1[:,0],track_e1[:,1]], [track_e2[:,0],track_e2[:,1]]
 
-def create_mask(image,x,y):
+'''def create_mask(image,x,y):
     flat_x = np.array(x)
     flat_y = np.array(y)
 
@@ -155,7 +155,20 @@ def create_mask(image,x,y):
 
     # mask[mask_contour[:,:,0] == 0] = 0
     mask = cv2.erode(mask, kernel, iterations=1)
-    return mask
+    return mask'''
+    
+def create_mask(image, x, y):
+    flat_x = np.array(x)
+    flat_y = np.array(y)
+    h, w = image.shape[:2]
+    # Optional: Clip points to stay inside crop, but don't force away from border
+    flat_x = np.clip(flat_x, 0, w-1)
+    flat_y = np.clip(flat_y, 0, h-1)
+
+    zeros = np.zeros((h, w), dtype=np.uint8)
+    pts = np.vstack([flat_x, flat_y]).T.astype(np.int32)
+    cv2.fillPoly(zeros, [pts], color=1)  # or 255 if you prefer
+    return zeros.astype(float)
 
 def redrow_lines(img,counturs_x,counturs_y,t,scale):
     flat_x = [item for sublist in counturs_x for item in sublist]
