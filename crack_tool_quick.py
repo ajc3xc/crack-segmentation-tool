@@ -1408,7 +1408,7 @@ class CrackToolsApplication(Ui_MainWindow):
             #print("First 5 track points (row, col):", track[:, :5].T)
 
             # --- Plot: original image, bbox, and track ---
-            fig, ax = plt.subplots()
+            '''fig, ax = plt.subplots()
             ax.imshow(img_gray, cmap='gray')
             rect = patches.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin,
                                     linewidth=2, edgecolor='lime', facecolor='none', label='crop bbox')
@@ -1416,7 +1416,7 @@ class CrackToolsApplication(Ui_MainWindow):
             ax.plot(track[1], track[0], 'r-', label='track (col, row)')
             plt.legend()
             plt.title('Original image with bbox (green) and track (red)')
-            plt.show()
+            plt.show()'''
 
             # --- Call edge_masks on original image + track ---
             self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(

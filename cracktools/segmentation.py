@@ -86,69 +86,73 @@ def edge_masks(image_gray, track, window_half_size=40):
     n_skipped = 0
 
     for i in range(track.shape[1] - 1):
-        start_x = float(track[1, i])
-        start_y = float(track[0, i])
+        start_row = float(track[0, i])  # row (y)
+        start_col = float(track[1, i])  # col (x)
+
         if i < track.shape[1] - center_line_length:
-            end_x = float(track[1, i + center_line_length])
-            end_y = float(track[0, i + center_line_length])
+            end_row = float(track[0, i + center_line_length])
+            end_col = float(track[1, i + center_line_length])
             a = False
         else:
-            end_x = float(track[1, i - center_line_length])
-            end_y = float(track[0, i - center_line_length])
+            end_row = float(track[0, i - center_line_length])
+            end_col = float(track[1, i - center_line_length])
             a = True
-        if start_x == end_x and start_y == end_y:
+
+        if start_col == end_col and start_row == end_row:
             n_skipped += 1
             continue
 
-        ddx, ddy, _ = cracktools.tracking.tang_len(start_x, start_y, end_x, end_y)
+        ddx, ddy, _ = cracktools.tracking.tang_len(start_col, start_row, end_col, end_row)
         if a:
             ddx = -ddx
             ddy = -ddy
 
-        # Shrink window so it's always in bounds
-        half_win_x = int(min(window_half_size, start_x, img_h - start_x - 1))
-        half_win_y = int(min(window_half_size, start_y, img_w - start_y - 1))
-        half_win_x = max(1, half_win_x)
-        half_win_y = max(1, half_win_y)
+        # Correct window computation: rows (Y), cols (X)
+        half_win_r = int(min(window_half_size, start_row, img_h - start_row - 1))
+        half_win_c = int(min(window_half_size, start_col, img_w - start_col - 1))
+        half_win_r = max(1, half_win_r)
+        half_win_c = max(1, half_win_c)
 
-        x1 = int(round(start_x - half_win_x))
-        x2 = int(round(start_x + half_win_x))
-        y1 = int(round(start_y - half_win_y))
-        y2 = int(round(start_y + half_win_y))
+        r1 = int(round(start_row - half_win_r))
+        r2 = int(round(start_row + half_win_r))
+        c1 = int(round(start_col - half_win_c))
+        c2 = int(round(start_col + half_win_c))
 
-        # Check for valid window
-        if x1 < 0 or x2 > img_h or y1 < 0 or y2 > img_w:
-            print(f"Skipping i={i}: window out of bounds ({x1}:{x2},{y1}:{y2}) in image of shape {image_gray.shape}")
+        if r1 < 0 or r2 > img_h or c1 < 0 or c2 > img_w:
+            print(f"Skipping i={i}: window out of bounds ({r1}:{r2},{c1}:{c2}) in image of shape {image_gray.shape}")
             continue
 
-        window = image_gray[x1:x2, y1:y2]
+        window = image_gray[r1:r2, c1:c2]
         if window.shape[0] < 3 or window.shape[1] < 3:
             print(f"Skipping i={i}: window too small ({window.shape})")
             continue
 
-        #print(f"Processing i={i}: window shape {window.shape} at ({x1}:{x2},{y1}:{y2})")
+        try:
+            angle = np.arctan2(ddx, ddy) * 57.3
+            window_rotate = scipy.ndimage.rotate(window, angle, reshape=False)
+            sobel = scipy.ndimage.gaussian_filter(window_rotate / 255.0, 1, order=(1, 0), mode='reflect')
+            sobel_rotate = scipy.ndimage.rotate(sobel, -angle, reshape=False)
+        except Exception as e:
+            print(f"Skipping i={i}: sobel rotation failed — {e}")
+            continue
 
-        # Continue as before
-        angle = np.arctan2(ddx, ddy) * 57.3
-        window_rotate = scipy.ndimage.rotate(window, angle, reshape=False)
-        sobel = scipy.ndimage.gaussian_filter(window_rotate / 255.0, 1, order=(1, 0), mode='reflect')
-        sobel_rotate = scipy.ndimage.rotate(sobel, -angle, reshape=False)
-        m = max(1, int(min(half_win_x, half_win_y) / 5))
+        m = max(1, int(min(half_win_r, half_win_c) / 5))
         sobel_rotate[:m, :] = 0
         sobel_rotate[-m:, :] = 0
         sobel_rotate[:, :m] = 0
         sobel_rotate[:, -m:] = 0
 
-        mask_x1 = x1
-        mask_x2 = x1 + sobel_rotate.shape[0]
-        mask_y1 = y1
-        mask_y2 = y1 + sobel_rotate.shape[1]
-        # Defensive: Only insert into legal area
-        if (mask_x1 < 0 or mask_y1 < 0 or mask_x2 > img_h or mask_y2 > img_w):
-            print(f"Skip insertion i={i}: mask indices out of bounds ({mask_x1}:{mask_x2},{mask_y1}:{mask_y2})")
+        # Insert into the correct position in edge_mask
+        mask_r1 = r1
+        mask_r2 = r1 + sobel_rotate.shape[0]
+        mask_c1 = c1
+        mask_c2 = c1 + sobel_rotate.shape[1]
+
+        if mask_r1 < 0 or mask_r2 > img_h or mask_c1 < 0 or mask_c2 > img_w:
+            print(f"Skip insertion i={i}: mask indices out of bounds ({mask_r1}:{mask_r2},{mask_c1}:{mask_c2})")
             continue
 
-        edge_mask[mask_x1:mask_x2, mask_y1:mask_y2] += sobel_rotate
+        edge_mask[mask_r1:mask_r2, mask_c1:mask_c2] += sobel_rotate
 
     print(f"Skipped {n_skipped} zero-length segments.")
     edge_mask1 = edge_mask - np.min(edge_mask)

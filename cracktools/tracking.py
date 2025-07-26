@@ -326,16 +326,6 @@ def GGF(g11,g22,g33,GFtoLIFinv,LIFtoEuclideaninv):
 def GLIFtoEuclideanOld(theta):
     return np.array([[np.cos(theta),np.sin(theta),0],[-np.sin(theta),np.cos(theta),0],[0,0,1]])
 
-'''def IncludeCost(cost,metric):
-    cost = cost**2
-    cost = np.expand_dims(cost,axis=3)
-    cost = np.concatenate([cost,cost,cost],axis = 3)
-    cost = np.expand_dims(cost,axis=4)
-    cost = np.concatenate([cost,cost,cost],axis = 4)
-
-    metric = metric*cost
-    return metric'''
-
 def IncludeCost(cost, metric):
     cost_sq = cost**2  # (nt, nx, ny)
     cost_exp = cost_sq[:, :, :, None, None]  # shape: (nt, nx, ny, 1, 1)
@@ -523,35 +513,6 @@ def fast_marching(os_cost,start_point,end_point,g11=1,g22=100,g33=100):
     print(f"runReedsSheppGF = {time() - start_time}")
 
     return [geos1[0][:,1],geos1[0][:,0]]
-
-'''def fast_marching(os_cost, start_point, end_point, g11=1, g22=100, g33=100):
-    import numpy as np
-    from time import time
-
-    NoCost, NxCost, NyCost = os_cost.shape
-    s_theta = 2 * np.pi / NoCost
-
-    dims = np.array([NoCost, NxCost, NyCost])
-    sides = np.array([[0, NxCost], [0, NyCost], [0, 2 * np.pi - s_theta]])
-    
-    # Efficient metric computation (no full tiling)
-    metric_t = ReedsSheppMetricGFOld(None, dims, g11, g22, g33)  # shape (nt, 3, 3)
-
-    # Apply cost**2 to (nt, nx, ny), broadcast and multiply with (nt, 3, 3)
-    cost_squared = os_cost ** 2
-    metricLIFinclCostOld = cost_squared[..., None, None] * metric_t[:, None, None, :, :]  # (nt, nx, ny, 3, 3)
-
-    # Transpose to match expected (3, 3, Nt, Nx, Ny)
-    metricLIFinclCostOld1 = metricLIFinclCostOld.transpose(3, 4, 0, 1, 2)
-
-    # Prepare seeds and tips
-    seeds = np.array([*start_point[::-1], np.pi / 2])
-    tips = np.array([*end_point[::-1], np.pi / 2])
-
-    # Geodesic computation
-    geos1 = runReedsSheppGF(sides, [NxCost, NyCost, NoCost], [seeds], [tips], metricLIFinclCostOld1)
-
-    return [geos1[0][:, 1], geos1[0][:, 0]]'''
 
 def fast_marching_2d(cost,start_point,end_point,l = 1, p = 6):
     mu = 0
