@@ -213,7 +213,7 @@ def CheckWavelet(window_size = 70,size = 75, nOrientations = 32, design = "N",
     #         plt.show()
     return os_check[display_orientations,:,:].real
            
-'''def OrientationScoreTransform(im, size, nOrientations, design = "N", inflectionPoint = 0.8, mnOrder = 8, splineOrder = 3,
+def OrientationScoreTransform(im, size, nOrientations, design = "N", inflectionPoint = 0.8, mnOrder = 8, splineOrder = 3,
                               overlapFactor = 1, dcStdDev = 8, directional = False):
     
     """
@@ -243,80 +243,7 @@ def CheckWavelet(window_size = 70,size = 75, nOrientations = 32, design = "N",
     print(os.shape)
     os = os[:,size:-size,size:-size]
     print(im.shape, os.shape)
-    return os'''
-    
-def OrientationScoreTransform(im, size, nOrientations, design="N", inflectionPoint=0.8,
-                              mnOrder=8, splineOrder=3, overlapFactor=1,
-                              dcStdDev=8, directional=False, top_extra_rows=0,
-                              plot_orientations=(0,)):
-    """
-    Computes orientation score transform with optional top padding and debugging plots.
-    """
-
-    import numpy as np
-    import matplotlib.pyplot as plt
-    import cupy as cp
-    from time import time
-
-    print("=== OrientationScoreTransform DEBUG ===")
-    print(f"Original image shape: {im.shape}")
-    pad = size
-
-    # Step 0: Add blank rows at the top
-    if top_extra_rows > 0:
-        im = np.vstack([
-            np.zeros((top_extra_rows, im.shape[1]), dtype=im.dtype),
-            im
-        ])
-        print(f"Added {top_extra_rows} throwaway rows → New shape: {im.shape}")
-
-    # Step 1: Pad image symmetrically
-    im_padded = np.pad(im, ((pad, pad), (pad, pad)), mode='symmetric')
-    print(f"Padded image shape: {im_padded.shape}")
-
-    # Step 2: Build Cake wavelets
-    t0 = time()
-    cws = CakeWaveletStack(size, nOrientations, design, inflectionPoint,
-                           mnOrder, splineOrder, overlapFactor, dcStdDev, directional)
-    print(f"CakeWaveletStack shape: {cws.shape} — time: {time() - t0:.2f}s")
-
-    # Step 3: Pad wavelets to match image
-    pad_y = (im_padded.shape[0] - cws.shape[1]) // 2
-    pad_x = (im_padded.shape[1] - cws.shape[2]) // 2
-    pad_y_extra = im_padded.shape[0] - cws.shape[1] - pad_y
-    pad_x_extra = im_padded.shape[1] - cws.shape[2] - pad_x
-
-    cwsP = np.pad(cws, ((0, 0), (pad_y, pad_y_extra), (pad_x, pad_x_extra)), mode='constant')
-
-    # Step 4: Wavelet Transform
-    t1 = time()
-    os = WaveletTransform2D(cp.asarray(im_padded), cp.asarray(cwsP.real))
-    os = cp.asnumpy(os)
-    print(f"WaveletTransform2D done in {time() - t1:.2f}s → shape: {os.shape}")
-
-    # Step 5: Crop away padding
-    os_cropped = os[:, pad:-pad, pad:-pad]
-    print(f"Cropped to original (with throwaway): {os_cropped.shape}")
-
-    # Step 6: Remove the extra top rows
-    if top_extra_rows > 0:
-        os_cropped = os_cropped[:, top_extra_rows:, :]
-        print(f"Removed top {top_extra_rows} throwaway rows → Final shape: {os_cropped.shape}")
-
-    # Step 7: Optional visualization
-    '''if plot_orientations:
-        n = len(plot_orientations)
-        plt.figure(figsize=(4 * n, 4))
-        for idx, ori in enumerate(plot_orientations):
-            plt.subplot(1, n, idx + 1)
-            plt.imshow(os_cropped[ori].real, cmap='gray')
-            plt.title(f'Orientation {ori}')
-            plt.axis('off')
-        plt.tight_layout()
-        plt.show()'''
-
-    print("=======================================")
-    return os_cropped
+    return os
 
 def WaveletTransform2D(im, kernels):
     # im: shape (H, W)
@@ -658,7 +585,7 @@ def CostFunction(oc,lambdaa, p):
     cost = 1/(1 + lambdaa*(oc)**p)
     return cost
 
-'''def MultiScaleVesselness(U,ksi,zeta,sigmas_s,method,sigmas_ext = 0, sigmaa_ext = 0):
+def MultiScaleVesselness(U,ksi,zeta,sigmas_s,method,sigmas_ext = 0, sigmaa_ext = 0):
     """Ërosion gives not the same results!!!"""
     vesselnessfilter = []
     for sigma in sigmas_s:
@@ -678,68 +605,12 @@ def CostFunction(oc,lambdaa, p):
 
         vesselnessErosion = scipy.ndimage.morphology.grey_erosion(vesselness_pad,size=(3,0,0))
         vesselnessErosion =  vesselnessErosion[pad:-pad,pad:-pad,pad:-pad]
-        vesselnessErosion[:,:5,:] = 0
+        #pad the top row just in case
+        vesselnessErosion[:,:1,:] = 0
         vesselnessfilter.append(vesselnessErosion)
         print(f"vesselness remaining time: {time() - start_time}")
         
-    return (vesselnessfilter)'''
-
-def MultiScaleVesselness(U, ksi, zeta, sigmas_s, method, sigmas_ext=0, sigmaa_ext=0):
-    """Applies vesselness filtering at multiple scales and shows debug plots."""
-    import cupy as cp, gc
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import scipy.ndimage
-
-    vesselnessfilter = []
-    for idx, sigma in enumerate(sigmas_s):
-        print(f"\n=== Vesselness for sigma={sigma} ===")
-        start_time = time()
-        vesselness = CostFunctionVesselnessFiltering(U, ksi, zeta, sigma, method, sigmaa_ext=sigmaa_ext)
-        print(f"Filtering time: {time() - start_time:.2f}s")
-
-        # --- Check before erosion ---
-        minval = np.min(vesselness)
-        maxval = np.max(vesselness)
-        nz_count = np.count_nonzero(vesselness)
-        print(f"Before erosion: min={minval:.4f}, max={maxval:.4f}, nonzero count={nz_count}")
-
-        # --- Plot before erosion ---
-        plt.figure(figsize=(6, 3))
-        plt.imshow(np.max(vesselness, axis=0), cmap='hot')
-        plt.title(f"Before erosion — σ={sigma}, max={maxval:.4f}")
-        plt.colorbar()
-        plt.tight_layout()
-        plt.show()
-
-        # --- Erosion ---
-        gc.collect()
-        cp.get_default_memory_pool().free_all_blocks()
-        cp.get_default_pinned_memory_pool().free_all_blocks()
-
-        pad = 5
-        vesselness_pad = np.pad(vesselness, pad, mode='wrap')
-        vesselnessErosion = scipy.ndimage.grey_erosion(vesselness_pad, size=(3, 0, 0))
-        vesselnessErosion = vesselnessErosion[pad:-pad, pad:-pad, pad:-pad]
-        #vesselnessErosion[:, :5, :] = 0
-
-        # --- Check after erosion ---
-        minval2 = np.min(vesselnessErosion)
-        maxval2 = np.max(vesselnessErosion)
-        nz_count2 = np.count_nonzero(vesselnessErosion)
-        print(f"After erosion:  min={minval2:.4f}, max={maxval2:.4f}, nonzero count={nz_count2}")
-
-        # --- Plot after erosion ---
-        plt.figure(figsize=(6, 3))
-        plt.imshow(np.max(vesselnessErosion, axis=0), cmap='hot')
-        plt.title(f"After erosion — σ={sigma}, max={maxval2:.4f}")
-        plt.colorbar()
-        plt.tight_layout()
-        plt.show()
-
-        vesselnessfilter.append(vesselnessErosion)
-
-    return vesselnessfilter
+    return (vesselnessfilter)
 
 def MultiScaleVesselnessFilter(vesselnessfilters):
     sum1 = np.sum(vesselnessfilters, axis=0)  # shape (H, W)

@@ -1200,7 +1200,7 @@ class CrackToolsApplication(Ui_MainWindow):
 
         fig.show()
 
-    '''def update_cost(self):
+    def update_cost(self):
         try:
             self.update_cost_bar.setValue(0)
             lambdaa = self.lambda_box.value()
@@ -1235,66 +1235,8 @@ class CrackToolsApplication(Ui_MainWindow):
             self.midline_track_button.setStyleSheet("background-color : lightblue")
         except Exception as e:
             error(e)
-            self.midline_track_button.setStyleSheet("background-color : red")'''
-    
-    def update_cost(self):
-        try:
-            import matplotlib.pyplot as plt
-            self.update_cost_bar.setValue(0)
-
-            # Parameters
-            lambdaa = self.lambda_box.value()
-            p = self.power_box.value()
-            ksi = 1
-            zeta = 1
-            sigmas = self.sigmas_line_edit.text()
-            sigmas = [float(i) for i in sigmas.split(',')]
-            sigmas_ext = 1
-
-            # Step 1: Multi-scale vesselness
-            start_time = time.time()
-            self.multiscalecostLIFExtReg = ct.os.MultiScaleVesselness(
-                self.osGFCost.real, ksi, zeta, sigmas, "LIF", sigmas_ext=sigmas_ext
-            )
-            print(f"MultiScaleVesselness took {time.time() - start_time:.2f} seconds")
-
-            # Step 2: Merge vesselness scales
-            start_time = time.time()
-            costmultiscale = ct.os.MultiScaleVesselnessFilter(self.multiscalecostLIFExtReg)
-            print(f"MultiScaleVesselnessFilter took {time.time() - start_time:.2f} seconds")
-
-            # Debug: Visualize min across orientations
-            plt.figure(figsize=(10, 3))
-            cost_debug = np.min(costmultiscale, axis=0)
-            plt.imshow(cost_debug, cmap='hot')
-            plt.title("Merged CostMap (min over orientations)")
-            plt.colorbar()
-            plt.show()
-
-            # Step 3: Cost function
-            start_time = time.time()
-            self.costFunction = ct.os.CostFunction(costmultiscale, lambdaa=lambdaa, p=p)
-            print(f"CostFunction took {time.time() - start_time:.2f} seconds")
-
-            # Step 4: Rescale and display
-            c00 = np.min(ct.os.Rescale(self.costFunction), axis=0)
-            self.update_cost_bar.setValue(100)
-            c00 = c00 - np.min(c00)
-            c00 = (c00 * 255 / np.max(c00)).astype(np.uint8)
-
-            print("c00 shape:", c00.shape)
-            qimage = QImage(c00, c00.shape[1], c00.shape[0], c00.strides[0], QImage.Format_Grayscale8)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.cost_display.width(), self.cost_display.height(),
-                                        Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.cost_display.setPixmap(scaled_pixmap)
-            print("c00 shape:", c00.shape)
-
-            self.midline_track_button.setStyleSheet("background-color : lightblue")
-        except Exception as e:
-            error(e)
             self.midline_track_button.setStyleSheet("background-color : red")
-
+    
     def midline_tracking(self):
         try :
             self.tracking_bar.setValue(0)
@@ -1852,7 +1794,6 @@ class CrackToolsApplication(Ui_MainWindow):
                 start_time = time()
                 self.update_cost()
                 print(f"cost time: {time() - start_time:.2f} seconds")
-                return
 
                 # --- Now do midline/edge/save for EACH pair in this box ---
                 for idx, pair in enumerate(pairs):
