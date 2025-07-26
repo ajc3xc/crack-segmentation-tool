@@ -12,7 +12,7 @@ from agd import AutomaticDifferentiation as ad
 norm_infinity = ad.Optimization.norm_infinity
 import scipy.ndimage
 
-def edge_masks(image_gray, track, window_half_size=40):
+'''def edge_masks(image_gray, track, window_half_size=40):
 
     edge_mask = np.zeros_like(image_gray, dtype=float)
     center_line_length = 3
@@ -91,63 +91,90 @@ def edge_masks(image_gray, track, window_half_size=40):
     print(f"Skipped {n_skipped} zero-length segments.")
     edge_mask1 = edge_mask - np.min(edge_mask)
     edge_mask2 = -edge_mask1 - np.min(-edge_mask1)
-    return edge_mask1, edge_mask2
-
-'''def edge_masks(image_gray, track, window_half_size=40, grad_thresh=5):
+    return edge_mask1, edge_mask2'''
+    
+def edge_masks(image_gray, track, window_half_size=40):
     import numpy as np
+    import scipy.ndimage
+
     edge_mask = np.zeros_like(image_gray, dtype=float)
-    img_h, img_w = image_gray.shape
-    profile_size = 2 * window_half_size + 1
     center_line_length = 3
+    img_h, img_w = image_gray.shape
     n_skipped = 0
 
     for i in range(track.shape[1] - 1):
-        row = float(track[0, i])
-        col = float(track[1, i])
+        start_row = float(track[0, i])  # y
+        start_col = float(track[1, i])  # x
 
         if i < track.shape[1] - center_line_length:
-            row2 = float(track[0, i + center_line_length])
-            col2 = float(track[1, i + center_line_length])
+            end_row = float(track[0, i + center_line_length])
+            end_col = float(track[1, i + center_line_length])
+            a = False
         else:
-            row2 = float(track[0, i - center_line_length])
-            col2 = float(track[1, i - center_line_length])
+            end_row = float(track[0, i - center_line_length])
+            end_col = float(track[1, i - center_line_length])
+            a = True
 
-        dx = col2 - col
-        dy = row2 - row
-        norm = np.hypot(dx, dy)
-        if norm == 0:
+        if start_row == end_row and start_col == end_col:
             n_skipped += 1
             continue
 
-        # Compute normal vector
-        nx = -dy / norm
-        ny = dx / norm
+        ddx, ddy, _ = cracktools.tracking.tang_len(start_col, start_row, end_col, end_row)
+        if a:
+            ddx = -ddx
+            ddy = -ddy
 
-        # Sample points along normal
-        offsets = np.linspace(-window_half_size, window_half_size, profile_size)
-        cols = col + offsets * nx
-        rows = row + offsets * ny
+        angle_deg = np.arctan2(ddx, ddy) * 180.0 / np.pi
 
-        cols = np.clip(np.round(cols).astype(int), 0, img_w - 1)
-        rows = np.clip(np.round(rows).astype(int), 0, img_h - 1)
+        # Extract safe window
+        half_win_r = int(min(window_half_size, start_row, img_h - start_row - 1))
+        half_win_c = int(min(window_half_size, start_col, img_w - start_col - 1))
+        half_win_r = max(1, half_win_r)
+        half_win_c = max(1, half_win_c)
 
-        profile = image_gray[rows, cols].astype(float)
-        grad = np.gradient(profile)
+        r1 = int(round(start_row - half_win_r))
+        r2 = int(round(start_row + half_win_r))
+        c1 = int(round(start_col - half_win_c))
+        c2 = int(round(start_col + half_win_c))
 
-        if np.std(profile) < 4 or np.max(np.abs(grad)) < grad_thresh:
+        if r1 < 0 or r2 > img_h or c1 < 0 or c2 > img_w:
             continue
 
-        # Only mark high-confidence gradient points
-        for j in range(profile_size):
-            r = rows[j]
-            c = cols[j]
-            g = grad[j]
-            if abs(g) > grad_thresh:
-                edge_mask[r, c] += g
+        window = image_gray[r1:r2, c1:c2]
+        if window.shape[0] < 3 or window.shape[1] < 3:
+            continue
+
+        try:
+            # Convert to float and normalize
+            patch = window.astype(float) / 255.0
+
+            # Apply Gaussian smoothed Sobel
+            grad_y = scipy.ndimage.gaussian_filter(patch, sigma=1, order=(1, 0), mode='reflect')
+            grad_x = scipy.ndimage.gaussian_filter(patch, sigma=1, order=(0, 1), mode='reflect')
+
+            # Project gradient along normal direction
+            # normal = [-ddy, ddx]
+            projected = grad_x * (-ddy) + grad_y * ddx
+
+            # Center crop to avoid edge effects
+            m = max(1, int(min(half_win_r, half_win_c) / 5))
+            projected[:m, :] = 0
+            projected[-m:, :] = 0
+            projected[:, :m] = 0
+            projected[:, -m:] = 0
+
+            # Add to edge_mask
+            edge_mask[r1:r2, c1:c2] += projected
+
+        except Exception as e:
+            print(f"Failed at i={i}: {e}")
+            continue
+
+    print(f"Skipped {n_skipped} zero-length segments.")
 
     edge_mask1 = edge_mask - np.min(edge_mask)
     edge_mask2 = -edge_mask1 - np.min(-edge_mask1)
-    return edge_mask1, edge_mask2'''
+    return edge_mask1, edge_mask2
 
 def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp,mu = 5,l = 1, p = 12):
     

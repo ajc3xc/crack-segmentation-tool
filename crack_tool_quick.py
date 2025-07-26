@@ -1326,9 +1326,6 @@ class CrackToolsApplication(Ui_MainWindow):
                 c = 'w'
 
             im = self.image.astype(np.uint8)
-            '''plt.imshow(im)
-            plt.plot(self.track[0],self.track[1],color = c,linewidth=w)
-            plt.show()'''
         except Exception as e:
             error(e)
             
@@ -1356,32 +1353,7 @@ class CrackToolsApplication(Ui_MainWindow):
             # Apply shift to all points
             track = track + shift_vector[:, np.newaxis]  # broadcast to all columns
             
-            #print(track[:,0])
-            #print(self.pts)
-            #print(self.pts[1] - track[:,0])
             xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
-            #print("Track min row, col:", np.min(track[0]), np.min(track[1]))
-            #print("BBox ymin, xmin:", ymin, xmin)
-
-            #print("active_bbox (xmin, ymin, xmax, ymax):", xmin, ymin, xmax, ymax)
-            #print("original image shape:", img_gray.shape)
-            #print("First 5 track points (row, col):", track[:, :5].T)
-
-            # --- Plot: original image, bbox, and track ---
-            '''fig, ax = plt.subplots()
-            ax.imshow(img_gray, cmap='gray')
-            rect = patches.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin,
-                                    linewidth=2, edgecolor='lime', facecolor='none', label='crop bbox')
-            ax.add_patch(rect)
-            ax.plot(track[1], track[0], 'r-', label='track (col, row)')
-            plt.legend()
-            plt.title('Original image with bbox (green) and track (red)')
-            plt.show()'''
-
-            # --- Call edge_masks on original image + track ---
-            '''self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(
-                img_gray, track, window_half_size=window_half_size
-            )'''
             self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(
                 img_gray, track
             )
@@ -1398,12 +1370,6 @@ class CrackToolsApplication(Ui_MainWindow):
             shifted_track[1] = track[1] - xmin
 
             # --- Plot: cropped image, shifted track ---
-            '''plt.figure(figsize=(5, 7))
-            plt.imshow(crop_img, cmap='gray')
-            plt.plot(shifted_track[1], shifted_track[0], 'r-', label='shifted track (col, row)')
-            plt.legend()
-            plt.title('Crop + shifted track')
-            plt.show()'''
 
             # --- Plot: cropped edge mask for display ---
             edge_mask1_crop = self.edge_mask1_crop - np.min(self.edge_mask1_crop)
@@ -1411,11 +1377,6 @@ class CrackToolsApplication(Ui_MainWindow):
                 edge_mask1_crop = (edge_mask1_crop * 255 / np.max(edge_mask1_crop)).astype(dtype=np.uint8)
             else:
                 edge_mask1_crop = (edge_mask1_crop * 255).astype(dtype=np.uint8)
-
-            '''plt.figure()
-            plt.imshow(edge_mask1_crop, cmap='gray')
-            plt.title('edge_mask1_crop (for display)')
-            plt.show()'''
 
             # --- Set for Qt display as before ---
             qimage = QImage(edge_mask1_crop.astype(dtype=np.uint8), edge_mask1_crop.shape[1], edge_mask1_crop.shape[0],
@@ -1817,7 +1778,6 @@ class CrackToolsApplication(Ui_MainWindow):
                         self.edge_mask()
                         print("    edge tracking")
                         self.edge_tracking()
-                        return
                         print("    save segment")
                         self.save_current_segment()
                         num_success += 1
