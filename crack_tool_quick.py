@@ -1102,6 +1102,67 @@ class CrackToolsApplication(Ui_MainWindow):
             error(e)
             self.update_cost_button.setStyleSheet("background-color : red")
             self.show_os_button.setStyleSheet("background-color : red")
+    
+    def update_os(self):
+        try:
+            import numpy as np
+            from time import time
+
+            self.os_progress_bar.setValue(0)
+
+            # Get user-selected parameters
+            color_channel = [0 if self.color_chenel_box.currentText() == 'R'
+                            else 1 if self.color_chenel_box.currentText() == 'B'
+                            else 2][0]
+            black_crack = -1 if self.crack_color_box.currentText() == 'Bright crack' else 1
+            size = self.wavelet_size_box.value()
+            nOrientations = self.wavelet_norientations_box.value()
+            design = "N"
+            inflectionPoint = self.wavelet_inflection_point_box.value()
+            mnOrder = self.wavelet_mnorder_box.value()
+            splineOrder = 3
+            overlapFactor = self.wavelet_overlap_factor_box.value()
+            dcStdDev = self.wavelet_STD_box.value()
+            directional = False
+
+            # Prepare input image and apply black_crack contrast adjustment
+            img_in = self.image_crop_down[:, :, color_channel].astype(float) / 255.0
+            img_in *= black_crack
+
+            # Pad image to prevent boundary artifacts in OS (e.g. white strip at top)
+            pad_amt = size
+            img_padded = np.pad(img_in, pad_width=((pad_amt, pad_amt), (pad_amt, pad_amt)), mode='reflect')
+
+            # Apply Orientation Score Transform to padded image
+            start_time = time()
+            os_full = ct.os.OrientationScoreTransform(
+                img_padded,
+                size=size,
+                nOrientations=nOrientations,
+                design=design,
+                inflectionPoint=inflectionPoint,
+                mnOrder=mnOrder,
+                splineOrder=splineOrder,
+                overlapFactor=overlapFactor,
+                dcStdDev=dcStdDev,
+                directional=directional
+            )
+            print(f"OrientationScoreTransform time: {time() - start_time:.2f}s")
+
+            # Crop result back to original image size
+            self.osGFCost = os_full[pad_amt:-pad_amt, pad_amt:-pad_amt, :]
+
+            # GUI feedback
+            self.os_progress_bar.setValue(100)
+            self.update_cost_button.setStyleSheet("background-color : lightblue")
+            self.show_os_button.setStyleSheet("background-color : lightblue")
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            error(e)
+            self.update_cost_button.setStyleSheet("background-color : red")
+            self.show_os_button.setStyleSheet("background-color : red")
 
     def show_os(self):
         import plotly.graph_objects as go
@@ -1331,46 +1392,6 @@ class CrackToolsApplication(Ui_MainWindow):
             plt.show()'''
         except Exception as e:
             error(e)
-
-    """def edge_mask(self):
-        try:
-            window_half_size = int(self.edge_filter_size_box.value()/2)
-            black_crack = [-1 if self.crack_color_box.currentText() =='Bright crack' else 1 ][0]
-            color_channel = [0 if self.color_chenel_box.currentText()=='R' else 1 if self.color_chenel_box.currentText()=='B' else 2][0]
-
-            print(window_half_size)
-            # Use FULL IMAGE and FULL-IMAGE TRACK for edge mask computation!
-            self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(
-                self.original_image[:,:,color_channel]*black_crack,
-                np.array(self.track), window_half_size=window_half_size
-            )
-            
-            '''self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(
-                self.original_image[:,:,color_channel]*black_crack,
-                np.array(self.track), crack_half_width=window_half_size  # Just use window_half_size as before
-            )'''
-
-            # Crop the edge masks to the bounding box for further use
-            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
-            self.edge_mask1_crop = self.edge_mask1[ymin:ymax, xmin:xmax]
-            self.edge_mask2_crop = self.edge_mask2[ymin:ymax, xmin:xmax]
-
-            # For display, just use the cropped version
-            edge_mask1_crop = self.edge_mask1_crop - np.min(self.edge_mask1_crop)
-            if np.max(edge_mask1_crop) != 0:
-                edge_mask1_crop = (edge_mask1_crop * 255 / np.max(edge_mask1_crop)).astype(dtype=np.uint8)
-            else:
-                edge_mask1_crop = (edge_mask1_crop * 255).astype(dtype=np.uint8)
-
-            qimage = QImage(edge_mask1_crop.astype(dtype=np.uint8), edge_mask1_crop.shape[1], edge_mask1_crop.shape[0],
-                            edge_mask1_crop.strides[0], QImage.Format_Grayscale8)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.edge_map_display.width(), self.edge_map_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.edge_map_display.setPixmap(scaled_pixmap)
-            self.edge_tracks_button.setStyleSheet("background-color : lightblue")
-        except Exception as e:
-            error(e)
-            self.edge_tracks_button.setStyleSheet("background-color : red")"""
             
     def edge_mask(self):
         import matplotlib.pyplot as plt
@@ -1419,8 +1440,11 @@ class CrackToolsApplication(Ui_MainWindow):
             plt.show()'''
 
             # --- Call edge_masks on original image + track ---
-            self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(
+            '''self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(
                 img_gray, track, window_half_size=window_half_size
+            )'''
+            self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(
+                img_gray, track
             )
 
             # --- Crop the edge masks to the bounding box for further use ---
@@ -1435,12 +1459,12 @@ class CrackToolsApplication(Ui_MainWindow):
             shifted_track[1] = track[1] - xmin
 
             # --- Plot: cropped image, shifted track ---
-            plt.figure(figsize=(5, 7))
+            '''plt.figure(figsize=(5, 7))
             plt.imshow(crop_img, cmap='gray')
             plt.plot(shifted_track[1], shifted_track[0], 'r-', label='shifted track (col, row)')
             plt.legend()
             plt.title('Crop + shifted track')
-            plt.show()
+            plt.show()'''
 
             # --- Plot: cropped edge mask for display ---
             edge_mask1_crop = self.edge_mask1_crop - np.min(self.edge_mask1_crop)
@@ -1449,10 +1473,10 @@ class CrackToolsApplication(Ui_MainWindow):
             else:
                 edge_mask1_crop = (edge_mask1_crop * 255).astype(dtype=np.uint8)
 
-            plt.figure()
+            '''plt.figure()
             plt.imshow(edge_mask1_crop, cmap='gray')
             plt.title('edge_mask1_crop (for display)')
-            plt.show()
+            plt.show()'''
 
             # --- Set for Qt display as before ---
             qimage = QImage(edge_mask1_crop.astype(dtype=np.uint8), edge_mask1_crop.shape[1], edge_mask1_crop.shape[0],
@@ -1831,6 +1855,7 @@ class CrackToolsApplication(Ui_MainWindow):
                 start_time = time()
                 self.update_cost()
                 print(f"cost time: {time() - start_time:.2f} seconds")
+                return
 
                 # --- Now do midline/edge/save for EACH pair in this box ---
                 for idx, pair in enumerate(pairs):
@@ -1852,9 +1877,9 @@ class CrackToolsApplication(Ui_MainWindow):
                         print(f"    midline tracking time: {time() - start_time:.2f} seconds")
                         print("    edge mask")
                         self.edge_mask()
-                        return
                         print("    edge tracking")
                         self.edge_tracking()
+                        return
                         print("    save segment")
                         self.save_current_segment()
                         num_success += 1

@@ -10,75 +10,9 @@ from agd.Plotting import savefig, quiver; #savefig.dirName = 'Figures/Riemannian
 from agd import LinearParallel as lp
 from agd import AutomaticDifferentiation as ad
 norm_infinity = ad.Optimization.norm_infinity
-
-'''def edge_masks(image_gray,track,window_half_size= 40):
-
-    edge1 = []
-    edge2 = []
-    step = 2
-    n = 265
-    center_line_length = 3
-    edge_mask = np.zeros_like((image_gray),dtype = float)
-    for i in range(track.shape[1]-1):
-    # for i in range(n,n+1):
-        start_point_x = track[1,i]
-        start_point_y = track[0,i]
-        a= False
-        if i<track.shape[1]-center_line_length:
-            end_point_x = track[1,i+center_line_length]
-            end_point_y = track[0,i+center_line_length]
-        else:
-            a = True
-            end_point_x = track[1,i-center_line_length]
-            end_point_y = track[0,i-center_line_length]
-        if start_point_x==end_point_x and start_point_y==end_point_y:
-            continue
-
-        ddx,ddy,l = cracktools.tracking.tang_len(start_point_x,start_point_y,end_point_x,end_point_y)
-        if a == True:
-            ddx = -ddx
-            ddy = -ddy
-        window = np.zeros((window_half_size*2,window_half_size*2))
-        window = image_gray[int(start_point_x-window_half_size):int(start_point_x+window_half_size),
-                                  int(start_point_y-window_half_size):int(start_point_y+window_half_size)]
-
-        angle = np.arctan2(ddx,ddy)*57.3
-
-        window_rotate = scipy.ndimage.rotate(window,angle,reshape=False)
-
-        sobel2 = scipy.ndimage.sobel(window_rotate/255,axis=0)
-        sobel = scipy.ndimage.gaussian_filter(window_rotate/255, 1, order=(1,0), output=None, mode='reflect', cval=0.0, truncate=4.0)
-        sobel_rotate = scipy.ndimage.rotate(sobel,-angle,reshape=False)
-    #     plt.imshow(window)
-    #     plt.show()
-    #     plt.imshow(sobel2)
-    #     plt.show()
-#         m = int(window_half_size)/5
-        m = np.max([1,int(window_half_size/5)])
-        sobel_rotate[:m,:] = 0
-        sobel_rotate[-m:,:] = 0
-        sobel_rotate[:,:m] = 0
-        sobel_rotate[:,-m:] = 0
-        
-        edge_window = edge_mask[int(start_point_x-window_half_size):int(start_point_x+window_half_size),
-                                  int(start_point_y-window_half_size):int(start_point_y+window_half_size)]
-
-        edge_mask[int(start_point_x-window_half_size):
-                  int(start_point_x+window_half_size),
-                  int(start_point_y-window_half_size):
-                  int(start_point_y+window_half_size)] = edge_window + sobel_rotate
-        
-    edge_mask1 = edge_mask - np.min(edge_mask)
-    edge_mask2 = edge_mask1*-1-np.min(edge_mask1*-1)
-    
-    return edge_mask1,edge_mask2'''
-    
-import numpy as np
 import scipy.ndimage
 
 def edge_masks(image_gray, track, window_half_size=40):
-    import numpy as np
-    import scipy.ndimage
 
     edge_mask = np.zeros_like(image_gray, dtype=float)
     center_line_length = 3
@@ -159,13 +93,61 @@ def edge_masks(image_gray, track, window_half_size=40):
     edge_mask2 = -edge_mask1 - np.min(-edge_mask1)
     return edge_mask1, edge_mask2
 
-import scipy
-from agd import Eikonal
-from agd.Metrics import Riemann
-from agd.Plotting import savefig, quiver; #savefig.dirName = 'Figures/Riemannian'
-from agd import LinearParallel as lp
-from agd import AutomaticDifferentiation as ad
-norm_infinity = ad.Optimization.norm_infinity
+'''def edge_masks(image_gray, track, window_half_size=40, grad_thresh=5):
+    import numpy as np
+    edge_mask = np.zeros_like(image_gray, dtype=float)
+    img_h, img_w = image_gray.shape
+    profile_size = 2 * window_half_size + 1
+    center_line_length = 3
+    n_skipped = 0
+
+    for i in range(track.shape[1] - 1):
+        row = float(track[0, i])
+        col = float(track[1, i])
+
+        if i < track.shape[1] - center_line_length:
+            row2 = float(track[0, i + center_line_length])
+            col2 = float(track[1, i + center_line_length])
+        else:
+            row2 = float(track[0, i - center_line_length])
+            col2 = float(track[1, i - center_line_length])
+
+        dx = col2 - col
+        dy = row2 - row
+        norm = np.hypot(dx, dy)
+        if norm == 0:
+            n_skipped += 1
+            continue
+
+        # Compute normal vector
+        nx = -dy / norm
+        ny = dx / norm
+
+        # Sample points along normal
+        offsets = np.linspace(-window_half_size, window_half_size, profile_size)
+        cols = col + offsets * nx
+        rows = row + offsets * ny
+
+        cols = np.clip(np.round(cols).astype(int), 0, img_w - 1)
+        rows = np.clip(np.round(rows).astype(int), 0, img_h - 1)
+
+        profile = image_gray[rows, cols].astype(float)
+        grad = np.gradient(profile)
+
+        if np.std(profile) < 4 or np.max(np.abs(grad)) < grad_thresh:
+            continue
+
+        # Only mark high-confidence gradient points
+        for j in range(profile_size):
+            r = rows[j]
+            c = cols[j]
+            g = grad[j]
+            if abs(g) > grad_thresh:
+                edge_mask[r, c] += g
+
+    edge_mask1 = edge_mask - np.min(edge_mask)
+    edge_mask2 = -edge_mask1 - np.min(-edge_mask1)
+    return edge_mask1, edge_mask2'''
 
 def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp,mu = 5,l = 1, p = 12):
     
