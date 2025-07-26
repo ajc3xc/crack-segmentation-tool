@@ -11,7 +11,7 @@ from agd import LinearParallel as lp
 from agd import AutomaticDifferentiation as ad
 norm_infinity = ad.Optimization.norm_infinity
 
-def edge_masks(image_gray,track,window_half_size= 40):
+'''def edge_masks(image_gray,track,window_half_size= 40):
 
     edge1 = []
     edge2 = []
@@ -71,7 +71,89 @@ def edge_masks(image_gray,track,window_half_size= 40):
     edge_mask1 = edge_mask - np.min(edge_mask)
     edge_mask2 = edge_mask1*-1-np.min(edge_mask1*-1)
     
-    return edge_mask1,edge_mask2
+    return edge_mask1,edge_mask2'''
+    
+import numpy as np
+import scipy.ndimage
+
+def edge_masks(image_gray, track, window_half_size=40):
+    import numpy as np
+    import scipy.ndimage
+
+    edge_mask = np.zeros_like(image_gray, dtype=float)
+    center_line_length = 3
+    img_h, img_w = image_gray.shape
+    n_skipped = 0
+
+    for i in range(track.shape[1] - 1):
+        start_x = float(track[1, i])
+        start_y = float(track[0, i])
+        if i < track.shape[1] - center_line_length:
+            end_x = float(track[1, i + center_line_length])
+            end_y = float(track[0, i + center_line_length])
+            a = False
+        else:
+            end_x = float(track[1, i - center_line_length])
+            end_y = float(track[0, i - center_line_length])
+            a = True
+        if start_x == end_x and start_y == end_y:
+            n_skipped += 1
+            continue
+
+        ddx, ddy, _ = cracktools.tracking.tang_len(start_x, start_y, end_x, end_y)
+        if a:
+            ddx = -ddx
+            ddy = -ddy
+
+        # Shrink window so it's always in bounds
+        half_win_x = int(min(window_half_size, start_x, img_h - start_x - 1))
+        half_win_y = int(min(window_half_size, start_y, img_w - start_y - 1))
+        half_win_x = max(1, half_win_x)
+        half_win_y = max(1, half_win_y)
+
+        x1 = int(round(start_x - half_win_x))
+        x2 = int(round(start_x + half_win_x))
+        y1 = int(round(start_y - half_win_y))
+        y2 = int(round(start_y + half_win_y))
+
+        # Check for valid window
+        if x1 < 0 or x2 > img_h or y1 < 0 or y2 > img_w:
+            print(f"Skipping i={i}: window out of bounds ({x1}:{x2},{y1}:{y2}) in image of shape {image_gray.shape}")
+            continue
+
+        window = image_gray[x1:x2, y1:y2]
+        if window.shape[0] < 3 or window.shape[1] < 3:
+            print(f"Skipping i={i}: window too small ({window.shape})")
+            continue
+
+        #print(f"Processing i={i}: window shape {window.shape} at ({x1}:{x2},{y1}:{y2})")
+
+        # Continue as before
+        angle = np.arctan2(ddx, ddy) * 57.3
+        window_rotate = scipy.ndimage.rotate(window, angle, reshape=False)
+        sobel = scipy.ndimage.gaussian_filter(window_rotate / 255.0, 1, order=(1, 0), mode='reflect')
+        sobel_rotate = scipy.ndimage.rotate(sobel, -angle, reshape=False)
+        m = max(1, int(min(half_win_x, half_win_y) / 5))
+        sobel_rotate[:m, :] = 0
+        sobel_rotate[-m:, :] = 0
+        sobel_rotate[:, :m] = 0
+        sobel_rotate[:, -m:] = 0
+
+        mask_x1 = x1
+        mask_x2 = x1 + sobel_rotate.shape[0]
+        mask_y1 = y1
+        mask_y2 = y1 + sobel_rotate.shape[1]
+        # Defensive: Only insert into legal area
+        if (mask_x1 < 0 or mask_y1 < 0 or mask_x2 > img_h or mask_y2 > img_w):
+            print(f"Skip insertion i={i}: mask indices out of bounds ({mask_x1}:{mask_x2},{mask_y1}:{mask_y2})")
+            continue
+
+        edge_mask[mask_x1:mask_x2, mask_y1:mask_y2] += sobel_rotate
+
+    print(f"Skipped {n_skipped} zero-length segments.")
+    edge_mask1 = edge_mask - np.min(edge_mask)
+    edge_mask2 = -edge_mask1 - np.min(-edge_mask1)
+    return edge_mask1, edge_mask2
 
 import scipy
 from agd import Eikonal
@@ -89,8 +171,6 @@ def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp,mu 
     c = np.array([0,image_crop.shape[1]])
     sides = np.array([b,c])
     dims = np.array([image_crop.shape[0],image_crop.shape[1]])
-    
-
 
     DxZ,DyZ = np.gradient(image_crop) 
 
@@ -100,8 +180,7 @@ def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp,mu 
     a22 = scipy.ndimage.gaussian_filter(mu*DyZ**2, 1, order=(0,0))
     df = np.array([[1+a11,a12],[a21,1+a22]])
     metric1 = (1+edge_mask1_cropp.squeeze()*l)**p*df
-    metric2 = (1+edge_mask2_cropp.squeeze()*l)**p*df
-    
+    metric2 = (1+edge_mask2_cropp.squeeze()*l)**p*df 
     
     metric = Riemann(metric1)
     hfmIn = Eikonal.dictIn({

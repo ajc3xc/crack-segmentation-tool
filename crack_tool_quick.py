@@ -1259,7 +1259,6 @@ class CrackToolsApplication(Ui_MainWindow):
             downsample_factor = self.downsample_factor_box.value()
 
             track_crop_down = ct.tracking.fast_marching(self.costFunction,self.pts_crop_down[0],self.pts_crop_down[1],g11=g11,g22=g22,g33=g33)
-            #print(".")
             track_crop_down[0] = track_crop_down[0]-0.5
             track_crop_down[1] = track_crop_down[1]-0.5
             track_crop = track_crop_down.copy()
@@ -1267,7 +1266,7 @@ class CrackToolsApplication(Ui_MainWindow):
             track_crop[1] = track_crop_down[1]*downsample_factor
             self.track_crop = track_crop
             track = ct.tools.track_crop_to_full(track_crop,self.pts[0],self.pts[1],y_margin,x_margin)
-            #print("..")
+            #print(self.track_crop, track,downsample_factor)
             self.track = track
             pts = np.array(track_crop).transpose(1,0).reshape((-1,1,2)).astype(np.int32)
             im = self.image_crop.astype(np.uint8)
@@ -1333,17 +1332,23 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
 
-    def edge_mask(self):
+    """def edge_mask(self):
         try:
             window_half_size = int(self.edge_filter_size_box.value()/2)
             black_crack = [-1 if self.crack_color_box.currentText() =='Bright crack' else 1 ][0]
             color_channel = [0 if self.color_chenel_box.currentText()=='R' else 1 if self.color_chenel_box.currentText()=='B' else 2][0]
 
+            print(window_half_size)
             # Use FULL IMAGE and FULL-IMAGE TRACK for edge mask computation!
             self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(
                 self.original_image[:,:,color_channel]*black_crack,
                 np.array(self.track), window_half_size=window_half_size
             )
+            
+            '''self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(
+                self.original_image[:,:,color_channel]*black_crack,
+                np.array(self.track), crack_half_width=window_half_size  # Just use window_half_size as before
+            )'''
 
             # Crop the edge masks to the bounding box for further use
             xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
@@ -1364,6 +1369,101 @@ class CrackToolsApplication(Ui_MainWindow):
             self.edge_map_display.setPixmap(scaled_pixmap)
             self.edge_tracks_button.setStyleSheet("background-color : lightblue")
         except Exception as e:
+            error(e)
+            self.edge_tracks_button.setStyleSheet("background-color : red")"""
+            
+    def edge_mask(self):
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
+
+        try:
+            window_half_size = int(self.edge_filter_size_box.value() / 2)
+            black_crack = [-1 if self.crack_color_box.currentText() == 'Bright crack' else 1][0]
+            color_channel = [0 if self.color_chenel_box.currentText() == 'R'
+                            else 1 if self.color_chenel_box.currentText() == 'B'
+                            else 2][0]
+
+            print("window_half_size:", window_half_size)
+            img_gray = self.original_image[:, :, color_channel] * black_crack
+            track = np.array(self.track)
+            
+            track = np.vstack([track[1], track[0]])
+            
+            # Compute shift to align track[:, 0] to self.pts[1]
+            target_point = np.array([self.pts[1][1], self.pts[1][0]])
+            shift_vector = target_point - track[:, 0]  # shape: (2,)
+
+            # Apply shift to all points
+            track = track + shift_vector[:, np.newaxis]  # broadcast to all columns
+            
+            #print(track[:,0])
+            #print(self.pts)
+            #print(self.pts[1] - track[:,0])
+            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
+            #print("Track min row, col:", np.min(track[0]), np.min(track[1]))
+            #print("BBox ymin, xmin:", ymin, xmin)
+
+            #print("active_bbox (xmin, ymin, xmax, ymax):", xmin, ymin, xmax, ymax)
+            #print("original image shape:", img_gray.shape)
+            #print("First 5 track points (row, col):", track[:, :5].T)
+
+            # --- Plot: original image, bbox, and track ---
+            fig, ax = plt.subplots()
+            ax.imshow(img_gray, cmap='gray')
+            rect = patches.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin,
+                                    linewidth=2, edgecolor='lime', facecolor='none', label='crop bbox')
+            ax.add_patch(rect)
+            ax.plot(track[1], track[0], 'r-', label='track (col, row)')
+            plt.legend()
+            plt.title('Original image with bbox (green) and track (red)')
+            plt.show()
+
+            # --- Call edge_masks on original image + track ---
+            self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(
+                img_gray, track, window_half_size=window_half_size
+            )
+
+            # --- Crop the edge masks to the bounding box for further use ---
+            #print("Cropping edge masks with:", ymin, ymax, xmin, xmax)
+            self.edge_mask1_crop = self.edge_mask1[ymin:ymax, xmin:xmax]
+            self.edge_mask2_crop = self.edge_mask2[ymin:ymax, xmin:xmax]
+
+            # --- Also crop the image for reference and shift track for crop ---
+            crop_img = img_gray[ymin:ymax, xmin:xmax]
+            shifted_track = np.zeros_like(track)
+            shifted_track[0] = track[0] - ymin
+            shifted_track[1] = track[1] - xmin
+
+            # --- Plot: cropped image, shifted track ---
+            plt.figure(figsize=(5, 7))
+            plt.imshow(crop_img, cmap='gray')
+            plt.plot(shifted_track[1], shifted_track[0], 'r-', label='shifted track (col, row)')
+            plt.legend()
+            plt.title('Crop + shifted track')
+            plt.show()
+
+            # --- Plot: cropped edge mask for display ---
+            edge_mask1_crop = self.edge_mask1_crop - np.min(self.edge_mask1_crop)
+            if np.max(edge_mask1_crop) != 0:
+                edge_mask1_crop = (edge_mask1_crop * 255 / np.max(edge_mask1_crop)).astype(dtype=np.uint8)
+            else:
+                edge_mask1_crop = (edge_mask1_crop * 255).astype(dtype=np.uint8)
+
+            plt.figure()
+            plt.imshow(edge_mask1_crop, cmap='gray')
+            plt.title('edge_mask1_crop (for display)')
+            plt.show()
+
+            # --- Set for Qt display as before ---
+            qimage = QImage(edge_mask1_crop.astype(dtype=np.uint8), edge_mask1_crop.shape[1], edge_mask1_crop.shape[0],
+                            edge_mask1_crop.strides[0], QImage.Format_Grayscale8)
+            pixmap = QPixmap.fromImage(qimage)
+            scaled_pixmap = pixmap.scaled(self.edge_map_display.width(), self.edge_map_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+            self.edge_map_display.setPixmap(scaled_pixmap)
+            self.edge_tracks_button.setStyleSheet("background-color : lightblue")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
             error(e)
             self.edge_tracks_button.setStyleSheet("background-color : red")
 
@@ -1752,6 +1852,7 @@ class CrackToolsApplication(Ui_MainWindow):
                         print(f"    midline tracking time: {time() - start_time:.2f} seconds")
                         print("    edge mask")
                         self.edge_mask()
+                        return
                         print("    edge tracking")
                         self.edge_tracking()
                         print("    save segment")
