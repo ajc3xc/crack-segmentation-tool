@@ -1103,67 +1103,6 @@ class CrackToolsApplication(Ui_MainWindow):
             self.update_cost_button.setStyleSheet("background-color : red")
             self.show_os_button.setStyleSheet("background-color : red")
     
-    def update_os(self):
-        try:
-            import numpy as np
-            from time import time
-
-            self.os_progress_bar.setValue(0)
-
-            # Get user-selected parameters
-            color_channel = [0 if self.color_chenel_box.currentText() == 'R'
-                            else 1 if self.color_chenel_box.currentText() == 'B'
-                            else 2][0]
-            black_crack = -1 if self.crack_color_box.currentText() == 'Bright crack' else 1
-            size = self.wavelet_size_box.value()
-            nOrientations = self.wavelet_norientations_box.value()
-            design = "N"
-            inflectionPoint = self.wavelet_inflection_point_box.value()
-            mnOrder = self.wavelet_mnorder_box.value()
-            splineOrder = 3
-            overlapFactor = self.wavelet_overlap_factor_box.value()
-            dcStdDev = self.wavelet_STD_box.value()
-            directional = False
-
-            # Prepare input image and apply black_crack contrast adjustment
-            img_in = self.image_crop_down[:, :, color_channel].astype(float) / 255.0
-            img_in *= black_crack
-
-            # Pad image to prevent boundary artifacts in OS (e.g. white strip at top)
-            pad_amt = size
-            img_padded = np.pad(img_in, pad_width=((pad_amt, pad_amt), (pad_amt, pad_amt)), mode='reflect')
-
-            # Apply Orientation Score Transform to padded image
-            start_time = time()
-            os_full = ct.os.OrientationScoreTransform(
-                img_padded,
-                size=size,
-                nOrientations=nOrientations,
-                design=design,
-                inflectionPoint=inflectionPoint,
-                mnOrder=mnOrder,
-                splineOrder=splineOrder,
-                overlapFactor=overlapFactor,
-                dcStdDev=dcStdDev,
-                directional=directional
-            )
-            print(f"OrientationScoreTransform time: {time() - start_time:.2f}s")
-
-            # Crop result back to original image size
-            self.osGFCost = os_full[pad_amt:-pad_amt, pad_amt:-pad_amt, :]
-
-            # GUI feedback
-            self.os_progress_bar.setValue(100)
-            self.update_cost_button.setStyleSheet("background-color : lightblue")
-            self.show_os_button.setStyleSheet("background-color : lightblue")
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            error(e)
-            self.update_cost_button.setStyleSheet("background-color : red")
-            self.show_os_button.setStyleSheet("background-color : red")
-
     def show_os(self):
         import plotly.graph_objects as go
         import numpy as np
@@ -1261,7 +1200,7 @@ class CrackToolsApplication(Ui_MainWindow):
 
         fig.show()
 
-    def update_cost(self):
+    '''def update_cost(self):
         try:
             self.update_cost_bar.setValue(0)
             lambdaa = self.lambda_box.value()
@@ -1293,6 +1232,64 @@ class CrackToolsApplication(Ui_MainWindow):
             scaled_pixmap = pixmap.scaled(self.cost_display.width(), self.cost_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
             self.cost_display.setPixmap(scaled_pixmap)
             print("c00 shape:", c00.shape)
+            self.midline_track_button.setStyleSheet("background-color : lightblue")
+        except Exception as e:
+            error(e)
+            self.midline_track_button.setStyleSheet("background-color : red")'''
+    
+    def update_cost(self):
+        try:
+            import matplotlib.pyplot as plt
+            self.update_cost_bar.setValue(0)
+
+            # Parameters
+            lambdaa = self.lambda_box.value()
+            p = self.power_box.value()
+            ksi = 1
+            zeta = 1
+            sigmas = self.sigmas_line_edit.text()
+            sigmas = [float(i) for i in sigmas.split(',')]
+            sigmas_ext = 1
+
+            # Step 1: Multi-scale vesselness
+            start_time = time.time()
+            self.multiscalecostLIFExtReg = ct.os.MultiScaleVesselness(
+                self.osGFCost.real, ksi, zeta, sigmas, "LIF", sigmas_ext=sigmas_ext
+            )
+            print(f"MultiScaleVesselness took {time.time() - start_time:.2f} seconds")
+
+            # Step 2: Merge vesselness scales
+            start_time = time.time()
+            costmultiscale = ct.os.MultiScaleVesselnessFilter(self.multiscalecostLIFExtReg)
+            print(f"MultiScaleVesselnessFilter took {time.time() - start_time:.2f} seconds")
+
+            # Debug: Visualize min across orientations
+            plt.figure(figsize=(10, 3))
+            cost_debug = np.min(costmultiscale, axis=0)
+            plt.imshow(cost_debug, cmap='hot')
+            plt.title("Merged CostMap (min over orientations)")
+            plt.colorbar()
+            plt.show()
+
+            # Step 3: Cost function
+            start_time = time.time()
+            self.costFunction = ct.os.CostFunction(costmultiscale, lambdaa=lambdaa, p=p)
+            print(f"CostFunction took {time.time() - start_time:.2f} seconds")
+
+            # Step 4: Rescale and display
+            c00 = np.min(ct.os.Rescale(self.costFunction), axis=0)
+            self.update_cost_bar.setValue(100)
+            c00 = c00 - np.min(c00)
+            c00 = (c00 * 255 / np.max(c00)).astype(np.uint8)
+
+            print("c00 shape:", c00.shape)
+            qimage = QImage(c00, c00.shape[1], c00.shape[0], c00.strides[0], QImage.Format_Grayscale8)
+            pixmap = QPixmap.fromImage(qimage)
+            scaled_pixmap = pixmap.scaled(self.cost_display.width(), self.cost_display.height(),
+                                        Qt.KeepAspectRatio, Qt.FastTransformation)
+            self.cost_display.setPixmap(scaled_pixmap)
+            print("c00 shape:", c00.shape)
+
             self.midline_track_button.setStyleSheet("background-color : lightblue")
         except Exception as e:
             error(e)
