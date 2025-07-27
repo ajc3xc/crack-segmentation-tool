@@ -304,7 +304,7 @@ class CrackToolsApplication(Ui_MainWindow):
         self.draw_segment_button.setStyleSheet("background-color : red")
         self.show_os_button.setStyleSheet("background-color : red")
 
-    def select_folder(self):
+    '''def select_folder(self):
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog, QMessageBox
 
         dlg = QDialog(self.MainWindow)
@@ -387,6 +387,146 @@ class CrackToolsApplication(Ui_MainWindow):
         self.current_folder = img_folder
         self.save_folder = save_folder
         #self.folder_line_edit.setText(img_folder)  # Show in main window if you have one
+
+        # ---- Wipe all memory/state/arrays for previous folder ----
+        self.files_list.clear()
+        self.image_names = []
+        self.n = 0
+
+        for attr in [
+            'mask', 'crack_tracks', 'cracks_stored_endpoints',
+            'track_crop', 'track',
+            'image', 'original_image', 'image_crop', 'image_crop_down', 'image_down',
+            'osGFCost', 'multiscalecostLIFExtReg', 'costFunction',
+            'bb_pts_list', 'mid_pt', 'end_points', 'points_pairs_list', 'annotation'
+        ]:
+            if hasattr(self, attr):
+                try:
+                    delattr(self, attr)
+                except Exception:
+                    pass
+
+        import gc; gc.collect()
+
+        # ---- Now load new image list ----
+        self.image_names = ct.tools.get_files(folder=img_folder, formats=['jpeg','jpg','png'], basename=False)
+        for filename in self.image_names:
+            self.files_list.addItem(os.path.basename(filename))
+        if self.image_names:
+            self.n = 0
+            self.change_image()
+        else:
+            self.ImageScreen.clear()
+            self.filename_label_2.setText("No images found in folder.")'''
+        
+    def select_folder(self):
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog, QMessageBox
+
+        def load_last_folders():
+            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'folder_config.json')
+            if os.path.isfile(config_path):
+                try:
+                    with open(config_path, 'r') as f:
+                        d = json.load(f)
+                        return d.get("img_folder", ""), d.get("save_folder", "")
+                except Exception:
+                    return "", ""
+            return "", ""
+
+        def save_last_folders(img_folder, save_folder):
+            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'folder_config.json')
+            try:
+                with open(config_path, 'w') as f:
+                    json.dump({"img_folder": img_folder, "save_folder": save_folder}, f)
+            except Exception:
+                pass
+
+        # --- Load previous defaults ---
+        default_img_folder, default_save_folder = load_last_folders()
+        # If in memory already, prefer that
+        img_folder_init = getattr(self, "current_folder", default_img_folder)
+        save_folder_init = getattr(self, "save_folder", default_save_folder)
+
+        dlg = QDialog(self.MainWindow)
+        dlg.setWindowTitle("Select Image & Save Folders")
+        layout = QVBoxLayout(dlg)
+
+        # Image folder row
+        img_row = QHBoxLayout()
+        img_label = QLabel("Image folder:")
+        image_folder_edit = QLineEdit()
+        image_folder_edit.setText(img_folder_init)
+        img_browse_btn = QPushButton("Browse...")
+        img_row.addWidget(img_label)
+        img_row.addWidget(image_folder_edit)
+        img_row.addWidget(img_browse_btn)
+        layout.addLayout(img_row)
+
+        # Save folder row
+        save_row = QHBoxLayout()
+        save_label = QLabel("Save folder:")
+        save_folder_edit = QLineEdit()
+        save_folder_edit.setText(save_folder_init)
+        save_browse_btn = QPushButton("Browse...")
+        save_row.addWidget(save_label)
+        save_row.addWidget(save_folder_edit)
+        save_row.addWidget(save_browse_btn)
+        layout.addLayout(save_row)
+
+        # Button row
+        btn_row = QHBoxLayout()
+        ok_btn = QPushButton("Select")
+        cancel_btn = QPushButton("Cancel")
+        btn_row.addWidget(ok_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+        # Browse logic
+        def img_browse():
+            folder = QFileDialog.getExistingDirectory(dlg, "Select Image Folder")
+            if folder:
+                image_folder_edit.setText(folder)
+        def save_browse():
+            folder = QFileDialog.getExistingDirectory(dlg, "Select Save Folder")
+            if folder:
+                save_folder_edit.setText(folder)
+        img_browse_btn.clicked.connect(img_browse)
+        save_browse_btn.clicked.connect(save_browse)
+
+        ok_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+        
+        def strip_quotes(path):
+            # Remove ONLY a single " from start/end if present
+            if path.startswith('"') and path.endswith('"'):
+                return path[1:-1]
+            elif path.startswith('"'):
+                return path[1:]
+            elif path.endswith('"'):
+                return path[:-1]
+            else:
+                return path
+
+        # --- Show dialog & check folders ---
+        while True:
+            if dlg.exec_() == QDialog.Accepted:
+                img_folder = strip_quotes(image_folder_edit.text().strip())
+                save_folder = strip_quotes(save_folder_edit.text().strip())
+                if not os.path.isdir(img_folder):
+                    QMessageBox.critical(dlg, "Error", "Please select a valid image folder.")
+                    continue
+                if not os.path.isdir(save_folder):
+                    QMessageBox.critical(dlg, "Error", "Please select a valid save folder.")
+                    continue
+                break
+            else:
+                print("Folder selection cancelled.")
+                return  # Don't continue if user cancels
+
+        # Save for use elsewhere and persist for next run!
+        self.current_folder = img_folder
+        self.save_folder = save_folder
+        save_last_folders(img_folder, save_folder)   # <-- Write to config file
 
         # ---- Wipe all memory/state/arrays for previous folder ----
         self.files_list.clear()
