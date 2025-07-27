@@ -35,7 +35,7 @@ from PyQt5.QtGui import QPainter, QPen, QColor, QCursor
 from PyQt5.QtCore import Qt, QPoint, QPointF
 
 class CrackAnnotator(QtWidgets.QWidget):
-    def __init__(self, image=None, boxes=None):
+    def __init__(self, image=None, boxes=None, initial_points=None, initial_connections=None):
         super().__init__()
         # Store & prepare image
         self.orig_image = image
@@ -49,8 +49,9 @@ class CrackAnnotator(QtWidgets.QWidget):
             self.img_w, self.img_h = 100, 100  # default size
 
         # Annotation state
-        self.points = []  # List[(x, y)]
-        self.connections = []  # List[(i_from, i_to)]
+        self.points = list(initial_points) if initial_points else []
+        self.connections = list(initial_connections) if initial_connections else []
+        print(self.points, self.connections)
         h, w, _ = image.shape
         # --- Adaptive point radius ---
         min_dim = min(w, h)
@@ -249,11 +250,12 @@ class CrackToolsApplication(Ui_MainWindow):
         self.clear_segmentation_button.clicked.connect(self.clear_segmentation)
         self.files_list.itemSelectionChanged.connect(self.name_selected)
 
-        self.select_points_button.clicked.connect(self.select_end_points)
+        self.select_points_button.clicked.connect(self.select_save_end_points)
         self.update_image_crop_button.clicked.connect(self.update_image_crop)
         self.wavelet_button.clicked.connect(self.check_wavelet)
         self.middle_point_button.clicked.connect(self.select_middle_point)
         self.middpoint_update_button.clicked.connect(self.update_midpoint_image)
+        self.DeleteAnnotationsButton.clicked.connect(self.clear_user_annotations)
 
         # Replace the following individual step connections
         # self.update_os_button.clicked.connect(self.update_os)
@@ -418,6 +420,15 @@ class CrackToolsApplication(Ui_MainWindow):
         else:
             self.ImageScreen.clear()
             self.filename_label_2.setText("No images found in folder.")'''
+    
+    def clear_user_annotations(self):
+        """Clears all user-drawn endpoints and connections, then refreshes the image."""
+        del self.user_points, self.user_connections
+        self.annotation["annotations"]["user_points"] = None
+        self.annotation["annotations"]["user_connections"] = None
+        self.save_box()
+        self.save_annotation()
+        self.change_image()
         
     def select_folder(self):
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog, QMessageBox
@@ -599,7 +610,7 @@ class CrackToolsApplication(Ui_MainWindow):
 
         # This gets the base filename with no extension, e.g. "IMG_003"
         base_name = os.path.splitext(os.path.basename(self.name))[0]
-        print(base_name)
+        #print(base_name)
         # Path for json file in save folder
         self.ann_name = os.path.join(self.save_folder, base_name + '.json')
         # Paths for mask outputs
@@ -611,6 +622,17 @@ class CrackToolsApplication(Ui_MainWindow):
             # ---- ADD THIS BLOCK ----
             # Always reconstruct self.mask from crack_pixels when loading!
             self.mask = []
+            ann = self.annotation.get('annotations', {})
+            self.user_points = ann.get('user_points', None)
+            self.user_connections = ann.get('user_connections', None)
+
+            if self.user_points and self.user_connections:
+                for pt1, pt2 in self.user_connections:
+                    cv2.line(self.image,
+                            (int(round(pt1[0])), int(round(pt1[1]))),
+                            (int(round(pt2[0])), int(round(pt2[1]))),
+                            (255, 0, 255), 2)
+
             if 'annotations' in self.annotation and 'all_masks' in self.annotation['annotations']:
                 all_masks = self.annotation['annotations']['all_masks']
                 for m_arr in all_masks:
@@ -843,7 +865,6 @@ class CrackToolsApplication(Ui_MainWindow):
         next_idx = max(existing_keys) + 1 if existing_keys else 1
 
         # Save each pending box with a unique key
-        print(self.bb_pts_list)
         for bb_pts in self.bb_pts_list:
             box_dict[str(next_idx)] = {
                 'bounding_box': bb_pts.tolist(),
@@ -1044,7 +1065,31 @@ class CrackToolsApplication(Ui_MainWindow):
         mode_btn.setCheckable(True)
         layout.addWidget(mode_btn)
 
-        annot = CrackAnnotator(image=self.original_image, boxes=boxes)
+        connections_for_annot = None
+        if hasattr(self, "user_points") and hasattr(self, "user_connections") and self.user_points and self.user_connections:
+            points = self.user_points
+            connections_for_annot = []
+            for conn in self.user_connections:
+                # If already index pairs (tuple of ints), leave unchanged
+                if isinstance(conn[0], int) and isinstance(conn[1], int):
+                    connections_for_annot.append(tuple(conn))
+                # If coordinate pairs, convert to indices
+                elif (isinstance(conn[0], (list, tuple)) and isinstance(conn[1], (list, tuple))):
+                    def find_index(points, pt):
+                        for i, p in enumerate(points):
+                            if np.allclose(p, pt):
+                                return i
+                        raise ValueError(f"Point {pt} not found in points list.")
+                    i1 = find_index(points, conn[0])
+                    i2 = find_index(points, conn[1])
+                    connections_for_annot.append((i1, i2))
+
+        annot = CrackAnnotator(
+            image=self.original_image,
+            boxes=boxes,
+            initial_points=getattr(self, "user_points", None),
+            initial_connections=connections_for_annot
+        )
         annot.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
 
         scroll = QScrollArea()
@@ -1117,10 +1162,19 @@ class CrackToolsApplication(Ui_MainWindow):
         conns = annot.connections
         print(f"Selected points: {pts}")
         self.endpoint_pairs = [(pts[a], pts[b]) for a, b in conns]
+        self.user_points = pts
+        self.user_connections = conns
         print(f"Selected endpoint pairs: {self.endpoint_pairs}")
 
         color = "lightblue" if self.endpoint_pairs else "red"
         self.update_image_crop_button.setStyleSheet(f"background-color: {color}")
+        
+    def select_save_end_points(self):
+        self.select_end_points()
+        print(self.user_points, self.user_connections)
+        self.save_annotation()
+        self.change_image()
+
             
     def update_image_crop(self):
         try:
@@ -1804,43 +1858,15 @@ class CrackToolsApplication(Ui_MainWindow):
             self.save_annotation()
         except Exception as e:
             error(e)
-
-    '''def save_annotation(self):
-        try:
-            self.annotation["annotations"]["cracks end-points"] = self.cracks_stored_endpoints
-            m = np.sum(np.array(self.mask),axis = 0)
-            m[m>=1] = 1.0
-            crack_pixels = np.argwhere(m==1.0)
-            self.annotation["annotations"]["crack_pixels"] = crack_pixels.tolist()
-            self.annotation["annotations"]['tracks'] = self.crack_tracks
-
-            # --- CRITICAL: Save all masks as well! ---
-            self.annotation["annotations"]["all_masks"] = [m.tolist() for m in self.mask]
-
-            json_file = json.dumps(self.annotation)
-            with open(os.path.splitext(os.path.splitext(self.name)[0])[0] + '.json', 'w') as f:        
-                f.write(json_file)
-            self.change_image()
-
-            self.update_image_crop_button.setStyleSheet("background-color : red")
-            self.middle_point_button.setStyleSheet("background-color : red")
-            self.middpoint_update_button.setStyleSheet("background-color : red")
-            self.update_os_button.setStyleSheet("background-color : red")
-            self.update_cost_button.setStyleSheet("background-color : red")
-            self.midline_track_button.setStyleSheet("background-color : red")
-            self.update_track_display_button.setStyleSheet("background-color : red")
-            self.track_full_screen_button.setStyleSheet("background-color : red")
-            self.edge_mask_button.setStyleSheet("background-color : red")
-            self.edge_tracks_button.setStyleSheet("background-color : red")
-            self.edge_tracks_full_screen_button.setStyleSheet("background-color : red")
-            self.save_current_segment_button.setStyleSheet("background-color : red")
-        except Exception as e:
-            error(e)'''
-            
+          
     def save_annotation(self):
         import os
         #import cv2
         try:
+            if getattr(self, "user_points", None) and getattr(self, "user_connections", None) and self.user_points and self.user_connections:
+                print(".")
+                self.annotation["annotations"]["user_points"] = self.user_points  # list of (x, y)
+                self.annotation["annotations"]["user_connections"] = self.endpoint_pairs  # list of (i1, i2)
             self.annotation["annotations"]["cracks end-points"] = self.cracks_stored_endpoints
             m = np.sum(np.array(self.mask), axis=0)
             m[m >= 1] = 1.0
@@ -1935,6 +1961,8 @@ class CrackToolsApplication(Ui_MainWindow):
             return
 
         self.endpoint_pairs = None
+        self.user_connections = None
+        self.user_points = None
         self.select_end_points()
         if not hasattr(self, "endpoint_pairs") or not self.endpoint_pairs or len(self.endpoint_pairs) == 0:
             msg = QMessageBox()
