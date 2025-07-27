@@ -304,52 +304,6 @@ class CrackToolsApplication(Ui_MainWindow):
         self.draw_segment_button.setStyleSheet("background-color : red")
         self.show_os_button.setStyleSheet("background-color : red")
 
-
-        # self.draw_segment_button.setStyleSheet("background-color : red")
-####################### Select Image Tab ########################################
-    '''def select_folder(self):
-        try:
-            dir = self.folder_line_edit.text().replace(" \ ", "/" )
-            # Only act if the folder is actually new
-            if hasattr(self, 'current_folder') and dir == self.current_folder:
-                return  # Do nothing if it's the same folder
-
-            self.current_folder = dir  # Save for next check
-
-            # ---- Wipe all memory/state/arrays for previous folder ----
-            self.files_list.clear()
-            self.image_names = []
-            self.n = 0
-
-            # Only clear variables if switching folder
-            for attr in [
-                'mask', 'crack_tracks', 'cracks_stored_endpoints',
-                'track_crop', 'track',
-                'image', 'original_image', 'image_crop', 'image_crop_down', 'image_down',
-                'osGFCost', 'multiscalecostLIFExtReg', 'costFunction',
-                'bb_pts_list', 'mid_pt', 'end_points', 'points_pairs_list', 'annotation'
-            ]:
-                if hasattr(self, attr):
-                    try:
-                        delattr(self, attr)
-                    except Exception:
-                        pass
-
-            import gc; gc.collect()
-
-            # ---- Now load new image list ----
-            self.image_names = ct.tools.get_files(folder=dir, formats=['jpeg','jpg','png'], basename=False)
-            for filename in self.image_names:
-                self.files_list.addItem(os.path.basename(filename))
-            if self.image_names:
-                self.n = 0
-                self.change_image()
-            else:
-                self.ImageScreen.clear()
-                self.filename_label_2.setText("No images found in folder.")
-        except Exception as e:
-            error(e)'''
-
     def select_folder(self):
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog, QMessageBox
 
@@ -480,97 +434,104 @@ class CrackToolsApplication(Ui_MainWindow):
         self.files_list.setCurrentItem(items[0])
 
     def change_image(self):
-            self.bb_pts_list = []  # Reset on image load!
-            w = self.segment_width_box_2.value()
-            if self.track_color_box.currentText() == "R":
-                color = (1,0,0)
-            elif self.track_color_box.currentText() == "G":
-                color = (0,1,0)
-            elif self.track_color_box.currentText() == "B":
-                color = (0,0,1)
-            elif self.track_color_box.currentText() == "W":
-                color = (1,1,1)
-            self.update_selected_item(os.path.basename(self.image_names[self.n]))
-            self.name = self.image_names[self.n]
-            self.image = cv2.imread(self.name)[:,:,::-1].astype(np.uint8)
-            self.original_image = self.image.copy()
-            self.filename_label_2.setText(os.path.basename(self.name))
+        self.bb_pts_list = []  # Reset on image load!
+        w = self.segment_width_box_2.value()
+        if self.track_color_box.currentText() == "R":
+            color = (1,0,0)
+        elif self.track_color_box.currentText() == "G":
+            color = (0,1,0)
+        elif self.track_color_box.currentText() == "B":
+            color = (0,0,1)
+        elif self.track_color_box.currentText() == "W":
+            color = (1,1,1)
+        self.update_selected_item(os.path.basename(self.image_names[self.n]))
+        self.name = self.image_names[self.n]
+        self.image = cv2.imread(self.name)[:,:,::-1].astype(np.uint8)
+        self.original_image = self.image.copy()
+        self.filename_label_2.setText(os.path.basename(self.name))
 
-            im = self.original_image.astype(np.uint8)
-            qimage = QImage(im, im.shape[1], im.shape[0], 
-                            im.strides[0], QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.ImageScreen.setPixmap(scaled_pixmap)
+        im = self.original_image.astype(np.uint8)
+        qimage = QImage(im, im.shape[1], im.shape[0], 
+                        im.strides[0], QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimage)
+        scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+        self.ImageScreen.setPixmap(scaled_pixmap)
 
-            self.ann_name = os.path.splitext(os.path.splitext(self.name)[0])[0] + '.json'
-            if os.path.exists(self.ann_name):
-                with open(self.ann_name) as f:
-                    self.annotation = json.load(f)
-                # ---- ADD THIS BLOCK ----
-                # Always reconstruct self.mask from crack_pixels when loading!
-                self.mask = []
-                if 'annotations' in self.annotation and 'all_masks' in self.annotation['annotations']:
-                    all_masks = self.annotation['annotations']['all_masks']
-                    for m_arr in all_masks:
-                        self.mask.append(np.array(m_arr, dtype=np.uint8))
-                elif 'annotations' in self.annotation and 'crack_pixels' in self.annotation['annotations']:
+        # This gets the base filename with no extension, e.g. "IMG_003"
+        base_name = os.path.splitext(os.path.basename(self.name))[0]
+        print(base_name)
+        # Path for json file in save folder
+        self.ann_name = os.path.join(self.save_folder, base_name + '.json')
+        # Paths for mask outputs
+        self.mask_name_bin = os.path.join(self.save_folder, base_name + '_mask.png')
+        self.mask_name_255 = os.path.join(self.save_folder, base_name + '_mask255.png')
+        if os.path.exists(self.ann_name):
+            with open(self.ann_name) as f:
+                self.annotation = json.load(f)
+            # ---- ADD THIS BLOCK ----
+            # Always reconstruct self.mask from crack_pixels when loading!
+            self.mask = []
+            if 'annotations' in self.annotation and 'all_masks' in self.annotation['annotations']:
+                all_masks = self.annotation['annotations']['all_masks']
+                for m_arr in all_masks:
+                    self.mask.append(np.array(m_arr, dtype=np.uint8))
+            elif 'annotations' in self.annotation and 'crack_pixels' in self.annotation['annotations']:
+                crack_pixels = self.annotation['annotations']['crack_pixels']
+                if crack_pixels:
+                    m = np.zeros((self.image.shape[0], self.image.shape[1]), dtype=np.uint8)
+                    c = np.array(crack_pixels)
+                    if c.size > 0:
+                        m[list(c[:, 0]), list(c[:, 1])] = 1
+                        self.mask.append(m)
+            # ------------------------
+            if 'annotations' in self.annotation.keys():
+                # ... (keep the rest of your block unchanged)
+                if 'crack_pixels' in self.annotation['annotations'].keys():
                     crack_pixels = self.annotation['annotations']['crack_pixels']
-                    if crack_pixels:
-                        m = np.zeros((self.image.shape[0], self.image.shape[1]), dtype=np.uint8)
+                    if crack_pixels != []:
+                        mask = np.zeros((self.image.shape[0],self.image.shape[1]))
                         c = np.array(crack_pixels)
-                        if c.size > 0:
-                            m[list(c[:, 0]), list(c[:, 1])] = 1
-                            self.mask.append(m)
-                # ------------------------
-                if 'annotations' in self.annotation.keys():
-                    # ... (keep the rest of your block unchanged)
-                    if 'crack_pixels' in self.annotation['annotations'].keys():
-                        crack_pixels = self.annotation['annotations']['crack_pixels']
-                        if crack_pixels != []:
-                            mask = np.zeros((self.image.shape[0],self.image.shape[1]))
-                            c = np.array(crack_pixels)
-                            mask[list(c[:,0]),list(c[:,1])] = 1
-                            # p = np.argwhere(mask==1)
-                            self.image = (mark_boundaries(self.image/255, mask,
-                                                                color=color, mode='inner', background_label=1)*255).astype(np.uint8)
-                            
-                            im = self.image.copy()
-                            im = im.astype(np.uint8)
-                            qimage = QImage(im, im.shape[1], im.shape[0], 
-                                im.strides[0], QImage.Format_RGB888)
-                            pixmap = QPixmap.fromImage(qimage)
-                            scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-                            self.ImageScreen.setPixmap(scaled_pixmap)
-                    if 'box' in self.annotation['annotations'].keys():
-                        for key in self.annotation['annotations']['box'].keys():
-                            if self.annotation['annotations']['box'][key]['class'] == 0:
-                                color = (0,0,255)
-                            elif self.annotation['annotations']['box'][key]['class'] == 1:
-                                color = (0,255,0)
-                            else:
-                                color = (255,0,0)
-                            bb_pts = np.array(self.annotation['annotations']['box'][key]['bounding_box'])
-                            cv2.line(self.image,(bb_pts[0,0],bb_pts[0,1]),(bb_pts[1,0],bb_pts[0,1]),color,5)
-                            cv2.line(self.image,(bb_pts[0,0],bb_pts[0,1]),(bb_pts[0,0],bb_pts[1,1]),color,5)
-                            cv2.line(self.image,(bb_pts[1,0],bb_pts[1,1]),(bb_pts[0,0],bb_pts[1,1]),color,5)
-                            cv2.line(self.image,(bb_pts[1,0],bb_pts[1,1]),(bb_pts[1,0],bb_pts[0,1]),color,5)
-                            im = self.image.astype(np.uint8)
-                            qimage = QImage(im, im.shape[1], im.shape[0], 
-                                im.strides[0], QImage.Format_RGB888)
-                            pixmap = QPixmap.fromImage(qimage)
-                            scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-                            self.ImageScreen.setPixmap(scaled_pixmap)
-                    else:
-                        self.annotation['annotations']['box'] = {}
-            else:
-                self.annotation = {}
-                self.annotation['image_name'] = self.name
-                self.annotation['annotations'] = {}
-                self.annotation["annotations"]["cracks end-points"] = []
-                self.annotation["annotations"]["crack_pixels"] = []
-                self.annotation["annotations"]['tracks'] = []
-                self.annotation["annotations"]['box'] = {} 
+                        mask[list(c[:,0]),list(c[:,1])] = 1
+                        # p = np.argwhere(mask==1)
+                        self.image = (mark_boundaries(self.image/255, mask,
+                                                            color=color, mode='inner', background_label=1)*255).astype(np.uint8)
+                        
+                        im = self.image.copy()
+                        im = im.astype(np.uint8)
+                        qimage = QImage(im, im.shape[1], im.shape[0], 
+                            im.strides[0], QImage.Format_RGB888)
+                        pixmap = QPixmap.fromImage(qimage)
+                        scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+                        self.ImageScreen.setPixmap(scaled_pixmap)
+                if 'box' in self.annotation['annotations'].keys():
+                    for key in self.annotation['annotations']['box'].keys():
+                        if self.annotation['annotations']['box'][key]['class'] == 0:
+                            color = (0,0,255)
+                        elif self.annotation['annotations']['box'][key]['class'] == 1:
+                            color = (0,255,0)
+                        else:
+                            color = (255,0,0)
+                        bb_pts = np.array(self.annotation['annotations']['box'][key]['bounding_box'])
+                        cv2.line(self.image,(bb_pts[0,0],bb_pts[0,1]),(bb_pts[1,0],bb_pts[0,1]),color,5)
+                        cv2.line(self.image,(bb_pts[0,0],bb_pts[0,1]),(bb_pts[0,0],bb_pts[1,1]),color,5)
+                        cv2.line(self.image,(bb_pts[1,0],bb_pts[1,1]),(bb_pts[0,0],bb_pts[1,1]),color,5)
+                        cv2.line(self.image,(bb_pts[1,0],bb_pts[1,1]),(bb_pts[1,0],bb_pts[0,1]),color,5)
+                        im = self.image.astype(np.uint8)
+                        qimage = QImage(im, im.shape[1], im.shape[0], 
+                            im.strides[0], QImage.Format_RGB888)
+                        pixmap = QPixmap.fromImage(qimage)
+                        scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+                        self.ImageScreen.setPixmap(scaled_pixmap)
+                else:
+                    self.annotation['annotations']['box'] = {}
+        else:
+            self.annotation = {}
+            self.annotation['image_name'] = self.name
+            self.annotation['annotations'] = {}
+            self.annotation["annotations"]["cracks end-points"] = []
+            self.annotation["annotations"]["crack_pixels"] = []
+            self.annotation["annotations"]['tracks'] = []
+            self.annotation["annotations"]['box'] = {} 
 
 
     def next_image(self):
@@ -1615,9 +1576,6 @@ class CrackToolsApplication(Ui_MainWindow):
             edge_x_crop = np.concatenate((self.track_e1[1][::-1], self.track_e2[1]))
             edge_y_crop = np.concatenate((self.track_e1[0][::-1], self.track_e2[0]))
 
-            # Make sure these are within [0, w) and [0, h)
-            # print("Mask on crop coords:", edge_x_crop, edge_y_crop)
-
             mask_crop = ct.segmentation.create_mask(
                 self.image_crop,
                 edge_y_crop, edge_x_crop  # NB: some libraries expect (row, col)
@@ -1711,12 +1669,6 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
 
-
-        # plt.imshow(m)
-        # plt.plot(self.track_e1[0],self.track_e1[1],'r')
-        # plt.plot(self.track_e2[0],self.track_e2[1],'r')
-        # plt.show()
-
     def draw_segment(self):
         try:
             image_size = self.select_image_size.value()
@@ -1767,7 +1719,7 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
 
-    def save_annotation(self):
+    '''def save_annotation(self):
         try:
             self.annotation["annotations"]["cracks end-points"] = self.cracks_stored_endpoints
             m = np.sum(np.array(self.mask),axis = 0)
@@ -1784,6 +1736,59 @@ class CrackToolsApplication(Ui_MainWindow):
                 f.write(json_file)
             self.change_image()
 
+            self.update_image_crop_button.setStyleSheet("background-color : red")
+            self.middle_point_button.setStyleSheet("background-color : red")
+            self.middpoint_update_button.setStyleSheet("background-color : red")
+            self.update_os_button.setStyleSheet("background-color : red")
+            self.update_cost_button.setStyleSheet("background-color : red")
+            self.midline_track_button.setStyleSheet("background-color : red")
+            self.update_track_display_button.setStyleSheet("background-color : red")
+            self.track_full_screen_button.setStyleSheet("background-color : red")
+            self.edge_mask_button.setStyleSheet("background-color : red")
+            self.edge_tracks_button.setStyleSheet("background-color : red")
+            self.edge_tracks_full_screen_button.setStyleSheet("background-color : red")
+            self.save_current_segment_button.setStyleSheet("background-color : red")
+        except Exception as e:
+            error(e)'''
+            
+    def save_annotation(self):
+        import os
+        #import cv2
+        try:
+            self.annotation["annotations"]["cracks end-points"] = self.cracks_stored_endpoints
+            m = np.sum(np.array(self.mask), axis=0)
+            m[m >= 1] = 1.0
+            crack_pixels = np.argwhere(m == 1.0)
+            self.annotation["annotations"]["crack_pixels"] = crack_pixels.tolist()
+            self.annotation["annotations"]['tracks'] = self.crack_tracks
+
+            # --- CRITICAL: Save all masks as well! ---
+            self.annotation["annotations"]["all_masks"] = [m.tolist() for m in self.mask]
+
+            # Prepare file names
+            base_name = os.path.splitext(os.path.basename(self.name))[0]
+            json_path = os.path.join(self.save_folder, base_name + '.json')
+            mask_bin_path = os.path.join(self.save_folder, base_name + '_mask.png')
+            mask_255_path = os.path.join(self.save_folder, base_name + '_mask255.png')
+
+            # 1. Save JSON annotation
+            json_file = json.dumps(self.annotation)
+            with open(json_path, 'w') as f:
+                f.write(json_file)
+
+            # 2. Save mask: crack=1, noncrack=0 (uint8)
+            mask_bin = (m >= 1).astype('uint8')
+            cv2.imwrite(mask_bin_path, mask_bin * 255)  # 0/255 for viewing, but value 1 can be used by others
+
+            # 3. Save mask: crack=255, noncrack=0 (uint8)
+            mask_255 = (m >= 1).astype('uint8') * 255
+            cv2.imwrite(mask_255_path, mask_255)
+
+            print(f"Saved: {json_path}, {mask_bin_path}, {mask_255_path}")
+
+            self.change_image()
+
+            # Reset UI colors
             self.update_image_crop_button.setStyleSheet("background-color : red")
             self.middle_point_button.setStyleSheet("background-color : red")
             self.middpoint_update_button.setStyleSheet("background-color : red")
@@ -1856,16 +1861,21 @@ class CrackToolsApplication(Ui_MainWindow):
         # Step 1: Group endpoint pairs by bounding box
         box_to_pairs = {}
         for pair in self.endpoint_pairs:
+            candidates = []
             for bbox in boxes:
                 xmin, ymin, xmax, ymax = bbox
                 p0, p1 = pair
                 if (xmin <= p0[0] <= xmax and ymin <= p0[1] <= ymax and
                     xmin <= p1[0] <= xmax and ymin <= p1[1] <= ymax):
-                    key = tuple(bbox)
-                    if key not in box_to_pairs:
-                        box_to_pairs[key] = []
-                    box_to_pairs[key].append(pair)
-                    break  # Each pair should only be in one box
+                    area = abs((xmax - xmin) * (ymax - ymin))
+                    candidates.append((area, bbox))
+            if candidates:
+                # Pick the box with the smallest area
+                _, chosen_bbox = min(candidates, key=lambda x: x[0])
+                key = tuple(chosen_bbox)
+                if key not in box_to_pairs:
+                    box_to_pairs[key] = []
+                box_to_pairs[key].append(pair)
 
         num_success = 0
         errors = []
@@ -1892,11 +1902,11 @@ class CrackToolsApplication(Ui_MainWindow):
                 print("os (once per box)")
                 start_time = time()
                 self.update_os()
-                print(f"os time: {time() - start_time:.2f} seconds")
+                #print(f"os time: {time() - start_time:.2f} seconds")
                 print("cost (once per box)")
                 start_time = time()
                 self.update_cost()
-                print(f"cost time: {time() - start_time:.2f} seconds")
+                #print(f"cost time: {time() - start_time:.2f} seconds")
 
                 # --- Now do midline/edge/save for EACH pair in this box ---
                 for idx, pair in enumerate(pairs):

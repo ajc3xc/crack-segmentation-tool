@@ -201,7 +201,7 @@ def CheckWavelet(window_size = 70,size = 75, nOrientations = 32, design = "N",
                 inflectionPoint = 0.9, mnOrder = 8, splineOrder = 3,
                 overlapFactor = 1, dcStdDev = 8, directional = False,display_orientations = 0,mode='real'):
     a = np.zeros((window_size, window_size))
-    a[np.int(window_size/2),np.int(window_size/2)] = 1
+    a[np.int32(window_size/2),np.int32(window_size/2)] = 1
     os_check = OrientationScoreTransform(a, size = size, nOrientations = nOrientations, design = design, inflectionPoint = inflectionPoint, mnOrder = mnOrder, splineOrder = splineOrder,
                               overlapFactor = overlapFactor, dcStdDev = dcStdDev, directional = directional)
     # for i in display_orientations:
