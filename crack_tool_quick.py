@@ -484,59 +484,7 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
         
-    # In CrackToolsApplication
-        
-    def draw_box(self):
-        if not hasattr(self, 'original_image') or self.original_image is None:
-            error("No image loaded. Please select a folder and an image first.")
-            return
-        self.image_size = self.select_image_size_2.value()
-        if not hasattr(self, "bb_pts_list"):
-            self.bb_pts_list = []
-        print("DRAW BOX: List before session:", self.bb_pts_list)
-        
-        display_image = self.original_image.copy()
-        if 'annotations' in self.annotation and 'box' in self.annotation['annotations']:
-            for box_k, box_data in self.annotation['annotations']['box'].items():
-                bb = np.array(box_data['bounding_box'], dtype=np.int32)
-                cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0, 128, 255), 3)
-        for bb in self.bb_pts_list:
-            if len(bb) == 2:  # Add this safety check
-                cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0, 255, 0), 3)
-
-        # --- Get the display size: ---
-        screen_rect = QtWidgets.QApplication.desktop().screenGeometry()
-        print(display_image.shape, screen_rect.width(), screen_rect.height())
-        target_w = max(display_image.shape[1], int(screen_rect.width()) * 2.5)
-        target_h = max(display_image.shape[0], int(screen_rect.height()) * 2.5)
-
-        # --- Upscale image if needed ---
-        scale_factor = 1.0
-        h, w = display_image.shape[:2]
-        if h < target_h or w < target_w:
-            scale_factor = min(target_w / w, target_h / h)
-            new_w = int(w * scale_factor)
-            new_h = int(h * scale_factor)
-            display_for_box = cv2.resize(display_image, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
-        else:
-            display_for_box = display_image
-
-        qimage = QImage(display_for_box.astype(np.uint8), display_for_box.shape[1], display_for_box.shape[0], display_for_box.strides[0], QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(qimage)
-        scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-        self.ImageScreen.setPixmap(scaled_pixmap)
-
-        bb_pts, _ = ct.tools.Draw().bounding_box(display_for_box[:, :, ::-1], self.image_size)
-        bb_pts = (np.array(bb_pts, dtype=np.float32) / scale_factor).astype(np.int32)
-
-        # Only append and update if a box was actually drawn:
-        if bb_pts.shape == (2, 2):  # (top-left, bottom-right)
-            self.bb_pts_list.append(bb_pts)
-            print("DRAW BOX: List after session:", self.bb_pts_list)
-            self.update_green_preview()
-        else:
-            print("No box drawn, nothing to add.")
-            
+    # In CrackToolsApplication           
     def draw_box(self):
         # --- Check image loaded ---
         if not hasattr(self, 'original_image') or self.original_image is None:
@@ -703,130 +651,209 @@ class CrackToolsApplication(Ui_MainWindow):
 
         self.change_image()
         #self.update_green_preview()
-
+            
     def clear_boxes(self):
-        if not hasattr(self, 'annotation'):
-            error("No image loaded. Please select a folder and an image first.")
-            return
-        # Remove only the box with the highest key (most recently added)
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
+
+        # Prepare box list for display
         box_dict = self.annotation['annotations'].get('box', {})
-        if box_dict:
-            # keys are strings, convert to int for comparison
-            max_key = max(map(int, box_dict.keys()))
-            del box_dict[str(max_key)]
-            print(f"Removed box with key {max_key}")
-            # Save and update
+        if not box_dict:
+            error("No saved boxes to delete.")
+            return
+
+        dlg = QDialog(self.MainWindow)
+        dlg.setWindowTitle("Select Boxes to Delete")
+        layout = QVBoxLayout(dlg)
+        listwidget = QListWidget()
+        listwidget.setSelectionMode(QListWidget.MultiSelection)
+
+        # Show index and bounding box (can show class too)
+        for key, v in box_dict.items():
+            bb = v['bounding_box']
+            label = f"Box {key}: [{bb[0][0]}, {bb[0][1]}] to [{bb[1][0]}, {bb[1][1]}]"
+            listwidget.addItem(label)
+
+        layout.addWidget(listwidget)
+        btns = QHBoxLayout()
+        btn_ok = QPushButton("Delete Selected")
+        btn_cancel = QPushButton("Cancel")
+        btns.addWidget(btn_ok)
+        btns.addWidget(btn_cancel)
+        layout.addLayout(btns)
+
+        btn_ok.clicked.connect(dlg.accept)
+        btn_cancel.clicked.connect(dlg.reject)
+
+        if dlg.exec_() == QDialog.Accepted:
+            # Find which were selected
+            selected_indices = [i.row() for i in listwidget.selectedIndexes()]
+            if not selected_indices:
+                return
+            keys = list(box_dict.keys())
+            for idx in sorted(selected_indices, reverse=True):
+                del box_dict[keys[idx]]
+
             with open(self.ann_name, 'w') as fp:
                 json.dump(self.annotation, fp)
+            print(f"Deleted {len(selected_indices)} box(es).")
             self.change_image()
-            #self.update_green_preview()
         else:
-            print("No boxes to remove.")
-        
+            print("Delete boxes cancelled.")
+            
+    def clear_boxes(self):
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
+
+        # Load all boxes from your annotation data structure
+        box_dict = self.annotation.get('annotations', {}).get('box', {})
+        if not box_dict:
+            error("No saved boxes to delete.")
+            return
+
+        keys = list(box_dict.keys())
+        dlg = QDialog(self.MainWindow)
+        dlg.setWindowTitle("Select Bounding Boxes to Delete")
+        layout = QVBoxLayout(dlg)
+        listwidget = QListWidget()
+        listwidget.setSelectionMode(QListWidget.MultiSelection)
+
+        for key in keys:
+            bbox = box_dict[key]['bounding_box']
+            # Nice display string: show the coordinates
+            xs = [bbox[0][0], bbox[1][0]]
+            ys = [bbox[0][1], bbox[1][1]]
+            box_str = f"Box {key}"
+            listwidget.addItem(box_str)
+
+        layout.addWidget(listwidget)
+        btns = QHBoxLayout()
+        btn_ok = QPushButton("Delete Selected")
+        btn_cancel = QPushButton("Cancel")
+        btns.addWidget(btn_ok)
+        btns.addWidget(btn_cancel)
+        layout.addLayout(btns)
+
+        btn_ok.clicked.connect(dlg.accept)
+        btn_cancel.clicked.connect(dlg.reject)
+
+        def highlight_selected_boxes():
+            # Start with base image
+            display = self.original_image.copy()
+            for i, key in enumerate(keys):
+                bbox = box_dict[key]['bounding_box']
+                xmin, ymin = bbox[0]
+                xmax, ymax = bbox[1]
+                color = (0, 128, 255)  # blue for normal
+                thickness = 3
+                if listwidget.item(i).isSelected():
+                    color = (255, 140, 0)  # orange for selected
+                    thickness = 6
+                cv2.rectangle(display, (xmin, ymin), (xmax, ymax), color, thickness)
+            # Show it
+            im = display.astype(np.uint8)
+            qimage = QImage(im, im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimage)
+            scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+            self.ImageScreen.setPixmap(scaled_pixmap)
+
+        # Connect highlight update
+        listwidget.itemSelectionChanged.connect(highlight_selected_boxes)
+        highlight_selected_boxes()  # initial call
+
+        # Dialog execution
+        if dlg.exec_() == QDialog.Accepted:
+            selected_indices = [i.row() for i in listwidget.selectedIndexes()]
+            if not selected_indices:
+                self.change_image()
+                return
+            for idx in sorted(selected_indices, reverse=True):
+                del box_dict[keys[idx]]
+            self.annotation['annotations']['box'] = box_dict
+            # Save file and reload
+            with open(self.ann_name, 'w') as fp:
+                json.dump(self.annotation, fp)
+            print(f"Deleted {len(selected_indices)} bounding box(es).")
+            self.change_image()
+        else:
+            self.change_image()
+            
     def clear_segmentation(self):
-        """
-        Remove only the most recent (last-added) segmentation, not all.
-        Handles cases where nothing is left to remove.
-        """
-        try:
-            # Remove last mask (if any)
-            if hasattr(self, 'mask') and len(self.mask) > 0:
-                self.mask.pop()
-            else:
-                print("No mask left to remove.")
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
 
-            # Remove last endpoints (if any)
-            if hasattr(self, 'cracks_stored_endpoints') and len(self.cracks_stored_endpoints) > 0:
-                int_keys = list(map(int, self.cracks_stored_endpoints.keys()))
-                last_key = max(int_keys)
-                #print(last_key, int_keys, self.cracks_stored_endpoints.keys())
-                del self.cracks_stored_endpoints[str(last_key)]
-            else:
-                print("No endpoints left to remove.")
+        if not hasattr(self, 'mask') or len(self.mask) == 0:
+            error("No saved masks to delete.")
+            return
 
-            # Remove last track (if any)
-            if hasattr(self, 'crack_tracks') and len(self.crack_tracks) > 0:
-                int_keys = list(map(int, self.crack_tracks.keys()))
-                last_key = max(int_keys)
-                del self.crack_tracks[str(last_key)]
-            else:
-                print("No tracks left to remove.")
+        dlg = QDialog(self.MainWindow)
+        dlg.setWindowTitle("Select Segmentations to Delete")
+        layout = QVBoxLayout(dlg)
+        listwidget = QListWidget()
+        listwidget.setSelectionMode(QListWidget.MultiSelection)
 
-            # Update annotation data
-            self.annotation["annotations"]["cracks end-points"] = self.cracks_stored_endpoints
+        for idx, m in enumerate(self.mask):
+            count = np.count_nonzero(m)
+            listwidget.addItem(f"{idx+1}: {count} nonzero pixels")
 
-            # Update all_masks in annotation for persistence
+        layout.addWidget(listwidget)
+        btns = QHBoxLayout()
+        btn_ok = QPushButton("Delete Selected")
+        btn_cancel = QPushButton("Cancel")
+        btns.addWidget(btn_ok)
+        btns.addWidget(btn_cancel)
+        layout.addLayout(btns)
+
+        btn_ok.clicked.connect(dlg.accept)
+        btn_cancel.clicked.connect(dlg.reject)
+
+        # --- Helper: highlight selected segmentations ---
+        def highlight_selected_segments():
+            # Base image
+            display = self.original_image.copy()
+            # Normal overlays: semi-transparent red
+            for i, m in enumerate(self.mask):
+                color = (255, 0, 0)  # Default: red
+                alpha = 0.25
+                if listwidget.item(i).isSelected():
+                    color = (255, 140, 0)  # Orange for selected
+                    alpha = 0.60
+                if np.any(m):
+                    mask_bool = m.astype(bool)
+                    overlay = np.zeros_like(display)
+                    overlay[mask_bool] = color
+                    display = cv2.addWeighted(display, 1, overlay, alpha, 0)
+            # Show in the main screen
+            im = display.astype(np.uint8)
+            qimage = QImage(im, im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimage)
+            scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+            self.ImageScreen.setPixmap(scaled_pixmap)
+
+        # Connect the highlight update to selection change
+        listwidget.itemSelectionChanged.connect(highlight_selected_segments)
+
+        # --- Show highlights for initial dialog state ---
+        highlight_selected_segments()
+
+        # Dialog execution
+        if dlg.exec_() == QDialog.Accepted:
+            selected_indices = [i.row() for i in listwidget.selectedIndexes()]
+            if not selected_indices:
+                # Restore original display
+                self.change_image()
+                return
+            for idx in sorted(selected_indices, reverse=True):
+                self.mask.pop(idx)
             self.annotation["annotations"]["all_masks"] = [m.tolist() for m in self.mask]
-
             m = np.sum(np.array(self.mask), axis=0) if len(self.mask) > 0 else np.zeros_like(self.original_image[..., 0])
             m[m >= 1] = 1.0
             crack_pixels = np.argwhere(m == 1.0)
             self.annotation["annotations"]["crack_pixels"] = crack_pixels.tolist()
-            self.annotation["annotations"]['tracks'] = self.crack_tracks
-
             with open(self.ann_name, 'w') as fp:
                 json.dump(self.annotation, fp)
-            print('Removed last segmentation, saved.')
+            print(f"Deleted {len(selected_indices)} segmentations.")
             self.change_image()
-        except Exception as e:
-            error(f"Failed to remove last segmentation: {e}")
-    
-    def clear_segmentation(self):
-        try:
-            # Remove last mask (if any)
-            if hasattr(self, 'mask') and len(self.mask) > 0:
-                self.mask.pop()
-            else:
-                print("No mask left to remove.")
-
-            # Remove last endpoints (if any)
-            if hasattr(self, 'cracks_stored_endpoints') and len(self.cracks_stored_endpoints) > 0:
-                keys = list(self.cracks_stored_endpoints.keys())
-                print("cracks_stored_endpoints keys before deletion:", keys)
-                int_keys = [int(k) for k in keys]
-                last_key = str(max(int_keys))
-                if last_key in self.cracks_stored_endpoints:
-                    del self.cracks_stored_endpoints[last_key]
-                    print(f"Deleted cracks_stored_endpoints key: {last_key}")
-                else:
-                    print(f"Key {last_key} not found in cracks_stored_endpoints! (Current keys: {keys})")
-            else:
-                print("No endpoints left to remove.")
-
-            # Remove last track (if any)
-            if hasattr(self, 'crack_tracks') and len(self.crack_tracks) > 0:
-                keys = list(self.crack_tracks.keys())
-                print("crack_tracks keys before deletion:", keys)
-                int_keys = [int(k) for k in keys]
-                last_key = str(max(int_keys))
-                if last_key in self.crack_tracks:
-                    del self.crack_tracks[last_key]
-                    print(f"Deleted crack_tracks key: {last_key}")
-                else:
-                    print(f"Key {last_key} not found in crack_tracks! (Current keys: {keys})")
-            else:
-                print("No tracks left to remove.")
-
-            # Ensure keys are strings
-            self.cracks_stored_endpoints = {str(k): v for k, v in self.cracks_stored_endpoints.items()}
-            self.crack_tracks = {str(k): v for k, v in self.crack_tracks.items()}
-
-            self.annotation["annotations"]["cracks end-points"] = self.cracks_stored_endpoints
-            self.annotation["annotations"]["all_masks"] = [m.tolist() for m in self.mask]
-            m = np.sum(np.array(self.mask), axis=0) if len(self.mask) > 0 else np.zeros_like(self.original_image[..., 0])
-            m[m >= 1] = 1.0
-            crack_pixels = np.argwhere(m == 1.0)
-            self.annotation["annotations"]["crack_pixels"] = crack_pixels.tolist()
-            self.annotation["annotations"]['tracks'] = self.crack_tracks
-
-            with open(self.ann_name, 'w') as fp:
-                json.dump(self.annotation, fp)
-            print('Removed last segmentation, saved.')
+        else:
+            # Restore normal display if cancelled
             self.change_image()
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            error(f"Failed to remove last segmentation: {e}")
 
     def annotation_full_screen(self):
         try:
