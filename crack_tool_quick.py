@@ -34,6 +34,7 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QWidget, QVB
 from PyQt5.QtGui import QPainter, QPen, QColor, QCursor
 from PyQt5.QtCore import Qt, QPoint, QPointF
 
+min_crop_size = 16
 class CrackAnnotator(QtWidgets.QWidget):
     def __init__(self, image=None, boxes=None, initial_points=None, initial_connections=None):
         super().__init__()
@@ -256,21 +257,22 @@ class CrackToolsApplication(Ui_MainWindow):
         self.middle_point_button.clicked.connect(self.select_middle_point)
         self.middpoint_update_button.clicked.connect(self.update_midpoint_image)
         self.DeleteAnnotationsButton.clicked.connect(self.clear_user_annotations)
+        self.BatchPipelineButton.clicked.connect(self.batch_run_pipeline)
 
         # Replace the following individual step connections
-        # self.update_os_button.clicked.connect(self.update_os)
-        # self.update_cost_button.clicked.connect(self.update_cost)
-        # self.midline_track_button.clicked.connect(self.midline_tracking)
-        # self.edge_mask_button.clicked.connect(self.edge_mask)
-        # self.edge_tracks_button.clicked.connect(self.edge_tracking)
+        self.update_os_button.clicked.connect(self.update_os)
+        self.update_cost_button.clicked.connect(self.update_cost)
+        self.midline_track_button.clicked.connect(self.midline_tracking)
+        self.edge_mask_button.clicked.connect(self.edge_mask)
+        self.edge_tracks_button.clicked.connect(self.edge_tracking)
         # self.save_current_segment_button.clicked.connect(self.save_current_segment)
 
         # Hide step-by-step buttons not needed anymore
-        self.show_os_button.hide()
-        self.update_cost_button.hide()
-        self.midline_track_button.hide()
-        self.edge_mask_button.hide()
-        self.edge_tracks_button.hide()
+        #self.show_os_button.hide()
+        #self.update_cost_button.hide()
+        #self.midline_track_button.hide()
+        #self.edge_mask_button.hide()
+        #self.edge_tracks_button.hide()
         self.save_current_segment_button.hide()
 
         # Repurpose the OS button for full pipeline
@@ -306,127 +308,11 @@ class CrackToolsApplication(Ui_MainWindow):
         self.draw_segment_button.setStyleSheet("background-color : red")
         self.show_os_button.setStyleSheet("background-color : red")
 
-    '''def select_folder(self):
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog, QMessageBox
-
-        dlg = QDialog(self.MainWindow)
-        dlg.setWindowTitle("Select Image & Save Folders")
-        layout = QVBoxLayout(dlg)
-
-        # Image folder row
-        img_row = QHBoxLayout()
-        img_label = QLabel("Image folder:")
-        image_folder_edit = QLineEdit()
-        image_folder_edit.setText(getattr(self, "current_folder", ""))  # Pre-fill if exists
-        img_browse_btn = QPushButton("Browse...")
-        img_row.addWidget(img_label)
-        img_row.addWidget(image_folder_edit)
-        img_row.addWidget(img_browse_btn)
-        layout.addLayout(img_row)
-
-        # Save folder row
-        save_row = QHBoxLayout()
-        save_label = QLabel("Save folder:")
-        save_folder_edit = QLineEdit()
-        save_folder_edit.setText(getattr(self, "save_folder", ""))  # Pre-fill if exists
-        save_browse_btn = QPushButton("Browse...")
-        save_row.addWidget(save_label)
-        save_row.addWidget(save_folder_edit)
-        save_row.addWidget(save_browse_btn)
-        layout.addLayout(save_row)
-
-        # Button row
-        btn_row = QHBoxLayout()
-        ok_btn = QPushButton("Select")
-        cancel_btn = QPushButton("Cancel")
-        btn_row.addWidget(ok_btn)
-        btn_row.addWidget(cancel_btn)
-        layout.addLayout(btn_row)
-
-        # Browse logic
-        def img_browse():
-            folder = QFileDialog.getExistingDirectory(dlg, "Select Image Folder")
-            if folder:
-                image_folder_edit.setText(folder)
-        def save_browse():
-            folder = QFileDialog.getExistingDirectory(dlg, "Select Save Folder")
-            if folder:
-                save_folder_edit.setText(folder)
-        img_browse_btn.clicked.connect(img_browse)
-        save_browse_btn.clicked.connect(save_browse)
-
-        ok_btn.clicked.connect(dlg.accept)
-        cancel_btn.clicked.connect(dlg.reject)
-        
-        def strip_quotes(path):
-            # Remove ONLY a single " from start/end if present
-            if path.startswith('"') and path.endswith('"'):
-                return path[1:-1]
-            elif path.startswith('"'):
-                return path[1:]
-            elif path.endswith('"'):
-                return path[:-1]
-            else:
-                return path
-
-        # --- Show dialog & check folders ---
-        while True:
-            if dlg.exec_() == QDialog.Accepted:
-                img_folder = strip_quotes(image_folder_edit.text().strip())
-                save_folder = strip_quotes(save_folder_edit.text().strip())
-                if not os.path.isdir(img_folder):
-                    QMessageBox.critical(dlg, "Error", "Please select a valid image folder.")
-                    continue
-                if not os.path.isdir(save_folder):
-                    QMessageBox.critical(dlg, "Error", "Please select a valid save folder.")
-                    continue
-                break
-            else:
-                print("Folder selection cancelled.")
-                return  # Don't continue if user cancels
-
-        # Save folder for use elsewhere
-        self.current_folder = img_folder
-        self.save_folder = save_folder
-        #self.folder_line_edit.setText(img_folder)  # Show in main window if you have one
-
-        # ---- Wipe all memory/state/arrays for previous folder ----
-        self.files_list.clear()
-        self.image_names = []
-        self.n = 0
-
-        for attr in [
-            'mask', 'crack_tracks', 'cracks_stored_endpoints',
-            'track_crop', 'track',
-            'image', 'original_image', 'image_crop', 'image_crop_down', 'image_down',
-            'osGFCost', 'multiscalecostLIFExtReg', 'costFunction',
-            'bb_pts_list', 'mid_pt', 'end_points', 'points_pairs_list', 'annotation'
-        ]:
-            if hasattr(self, attr):
-                try:
-                    delattr(self, attr)
-                except Exception:
-                    pass
-
-        import gc; gc.collect()
-
-        # ---- Now load new image list ----
-        self.image_names = ct.tools.get_files(folder=img_folder, formats=['jpeg','jpg','png'], basename=False)
-        for filename in self.image_names:
-            self.files_list.addItem(os.path.basename(filename))
-        if self.image_names:
-            self.n = 0
-            self.change_image()
-        else:
-            self.ImageScreen.clear()
-            self.filename_label_2.setText("No images found in folder.")'''
-    
     def clear_user_annotations(self):
         """Clears all user-drawn endpoints and connections, then refreshes the image."""
         del self.user_points, self.user_connections
         self.annotation["annotations"]["user_points"] = None
         self.annotation["annotations"]["user_connections"] = None
-        self.save_box()
         self.save_annotation()
         self.change_image()
         
@@ -627,6 +513,8 @@ class CrackToolsApplication(Ui_MainWindow):
             self.user_connections = ann.get('user_connections', None)
 
             if self.user_points and self.user_connections:
+                #print([(a,b) for a,b in self.user_connections], self.user_connections)
+                self.endpoint_pairs = [[a, b] for a, b in self.user_connections]
                 for pt1, pt2 in self.user_connections:
                     cv2.line(self.image,
                             (int(round(pt1[0])), int(round(pt1[1]))),
@@ -824,6 +712,22 @@ class CrackToolsApplication(Ui_MainWindow):
                 box = snap_box_points(box, self.original_image.shape, margin=snap_margin)
             box = box.astype(np.int32)
             if box.shape == (2, 2):
+                # Compute crop size
+                xmin, ymin = box[0]
+                xmax, ymax = box[1]
+                width = abs(xmax - xmin)
+                height = abs(ymax - ymin)
+                if width < min_crop_size or height < min_crop_size:
+                    from PyQt5.QtWidgets import QMessageBox
+                    msg = QMessageBox()
+                    msg.setIcon(QMessageBox.Warning)
+                    msg.setText(
+                        f"Box too small!\nWidth: {width}, Height: {height}\n"
+                        f"Minimum size is {min_crop_size}."
+                    )
+                    msg.setWindowTitle("Box Too Small")
+                    msg.exec_()
+                    continue  # Skip adding this box or previewing it
                 self.bb_pts_list.append(box)
 
         print("DRAW BOX: List after session:", self.bb_pts_list)
@@ -1171,7 +1075,6 @@ class CrackToolsApplication(Ui_MainWindow):
         
     def select_save_end_points(self):
         self.select_end_points()
-        print(self.user_points, self.user_connections)
         self.save_annotation()
         self.change_image()
 
@@ -1193,7 +1096,6 @@ class CrackToolsApplication(Ui_MainWindow):
             # Crop the image to the bounding box
             self.image_crop = self.original_image[ymin:ymax, xmin:xmax]
             # Ensure the crop is not too small for tracking/segmentation
-            min_crop_size = 16  # Or whatever your algorithm needs (try 32 as safe default)
             h, w = self.image_crop.shape[:2]
             if h < min_crop_size or w < min_crop_size:
                 print(f"Skipping segment: Crop too small for processing ({w}x{h})")
@@ -1861,21 +1763,29 @@ class CrackToolsApplication(Ui_MainWindow):
           
     def save_annotation(self):
         import os
-        #import cv2
         try:
+            # Save endpoints/connections if present
             if getattr(self, "user_points", None) and getattr(self, "user_connections", None) and self.user_points and self.user_connections:
-                print(".")
                 self.annotation["annotations"]["user_points"] = self.user_points  # list of (x, y)
                 self.annotation["annotations"]["user_connections"] = self.endpoint_pairs  # list of (i1, i2)
-            self.annotation["annotations"]["cracks end-points"] = self.cracks_stored_endpoints
-            m = np.sum(np.array(self.mask), axis=0)
-            m[m >= 1] = 1.0
-            crack_pixels = np.argwhere(m == 1.0)
-            self.annotation["annotations"]["crack_pixels"] = crack_pixels.tolist()
-            self.annotation["annotations"]['tracks'] = self.crack_tracks
 
-            # --- CRITICAL: Save all masks as well! ---
-            self.annotation["annotations"]["all_masks"] = [m.tolist() for m in self.mask]
+            self.annotation["annotations"]["cracks end-points"] = self.cracks_stored_endpoints
+
+            # Robust mask handling
+            masks = [np.array(m, dtype=np.uint8) for m in self.mask if m is not None and np.array(m).size > 0]
+            if masks:
+                m = np.sum(np.stack(masks), axis=0)
+                m[m >= 1] = 1.0
+                crack_pixels = np.argwhere(m == 1.0)
+                self.annotation["annotations"]["crack_pixels"] = crack_pixels.tolist()
+                self.annotation["annotations"]['all_masks'] = [mm.tolist() for mm in masks]
+            else:
+                # If no masks, save blank
+                m = np.zeros(self.image.shape[:2], dtype=np.uint8)
+                self.annotation["annotations"]["crack_pixels"] = []
+                self.annotation["annotations"]['all_masks'] = []
+
+            self.annotation["annotations"]['tracks'] = self.crack_tracks
 
             # Prepare file names
             base_name = os.path.splitext(os.path.basename(self.name))[0]
@@ -1935,19 +1845,16 @@ class CrackToolsApplication(Ui_MainWindow):
             print(f"Could not parse bounding boxes: {e}")
         return boxes
                 
-    def run_pipeline(self):
+    def run_pipeline(self, multirun=False):
         """
         For each bounding box:
         - Compute OS/cost ONCE per box
         - For each endpoint-pair inside the box, do midline/edge tracking/saving.
+        After all succeed, clears user endpoints & connections from memory and file.
         """
-        import cupy as cp, gc
+        import gc
 
         gc.collect()
-        mempool = cp.get_default_memory_pool()
-        pinned = cp.get_default_pinned_memory_pool()
-        mempool.free_all_blocks()
-        pinned.free_all_blocks()
         print("✅ GPU memory freed from CuPy pool")
         print("Running optimized pipeline for all endpoint pairs and bounding boxes...")
 
@@ -1960,10 +1867,11 @@ class CrackToolsApplication(Ui_MainWindow):
             msg.exec_()
             return
 
-        self.endpoint_pairs = None
-        self.user_connections = None
-        self.user_points = None
-        self.select_end_points()
+        if multirun:
+            self.endpoint_pairs = None
+            self.user_connections = None
+            self.user_points = None
+            self.select_end_points()
         if not hasattr(self, "endpoint_pairs") or not self.endpoint_pairs or len(self.endpoint_pairs) == 0:
             msg = QMessageBox()
             msg.setIcon(QMessageBox.Critical)
@@ -2057,17 +1965,76 @@ class CrackToolsApplication(Ui_MainWindow):
                 errors.append(f"Failed for bounding box {bbox}: {e}")
                 continue
 
+        # --- CLEANUP/DELETE: Only if everything worked ---
         if errors and num_success == 0:
             msg = QMessageBox()
             msg.setIcon(QMessageBox.Critical)
             msg.setText("\n".join(errors))
             msg.setWindowTitle("Pipeline Error")
             msg.exec_()
-        elif errors:
-            print("\n".join(errors))
         else:
-            print("✔ All endpoint-groups processed (optimized by box).")
+            if errors:
+                print("\n".join(errors))
+            else:
+                print("✔ All endpoint-groups processed (optimized by box).")
+            # --- Now remove user_points/user_connections/endpoint_pairs from memory and file
+            print("Clearing endpoint and connection annotations after successful pipeline run...")
+            # Remove from memory
+            if hasattr(self, "user_points"):
+                del self.user_points
+            if hasattr(self, "user_connections"):
+                del self.user_connections
+            if hasattr(self, "endpoint_pairs"):
+                del self.endpoint_pairs
+            # Remove from file
+            ann = self.annotation.get("annotations", {})
+            ann["user_points"] = None
+            ann["user_connections"] = None
+            # Save cleared annotation to file
+            self.save_annotation()
+            self.change_image()
+            
+    def batch_run_pipeline(self):
+        """
+        Runs the pipeline (full segment generation, clearing endpoints/connections) on EVERY image in the selected folder.
+        """
+        from PyQt5.QtWidgets import QMessageBox
+        
+        # Check existence and content
+        if not hasattr(self, "image_names") or not self.image_names:
+            QMessageBox.warning(self.MainWindow, "Batch Run", "No images loaded. Please select a folder with images first.")
+            print("Batch run aborted: no images loaded.")
+            return
+        
+        total = len(self.image_names)
+        errors = []
+        n_success = 0
+        orig_n = self.n
 
+        for idx, fname in enumerate(self.image_names):
+            try:
+                self.n = idx
+                self.change_image()
+                # Only run if endpoints and connections are present
+                endpoints = getattr(self, "user_points", None)
+                connections = getattr(self, "user_connections", None)
+                if endpoints and connections:
+                    print(f"\n======= Processing image {idx+1}/{total}: {fname} =======")
+                    self.run_pipeline(multirun=False)  # Will clear endpoints on success
+                    n_success += 1
+                    #return
+                else:
+                    print(f"  [SKIP] No endpoints/connections for this image.")
+            except Exception as e:
+                errors.append(f"Image {fname}: {e}")
+
+        self.n = orig_n
+        self.change_image()
+        summary = f"Batch pipeline run complete.\nSuccessful: {n_success}/{total}\n"
+        if errors:
+            summary += f"\nErrors:\n" + "\n".join(errors)
+        print(summary)
+        QMessageBox.information(self.MainWindow, "Batch pipeline finished", summary)
 
 if __name__ == "__main__":
     import sys
