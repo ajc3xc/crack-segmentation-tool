@@ -785,25 +785,27 @@ class CrackToolsApplication(Ui_MainWindow):
 
         # --- Draw box using your custom tool ---
         bb_pts, _ = ct.tools.Draw().bounding_box(display_for_box[:, :, ::-1], self.image_size)
-        if bb_pts is None or len(bb_pts) != 2:
-            print("No box drawn, nothing to add.")
+
+        if bb_pts is None or len(bb_pts) < 2 or len(bb_pts) % 2 != 0:
+            print("No complete boxes drawn, nothing to add.")
             return
 
-        # --- Scale down and snap if needed ---
-        bb_pts = (np.array(bb_pts, dtype=np.float32) / scale_factor)
+        # Group every two points into a box
+        boxes = [np.array([bb_pts[i], bb_pts[i + 1]], dtype=np.float32) for i in range(0, len(bb_pts), 2)]
         h, w = self.original_image.shape[:2]
         snap_margin = max(2, int(0.01 * min(h, w)))
-        if snap:
-            bb_pts = snap_box_points(bb_pts, self.original_image.shape, margin=snap_margin)
-        bb_pts = bb_pts.astype(np.int32)
 
-        # --- Only append if the box has two corners ---
-        if bb_pts.shape == (2, 2):
-            self.bb_pts_list.append(bb_pts)
-            print("DRAW BOX: List after session:", self.bb_pts_list)
-            self.update_green_preview()
-        else:
-            print("No box drawn, nothing to add.")
+        for box in boxes:
+            # Scale down if image was upscaled for display
+            box = box / scale_factor
+            if snap:
+                box = snap_box_points(box, self.original_image.shape, margin=snap_margin)
+            box = box.astype(np.int32)
+            if box.shape == (2, 2):
+                self.bb_pts_list.append(box)
+
+        print("DRAW BOX: List after session:", self.bb_pts_list)
+        self.update_green_preview()
             
     def update_green_preview(self):
         display_image = self.original_image.copy()
@@ -823,14 +825,6 @@ class CrackToolsApplication(Ui_MainWindow):
         pixmap = QPixmap.fromImage(qimage)
         scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
         self.ImageScreen.setPixmap(scaled_pixmap)
-        
-    def delete_last_unsaved_box(self):
-        if hasattr(self, "bb_pts_list") and self.bb_pts_list:
-            self.bb_pts_list.pop()
-            print("Deleted last unsaved box. Remaining:", len(self.bb_pts_list))
-            self.update_green_preview()
-        else:
-            print("No unsaved boxes to delete.")
 
     def save_box(self):
         class_ = self.ClassSpinBox.value()
@@ -867,54 +861,6 @@ class CrackToolsApplication(Ui_MainWindow):
 
         self.change_image()
         #self.update_green_preview()
-            
-    def clear_boxes(self):
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
-
-        # Prepare box list for display
-        box_dict = self.annotation['annotations'].get('box', {})
-        if not box_dict:
-            error("No saved boxes to delete.")
-            return
-
-        dlg = QDialog(self.MainWindow)
-        dlg.setWindowTitle("Select Boxes to Delete")
-        layout = QVBoxLayout(dlg)
-        listwidget = QListWidget()
-        listwidget.setSelectionMode(QListWidget.MultiSelection)
-
-        # Show index and bounding box (can show class too)
-        for key, v in box_dict.items():
-            bb = v['bounding_box']
-            label = f"Box {key}: [{bb[0][0]}, {bb[0][1]}] to [{bb[1][0]}, {bb[1][1]}]"
-            listwidget.addItem(label)
-
-        layout.addWidget(listwidget)
-        btns = QHBoxLayout()
-        btn_ok = QPushButton("Delete Selected")
-        btn_cancel = QPushButton("Cancel")
-        btns.addWidget(btn_ok)
-        btns.addWidget(btn_cancel)
-        layout.addLayout(btns)
-
-        btn_ok.clicked.connect(dlg.accept)
-        btn_cancel.clicked.connect(dlg.reject)
-
-        if dlg.exec_() == QDialog.Accepted:
-            # Find which were selected
-            selected_indices = [i.row() for i in listwidget.selectedIndexes()]
-            if not selected_indices:
-                return
-            keys = list(box_dict.keys())
-            for idx in sorted(selected_indices, reverse=True):
-                del box_dict[keys[idx]]
-
-            with open(self.ann_name, 'w') as fp:
-                json.dump(self.annotation, fp)
-            print(f"Deleted {len(selected_indices)} box(es).")
-            self.change_image()
-        else:
-            print("Delete boxes cancelled.")
             
     def clear_boxes(self):
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
@@ -2042,11 +1988,11 @@ class CrackToolsApplication(Ui_MainWindow):
                 print("os (once per box)")
                 start_time = time()
                 self.update_os()
-                #print(f"os time: {time() - start_time:.2f} seconds")
+                print(f"os time: {time() - start_time:.2f} seconds")
                 print("cost (once per box)")
                 start_time = time()
                 self.update_cost()
-                #print(f"cost time: {time() - start_time:.2f} seconds")
+                print(f"cost time: {time() - start_time:.2f} seconds")
 
                 # --- Now do midline/edge/save for EACH pair in this box ---
                 for idx, pair in enumerate(pairs):
