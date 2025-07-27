@@ -285,7 +285,6 @@ class CrackToolsApplication(Ui_MainWindow):
         self.draw_segment_button.clicked.connect(self.draw_segment)
         self.save_manuall_segment_button.clicked.connect(self.save_manual_segment)
         self.manual_segment_full_screen_button.clicked.connect(self.manual_segment_full_screen)
-        self.saveFolderButton.clicked.connect(self.set_save_folder)
 
         self.n = -1
         self.saved = False
@@ -433,7 +432,7 @@ class CrackToolsApplication(Ui_MainWindow):
         # Save folder for use elsewhere
         self.current_folder = img_folder
         self.save_folder = save_folder
-        self.folder_line_edit.setText(img_folder)  # Show in main window if you have one
+        #self.folder_line_edit.setText(img_folder)  # Show in main window if you have one
 
         # ---- Wipe all memory/state/arrays for previous folder ----
         self.files_list.clear()
@@ -891,16 +890,6 @@ class CrackToolsApplication(Ui_MainWindow):
             self.change_image()
         else:
             self.change_image()
-    
-    def set_save_folder(self):
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self.MainWindow, "Select Save Folder")
-        if folder:
-            self.save_folder = folder
-            print(f"Save folder set to: {folder}")
-            # Optional: show a visual confirmation (status bar etc.)
-            self.statusbar.showMessage(f"Save folder: {folder}", 8000)
-        else:
-            print("Save folder not set.")
             
     def clear_segmentation(self):
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
@@ -1960,6 +1949,9 @@ if __name__ == "__main__":
     import sys
     import time
     app = QtWidgets.QApplication(sys.argv)
+    font = QtGui.QFont()
+    font.setPointSize(7)
+    app.setFont(font)
     MainWindow = QtWidgets.QMainWindow()
     ui = CrackToolsApplication()
     ui.setupUi(MainWindow)
