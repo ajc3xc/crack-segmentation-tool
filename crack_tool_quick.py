@@ -1548,7 +1548,7 @@ class CrackToolsApplication(Ui_MainWindow):
             ksi = 1
             zeta = 1
             sigmas = self.sigmas_line_edit.text()
-            sigmas = [float(i) for i in sigmas.split(sep = ',')]
+            sigmas = [float(i) for i in sigmas.split(sep=',')]
             sigmas_ext = 1
 
             start_time = time.time()
@@ -1565,11 +1565,9 @@ class CrackToolsApplication(Ui_MainWindow):
             costFunction = ct.os.CostFunction(costmultiscale, lambdaa=lambdaa, p=p)
             print(f"CostFunction took {time.time() - start_time:.2f} seconds")
 
-            # --- Mask Application with crop/downsample ---
-            show_mask_instead = getattr(self, "use_masks", False) and self.current_mask is not None
-
-            # --- Always generate mask_bin if using masks ---
+            # --- Prepare mask if needed ---
             mask_bin = None
+            mask3d = None
             if getattr(self, "use_masks", False) and self.current_mask is not None:
                 mask_bin = (self.current_mask > 0).astype(np.uint8)
                 # Crop to active bbox if set
@@ -1602,20 +1600,14 @@ class CrackToolsApplication(Ui_MainWindow):
                 else:
                     raise RuntimeError("Unexpected costFunction shape: %s" % repr(costFunction.shape))
 
-            # --- Show the mask instead of the costmap if requested ---
-            if show_mask_instead:
-                if mask_bin is not None:
-                    debug_img = (1 - mask_bin) * 255  # crack=0 (black), non-crack=255 (white)
-                    # Dummy costFunction for the pipeline
-                    if costFunction.ndim == 3:
-                        self.costFunction = mask3d * 1.0 + (1 - mask3d) * 1e6
-                    else:
-                        self.costFunction = mask3d * 1.0 + (1 - mask3d) * 1e6
-                else:
-                    # fallback, shouldn't happen, but safe
-                    debug_img = np.ones((costFunction.shape[-2], costFunction.shape[-1]), dtype=np.uint8) * 255
-                    self.costFunction = np.ones_like(costFunction) * 1e6
+            # --- Modify costFunction: keep original INSIDE mask, set to 1.0 OUTSIDE ---
+            if mask3d is not None:
+                costFunction = np.where(mask3d == 1, costFunction, 1.0)
 
+            # --- Show the mask instead of the costmap if requested ---
+            show_mask_instead = getattr(self, "use_masks", False) and self.current_mask is not None and getattr(self, "show_mask_preview", False)
+            if show_mask_instead:
+                debug_img = (1 - mask_bin) * 255  # crack=0 (black), non-crack=255 (white)
                 print("Displaying binary mask instead of costmap. debug_img shape:", debug_img.shape)
                 qimage = QImage(debug_img.astype(np.uint8), debug_img.shape[1], debug_img.shape[0],
                                 debug_img.strides[0], QImage.Format_Grayscale8)
@@ -1624,23 +1616,20 @@ class CrackToolsApplication(Ui_MainWindow):
                 self.cost_display.setPixmap(scaled_pixmap)
                 self.update_cost_bar.setValue(100)
                 self.midline_track_button.setStyleSheet("background-color : lightblue")
-                return  # Now you can return safely
+                self.costFunction = costFunction  # keep the right costFunction for pipeline!
+                return
 
-            # --- (Normal) Mask Application: make outside mask high cost, proceed as usual ---
-            if getattr(self, "use_masks", False) and self.current_mask is not None and mask_bin is not None:
-                costFunction = costFunction * mask3d + (1 - mask3d) * 1e6
-
+            # --- Normal costmap display (min over orientations, as before) ---
             self.costFunction = costFunction
-
             c00 = np.min(ct.os.Rescale(self.costFunction), axis=0)
             self.update_cost_bar.setValue(100)
             c00 = c00 - np.min(c00)
             if np.max(c00) > 0:
-                c00 = (c00*255/np.max(c00)).astype(dtype=np.uint8)
+                c00 = (c00 * 255 / np.max(c00)).astype(dtype=np.uint8)
             else:
                 c00 = np.zeros_like(c00, dtype=np.uint8)
             print("c00 shape:", c00.shape)
-            qimage = QImage(c00.astype(dtype=np.uint8), c00.shape[1], c00.shape[0], 
+            qimage = QImage(c00.astype(dtype=np.uint8), c00.shape[1], c00.shape[0],
                             c00.strides[0], QImage.Format_Grayscale8)
             pixmap = QPixmap.fromImage(qimage)
             scaled_pixmap = pixmap.scaled(self.cost_display.width(), self.cost_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
@@ -1650,7 +1639,7 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
             self.midline_track_button.setStyleSheet("background-color : red")
-    
+
     def midline_tracking(self):
         try :
             self.tracking_bar.setValue(0)
