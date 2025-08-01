@@ -261,7 +261,7 @@ class CrackToolsApplication(Ui_MainWindow):
 
         # Replace the following individual step connections
         self.update_os_button.clicked.connect(self.update_os)
-        self.update_cost_button.clicked.connect(self.update_cost)
+        self.update_cost_button.clicked.connect(self.update_os_cost)
         self.midline_track_button.clicked.connect(self.midline_tracking)
         self.edge_mask_button.clicked.connect(self.edge_mask)
         self.edge_tracks_button.clicked.connect(self.edge_tracking)
@@ -485,13 +485,21 @@ class CrackToolsApplication(Ui_MainWindow):
             if hasattr(self, attr):
                 try:
                     delattr(self, attr)
-                except Exception:
+                except Exception as e:
+                    print(f"Error deleting attribute {attr}: {e}")
                     pass
 
         import gc; gc.collect()
 
         # ---- Now load new image list ----
         self.image_names = ct.tools.get_files(folder=img_folder, formats=['jpeg','jpg','png'], basename=False)
+        if self.use_masks and self.mask_folder:
+            self.mask_names = ct.tools.get_files(folder=self.mask_folder, formats=['png','npy'], basename=False)
+            self.mask_map = {os.path.splitext(os.path.basename(f))[0]: f for f in self.mask_names}
+        else:
+            self.mask_names = []
+            self.mask_map = {}
+        #print("....................................................")
         for filename in self.image_names:
             self.files_list.addItem(os.path.basename(filename))
         if self.image_names:
@@ -500,14 +508,9 @@ class CrackToolsApplication(Ui_MainWindow):
         else:
             self.ImageScreen.clear()
             self.filename_label_2.setText("No images found in folder.")
+        #print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
         # ---- Optionally load mask file mapping ----
-        if self.use_masks and self.mask_folder:
-            self.mask_names = ct.tools.get_files(folder=self.mask_folder, formats=['png','npy'], basename=False)
-            self.mask_map = {os.path.splitext(os.path.basename(f))[0]: f for f in self.mask_names}
-        else:
-            self.mask_names = []
-            self.mask_map = {}
 
     def name_selected(self):
         self.n = self.files_list.currentRow()
@@ -534,13 +537,16 @@ class CrackToolsApplication(Ui_MainWindow):
         self.image = cv2.imread(self.name)[:,:,::-1].astype(np.uint8)
         self.original_image = self.image.copy()
         self.filename_label_2.setText(os.path.basename(self.name))
-
         base_name = os.path.splitext(os.path.basename(self.name))[0]
 
-        # ---- MASK LOADING: Try to load from mask folder if set ----
+        # ---- MASK LOADING (if you want to use it later in the pipeline only) ----
         self.current_mask = None
+        print(self.use_masks)
+        print(self.mask_map)
         if getattr(self, "use_masks", False) and hasattr(self, "mask_map"):
+            print("[change_image] Using mask for image:", base_name)
             mask_path = self.mask_map.get(base_name)
+            print(mask_path)
             if mask_path:
                 if mask_path.endswith('.npy'):
                     mask = np.load(mask_path)
@@ -554,54 +560,179 @@ class CrackToolsApplication(Ui_MainWindow):
             else:
                 print(f"[change_image] No mask found for image: {base_name}")
 
-        # ---- DISPLAY: If mask present, overlay mask in red ----
+        # ---- Start with original image ----
         im = self.original_image.copy()
-        if self.current_mask is not None:
-            overlay = im.copy()
-            mask_rgb = np.zeros_like(im)
-            mask_rgb[...,0] = self.current_mask * 255
-            alpha = 0.4
-            im = cv2.addWeighted(overlay, 1.0, mask_rgb, alpha, 0)
+
+        # -------- Load annotation data as before --------
+        self.ann_name = os.path.join(self.save_folder, base_name + '.json')
+        self.mask_name_bin = os.path.join(self.save_folder, base_name + '_mask.png')
+        self.mask_name_255 = os.path.join(self.save_folder, base_name + '_mask255.png')
+        self.mask = []
+        self.user_points = []
+        self.user_connections = []
+        self.endpoint_pairs = []
+
+        # Always draw annotation segmentations and connections!
+        if os.path.exists(self.ann_name):
+            with open(self.ann_name) as f:
+                self.annotation = json.load(f)
+            ann = self.annotation.get('annotations', {})
+            self.user_points = ann.get('user_points', None)
+            self.user_connections = ann.get('user_connections', None)
+            if self.user_points and self.user_connections:
+                self.endpoint_pairs = [[a, b] for a, b in self.user_connections]
+                for pt1, pt2 in self.user_connections:
+                    cv2.line(im,
+                        (int(round(pt1[0])), int(round(pt1[1]))),
+                        (int(round(pt2[0])), int(round(pt2[1]))),
+                        (255, 0, 255), 2)
+
+            # --- Draw annotation masks (segmentations) ---
+            # Priority: 'all_masks' -> 'crack_pixels'
+            if 'all_masks' in ann:
+                all_masks = ann['all_masks']
+                for m_arr in all_masks:
+                    mask = np.array(m_arr, dtype=np.uint8)
+                    if mask.shape == im.shape[:2]:
+                        # Option 1: show boundary as in mark_boundaries (classic)
+                        from skimage.segmentation import mark_boundaries
+                        im = (mark_boundaries(im / 255.0, mask, color=(1,0,0), background_label=0)*255).astype(np.uint8)
+                        self.mask.append(mask)
+            elif 'crack_pixels' in ann:
+                crack_pixels = ann['crack_pixels']
+                if crack_pixels:
+                    mask = np.zeros(im.shape[:2], dtype=np.uint8)
+                    c = np.array(crack_pixels)
+                    if c.size > 0:
+                        mask[list(c[:, 0]), list(c[:, 1])] = 1
+                        from skimage.segmentation import mark_boundaries
+                        im = (mark_boundaries(im / 255.0, mask, color=(1,0,0), background_label=0)*255).astype(np.uint8)
+                        self.mask.append(mask)
+
+            # --- Draw bounding boxes ---
+            if 'box' in ann:
+                for key in ann['box'].keys():
+                    box_data = ann['box'][key]
+                    bb_pts = np.array(box_data['bounding_box'])
+                    if box_data['class'] == 0:
+                        box_color = (0,0,255)
+                    elif box_data['class'] == 1:
+                        box_color = (0,255,0)
+                    else:
+                        box_color = (255,0,0)
+                    cv2.rectangle(im, tuple(bb_pts[0]), tuple(bb_pts[1]), box_color, 1)
+
+        # ---- Now show the image with overlays ----
         qimage = QImage(im.astype(np.uint8), im.shape[1], im.shape[0],
                         im.strides[0], QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(qimage)
         scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
         self.ImageScreen.setPixmap(scaled_pixmap)
+        
+    '''def change_image(self):
+        self.bb_pts_list = []  # Reset on image load!
+        w = self.segment_width_box_2.value()
+        if self.track_color_box.currentText() == "R":
+            color = (1,0,0)
+        elif self.track_color_box.currentText() == "G":
+            color = (0,1,0)
+        elif self.track_color_box.currentText() == "B":
+            color = (0,0,1)
+        elif self.track_color_box.currentText() == "W":
+            color = (1,1,1)
+        self.update_selected_item(os.path.basename(self.image_names[self.n]))
+        self.name = self.image_names[self.n]
+        self.image = cv2.imread(self.name)[:,:,::-1].astype(np.uint8)
+        self.original_image = self.image.copy()
+        self.filename_label_2.setText(os.path.basename(self.name))
 
-        # -------- Load annotation data as before, but ignore mask if mask folder used --------
+        im = self.original_image.astype(np.uint8)
+        qimage = QImage(im, im.shape[1], im.shape[0], 
+                        im.strides[0], QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimage)
+        scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+        self.ImageScreen.setPixmap(scaled_pixmap)
+
+        # This gets the base filename with no extension, e.g. "IMG_003"
+        base_name = os.path.splitext(os.path.basename(self.name))[0]
+        #print(base_name)
+        # Path for json file in save folder
         self.ann_name = os.path.join(self.save_folder, base_name + '.json')
+        # Paths for mask outputs
         self.mask_name_bin = os.path.join(self.save_folder, base_name + '_mask.png')
         self.mask_name_255 = os.path.join(self.save_folder, base_name + '_mask255.png')
         if os.path.exists(self.ann_name):
             with open(self.ann_name) as f:
                 self.annotation = json.load(f)
-            # -- Only load annotation masks if not using mask folder --
-            if not getattr(self, "use_masks", False):
-                self.mask = []
-                ann = self.annotation.get('annotations', {})
-                self.user_points = ann.get('user_points', None)
-                self.user_connections = ann.get('user_connections', None)
+            # ---- ADD THIS BLOCK ----
+            # Always reconstruct self.mask from crack_pixels when loading!
+            self.mask = []
+            ann = self.annotation.get('annotations', {})
+            self.user_points = ann.get('user_points', None)
+            self.user_connections = ann.get('user_connections', None)
 
-                if self.user_points and self.user_connections:
-                    self.endpoint_pairs = [[a, b] for a, b in self.user_connections]
-                    for pt1, pt2 in self.user_connections:
-                        cv2.line(self.image,
-                                (int(round(pt1[0])), int(round(pt1[1]))),
-                                (int(round(pt2[0])), int(round(pt2[1]))),
-                                (255, 0, 255), 2)
+            if self.user_points and self.user_connections:
+                #print([(a,b) for a,b in self.user_connections], self.user_connections)
+                self.endpoint_pairs = [[a, b] for a, b in self.user_connections]
+                for pt1, pt2 in self.user_connections:
+                    cv2.line(self.image,
+                            (int(round(pt1[0])), int(round(pt1[1]))),
+                            (int(round(pt2[0])), int(round(pt2[1]))),
+                            (255, 0, 255), 2)
 
-                if 'annotations' in self.annotation and 'all_masks' in self.annotation['annotations']:
-                    all_masks = self.annotation['annotations']['all_masks']
-                    for m_arr in all_masks:
-                        self.mask.append(np.array(m_arr, dtype=np.uint8))
-                elif 'annotations' in self.annotation and 'crack_pixels' in self.annotation['annotations']:
+            if 'annotations' in self.annotation and 'all_masks' in self.annotation['annotations']:
+                all_masks = self.annotation['annotations']['all_masks']
+                for m_arr in all_masks:
+                    self.mask.append(np.array(m_arr, dtype=np.uint8))
+            elif 'annotations' in self.annotation and 'crack_pixels' in self.annotation['annotations']:
+                crack_pixels = self.annotation['annotations']['crack_pixels']
+                if crack_pixels:
+                    m = np.zeros((self.image.shape[0], self.image.shape[1]), dtype=np.uint8)
+                    c = np.array(crack_pixels)
+                    if c.size > 0:
+                        m[list(c[:, 0]), list(c[:, 1])] = 1
+                        self.mask.append(m)
+            # ------------------------
+            if 'annotations' in self.annotation.keys():
+                # ... (keep the rest of your block unchanged)
+                if 'crack_pixels' in self.annotation['annotations'].keys():
                     crack_pixels = self.annotation['annotations']['crack_pixels']
-                    if crack_pixels:
-                        m = np.zeros((self.image.shape[0], self.image.shape[1]), dtype=np.uint8)
+                    if crack_pixels != []:
+                        mask = np.zeros((self.image.shape[0],self.image.shape[1]))
                         c = np.array(crack_pixels)
-                        if c.size > 0:
-                            m[list(c[:, 0]), list(c[:, 1])] = 1
-                            self.mask.append(m)
+                        mask[list(c[:,0]),list(c[:,1])] = 1
+                        # p = np.argwhere(mask==1)
+                        self.image = (mark_boundaries(self.image/255, mask,
+                                                            color=color, mode='inner', background_label=1)*255).astype(np.uint8)
+                        
+                        im = self.image.copy()
+                        im = im.astype(np.uint8)
+                        qimage = QImage(im, im.shape[1], im.shape[0], 
+                            im.strides[0], QImage.Format_RGB888)
+                        pixmap = QPixmap.fromImage(qimage)
+                        scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+                        self.ImageScreen.setPixmap(scaled_pixmap)
+                if 'box' in self.annotation['annotations'].keys():
+                    for key in self.annotation['annotations']['box'].keys():
+                        if self.annotation['annotations']['box'][key]['class'] == 0:
+                            color = (0,0,255)
+                        elif self.annotation['annotations']['box'][key]['class'] == 1:
+                            color = (0,255,0)
+                        else:
+                            color = (255,0,0)
+                        bb_pts = np.array(self.annotation['annotations']['box'][key]['bounding_box'])
+                        cv2.line(self.image,(bb_pts[0,0],bb_pts[0,1]),(bb_pts[1,0],bb_pts[0,1]),color,5)
+                        cv2.line(self.image,(bb_pts[0,0],bb_pts[0,1]),(bb_pts[0,0],bb_pts[1,1]),color,5)
+                        cv2.line(self.image,(bb_pts[1,0],bb_pts[1,1]),(bb_pts[0,0],bb_pts[1,1]),color,5)
+                        cv2.line(self.image,(bb_pts[1,0],bb_pts[1,1]),(bb_pts[1,0],bb_pts[0,1]),color,5)
+                        im = self.image.astype(np.uint8)
+                        qimage = QImage(im, im.shape[1], im.shape[0], 
+                            im.strides[0], QImage.Format_RGB888)
+                        pixmap = QPixmap.fromImage(qimage)
+                        scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+                        self.ImageScreen.setPixmap(scaled_pixmap)
+                else:
+                    self.annotation['annotations']['box'] = {}
         else:
             self.annotation = {}
             self.annotation['image_name'] = self.name
@@ -609,8 +740,7 @@ class CrackToolsApplication(Ui_MainWindow):
             self.annotation["annotations"]["cracks end-points"] = []
             self.annotation["annotations"]["crack_pixels"] = []
             self.annotation["annotations"]['tracks'] = []
-            self.annotation["annotations"]['box'] = {}
-
+            self.annotation["annotations"]['box'] = {}'''
 
     def next_image(self):
         try:
@@ -1373,7 +1503,7 @@ class CrackToolsApplication(Ui_MainWindow):
 
         fig.show()
 
-    def update_cost(self):
+    '''def update_cost(self):
         try:
             self.update_cost_bar.setValue(0)
             lambdaa = self.lambda_box.value()
@@ -1408,7 +1538,7 @@ class CrackToolsApplication(Ui_MainWindow):
             self.midline_track_button.setStyleSheet("background-color : lightblue")
         except Exception as e:
             error(e)
-            self.midline_track_button.setStyleSheet("background-color : red")
+            self.midline_track_button.setStyleSheet("background-color : red")'''
     
     def update_cost(self):
         try:
@@ -1420,29 +1550,95 @@ class CrackToolsApplication(Ui_MainWindow):
             sigmas = self.sigmas_line_edit.text()
             sigmas = [float(i) for i in sigmas.split(sep = ',')]
             sigmas_ext = 1
+
             start_time = time.time()
-            self.multiscalecostLIFExtReg = ct.os.MultiScaleVesselness(self.osGFCost.real,ksi,1,sigmas,"LIF",sigmas_ext = sigmas_ext)
+            self.multiscalecostLIFExtReg = ct.os.MultiScaleVesselness(
+                self.osGFCost.real, ksi, 1, sigmas, "LIF", sigmas_ext=sigmas_ext
+            )
             print(f"MultiScaleVesselness took {time.time() - start_time:.2f} seconds")
-            
+
             start_time = time.time()
             costmultiscale = ct.os.MultiScaleVesselnessFilter(self.multiscalecostLIFExtReg)
             print(f"MultiScaleVesselnessFilter took {time.time() - start_time:.2f} seconds")
+
             start_time = time.time()
-            costFunction = ct.os.CostFunction(costmultiscale,lambdaa = lambdaa, p = p)
+            costFunction = ct.os.CostFunction(costmultiscale, lambdaa=lambdaa, p=p)
             print(f"CostFunction took {time.time() - start_time:.2f} seconds")
-            
-            # If using a mask, multiply costFunction so cost is high outside mask
+
+            # --- Mask Application with crop/downsample ---
+            show_mask_instead = getattr(self, "use_masks", False) and self.current_mask is not None
+
+            # --- Always generate mask_bin if using masks ---
+            mask_bin = None
             if getattr(self, "use_masks", False) and self.current_mask is not None:
                 mask_bin = (self.current_mask > 0).astype(np.uint8)
-                mask3d = mask_bin[None, :, :]
+                # Crop to active bbox if set
+                if hasattr(self, "active_bbox"):
+                    xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
+                    mask_bin = mask_bin[ymin:ymax, xmin:xmax]
+                # Downsample to image_crop_down if set
+                if hasattr(self, "image_crop_down"):
+                    target_shape = self.image_crop_down.shape[:2]
+                    if mask_bin.shape != target_shape:
+                        factor_y = mask_bin.shape[0] // target_shape[0]
+                        factor_x = mask_bin.shape[1] // target_shape[1]
+                        if factor_y > 1 and factor_x > 1:
+                            from skimage.measure import block_reduce
+                            mask_bin = block_reduce(mask_bin, block_size=(factor_y, factor_x), func=np.max)
+                        if mask_bin.shape != target_shape:
+                            import cv2
+                            mask_bin = cv2.resize(mask_bin, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_NEAREST)
+                # Final resize to match costFunction
+                if costFunction.ndim == 3:
+                    N, H, W = costFunction.shape
+                    if mask_bin.shape != (H, W):
+                        mask_bin = cv2.resize(mask_bin, (W, H), interpolation=cv2.INTER_NEAREST)
+                    mask3d = np.broadcast_to(mask_bin, (N, H, W))
+                elif costFunction.ndim == 2:
+                    H, W = costFunction.shape
+                    if mask_bin.shape != (H, W):
+                        mask_bin = cv2.resize(mask_bin, (W, H), interpolation=cv2.INTER_NEAREST)
+                    mask3d = mask_bin
+                else:
+                    raise RuntimeError("Unexpected costFunction shape: %s" % repr(costFunction.shape))
+
+            # --- Show the mask instead of the costmap if requested ---
+            if show_mask_instead:
+                if mask_bin is not None:
+                    debug_img = (1 - mask_bin) * 255  # crack=0 (black), non-crack=255 (white)
+                    # Dummy costFunction for the pipeline
+                    if costFunction.ndim == 3:
+                        self.costFunction = mask3d * 1.0 + (1 - mask3d) * 1e6
+                    else:
+                        self.costFunction = mask3d * 1.0 + (1 - mask3d) * 1e6
+                else:
+                    # fallback, shouldn't happen, but safe
+                    debug_img = np.ones((costFunction.shape[-2], costFunction.shape[-1]), dtype=np.uint8) * 255
+                    self.costFunction = np.ones_like(costFunction) * 1e6
+
+                print("Displaying binary mask instead of costmap. debug_img shape:", debug_img.shape)
+                qimage = QImage(debug_img.astype(np.uint8), debug_img.shape[1], debug_img.shape[0],
+                                debug_img.strides[0], QImage.Format_Grayscale8)
+                pixmap = QPixmap.fromImage(qimage)
+                scaled_pixmap = pixmap.scaled(self.cost_display.width(), self.cost_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+                self.cost_display.setPixmap(scaled_pixmap)
+                self.update_cost_bar.setValue(100)
+                self.midline_track_button.setStyleSheet("background-color : lightblue")
+                return  # Now you can return safely
+
+            # --- (Normal) Mask Application: make outside mask high cost, proceed as usual ---
+            if getattr(self, "use_masks", False) and self.current_mask is not None and mask_bin is not None:
                 costFunction = costFunction * mask3d + (1 - mask3d) * 1e6
-            
+
             self.costFunction = costFunction
 
             c00 = np.min(ct.os.Rescale(self.costFunction), axis=0)
             self.update_cost_bar.setValue(100)
             c00 = c00 - np.min(c00)
-            c00 = (c00*255/np.max(c00)).astype(dtype=np.uint8)
+            if np.max(c00) > 0:
+                c00 = (c00*255/np.max(c00)).astype(dtype=np.uint8)
+            else:
+                c00 = np.zeros_like(c00, dtype=np.uint8)
             print("c00 shape:", c00.shape)
             qimage = QImage(c00.astype(dtype=np.uint8), c00.shape[1], c00.shape[0], 
                             c00.strides[0], QImage.Format_Grayscale8)
@@ -2055,12 +2251,13 @@ class CrackToolsApplication(Ui_MainWindow):
             self.save_annotation()
             self.change_image()
             
-    def run_os_cost(self):
+    def update_os_cost(self):
         """
         Runs the OS and cost function generation for the current image.
         This is a helper function to quickly generate the OS and cost without running the full pipeline.
         """
         try:
+            self.update_image_crop()  # Ensure the crop is set correctly
             self.update_os()
             self.update_cost()
             print("OS and cost function generated successfully.")
