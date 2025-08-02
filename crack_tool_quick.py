@@ -52,7 +52,7 @@ class CrackAnnotator(QtWidgets.QWidget):
         # Annotation state
         self.points = list(initial_points) if initial_points else []
         self.connections = list(initial_connections) if initial_connections else []
-        print(self.points, self.connections)
+        #print(self.points, self.connections)
         h, w, _ = image.shape
         # --- Adaptive point radius ---
         min_dim = min(w, h)
@@ -1376,7 +1376,7 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
 
-    def update_os(self):
+    '''def update_os(self):
         try:
             self.os_progress_bar.setValue(0)
             color_channel = [0 if self.color_chenel_box.currentText()=='R' else 1 if self.color_chenel_box.currentText()=='B' else 2][0]
@@ -1397,6 +1397,49 @@ class CrackToolsApplication(Ui_MainWindow):
                                             inflectionPoint = inflectionPoint, mnOrder = mnOrder, 
                                             splineOrder = splineOrder, overlapFactor = overlapFactor, 
                                             dcStdDev = dcStdDev, directional = directional)
+            print(f"OrientationScoreTransform time: {time() - start_time}")
+            self.os_progress_bar.setValue(100)
+            self.update_cost_button.setStyleSheet("background-color : lightblue")
+            self.show_os_button.setStyleSheet("background-color : lightblue")
+        except Exception as e:
+            error(e)
+            self.update_cost_button.setStyleSheet("background-color : red")
+            self.show_os_button.setStyleSheet("background-color : red")'''
+
+    def update_os(self):
+        try:
+            self.os_progress_bar.setValue(0)
+            color_channel = [0 if self.color_chenel_box.currentText()=='R' else 1 if self.color_chenel_box.currentText()=='B' else 2][0]
+            black_crack = -1 if self.crack_color_box.currentText() =='Bright crack' else 1
+            size = self.wavelet_size_box.value()
+            nOrientations = self.wavelet_norientations_box.value()
+            design = "N"
+            inflectionPoint = self.wavelet_inflection_point_box.value()
+            mnOrder = self.wavelet_mnorder_box.value()
+            splineOrder = 3
+            overlapFactor = self.wavelet_overlap_factor_box.value()
+            dcStdDev = self.wavelet_STD_box.value()
+            directional = False
+            from time import time
+            start_time = time()
+
+            # --- Use the full downsampled image for OS ---
+            img_full = self.image_crop_down[:,:,color_channel].copy()  # shape (H_full, W_full)
+
+            # --- Compute the orientation score on the full downsampled image ---
+            os_full = ct.os.OrientationScoreTransform(
+                img_full / 255 * black_crack, size=size, nOrientations=nOrientations,
+                design=design, inflectionPoint=inflectionPoint, mnOrder=mnOrder,
+                splineOrder=splineOrder, overlapFactor=overlapFactor,
+                dcStdDev=dcStdDev, directional=directional
+            )
+            
+            mask_bin = (self.current_mask > 0)
+            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
+            mask_cropped = mask_bin[ymin:ymax, xmin:xmax]
+            mask3d = np.broadcast_to(mask_cropped, os_full.shape)
+            self.osGFCost = np.where(mask3d, os_full, 0)  # or use a large negative value
+
             print(f"OrientationScoreTransform time: {time() - start_time}")
             self.os_progress_bar.setValue(100)
             self.update_cost_button.setStyleSheet("background-color : lightblue")
@@ -1503,7 +1546,7 @@ class CrackToolsApplication(Ui_MainWindow):
 
         fig.show()
 
-    '''def update_cost(self):
+    def update_cost(self):
         try:
             self.update_cost_bar.setValue(0)
             lambdaa = self.lambda_box.value()
@@ -1530,106 +1573,6 @@ class CrackToolsApplication(Ui_MainWindow):
             c00 = (c00*255/np.max(c00)).astype(dtype=np.uint8)
             print("c00 shape:", c00.shape)
             qimage = QImage(c00.astype(dtype=np.uint8), c00.shape[1], c00.shape[0], 
-                            c00.strides[0], QImage.Format_Grayscale8)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.cost_display.width(), self.cost_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.cost_display.setPixmap(scaled_pixmap)
-            print("c00 shape:", c00.shape)
-            self.midline_track_button.setStyleSheet("background-color : lightblue")
-        except Exception as e:
-            error(e)
-            self.midline_track_button.setStyleSheet("background-color : red")'''
-    
-    def update_cost(self):
-        try:
-            self.update_cost_bar.setValue(0)
-            lambdaa = self.lambda_box.value()
-            p = self.power_box.value()
-            ksi = 1
-            zeta = 1
-            sigmas = self.sigmas_line_edit.text()
-            sigmas = [float(i) for i in sigmas.split(sep=',')]
-            sigmas_ext = 1
-
-            start_time = time.time()
-            self.multiscalecostLIFExtReg = ct.os.MultiScaleVesselness(
-                self.osGFCost.real, ksi, 1, sigmas, "LIF", sigmas_ext=sigmas_ext
-            )
-            print(f"MultiScaleVesselness took {time.time() - start_time:.2f} seconds")
-
-            start_time = time.time()
-            costmultiscale = ct.os.MultiScaleVesselnessFilter(self.multiscalecostLIFExtReg)
-            print(f"MultiScaleVesselnessFilter took {time.time() - start_time:.2f} seconds")
-
-            start_time = time.time()
-            costFunction = ct.os.CostFunction(costmultiscale, lambdaa=lambdaa, p=p)
-            print(f"CostFunction took {time.time() - start_time:.2f} seconds")
-
-            # --- Prepare mask if needed ---
-            mask_bin = None
-            mask3d = None
-            if getattr(self, "use_masks", False) and self.current_mask is not None:
-                mask_bin = (self.current_mask > 0).astype(np.uint8)
-                # Crop to active bbox if set
-                if hasattr(self, "active_bbox"):
-                    xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
-                    mask_bin = mask_bin[ymin:ymax, xmin:xmax]
-                # Downsample to image_crop_down if set
-                if hasattr(self, "image_crop_down"):
-                    target_shape = self.image_crop_down.shape[:2]
-                    if mask_bin.shape != target_shape:
-                        factor_y = mask_bin.shape[0] // target_shape[0]
-                        factor_x = mask_bin.shape[1] // target_shape[1]
-                        if factor_y > 1 and factor_x > 1:
-                            from skimage.measure import block_reduce
-                            mask_bin = block_reduce(mask_bin, block_size=(factor_y, factor_x), func=np.max)
-                        if mask_bin.shape != target_shape:
-                            import cv2
-                            mask_bin = cv2.resize(mask_bin, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_NEAREST)
-                # Final resize to match costFunction
-                if costFunction.ndim == 3:
-                    N, H, W = costFunction.shape
-                    if mask_bin.shape != (H, W):
-                        mask_bin = cv2.resize(mask_bin, (W, H), interpolation=cv2.INTER_NEAREST)
-                    mask3d = np.broadcast_to(mask_bin, (N, H, W))
-                elif costFunction.ndim == 2:
-                    H, W = costFunction.shape
-                    if mask_bin.shape != (H, W):
-                        mask_bin = cv2.resize(mask_bin, (W, H), interpolation=cv2.INTER_NEAREST)
-                    mask3d = mask_bin
-                else:
-                    raise RuntimeError("Unexpected costFunction shape: %s" % repr(costFunction.shape))
-
-            # --- Modify costFunction: keep original INSIDE mask, set to 1.0 OUTSIDE ---
-            if mask3d is not None:
-                costFunction = np.where(mask3d == 1, costFunction, 1.0)
-
-            # --- Show the mask instead of the costmap if requested ---
-            show_mask_instead = getattr(self, "use_masks", False) and self.current_mask is not None and getattr(self, "show_mask_preview", False)
-            if show_mask_instead:
-                debug_img = (1 - mask_bin) * 255  # crack=0 (black), non-crack=255 (white)
-                print("Displaying binary mask instead of costmap. debug_img shape:", debug_img.shape)
-                qimage = QImage(debug_img.astype(np.uint8), debug_img.shape[1], debug_img.shape[0],
-                                debug_img.strides[0], QImage.Format_Grayscale8)
-                pixmap = QPixmap.fromImage(qimage)
-                scaled_pixmap = pixmap.scaled(self.cost_display.width(), self.cost_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-                self.cost_display.setPixmap(scaled_pixmap)
-                self.update_cost_bar.setValue(100)
-                self.midline_track_button.setStyleSheet("background-color : lightblue")
-                self.costFunction = costFunction  # keep the right costFunction for pipeline!
-                return
-
-            # --- Normal costmap display (min over orientations, as before) ---
-            self.costFunction = costFunction
-            c00 = np.min(ct.os.Rescale(self.costFunction), axis=0)
-            self.update_cost_bar.setValue(100)
-            c00 = c00 - np.min(c00)
-            if np.max(c00) > 0:
-                c00 = (c00 * 255 / np.max(c00)).astype(dtype=np.uint8)
-            else:
-                c00 = np.zeros_like(c00, dtype=np.uint8)
-            print("c00 shape:", c00.shape)
-            qimage = QImage(c00.astype(dtype=np.uint8), c00.shape[1], c00.shape[0],
                             c00.strides[0], QImage.Format_Grayscale8)
             pixmap = QPixmap.fromImage(qimage)
             scaled_pixmap = pixmap.scaled(self.cost_display.width(), self.cost_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)

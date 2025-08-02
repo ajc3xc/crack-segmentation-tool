@@ -240,10 +240,10 @@ def OrientationScoreTransform(im, size, nOrientations, design = "N", inflectionP
                      np.ceil((im.shape[1]-cws.shape[2])/2).astype(int)]), mode='constant')
     os = WaveletTransform2D(cp.asarray(im), cp.asarray(cwsP.real))
     print(f"Wavelet Transform 2D time: {time() - start_time}")
-    print(os.shape)
+    #print(os.shape)
     os = os[:,size:-size,size:-size]
-    print(im.shape, os.shape)
-    return os
+    #print(im.shape, os.shape)
+    return os.get()
 
 def WaveletTransform2D(im, kernels):
     # im: shape (H, W)
