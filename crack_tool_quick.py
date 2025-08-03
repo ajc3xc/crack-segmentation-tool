@@ -265,7 +265,6 @@ class CrackToolsApplication(Ui_MainWindow):
         self.midline_track_button.clicked.connect(self.midline_tracking)
         self.edge_mask_button.clicked.connect(self.edge_mask)
         self.edge_tracks_button.clicked.connect(self.edge_tracking)
-        self.mask_pipeline_button.clicked.connect(self.run_mask_pipeline)
         # self.save_current_segment_button.clicked.connect(self.save_current_segment)
 
         # Hide step-by-step buttons not needed anymore
@@ -308,7 +307,7 @@ class CrackToolsApplication(Ui_MainWindow):
         self.save_current_segment_button.setStyleSheet("background-color : red")
         self.draw_segment_button.setStyleSheet("background-color : red")
         self.show_os_button.setStyleSheet("background-color : red")
-        self.mask_pipeline_button.setStyleSheet("background-color : red")
+        #self.mask_pipeline_button.setStyleSheet("background-color : red")
 
     def clear_user_annotations(self):
         """Clears all user-drawn endpoints and connections, then refreshes the image."""
@@ -571,6 +570,7 @@ class CrackToolsApplication(Ui_MainWindow):
         self.user_points = []
         self.user_connections = []
         self.endpoint_pairs = []
+        self.annotation = {}
 
         # Always draw annotation segmentations and connections!
         if os.path.exists(self.ann_name):
@@ -620,7 +620,7 @@ class CrackToolsApplication(Ui_MainWindow):
                         box_color = (0,255,0)
                     else:
                         box_color = (255,0,0)
-                    cv2.rectangle(im, tuple(bb_pts[0]), tuple(bb_pts[1]), box_color, 1)
+                    cv2.rectangle(im, tuple(bb_pts[0]), tuple(bb_pts[1]), box_color, 2)
 
         # ---- Now show the image with overlays ----
         qimage = QImage(im.astype(np.uint8), im.shape[1], im.shape[0],
@@ -1427,18 +1427,18 @@ class CrackToolsApplication(Ui_MainWindow):
             img_full = self.image_crop_down[:,:,color_channel].copy()  # shape (H_full, W_full)
 
             # --- Compute the orientation score on the full downsampled image ---
-            os_full = ct.os.OrientationScoreTransform(
+            os_results = ct.os.OrientationScoreTransform(
                 img_full / 255 * black_crack, size=size, nOrientations=nOrientations,
                 design=design, inflectionPoint=inflectionPoint, mnOrder=mnOrder,
                 splineOrder=splineOrder, overlapFactor=overlapFactor,
                 dcStdDev=dcStdDev, directional=directional
             )
-            
-            mask_bin = (self.current_mask > 0)
+            '''mask_bin = (self.current_mask > 0)
             xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
             mask_cropped = mask_bin[ymin:ymax, xmin:xmax]
-            mask3d = np.broadcast_to(mask_cropped, os_full.shape)
-            self.osGFCost = np.where(mask3d, os_full, 0)  # or use a large negative value
+            mask3d = np.broadcast_to(mask_cropped, os_results.shape)
+            os_results = np.where(mask3d, os_results, 0)'''
+            self.osGFCost = os_results
 
             print(f"OrientationScoreTransform time: {time() - start_time}")
             self.os_progress_bar.setValue(100)
@@ -1566,6 +1566,18 @@ class CrackToolsApplication(Ui_MainWindow):
             start_time = time.time()
             self.costFunction = ct.os.CostFunction(costmultiscale,lambdaa = lambdaa, p = p)
             print(f"CostFunction took {time.time() - start_time:.2f} seconds")
+
+            if getattr(self, 'current_mask', None) is not None and self.current_mask is not None:
+                # Sharpen cost inside mask
+                improved_cost = self.costFunction ** 2.0  # (You can tune the exponent as needed)
+                # If mask exists, apply it to the cost function
+                mask_bin = (self.current_mask > 0)
+                xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
+                mask_cropped = mask_bin[ymin:ymax, xmin:xmax]
+                mask3d = np.broadcast_to(mask_cropped, self.costFunction.shape)
+                PENALTY = 5.0
+                improved_cost = np.where(mask3d, improved_cost, np.clip(improved_cost * PENALTY, 0, 1))
+            self.costFunction = improved_cost
             c00 = np.min(ct.os.Rescale(self.costFunction),axis = 0)
             #c00 = np.max(ct.os.Rescale(self.costFunction), axis=0)
             self.update_cost_bar.setValue(100)
@@ -1810,55 +1822,6 @@ class CrackToolsApplication(Ui_MainWindow):
             plt.show()
         except Exception as e:
             error(e)
-
-    '''def save_current_segment(self):
-        try:
-            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
-
-            # Coordinates for mask must be relative to the crop
-            edge_x_crop = np.concatenate((self.track_e1[1][::-1], self.track_e2[1]))
-            edge_y_crop = np.concatenate((self.track_e1[0][::-1], self.track_e2[0]))
-
-            mask_crop = ct.segmentation.create_mask(
-                self.image_crop,
-                edge_y_crop, edge_x_crop  # NB: some libraries expect (row, col)
-            )
-
-            # Now paste the crop mask into the correct region in the full image
-            full_mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
-            h, w = mask_crop.shape
-            full_mask[ymin:ymin+h, xmin:xmin+w] = mask_crop
-
-            self.mask.append(full_mask)
-            track = [list(x) for x in self.track]
-
-            self.cracks_stored_endpoints[len(self.cracks_stored_endpoints.keys())] = [
-                (self.pts[0][0] + xmin, self.pts[0][1] + ymin),
-                (self.pts[1][0] + xmin, self.pts[1][1] + ymin)
-            ]
-            self.crack_tracks[len(self.crack_tracks)] = track
-
-            m = np.sum(np.array(self.mask), axis=0)
-            m[m >= 1] = 255
-            m = m.astype(dtype=np.uint8)
-            qimage = QImage(m.astype(dtype=np.uint8), m.shape[1], m.shape[0],
-                            m.strides[0], QImage.Format_Grayscale8)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.all_segments_display.width(), self.all_segments_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.all_segments_display.setPixmap(scaled_pixmap)
-
-            # For display, shift polylines to full image
-            pts1 = (np.array(self.track_e1).transpose(1, 0) + np.array([xmin, ymin])).reshape((-1, 1, 2)).astype(np.int32)
-            pts2 = (np.array(self.track_e2).transpose(1, 0) + np.array([xmin, ymin])).reshape((-1, 1, 2)).astype(np.int32)
-            im = self.image.astype(np.uint8).copy()
-            im = cv2.polylines(im, [pts1], False, (0, 255, 0), 1)
-            im = cv2.polylines(im, [pts2], False, (0, 255, 0), 1)
-            self.image = im
-
-            self.save_annotation()
-
-        except Exception as e:
-            error(e)'''
 
     def save_current_segment(self):
         try:
@@ -2117,8 +2080,6 @@ class CrackToolsApplication(Ui_MainWindow):
                 self.update_cost()
                 print(f"cost time: {time() - start_time:.2f} seconds")
                 print(np.unique(self.costFunction), self.costFunction.shape)
-                return
-
                 # --- Now do midline/edge/save for EACH pair in this box ---
                 for idx, pair in enumerate(pairs):
                     print(f"  > Branch {idx+1}/{len(pairs)} in box: endpoints {pair}")
@@ -2137,6 +2098,7 @@ class CrackToolsApplication(Ui_MainWindow):
                         start_time = time()
                         self.midline_tracking()
                         print(f"    midline tracking time: {time() - start_time:.2f} seconds")
+                        return
                         print("    edge mask")
                         self.edge_mask()
                         print("    edge tracking")
@@ -2238,48 +2200,6 @@ class CrackToolsApplication(Ui_MainWindow):
             summary += f"\nErrors:\n" + "\n".join(errors)
         print(summary)
         QMessageBox.information(self.MainWindow, "Batch pipeline finished", summary)
-    
-    def run_mask_pipeline(self):
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        """
-        Runs the mask pipeline on all images in the selected folder.
-        This will generate masks for each image based on the existing annotations.
-        """
-        '''from PyQt5.QtWidgets import QMessageBox
-        
-        # Check existence and content
-        if not hasattr(self, "image_names") or not self.image_names:
-            QMessageBox.warning(self.MainWindow, "Mask Pipeline", "No images loaded. Please select a folder with images first.")
-            print("Mask pipeline aborted: no images loaded.")
-            return
-        
-        total = len(self.image_names)
-        errors = []
-        n_success = 0
-        orig_n = self.n
-
-        for idx, fname in enumerate(self.image_names):
-            try:
-                self.n = idx
-                self.change_image()
-                # Only run if cracks are present
-                cracks = getattr(self, "cracks_stored_endpoints", None)
-                if cracks:
-                    print(f"\n======= Processing image {idx+1}/{total}: {fname} =======")
-                    self.save_annotation()  # Save current state to ensure cracks are stored
-                    n_success += 1
-                else:
-                    print(f"  [SKIP] No cracks for this image.")
-            except Exception as e:
-                errors.append(f"Image {fname}: {e}")
-
-        self.n = orig_n
-        self.change_image()
-        summary = f"Mask pipeline run complete.\nSuccessful: {n_success}/{total}\n"
-        if errors:
-            summary += f"\nErrors:\n" + "\n".join(errors)
-        print(summary)
-        QMessageBox.information(self.MainWindow, "Mask pipeline finished", summary)''' 
 
 if __name__ == "__main__":
     import sys

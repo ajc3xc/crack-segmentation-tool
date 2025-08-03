@@ -390,7 +390,7 @@ def ReedsSheppMetricGFOld(GF, dims, g11, g22, g33):
     return M
 
 from time import time
-def fast_marching(os_cost,start_point,end_point,g11=1,g22=100,g33=100):
+def fast_marching(os_cost,start_point,end_point,g11=1,g22=25,g33=25):
     NxCost = os_cost.shape[1]
     NyCost = os_cost.shape[2]
     NoCost = os_cost.shape[0]
