@@ -176,7 +176,7 @@ def edge_masks(image_gray, track, window_half_size=40):
     edge_mask2 = -edge_mask1 - np.min(-edge_mask1)
     return edge_mask1, edge_mask2
 
-def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp,mu = 5,l = 1, p = 12):
+'''def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp,mu = 5,l = 1, p = 12):
     
     seeds = np.array([*pts_cropp[0][::-1]])
     tips = np.array([*pts_cropp[1][::-1]])
@@ -225,18 +225,193 @@ def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp,mu 
     # track_e2 = ct.tools.track_crop_to_full(geos2[0].T,pts[0],pts[1],y_margin,x_margin)
     track_e2 = geos2[0]
     
-    return [track_e1[:,0],track_e1[:,1]], [track_e2[:,0],track_e2[:,1]]
+    return [track_e1[:,0],track_e1[:,1]], [track_e2[:,0],track_e2[:,1]]'''
 
-'''def create_mask(image, x, y):
-    # x and y: concatenated as [top_edge (reversed), bottom_edge]
-    flat_x = np.array(x, dtype=np.int32)
-    flat_y = np.array(y, dtype=np.int32)
-    
-    # Make a (N, 2) array for points in (col, row) format
-    pts = np.vstack([flat_x, flat_y]).T.reshape((-1, 1, 2))
-    mask = np.zeros(image.shape[:2], dtype=np.uint8)
-    cv2.fillPoly(mask, [pts], 1)
-    return mask'''
+import numpy as np
+import scipy.ndimage
+from scipy.spatial import cKDTree
+
+def compute_tangent_normals(x, y):
+    dx = np.gradient(x)
+    dy = np.gradient(y)
+    norm = np.sqrt(dx**2 + dy**2) + 1e-8
+    tangent = np.stack([dx / norm, dy / norm], axis=1)
+    normal = np.stack([-dy / norm, dx / norm], axis=1)
+    return tangent, normal
+
+def nearest_edge_points_along_normal(mid_x, mid_y, edge_x, edge_y, search_radius=5):
+    tangent, normal = compute_tangent_normals(mid_x, mid_y)
+    edge_points = np.column_stack([edge_x, edge_y])
+    tree = cKDTree(edge_points)
+    matched_x = np.empty_like(mid_x)
+    matched_y = np.empty_like(mid_y)
+    for i, (x0, y0, nvec) in enumerate(zip(mid_x, mid_y, normal)):
+        rel = edge_points - np.array([x0, y0])
+        dist_along_normal = np.abs(rel @ nvec)
+        mask = dist_along_normal < search_radius
+        candidates = edge_points[mask]
+        if len(candidates) == 0:
+            dist, idx = tree.query([x0, y0], k=1)
+            matched_x[i], matched_y[i] = edge_points[idx]
+        else:
+            dists = np.linalg.norm(candidates - np.array([x0, y0]), axis=1)
+            j = np.argmin(dists)
+            matched_x[i], matched_y[i] = candidates[j]
+    return matched_x, matched_y
+
+'''def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp, mu=5, l=1, p=12, search_radius=5):
+    """
+    Compute edge tracks using Riemann2 geodesics and pair each midline point
+    to the nearest edge point along its normal (no interpolation, just nearest).
+    Returns: ([edge1_x, edge1_y], [edge2_x, edge2_y])
+    """
+    # --- Riemann metric setup ---
+    DxZ, DyZ = np.gradient(image_crop)
+    a11 = scipy.ndimage.gaussian_filter(mu * DxZ ** 2, 1)
+    a12 = scipy.ndimage.gaussian_filter(mu * DxZ * DyZ, 1)
+    a21 = a12
+    a22 = scipy.ndimage.gaussian_filter(mu * DyZ ** 2, 1)
+    df = np.stack([[1 + a11, a12], [a21, 1 + a22]], axis=0)
+
+    seeds = np.array([*pts_cropp[0][::-1]])
+    tips  = np.array([*pts_cropp[1][::-1]])
+    sides = np.array([[0, image_crop.shape[0]], [0, image_crop.shape[1]]])
+    dims  = np.array(image_crop.shape[:2])
+
+    # --- Compute midline geodesic (Riemann2) ---
+    metric_mid = Riemann(df)
+    hfmIn_mid = Eikonal.dictIn({
+        'model': 'Riemann2',
+        'seeds': np.expand_dims(seeds, axis=0),
+        'tips': np.expand_dims(tips, axis=0),
+        'metric': metric_mid,
+        'arrayOrdering': 'RowMajor'
+    })
+    hfmIn_mid.SetRect(sides=sides, dims=dims)
+    out_mid = hfmIn_mid.Run()
+    geos_mid = out_mid['geodesics'][0].T  # shape (N_mid, 2)
+    mid_y, mid_x = geos_mid[:,0], geos_mid[:,1]
+
+    # --- Compute edge tracks (Riemann2 geodesic) ---
+    m1 = edge_mask1_cropp.squeeze()
+    m2 = edge_mask2_cropp.squeeze()
+    metric1 = Riemann((1 + m1 * l)**p * df)
+    metric2 = Riemann((1 + m2 * l)**p * df)
+
+    def compute_edge_track(metric):
+        hfm = Eikonal.dictIn({
+            'model': 'Riemann2',
+            'seeds': np.expand_dims(seeds, axis=0),
+            'tips': np.expand_dims(tips, axis=0),
+            'metric': metric,
+            'arrayOrdering': 'RowMajor'
+        })
+        hfm.SetRect(sides=sides, dims=dims)
+        out = hfm.Run()
+        return out['geodesics'][0].T
+
+    geos1 = compute_edge_track(metric1)
+    geos2 = compute_edge_track(metric2)
+    e1_y, e1_x = geos1[:,0], geos1[:,1]
+    e2_y, e2_x = geos2[:,0], geos2[:,1]
+
+    # --- Pair midline to nearest edge points along normal (fast) ---
+    e1_x_matched, e1_y_matched = nearest_edge_points_along_normal(mid_x, mid_y, e1_x, e1_y, search_radius)
+    e2_x_matched, e2_y_matched = nearest_edge_points_along_normal(mid_x, mid_y, e2_x, e2_y, search_radius)
+
+    return [e1_x_matched, e1_y_matched], [e2_x_matched, e2_y_matched]'''
+import numpy as np
+from scipy.spatial import cKDTree
+import scipy.ndimage
+
+def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp, mu=5, l=1, p=12):
+    seeds = np.array([*pts_cropp[0][::-1]])
+    tips = np.array([*pts_cropp[1][::-1]])
+    b = np.array([0, image_crop.shape[0]])
+    c = np.array([0, image_crop.shape[1]])
+    sides = np.array([b, c])
+    dims = np.array([image_crop.shape[0], image_crop.shape[1]])
+
+    DxZ, DyZ = np.gradient(image_crop)
+    a11 = scipy.ndimage.gaussian_filter(mu * DxZ**2, 1, order=(0,0))
+    a12 = scipy.ndimage.gaussian_filter(mu * DxZ * DyZ, 1, order=(0,0))
+    a21 = scipy.ndimage.gaussian_filter(mu * DxZ * DyZ, 1, order=(0,0))
+    a22 = scipy.ndimage.gaussian_filter(mu * DyZ**2, 1, order=(0,0))
+    df = np.array([[1 + a11, a12], [a21, 1 + a22]])
+    metric1 = (1 + edge_mask1_cropp.squeeze() * l) ** p * df
+    metric2 = (1 + edge_mask2_cropp.squeeze() * l) ** p * df
+
+    # Geodesic edge tracks
+    metric = Riemann(metric1)
+    hfmIn = Eikonal.dictIn({
+        'model': 'Riemann2',
+        'seeds': np.expand_dims(seeds, axis=0),
+        'arrayOrdering': 'RowMajor',
+        'tips': np.expand_dims(tips, axis=0),
+        'metric': metric
+    })
+    hfmIn.SetRect(sides=sides, dims=dims)
+    hfmOut = hfmIn.Run()
+    track_e1 = [g.T for g in hfmOut['geodesics']][0]
+
+    metric = Riemann(metric2)
+    hfmIn = Eikonal.dictIn({
+        'model': 'Riemann2',
+        'seeds': np.expand_dims(seeds, axis=0),
+        'arrayOrdering': 'RowMajor',
+        'tips': np.expand_dims(tips, axis=0),
+        'metric': metric
+    })
+    hfmIn.SetRect(sides=sides, dims=dims)
+    hfmOut = hfmIn.Run()
+    track_e2 = [g.T for g in hfmOut['geodesics']][0]
+
+    print(f"track_e1: shape={track_e1.shape}, x=[{track_e1[:,1].min():.1f}, {track_e1[:,1].max():.1f}], y=[{track_e1[:,0].min():.1f}, {track_e1[:,0].max():.1f}]")
+    print(f"  sample start: ({track_e1[0,1]:.1f},{track_e1[0,0]:.1f}), middle: ({track_e1[len(track_e1)//2,1]:.1f},{track_e1[len(track_e1)//2,0]:.1f}), end: ({track_e1[-1,1]:.1f},{track_e1[-1,0]:.1f})")
+    print(f"track_e2: shape={track_e2.shape}, x=[{track_e2[:,1].min():.1f}, {track_e2[:,1].max():.1f}], y=[{track_e2[:,0].min():.1f}, {track_e2[:,0].max():.1f}]")
+    print(f"  sample start: ({track_e2[0,1]:.1f},{track_e2[0,0]:.1f}), middle: ({track_e2[len(track_e2)//2,1]:.1f},{track_e2[len(track_e2)//2,0]:.1f}), end: ({track_e2[-1,1]:.1f},{track_e2[-1,0]:.1f})")
+
+    # Compute midline as mean
+    min_len = min(len(track_e1), len(track_e2))
+    mid_x = (track_e1[:min_len,1] + track_e2[:min_len,1]) / 2
+    mid_y = (track_e1[:min_len,0] + track_e2[:min_len,0]) / 2
+
+    print(f"mid_x range: [{mid_x.min():.1f}, {mid_x.max():.1f}]")
+    print(f"mid_y range: [{mid_y.min():.1f}, {mid_y.max():.1f}]")
+    print(f"  sample start: ({mid_x[0]:.1f},{mid_y[0]:.1f}), middle: ({mid_x[len(mid_x)//2]:.1f},{mid_y[len(mid_y)//2]:.1f}), end: ({mid_x[-1]:.1f},{mid_y[-1]:.1f})")
+
+    # KDTree NN
+    edge1_tree = cKDTree(np.column_stack([track_e1[:,1], track_e1[:,0]]))
+    edge2_tree = cKDTree(np.column_stack([track_e2[:,1], track_e2[:,0]]))
+
+    dist1, idx1 = edge1_tree.query(np.column_stack([mid_x, mid_y]))
+    dist2, idx2 = edge2_tree.query(np.column_stack([mid_x, mid_y]))
+    nearest_e1_x, nearest_e1_y = track_e1[idx1,1], track_e1[idx1,0]
+    nearest_e2_x, nearest_e2_y = track_e2[idx2,1], track_e2[idx2,0]
+
+    print(f"Nearest E1: x [{nearest_e1_x.min():.1f}, {nearest_e1_x.max():.1f}], y [{nearest_e1_y.min():.1f}, {nearest_e1_y.max():.1f}]")
+    print(f"Nearest E2: x [{nearest_e2_x.min():.1f}, {nearest_e2_x.max():.1f}], y [{nearest_e2_y.min():.1f}, {nearest_e2_y.max():.1f}]")
+    print(f"First 5 midline pts: {list(zip(mid_x[:5], mid_y[:5]))}")
+    print(f"First 5 NN e1 pts: {list(zip(nearest_e1_x[:5], nearest_e1_y[:5]))}")
+    print(f"First 5 NN e2 pts: {list(zip(nearest_e2_x[:5], nearest_e2_y[:5]))}")
+
+    print("track_e1 start/end:", track_e1[0], track_e1[-1])
+    print("track_e2 start/end:", track_e2[0], track_e2[-1])
+    print("midline start/end:", mid_x[0], mid_y[0], mid_x[-1], mid_y[-1])
+
+    import matplotlib.pyplot as plt
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(track_e1[:,1], track_e1[:,0], label='Edge 1', color='red')
+    plt.plot(track_e2[:,1], track_e2[:,0], label='Edge 2', color='blue')
+    plt.plot(mid_x, mid_y, label='Midline', color='green')
+    plt.scatter(nearest_e1_x, nearest_e1_y, label='NN Edge1', color='orange', s=2)
+    plt.scatter(nearest_e2_x, nearest_e2_y, label='NN Edge2', color='purple', s=2)
+    plt.legend()
+    plt.gca().invert_yaxis()
+    plt.show()
+
+    return [nearest_e1_x, nearest_e1_y], [nearest_e2_x, nearest_e2_y]
 
 import numpy as np
 import cv2

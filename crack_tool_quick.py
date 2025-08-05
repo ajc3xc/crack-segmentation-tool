@@ -1774,21 +1774,66 @@ class CrackToolsApplication(Ui_MainWindow):
                 self.pts_crop,
                 self.edge_mask1_crop, self.edge_mask2_crop, mu=mu, l=l, p=p
             )
-            track_e1_crop = track_e1_crop[::-1]
-            track_e2_crop = track_e2_crop[::-1]
+
+            # Debug: Print original before swap
+            print("--- Raw output ---")
+            print("track_e1_crop shapes:", [a.shape for a in track_e1_crop], 
+                "min/max X:", np.min(track_e1_crop[0]), np.max(track_e1_crop[0]), 
+                "min/max Y:", np.min(track_e1_crop[1]), np.max(track_e1_crop[1]))
+            print("track_e2_crop shapes:", [a.shape for a in track_e2_crop],
+                "min/max X:", np.min(track_e2_crop[0]), np.max(track_e2_crop[0]),
+                "min/max Y:", np.min(track_e2_crop[1]), np.max(track_e2_crop[1]))
+
+            # Typical convention: [y, x], so reverse to [x, y] if needed
+            # Debug print BEFORE any swap
+            print("track_e1_crop first 5:", [(track_e1_crop[0][i], track_e1_crop[1][i]) for i in range(5)])
+            print("track_e2_crop first 5:", [(track_e2_crop[0][i], track_e2_crop[1][i]) for i in range(5)])
+
+            # Only swap if you are SURE it is [y, x]. If already [x, y], do NOT swap!
+            # Let's check if swap needed: x should always be in [0, width], y in [0, height]
+            x1_min, x1_max = np.min(track_e1_crop[0]), np.max(track_e1_crop[0])
+            y1_min, y1_max = np.min(track_e1_crop[1]), np.max(track_e1_crop[1])
+            print("Pre-swap, E1 x-range: %.1f, %.1f  y-range: %.1f, %.1f" % (x1_min, x1_max, y1_min, y1_max))
+
+            h, w_img = self.image_crop.shape[:2]
+            if (y1_max > w_img-10 and x1_max < h+10):
+                print("Swapping axes [y, x] -> [x, y]")
+                track_e1_crop = track_e1_crop[::-1]
+                track_e2_crop = track_e2_crop[::-1]
+
+            # Offset for drawing
             track_e1_crop[0] = track_e1_crop[0] - 0.5
             track_e2_crop[0] = track_e2_crop[0] - 0.5
             track_e1_crop[1] = track_e1_crop[1] - 0.5
             track_e2_crop[1] = track_e2_crop[1] - 0.5
 
+            # Clip to image size just in case
+            h, w_img = self.image_crop.shape[:2]
+            track_e1_crop[0] = np.clip(track_e1_crop[0], 0, w_img-1)
+            track_e1_crop[1] = np.clip(track_e1_crop[1], 0, h-1)
+            track_e2_crop[0] = np.clip(track_e2_crop[0], 0, w_img-1)
+            track_e2_crop[1] = np.clip(track_e2_crop[1], 0, h-1)
+
+            # Debug: Print after swapping/reordering
+            print("--- After reordering and -0.5 offset ---")
+            print("E1 X range:", np.min(track_e1_crop[0]), np.max(track_e1_crop[0]))
+            print("E1 Y range:", np.min(track_e1_crop[1]), np.max(track_e1_crop[1]))
+            print("E2 X range:", np.min(track_e2_crop[0]), np.max(track_e2_crop[0]))
+            print("E2 Y range:", np.min(track_e2_crop[1]), np.max(track_e2_crop[1]))
+            print("E1 start/end:", (track_e1_crop[0][0], track_e1_crop[1][0]), "->", (track_e1_crop[0][-1], track_e1_crop[1][-1]))
+            print("E2 start/end:", (track_e2_crop[0][0], track_e2_crop[1][0]), "->", (track_e2_crop[0][-1], track_e2_crop[1][-1]))
+
             # Save crop-coords for later
             self.track_e1 = [track_e1_crop[0], track_e1_crop[1]]
             self.track_e2 = [track_e2_crop[0], track_e2_crop[1]]
-            #print(self.track_e1, self.track_e2)
 
             # For display, use crop coordinates only!
             pts1 = np.array(track_e1_crop).transpose(1, 0).reshape((-1, 1, 2)).astype(np.int32)
             pts2 = np.array(track_e2_crop).transpose(1, 0).reshape((-1, 1, 2)).astype(np.int32)
+            print("pts1 shape:", pts1.shape, "pts2 shape:", pts2.shape)
+            print("First 5 pts1:", pts1[:5].reshape(-1, 2))
+            print("First 5 pts2:", pts2[:5].reshape(-1, 2))
+
             im = self.image_crop.astype(np.uint8)
             im = cv2.polylines(im, [pts1], False, color, w)
             im = cv2.polylines(im, [pts2], False, color, w)
@@ -1803,8 +1848,8 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
             self.edge_tracks_full_screen_button.setStyleSheet("background-color : red")
-            self.save_current_segment_button.setStyleSheet("background-color : red")    
-    
+            self.save_current_segment_button.setStyleSheet("background-color : red")
+
     def edge_tracks_full_screen(self):
         try:
             w = self.edge_track_width_box.value()
@@ -1880,6 +1925,7 @@ class CrackToolsApplication(Ui_MainWindow):
             im = cv2.polylines(im, [pts1], False, (0, 255, 0), 1)
             im = cv2.polylines(im, [pts2], False, (0, 255, 0), 1)
             self.image = im
+            #return
 
             self.save_annotation()
 
@@ -2178,6 +2224,7 @@ class CrackToolsApplication(Ui_MainWindow):
                         self.edge_mask()
                         print("    edge tracking")
                         self.edge_tracking()
+                        return
                         print("    save segment")
                         self.save_current_segment()
                         num_success += 1
