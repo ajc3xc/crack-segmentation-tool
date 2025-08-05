@@ -227,7 +227,7 @@ def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp,mu 
     
     return [track_e1[:,0],track_e1[:,1]], [track_e2[:,0],track_e2[:,1]]
 
-def create_mask(image, x, y):
+'''def create_mask(image, x, y):
     # x and y: concatenated as [top_edge (reversed), bottom_edge]
     flat_x = np.array(x, dtype=np.int32)
     flat_y = np.array(y, dtype=np.int32)
@@ -236,7 +236,7 @@ def create_mask(image, x, y):
     pts = np.vstack([flat_x, flat_y]).T.reshape((-1, 1, 2))
     mask = np.zeros(image.shape[:2], dtype=np.uint8)
     cv2.fillPoly(mask, [pts], 1)
-    return mask
+    return mask'''
 
 import numpy as np
 import cv2

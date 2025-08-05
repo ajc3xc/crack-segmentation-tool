@@ -612,13 +612,13 @@ def MultiScaleVesselness(U,ksi,zeta,sigmas_s,method,sigmas_ext = 0, sigmaa_ext =
         
     return (vesselnessfilter)
 
-'''def MultiScaleVesselnessFilter(vesselnessfilters):
+def MultiScaleVesselnessFilter(vesselnessfilters):
     sum1 = np.sum(vesselnessfilters, axis=0)  # shape (H, W)
     mu = np.max(sum1)
     cost = sum1 / mu
-    return cost'''
+    return cost
 
-def MultiScaleVesselnessFilter(vesselnessfilters):
+'''def MultiScaleVesselnessFilter(vesselnessfilters):
     # vesselnessfilters: list of arrays, each shape (n_orient, H, W)
     vesselness_3d = np.stack(vesselnessfilters, axis=0)  # shape (n_scales, n_orient, H, W)
     vesselness_agg = np.max(vesselness_3d, axis=0)       # shape (n_orient, H, W)
@@ -632,7 +632,7 @@ def MultiScaleVesselnessFilter(vesselnessfilters):
     # Lower cost for stronger "center" locations
     cost = 1.0 / (0.1 + center_score**2)        # or try **1.5 or **2 for sharper centering
 
-    return cost
+    return cost'''
 
 def LeftInvariantFrame(theta):
     return np.array([[np.cos(theta),np.sin(theta),0],[-np.sin(theta),np.cos(theta),0],[0,0,1]])

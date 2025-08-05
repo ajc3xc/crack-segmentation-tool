@@ -540,8 +540,8 @@ class CrackToolsApplication(Ui_MainWindow):
 
         # ---- MASK LOADING (if you want to use it later in the pipeline only) ----
         self.current_mask = None
-        print(self.use_masks)
-        print(self.mask_map)
+        #print(self.use_masks)
+        #print(self.mask_map)
         if getattr(self, "use_masks", False) and hasattr(self, "mask_map"):
             print("[change_image] Using mask for image:", base_name)
             mask_path = self.mask_map.get(base_name)
@@ -620,7 +620,7 @@ class CrackToolsApplication(Ui_MainWindow):
                         box_color = (0,255,0)
                     else:
                         box_color = (255,0,0)
-                    cv2.rectangle(im, tuple(bb_pts[0]), tuple(bb_pts[1]), box_color, 2)
+                    cv2.rectangle(im, tuple(bb_pts[0]), tuple(bb_pts[1]), box_color, 3)
 
         # ---- Now show the image with overlays ----
         qimage = QImage(im.astype(np.uint8), im.shape[1], im.shape[0],
@@ -1577,7 +1577,7 @@ class CrackToolsApplication(Ui_MainWindow):
                 mask3d = np.broadcast_to(mask_cropped, self.costFunction.shape)
                 PENALTY = 5.0
                 improved_cost = np.where(mask3d, improved_cost, np.clip(improved_cost * PENALTY, 0, 1))
-            self.costFunction = improved_cost
+                self.costFunction = improved_cost
             c00 = np.min(ct.os.Rescale(self.costFunction),axis = 0)
             #c00 = np.max(ct.os.Rescale(self.costFunction), axis=0)
             self.update_cost_bar.setValue(100)
@@ -1626,6 +1626,7 @@ class CrackToolsApplication(Ui_MainWindow):
             track = ct.tools.track_crop_to_full(track_crop,self.pts[0],self.pts[1],y_margin,x_margin)
             #print(self.track_crop, track,downsample_factor)
             self.track = track
+            print(self.track)
             pts = np.array(track_crop).transpose(1,0).reshape((-1,1,2)).astype(np.int32)
             im = self.image_crop.astype(np.uint8)
             im = cv2.polylines(im, [pts], False, color, w)
@@ -1783,6 +1784,7 @@ class CrackToolsApplication(Ui_MainWindow):
             # Save crop-coords for later
             self.track_e1 = [track_e1_crop[0], track_e1_crop[1]]
             self.track_e2 = [track_e2_crop[0], track_e2_crop[1]]
+            #print(self.track_e1, self.track_e2)
 
             # For display, use crop coordinates only!
             pts1 = np.array(track_e1_crop).transpose(1, 0).reshape((-1, 1, 2)).astype(np.int32)
@@ -1862,6 +1864,15 @@ class CrackToolsApplication(Ui_MainWindow):
             scaled_pixmap = pixmap.scaled(self.all_segments_display.width(), self.all_segments_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
             self.all_segments_display.setPixmap(scaled_pixmap)
 
+            #print(self.track_e1.shape, self.track_e2.shape, self.track.shape, self.crack_tracks.shape)
+            #print(type(self.track_e1), type(self.track_e2), type(self.track), type(self.crack_tracks))
+            #print(len(self.track_e1), len(self.track_e2), len(self.track), len(self.crack_tracks))
+            print(self.track_e1[0].shape, self.track_e2[0].shape, self.track[0].shape)
+            #print(self.track_e1)
+            #print(self.track_e2)
+            #print(self.track)
+            #print(self.crack_tracks)
+
             # For display, shift polylines to full image
             pts1 = (np.array(self.track_e1).transpose(1, 0) + np.array([xmin, ymin])).reshape((-1, 1, 2)).astype(np.int32)
             pts2 = (np.array(self.track_e2).transpose(1, 0) + np.array([xmin, ymin])).reshape((-1, 1, 2)).astype(np.int32)
@@ -1909,7 +1920,7 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
 
-    def save_manual_segment(self):
+    '''def save_manual_segment(self):
         try:
             mask_FM = ct.segmentation.create_mask(self.image,self.manuall_x,self.manuall_y)
             self.mask.append(mask_FM)
@@ -1923,11 +1934,39 @@ class CrackToolsApplication(Ui_MainWindow):
 
             self.save_annotation()
         except Exception as e:
+            error(e)'''
+    
+    def save_manual_segment(self):
+        try:
+            # 1. Create mask from current manual segment
+            mask_FM = ct.segmentation.create_mask(self.image, self.manuall_x, self.manuall_y)
+            self.mask.append(mask_FM)
+            m = np.sum(np.array(self.mask), axis=0)
+            m[m >= 1] = 255
+            m = m.astype(dtype=np.uint8)
+
+            # 2. Draw polyline overlay for display
+            pts = np.array([self.manuall_x, self.manuall_y]).transpose(1, 0).reshape((-1, 1, 2)).astype(np.int32)
+            im = self.image.astype(np.uint8).copy()
+            im = cv2.polylines(im, [pts], False, (0, 255, 0), 1)
+            self.image = im
+
+            # 3. Save mask as PNG immediately (in addition to annotation)
+            # Use same base filename and save_folder as JSON annotation
+            #base_name = os.path.splitext(os.path.basename(self.name))[0]
+            #mask_path = os.path.join(self.save_folder, base_name + '_manual_mask.png')
+            #cv2.imwrite(mask_path, m)
+            #print(f"Saved manual mask to: {mask_path}")
+
+            # 4. Save annotation as usual
+            self.save_annotation()
+            self.change_image()
+
+        except Exception as e:
             error(e)
           
     def save_annotation(self):
         try:
-            # ... your earlier annotation code ...
             # Only save mask PNGs if not using external masks
             if not getattr(self, "use_masks", False):
                 masks = [np.array(m, dtype=np.uint8) for m in self.mask if m is not None and np.array(m).size > 0]
@@ -1936,14 +1975,49 @@ class CrackToolsApplication(Ui_MainWindow):
                     m[m >= 1] = 1.0
                     crack_pixels = np.argwhere(m == 1.0)
                     self.annotation["annotations"]["crack_pixels"] = crack_pixels.tolist()
-                    self.annotation["annotations"]['all_masks'] = [mm.tolist() for mm in masks]
+                    self.annotation["annotations"]["all_masks"] = [mm.tolist() for mm in masks]
                 else:
                     # If no masks, save blank
                     m = np.zeros(self.image.shape[:2], dtype=np.uint8)
                     self.annotation["annotations"]["crack_pixels"] = []
-                    self.annotation["annotations"]['all_masks'] = []
+                    self.annotation["annotations"]["all_masks"] = []
 
-                self.annotation["annotations"]['tracks'] = self.crack_tracks
+                # Save midline tracks
+                self.annotation["annotations"]["tracks"] = self.crack_tracks
+
+                # Save additional geometric data per crack
+                cracks_data = {}
+                for crack_id, track in self.crack_tracks.items():
+                    # Midline
+                    midline = list(zip(track[1], track[0]))  # (x, y)
+
+                    # Get edge1 and edge2 for this crack if available
+                    if hasattr(self, "track_e1") and hasattr(self, "track_e2"):
+                        # Edge points as (x, y)
+                        edge1 = list(zip(self.track_e1[1], self.track_e1[0]))
+                        edge2 = list(zip(self.track_e2[1], self.track_e2[0]))
+
+                        # Calculate widths (Euclidean distance)
+                        e1_arr = np.stack(self.track_e1, axis=1)  # shape (N, 2)
+                        e2_arr = np.stack(self.track_e2, axis=1)
+                        widths = np.linalg.norm(e1_arr - e2_arr, axis=1).tolist()
+
+                        # Calculate angles (orientation of midline)
+                        mid_arr = np.stack([track[0], track[1]], axis=1)
+                        deltas = np.diff(mid_arr, axis=0)
+                        angles = np.degrees(np.arctan2(deltas[:, 1], deltas[:, 0])).tolist()
+                        if len(angles) > 0:
+                            angles.append(angles[-1])  # Pad to match lengths
+
+                        cracks_data[str(crack_id)] = {
+                            "midline": midline,
+                            "edge1": edge1,
+                            "edge2": edge2,
+                            "widths": widths,
+                            "angles": angles
+                        }
+
+                self.annotation["annotations"]["cracks"] = cracks_data
 
                 # Prepare file names
                 base_name = os.path.splitext(os.path.basename(self.name))[0]
@@ -1956,15 +2030,16 @@ class CrackToolsApplication(Ui_MainWindow):
                 with open(json_path, 'w') as f:
                     f.write(json_file)
 
-                # 2. Save mask: crack=1, noncrack=0 (uint8)
+                # 2. Save binary mask
                 mask_bin = (m >= 1).astype('uint8')
-                cv2.imwrite(mask_bin_path, mask_bin * 255)  # 0/255 for viewing, but value 1 can be used by others
+                cv2.imwrite(mask_bin_path, mask_bin)
 
-                # 3. Save mask: crack=255, noncrack=0 (uint8)
-                mask_255 = (m >= 1).astype('uint8') * 255
+                # 3. Save 255-scaled mask for viewing
+                mask_255 = mask_bin * 255
                 cv2.imwrite(mask_255_path, mask_255)
 
                 print(f"Saved: {json_path}, {mask_bin_path}, {mask_255_path}")
+
             else:
                 # If using external mask, just save annotation JSON
                 base_name = os.path.splitext(os.path.basename(self.name))[0]
@@ -2098,7 +2173,7 @@ class CrackToolsApplication(Ui_MainWindow):
                         start_time = time()
                         self.midline_tracking()
                         print(f"    midline tracking time: {time() - start_time:.2f} seconds")
-                        return
+                        #return
                         print("    edge mask")
                         self.edge_mask()
                         print("    edge tracking")
