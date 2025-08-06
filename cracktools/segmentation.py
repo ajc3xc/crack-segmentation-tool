@@ -180,6 +180,8 @@ def edge_masks(image_gray, track, window_half_size=40):
 import numpy as np
 from shapely.geometry import LineString, Point
 
+###################################################################################
+# Normal Projection Edge Correspondence, by Adam Camerer
 def compute_tangent_normals(x, y):
     dx = np.gradient(x)
     dy = np.gradient(y)
