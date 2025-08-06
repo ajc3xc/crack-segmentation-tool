@@ -259,72 +259,11 @@ def nearest_edge_points_along_normal(mid_x, mid_y, edge_x, edge_y, search_radius
             matched_x[i], matched_y[i] = candidates[j]
     return matched_x, matched_y
 
-'''def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp, mu=5, l=1, p=12, search_radius=5):
-    """
-    Compute edge tracks using Riemann2 geodesics and pair each midline point
-    to the nearest edge point along its normal (no interpolation, just nearest).
-    Returns: ([edge1_x, edge1_y], [edge2_x, edge2_y])
-    """
-    # --- Riemann metric setup ---
-    DxZ, DyZ = np.gradient(image_crop)
-    a11 = scipy.ndimage.gaussian_filter(mu * DxZ ** 2, 1)
-    a12 = scipy.ndimage.gaussian_filter(mu * DxZ * DyZ, 1)
-    a21 = a12
-    a22 = scipy.ndimage.gaussian_filter(mu * DyZ ** 2, 1)
-    df = np.stack([[1 + a11, a12], [a21, 1 + a22]], axis=0)
-
-    seeds = np.array([*pts_cropp[0][::-1]])
-    tips  = np.array([*pts_cropp[1][::-1]])
-    sides = np.array([[0, image_crop.shape[0]], [0, image_crop.shape[1]]])
-    dims  = np.array(image_crop.shape[:2])
-
-    # --- Compute midline geodesic (Riemann2) ---
-    metric_mid = Riemann(df)
-    hfmIn_mid = Eikonal.dictIn({
-        'model': 'Riemann2',
-        'seeds': np.expand_dims(seeds, axis=0),
-        'tips': np.expand_dims(tips, axis=0),
-        'metric': metric_mid,
-        'arrayOrdering': 'RowMajor'
-    })
-    hfmIn_mid.SetRect(sides=sides, dims=dims)
-    out_mid = hfmIn_mid.Run()
-    geos_mid = out_mid['geodesics'][0].T  # shape (N_mid, 2)
-    mid_y, mid_x = geos_mid[:,0], geos_mid[:,1]
-
-    # --- Compute edge tracks (Riemann2 geodesic) ---
-    m1 = edge_mask1_cropp.squeeze()
-    m2 = edge_mask2_cropp.squeeze()
-    metric1 = Riemann((1 + m1 * l)**p * df)
-    metric2 = Riemann((1 + m2 * l)**p * df)
-
-    def compute_edge_track(metric):
-        hfm = Eikonal.dictIn({
-            'model': 'Riemann2',
-            'seeds': np.expand_dims(seeds, axis=0),
-            'tips': np.expand_dims(tips, axis=0),
-            'metric': metric,
-            'arrayOrdering': 'RowMajor'
-        })
-        hfm.SetRect(sides=sides, dims=dims)
-        out = hfm.Run()
-        return out['geodesics'][0].T
-
-    geos1 = compute_edge_track(metric1)
-    geos2 = compute_edge_track(metric2)
-    e1_y, e1_x = geos1[:,0], geos1[:,1]
-    e2_y, e2_x = geos2[:,0], geos2[:,1]
-
-    # --- Pair midline to nearest edge points along normal (fast) ---
-    e1_x_matched, e1_y_matched = nearest_edge_points_along_normal(mid_x, mid_y, e1_x, e1_y, search_radius)
-    e2_x_matched, e2_y_matched = nearest_edge_points_along_normal(mid_x, mid_y, e2_x, e2_y, search_radius)
-
-    return [e1_x_matched, e1_y_matched], [e2_x_matched, e2_y_matched]'''
 import numpy as np
 from scipy.spatial import cKDTree
 import scipy.ndimage
 
-def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp, mu=5, l=1, p=12):
+def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp, midline, mu=5, l=1, p=12):
     seeds = np.array([*pts_cropp[0][::-1]])
     tips = np.array([*pts_cropp[1][::-1]])
     b = np.array([0, image_crop.shape[0]])
@@ -371,10 +310,12 @@ def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp, mu
     print(f"track_e2: shape={track_e2.shape}, x=[{track_e2[:,1].min():.1f}, {track_e2[:,1].max():.1f}], y=[{track_e2[:,0].min():.1f}, {track_e2[:,0].max():.1f}]")
     print(f"  sample start: ({track_e2[0,1]:.1f},{track_e2[0,0]:.1f}), middle: ({track_e2[len(track_e2)//2,1]:.1f},{track_e2[len(track_e2)//2,0]:.1f}), end: ({track_e2[-1,1]:.1f},{track_e2[-1,0]:.1f})")
 
-    # Compute midline as mean
-    min_len = min(len(track_e1), len(track_e2))
-    mid_x = (track_e1[:min_len,1] + track_e2[:min_len,1]) / 2
-    mid_y = (track_e1[:min_len,0] + track_e2[:min_len,0]) / 2
+    if isinstance(midline, np.ndarray) and midline.shape[0] == 2:
+        mid_y, mid_x = midline[0], midline[1]
+    elif isinstance(midline, list) and len(midline) == 2:
+        mid_y, mid_x = midline[0], midline[1]
+    else:
+        raise ValueError("midline must be a (2, N) array or a list [y_array, x_array]")
 
     print(f"mid_x range: [{mid_x.min():.1f}, {mid_x.max():.1f}]")
     print(f"mid_y range: [{mid_y.min():.1f}, {mid_y.max():.1f}]")
@@ -399,8 +340,8 @@ def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp, mu
     print("track_e2 start/end:", track_e2[0], track_e2[-1])
     print("midline start/end:", mid_x[0], mid_y[0], mid_x[-1], mid_y[-1])
 
+    # Visualization (remove or comment out if not needed in production)
     import matplotlib.pyplot as plt
-
     plt.figure(figsize=(10, 5))
     plt.plot(track_e1[:,1], track_e1[:,0], label='Edge 1', color='red')
     plt.plot(track_e2[:,1], track_e2[:,0], label='Edge 2', color='blue')
