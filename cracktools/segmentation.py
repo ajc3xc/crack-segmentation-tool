@@ -3,6 +3,7 @@ import numpy as np
 import cracktools.tracking
 import cv2
 from skimage import measure
+import matplotlib.pyplot as plt
 
 from agd import Eikonal
 from agd.Metrics import Riemann
@@ -176,94 +177,61 @@ def edge_masks(image_gray, track, window_half_size=40):
     edge_mask2 = -edge_mask1 - np.min(-edge_mask1)
     return edge_mask1, edge_mask2
 
-'''def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp,mu = 5,l = 1, p = 12):
-    
-    seeds = np.array([*pts_cropp[0][::-1]])
-    tips = np.array([*pts_cropp[1][::-1]])
-    b = np.array([0,image_crop.shape[0]])
-    c = np.array([0,image_crop.shape[1]])
-    sides = np.array([b,c])
-    dims = np.array([image_crop.shape[0],image_crop.shape[1]])
-
-    DxZ,DyZ = np.gradient(image_crop) 
-
-    a11 = scipy.ndimage.gaussian_filter(mu*DxZ**2, 1, order=(0,0))
-    a12 = scipy.ndimage.gaussian_filter(mu*DxZ*DyZ, 1, order=(0,0))
-    a21 = scipy.ndimage.gaussian_filter(mu*DxZ*DyZ, 1, order=(0,0))
-    a22 = scipy.ndimage.gaussian_filter(mu*DyZ**2, 1, order=(0,0))
-    df = np.array([[1+a11,a12],[a21,1+a22]])
-    metric1 = (1+edge_mask1_cropp.squeeze()*l)**p*df
-    metric2 = (1+edge_mask2_cropp.squeeze()*l)**p*df 
-    
-    metric = Riemann(metric1)
-    hfmIn = Eikonal.dictIn({
-        'model' : 'Riemann2',
-        'seeds' : np.expand_dims(seeds,axis = 0),
-        'arrayOrdering' : 'RowMajor',
-        'tips' : np.expand_dims(tips,axis = 0),
-        'metric' : metric})
-    hfmIn.SetRect(sides = sides, dims = dims)
-    hfmOut = hfmIn.Run()
-    geos1 = [g.T for g in hfmOut['geodesics']]
-    # geos1[0][:,0] = geos1[0][:,0]+y1
-    # geos1[0][:,1] = geos1[0][:,1]+x1
-    # track_e1 = ct.tools.track_crop_to_full(geos1[0].T,pts[0],pts[1],y_margin,x_margin)
-    track_e1 = geos1[0]
-    
-    metric = Riemann(metric2)
-    hfmIn = Eikonal.dictIn({
-        'model' : 'Riemann2',
-        'seeds' : np.expand_dims(seeds,axis = 0),
-        'arrayOrdering' : 'RowMajor',
-        'tips' : np.expand_dims(tips,axis = 0),
-        'metric' : metric})
-    hfmIn.SetRect(sides = sides, dims = dims)
-    hfmOut = hfmIn.Run()
-    geos2 = [g.T for g in hfmOut['geodesics']]
-    # geos1[0][:,0] = geos1[0][:,0]+y1
-    # geos1[0][:,1] = geos1[0][:,1]+x1
-    # track_e2 = ct.tools.track_crop_to_full(geos2[0].T,pts[0],pts[1],y_margin,x_margin)
-    track_e2 = geos2[0]
-    
-    return [track_e1[:,0],track_e1[:,1]], [track_e2[:,0],track_e2[:,1]]'''
-
 import numpy as np
-import scipy.ndimage
-from scipy.spatial import cKDTree
+from shapely.geometry import LineString, Point
 
 def compute_tangent_normals(x, y):
     dx = np.gradient(x)
     dy = np.gradient(y)
-    norm = np.sqrt(dx**2 + dy**2) + 1e-8
+    norm = np.sqrt(dx**2 + dy**2) + 1e-10
     tangent = np.stack([dx / norm, dy / norm], axis=1)
     normal = np.stack([-dy / norm, dx / norm], axis=1)
     return tangent, normal
 
-def nearest_edge_points_along_normal(mid_x, mid_y, edge_x, edge_y, search_radius=5):
+def normal_intersections_bruteforce(mid_x, mid_y, edge_x, edge_y, normal_length):
     tangent, normal = compute_tangent_normals(mid_x, mid_y)
+    n = len(mid_x)
+    result_x = np.full(n, np.nan)
+    result_y = np.full(n, np.nan)
+    edge_x = np.asarray(edge_x, dtype=float)
+    edge_y = np.asarray(edge_y, dtype=float)
+    edge_segments = [
+        LineString([(edge_x[i], edge_y[i]), (edge_x[i+1], edge_y[i+1])])
+        for i in range(len(edge_x) - 1)
+        if np.all(np.isfinite([edge_x[i], edge_y[i], edge_x[i+1], edge_y[i+1]]))
+    ]
+    # Edge as array for fallback
     edge_points = np.column_stack([edge_x, edge_y])
-    tree = cKDTree(edge_points)
-    matched_x = np.empty_like(mid_x)
-    matched_y = np.empty_like(mid_y)
-    for i, (x0, y0, nvec) in enumerate(zip(mid_x, mid_y, normal)):
-        rel = edge_points - np.array([x0, y0])
-        dist_along_normal = np.abs(rel @ nvec)
-        mask = dist_along_normal < search_radius
-        candidates = edge_points[mask]
-        if len(candidates) == 0:
-            dist, idx = tree.query([x0, y0], k=1)
-            matched_x[i], matched_y[i] = edge_points[idx]
-        else:
-            dists = np.linalg.norm(candidates - np.array([x0, y0]), axis=1)
-            j = np.argmin(dists)
-            matched_x[i], matched_y[i] = candidates[j]
-    return matched_x, matched_y
 
-import numpy as np
-from scipy.spatial import cKDTree
-import scipy.ndimage
+    for i in range(n):
+        mx, my = float(mid_x[i]), float(mid_y[i])
+        if not np.isfinite(mx) or not np.isfinite(my):
+            continue
+        nvec = normal[i]
+        norm_a = (mx - normal_length * nvec[0], my - normal_length * nvec[1])
+        norm_b = (mx + normal_length * nvec[0], my + normal_length * nvec[1])
+        norm_line = LineString([norm_a, norm_b])
+        best_pt = None
+        best_dist = np.inf
+        for seg in edge_segments:
+            inter = norm_line.intersection(seg)
+            if isinstance(inter, Point):
+                dist = np.hypot(inter.x - mx, inter.y - my)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_pt = inter
+        if best_pt:
+            result_x[i], result_y[i] = best_pt.x, best_pt.y
+        else:
+            # fallback: nearest edge point
+            dists = np.hypot(edge_x - mx, edge_y - my)
+            j = np.argmin(dists)
+            result_x[i], result_y[i] = edge_x[j], edge_y[j]
+
+    return result_x, result_y
 
 def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp, midline, mu=5, l=1, p=12):
+    # --- Geodesic edge extraction (unchanged from your code) ---
     seeds = np.array([*pts_cropp[0][::-1]])
     tips = np.array([*pts_cropp[1][::-1]])
     b = np.array([0, image_crop.shape[0]])
@@ -280,7 +248,6 @@ def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp, mi
     metric1 = (1 + edge_mask1_cropp.squeeze() * l) ** p * df
     metric2 = (1 + edge_mask2_cropp.squeeze() * l) ** p * df
 
-    # Geodesic edge tracks
     metric = Riemann(metric1)
     hfmIn = Eikonal.dictIn({
         'model': 'Riemann2',
@@ -305,54 +272,67 @@ def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp, mi
     hfmOut = hfmIn.Run()
     track_e2 = [g.T for g in hfmOut['geodesics']][0]
 
-    print(f"track_e1: shape={track_e1.shape}, x=[{track_e1[:,1].min():.1f}, {track_e1[:,1].max():.1f}], y=[{track_e1[:,0].min():.1f}, {track_e1[:,0].max():.1f}]")
-    print(f"  sample start: ({track_e1[0,1]:.1f},{track_e1[0,0]:.1f}), middle: ({track_e1[len(track_e1)//2,1]:.1f},{track_e1[len(track_e1)//2,0]:.1f}), end: ({track_e1[-1,1]:.1f},{track_e1[-1,0]:.1f})")
-    print(f"track_e2: shape={track_e2.shape}, x=[{track_e2[:,1].min():.1f}, {track_e2[:,1].max():.1f}], y=[{track_e2[:,0].min():.1f}, {track_e2[:,0].max():.1f}]")
-    print(f"  sample start: ({track_e2[0,1]:.1f},{track_e2[0,0]:.1f}), middle: ({track_e2[len(track_e2)//2,1]:.1f},{track_e2[len(track_e2)//2,0]:.1f}), end: ({track_e2[-1,1]:.1f},{track_e2[-1,0]:.1f})")
-
-    if isinstance(midline, np.ndarray) and midline.shape[0] == 2:
-        mid_y, mid_x = midline[0], midline[1]
+    # --- Robust midline handling ---
+    if isinstance(midline, np.ndarray):
+        if midline.shape[0] == 2:  # shape (2, N)
+            mid_y, mid_x = midline[0], midline[1]
+        elif midline.shape[1] == 2:  # shape (N, 2)
+            mid_y, mid_x = midline[:, 0], midline[:, 1]
+        else:
+            raise ValueError("midline array must be shape (2, N) or (N, 2)")
     elif isinstance(midline, list) and len(midline) == 2:
         mid_y, mid_x = midline[0], midline[1]
     else:
-        raise ValueError("midline must be a (2, N) array or a list [y_array, x_array]")
+        raise ValueError("midline must be a (2, N) or (N, 2) array, or a list [y_array, x_array]")
 
-    print(f"mid_x range: [{mid_x.min():.1f}, {mid_x.max():.1f}]")
-    print(f"mid_y range: [{mid_y.min():.1f}, {mid_y.max():.1f}]")
-    print(f"  sample start: ({mid_x[0]:.1f},{mid_y[0]:.1f}), middle: ({mid_x[len(mid_x)//2]:.1f},{mid_y[len(mid_y)//2]:.1f}), end: ({mid_x[-1]:.1f},{mid_y[-1]:.1f})")
+    # --- Normal length & bounds ---
+    height, width = image_crop.shape[:2]
+    normal_length = int(np.ceil(np.hypot(height, width)))
 
-    # KDTree NN
-    edge1_tree = cKDTree(np.column_stack([track_e1[:,1], track_e1[:,0]]))
-    edge2_tree = cKDTree(np.column_stack([track_e2[:,1], track_e2[:,0]]))
+    # --- Normal intersections ---
+    edge1_x, edge1_y = normal_intersections_bruteforce(mid_x, mid_y, track_e1[:,1], track_e1[:,0], normal_length)
+    edge2_x, edge2_y = normal_intersections_bruteforce(mid_x, mid_y, track_e2[:,1], track_e2[:,0], normal_length)
 
-    dist1, idx1 = edge1_tree.query(np.column_stack([mid_x, mid_y]))
-    dist2, idx2 = edge2_tree.query(np.column_stack([mid_x, mid_y]))
-    nearest_e1_x, nearest_e1_y = track_e1[idx1,1], track_e1[idx1,0]
-    nearest_e2_x, nearest_e2_y = track_e2[idx2,1], track_e2[idx2,0]
+    # --- Output clipping ---
+    edge1_x = np.clip(edge1_x, 0, width-1)
+    edge1_y = np.clip(edge1_y, 0, height-1)
+    edge2_x = np.clip(edge2_x, 0, width-1)
+    edge2_y = np.clip(edge2_y, 0, height-1)
 
-    print(f"Nearest E1: x [{nearest_e1_x.min():.1f}, {nearest_e1_x.max():.1f}], y [{nearest_e1_y.min():.1f}, {nearest_e1_y.max():.1f}]")
-    print(f"Nearest E2: x [{nearest_e2_x.min():.1f}, {nearest_e2_x.max():.1f}], y [{nearest_e2_y.min():.1f}, {nearest_e2_y.max():.1f}]")
-    print(f"First 5 midline pts: {list(zip(mid_x[:5], mid_y[:5]))}")
-    print(f"First 5 NN e1 pts: {list(zip(nearest_e1_x[:5], nearest_e1_y[:5]))}")
-    print(f"First 5 NN e2 pts: {list(zip(nearest_e2_x[:5], nearest_e2_y[:5]))}")
+    # --- Optional: NaN handling (replace with zeros or skip in plot) ---
+    # edge1_x = np.nan_to_num(edge1_x, nan=0.0)
+    # edge1_y = np.nan_to_num(edge1_y, nan=0.0)
+    # edge2_x = np.nan_to_num(edge2_x, nan=0.0)
+    # edge2_y = np.nan_to_num(edge2_y, nan=0.0)
 
-    print("track_e1 start/end:", track_e1[0], track_e1[-1])
-    print("track_e2 start/end:", track_e2[0], track_e2[-1])
-    print("midline start/end:", mid_x[0], mid_y[0], mid_x[-1], mid_y[-1])
-
-    # Visualization (remove or comment out if not needed in production)
-    import matplotlib.pyplot as plt
-    plt.figure(figsize=(10, 5))
+    # --- Visualization ---
+    plt.figure(figsize=(18, 9))
     plt.plot(track_e1[:,1], track_e1[:,0], label='Edge 1', color='red')
     plt.plot(track_e2[:,1], track_e2[:,0], label='Edge 2', color='blue')
     plt.plot(mid_x, mid_y, label='Midline', color='green')
-    plt.scatter(nearest_e1_x, nearest_e1_y, label='NN Edge1', color='orange', s=2)
-    plt.scatter(nearest_e2_x, nearest_e2_y, label='NN Edge2', color='purple', s=2)
+
+    # Plot intersection points for debugging (optional)
+    plt.scatter(edge1_x, edge1_y, color='orange', s=6, label='Normal intersect 1', alpha=0.7, zorder=5)
+    plt.scatter(edge2_x, edge2_y, color='purple', s=6, label='Normal intersect 2', alpha=0.7, zorder=5)
+
+    step = 1
+    for i in range(0, len(mid_x), step):
+        if np.isfinite(edge1_x[i]) and np.isfinite(edge1_y[i]):
+            plt.plot([mid_x[i], edge1_x[i]], [mid_y[i], edge1_y[i]],
+                     color='orange', linewidth=0.5, alpha=0.8)
+        if np.isfinite(edge2_x[i]) and np.isfinite(edge2_y[i]):
+            plt.plot([mid_x[i], edge2_x[i]], [mid_y[i], edge2_y[i]],
+                     color='purple', linewidth=0.5, alpha=0.8)
     plt.legend()
     plt.gca().invert_yaxis()
+    plt.axis('equal')  # ENFORCE EQUAL SCALING
+    # Fit axis to image size
+    plt.xlim(0, image_crop.shape[1])
+    plt.ylim(image_crop.shape[0], 0)  # y axis inverted (image coords)
+    plt.tight_layout()
     plt.show()
 
-    return [nearest_e1_x, nearest_e1_y], [nearest_e2_x, nearest_e2_y]
+    return [edge1_x, edge1_y], [edge2_x, edge2_y]
 
 import numpy as np
 import cv2
