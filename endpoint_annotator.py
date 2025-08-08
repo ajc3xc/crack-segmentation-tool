@@ -226,20 +226,6 @@ class CrackAnnotator(QtWidgets.QWidget):
     def _start_erase_if_still_pressed(self):
         if QtWidgets.QApplication.mouseButtons() & Qt.RightButton and self._is_drawing:
             self._erase_timer.start(75)
-
-    '''def mouseMoveEvent(self, event):
-        p = self._to_image_coords(event.pos())
-        if self.polyline_mode and self._is_drawing and (event.buttons() & Qt.LeftButton):
-            self._add_poly_point(p)
-            self.update()
-            return
-        self.hover_index = self._find_point_at(p)
-        if self.connection_mode and self.connecting_index is None and self.hover_index is None:
-            self.hover_line_index = self._find_line_at(p)
-        else:
-            self.hover_line_index = None
-        self._hover_midline_key = self._midline_hit_test(event.pos(), 10.0) if not self._is_drawing else None
-        self.update()'''
     
     def mouseMoveEvent(self, event):
         p = self._to_image_coords(event.pos())
@@ -279,7 +265,7 @@ class CrackAnnotator(QtWidgets.QWidget):
         self.update()
 
     def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_Backspace, Qt.Key_Z):
+        if event.key() in (Qt.Key_Backspace):
             if self.polyline_mode and self._is_drawing and self.polyline:
                 self._pop_poly_point()
                 self.update()

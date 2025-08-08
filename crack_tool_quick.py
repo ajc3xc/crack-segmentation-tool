@@ -641,8 +641,8 @@ class CrackToolsApplication(Ui_MainWindow):
         layout.addWidget(manual_btn)
 
         hint = QLabel(
-            "Manual: click an existing point to start → draw → click a different point to finish.\n"
-            "Left-click a hovered connection/midline deletes it. Backspace/Z undo; Esc cancels current midline."
+            "Manual: Left-hold on starting point → draw (hold/click) → finish w/ hold/click endpoint.\n"
+            "Left-click: remove hovered connection. Backspace/right-hold: undo (fast,slow); Esc: cancel."
         )
         layout.addWidget(hint)
 
@@ -1653,7 +1653,6 @@ class CrackToolsApplication(Ui_MainWindow):
                                 pt2 = (int(round(edge_pts[i][0])), int(round(edge_pts[i][1])))
                                 cv2.line(im, pt1, pt2, (255, 255, 0), 1)
 
-            # ALSO render any manual midlines that haven't been promoted to atomic yet (defensive)
             # ALSO render any manual midlines that haven't been promoted to atomic yet (defensive)
             if "midlines" in ann:
                 for k, poly in ann["midlines"].items():
