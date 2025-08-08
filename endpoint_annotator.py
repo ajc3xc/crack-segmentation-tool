@@ -167,8 +167,16 @@ class CrackAnnotator(QtWidgets.QWidget):
                     return
 
             elif event.button() == Qt.RightButton:
-                # Undo or cancel
                 if self._is_drawing:
+                    # Start hold-to-erase after short delay
+                    self._erase_timer.stop()
+                    QtCore.QTimer.singleShot(500, lambda: (
+                        self._erase_timer.start(75)
+                        if (QtWidgets.QApplication.mouseButtons() & Qt.RightButton and self._is_drawing)
+                        else None
+                    ))
+
+                    # Immediate single-step undo on initial click
                     if len(self.polyline) > 1:
                         self._pop_poly_point()
                     else:
