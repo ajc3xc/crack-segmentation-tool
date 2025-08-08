@@ -28,215 +28,8 @@ def error(e):
     msg.setText(f"Error: {e}")
     msg.setWindowTitle("Error")
     msg.exec_()
-    
-from PyQt5.QtWidgets import QDialog, QVBoxLayout, QPushButton
-from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QWidget, QVBoxLayout, QFileDialog
-from PyQt5.QtGui import QPainter, QPen, QColor, QCursor
-from PyQt5.QtCore import Qt, QPoint, QPointF
 
-min_crop_size = 16
-class CrackAnnotator(QtWidgets.QWidget):
-    def __init__(self, image=None, boxes=None, initial_points=None, initial_connections=None):
-        super().__init__()
-        # Store & prepare image
-        self.orig_image = image
-        if image is not None:
-            h, w, _ = image.shape
-            qimg = QImage(image.data, w, h, image.strides[0], QImage.Format_RGB888)
-            self.image_pixmap = QPixmap.fromImage(qimg)
-            self.img_w, self.img_h = w, h
-        else:
-            self.image_pixmap = None
-            self.img_w, self.img_h = 100, 100  # default size
-
-        # Annotation state
-        self.points = list(initial_points) if initial_points else []
-        self.connections = list(initial_connections) if initial_connections else []
-        #print(self.points, self.connections)
-        h, w, _ = image.shape
-        # --- Adaptive point radius ---
-        min_dim = min(w, h)
-        self.point_radius = max(3, min(20, int(0.005 * min_dim)))  # Between 4 and 18 px
-        self.connection_mode = False
-        self.connecting_index = None
-        self.hover_index = None
-        self.hover_line_index = None
-
-        # Bounding boxes
-        self.boxes = boxes if boxes is not None else []
-        
-        # Zoom state
-        self.scale = 1.0
-        self.setMouseTracking(True)
-        self.update_canvas_size()
-
-    def update_canvas_size(self):
-        # Set widget size to image size * scale
-        w = int(self.img_w * self.scale)
-        h = int(self.img_h * self.scale)
-        self.setMinimumSize(w, h)
-        self.resize(w, h)
-        self.update()
-
-    def wheelEvent(self, event):
-        f = 1.2 if event.angleDelta().y() > 0 else 1/1.2
-        self.scale = max(0.1, min(10.0, self.scale * f))
-        self.update_canvas_size()
-        self.update()
-
-    def mousePressEvent(self, event):
-        p = self._to_image_coords(event.pos())
-        point_i = self._find_point_at(p)
-        line_i = self._find_line_at(p)
-
-        if event.button() == Qt.LeftButton:
-            if not self.connection_mode:
-                if point_i is None:
-                    self.points.append(p)
-                else:
-                    # remove point and any connections
-                    self.connections = [
-                        (i1, i2) for i1, i2 in self.connections
-                        if i1 != point_i and i2 != point_i
-                    ]
-                    self.points.pop(point_i)
-                    self.connections = [
-                        (i1 - (i1 > point_i), i2 - (i2 > point_i))
-                        for i1, i2 in self.connections
-                    ]
-            else:
-                if (line_i is not None) and (self.connecting_index is None) and (point_i is None):
-                    self.connections.pop(line_i)
-                elif point_i is not None:
-                    if self.connecting_index is None:
-                        self.connecting_index = point_i
-                    elif self.connecting_index != point_i:
-                        c = (self.connecting_index, point_i)
-                        if c not in self.connections:
-                            self.connections.append(c)
-                        self.connecting_index = None
-                    else:
-                        self.connecting_index = None
-                else:
-                    self.connecting_index = None
-        self.update()
-
-    def mouseMoveEvent(self, event):
-        p = self._to_image_coords(event.pos())
-        self.hover_index = self._find_point_at(p)
-        if self.connection_mode and self.connecting_index is None and self.hover_index is None:
-            self.hover_line_index = self._find_line_at(p)
-        else:
-            self.hover_line_index = None
-        self.update()
-    
-    def paintEvent(self, event):
-        qp = QPainter(self)
-        qp.setRenderHint(QPainter.Antialiasing)
-        # --- Compute scale and offset for aspect-fit ---
-        if self.image_pixmap:
-            img_w, img_h = self.img_w, self.img_h
-            win_w, win_h = self.width(), self.height()
-            scale = min(win_w / img_w, win_h / img_h)
-            xoff = int((win_w - img_w * scale) / 2)
-            yoff = int((win_h - img_h * scale) / 2)
-            self._last_draw_scale = scale
-            self._last_draw_xoff = xoff
-            self._last_draw_yoff = yoff
-            # Draw image centered and scaled
-            qp.drawPixmap(
-                xoff, yoff,
-                int(img_w * scale), int(img_h * scale),
-                self.image_pixmap
-            )
-        else:
-            scale, xoff, yoff = 1.0, 0, 0
-            self._last_draw_scale = scale
-            self._last_draw_xoff = xoff
-            self._last_draw_yoff = yoff
-
-        # --- Draw bounding boxes in BLUE ---
-        pen_box = QPen(QColor(0, 128, 255), 3)
-        qp.setPen(pen_box)
-        for bbox in self.boxes:
-            xmin, ymin, xmax, ymax = [float(v) for v in bbox]
-            xmin_ = int(round(xmin * scale + xoff))
-            ymin_ = int(round(ymin * scale + yoff))
-            xmax_ = int(round(xmax * scale + xoff))
-            ymax_ = int(round(ymax * scale + yoff))
-            qp.drawRect(xmin_, ymin_, xmax_ - xmin_, ymax_ - ymin_)
-
-        # --- Draw connections in PURPLE ---
-        for idx, (i1, i2) in enumerate(self.connections):
-            x1, y1 = self.points[i1]
-            x2, y2 = self.points[i2]
-            p1 = QPoint(int(round(x1 * scale + xoff)), int(round(y1 * scale + yoff)))
-            p2 = QPoint(int(round(x2 * scale + xoff)), int(round(y2 * scale + yoff)))
-            if (self.connection_mode and self.connecting_index is None
-                    and idx == self.hover_line_index and self.hover_index is None):
-                pen = QPen(QColor(0, 0, 0), 6)  # BLACK (highlight)
-            else:
-                pen = QPen(QColor(0, 0, 0), 4)  # BLACK (normal)
-            qp.setPen(pen)
-            qp.drawLine(p1, p2)
-            self._draw_arrowhead(qp, p1, p2)
-
-        # --- Draw points ---
-        for i, (x, y) in enumerate(self.points):
-            center = QPoint(int(round(x * scale + xoff)), int(round(y * scale + yoff)))
-            brush = (QColor(0, 200, 0) if i == self.hover_index
-                    or (self.connection_mode and i == self.connecting_index)
-                    else QColor(200, 80, 80))
-            qp.setBrush(brush)
-            qp.setPen(Qt.NoPen)
-            qp.drawEllipse(center, int(self.point_radius * scale), int(self.point_radius * scale))
-
-    def toggle_mode(self):
-        self.connection_mode = not self.connection_mode
-        self.connecting_index = None
-        self.update()
-
-    def _to_image_coords(self, pos):
-        # Use values set by paintEvent (scale/offset to match the drawn image)
-        x_img = (pos.x() - getattr(self, "_last_draw_xoff", 0)) / getattr(self, "_last_draw_scale", 1)
-        y_img = (pos.y() - getattr(self, "_last_draw_yoff", 0)) / getattr(self, "_last_draw_scale", 1)
-        return (x_img, y_img)
-
-    def _find_point_at(self, pos):
-        for i, (x, y) in enumerate(self.points):
-            if (x - pos[0]) ** 2 + (y - pos[1]) ** 2 <= (self.point_radius / self.scale) ** 2:
-                return i
-        return None
-
-    def _find_line_at(self, pos):
-        thr = 7 / self.scale
-        for idx, (i1, i2) in enumerate(self.connections):
-            x1, y1 = self.points[i1]
-            x2, y2 = self.points[i2]
-            if self._dist_point_to_segment(pos, (x1, y1), (x2, y2)) < thr:
-                return idx
-        return None
-
-    def _dist_point_to_segment(self, p, a, b):
-        import numpy as np
-        p, a, b = np.array(p), np.array(a), np.array(b)
-        if np.all(a == b):
-            return np.linalg.norm(p - a)
-        t = max(0, min(1, np.dot(p - a, b - a) / np.dot(b - a, b - a)))
-        proj = a + t * (b - a)
-        return np.linalg.norm(p - proj)
-
-    def _draw_arrowhead(self, qp, p1, p2):
-        import math
-        angle = math.atan2(p2.y() - p1.y(), p2.x() - p1.x())
-        sz = int(10 * self.scale)
-        dx1, dy1 = sz * math.cos(angle - math.pi / 8), sz * math.sin(angle - math.pi / 8)
-        dx2, dy2 = sz * math.cos(angle + math.pi / 8), sz * math.sin(angle + math.pi / 8)
-        left = QPoint(int(p2.x() - dx1), int(p2.y() - dy1))
-        right = QPoint(int(p2.x() - dx2), int(p2.y() - dy2))
-        qp.setPen(Qt.NoPen)
-        qp.setBrush(QColor(80, 80, 220))
-        qp.drawPolygon(p2, left, right)
+from endpoint_annotator import CrackAnnotator
    
 class CrackToolsApplication(Ui_MainWindow):
     def setupUi(self, MainWindow):
@@ -523,110 +316,6 @@ class CrackToolsApplication(Ui_MainWindow):
     def update_selected_item(self,name):
         items = self.files_list.findItems(name, QtCore.Qt.MatchExactly)
         self.files_list.setCurrentItem(items[0])
-
-    '''def change_image(self):
-        self.bb_pts_list = []  # Reset on image load!
-        w = self.segment_width_box_2.value()
-        color_dict = {"R": (1,0,0), "G": (0,1,0), "B": (0,0,1), "W": (1,1,1)}
-        color = color_dict.get(self.track_color_box.currentText(), (1,0,0))
-
-        self.update_selected_item(os.path.basename(self.image_names[self.n]))
-        self.name = self.image_names[self.n]
-        self.image = cv2.imread(self.name)[:,:,::-1].astype(np.uint8)
-        self.original_image = self.image.copy()
-        self.filename_label_2.setText(os.path.basename(self.name))
-        base_name = os.path.splitext(os.path.basename(self.name))[0]
-
-        # ---- MASK LOADING (if you want to use it later in the pipeline only) ----
-        self.current_mask = None
-        #print(self.use_masks)
-        #print(self.mask_map)
-        if getattr(self, "use_masks", False) and hasattr(self, "mask_map"):
-            print("[change_image] Using mask for image:", base_name)
-            mask_path = self.mask_map.get(base_name)
-            print(mask_path)
-            if mask_path:
-                if mask_path.endswith('.npy'):
-                    mask = np.load(mask_path)
-                    if mask.max() > 1:
-                        mask = (mask > 0).astype(np.uint8)
-                else:
-                    mask = cv2.imread(mask_path, 0)
-                    if mask is not None:
-                        mask = (mask > 0).astype(np.uint8)
-                self.current_mask = mask
-            else:
-                print(f"[change_image] No mask found for image: {base_name}")
-
-        # ---- Start with original image ----
-        im = self.original_image.copy()
-
-        # -------- Load annotation data as before --------
-        self.ann_name = os.path.join(self.save_folder, base_name + '.json')
-        self.mask_name_bin = os.path.join(self.save_folder, base_name + '_mask.png')
-        self.mask_name_255 = os.path.join(self.save_folder, base_name + '_mask255.png')
-        self.mask = []
-        self.user_points = []
-        self.user_connections = []
-        self.endpoint_pairs = []
-        self.annotation = {}
-
-        # Always draw annotation segmentations and connections!
-        if os.path.exists(self.ann_name):
-            with open(self.ann_name) as f:
-                self.annotation = json.load(f)
-            ann = self.annotation.get('annotations', {})
-            self.user_points = ann.get('user_points', None)
-            self.user_connections = ann.get('user_connections', None)
-            if self.user_points and self.user_connections:
-                self.endpoint_pairs = [[a, b] for a, b in self.user_connections]
-                for pt1, pt2 in self.user_connections:
-                    cv2.line(im,
-                        (int(round(pt1[0])), int(round(pt1[1]))),
-                        (int(round(pt2[0])), int(round(pt2[1]))),
-                        (255, 0, 255), 2)
-
-            # --- Draw annotation masks (segmentations) ---
-            # Priority: 'all_masks' -> 'crack_pixels'
-            if 'all_masks' in ann:
-                all_masks = ann['all_masks']
-                for m_arr in all_masks:
-                    mask = np.array(m_arr, dtype=np.uint8)
-                    if mask.shape == im.shape[:2]:
-                        # Option 1: show boundary as in mark_boundaries (classic)
-                        from skimage.segmentation import mark_boundaries
-                        im = (mark_boundaries(im / 255.0, mask, color=(1,0,0), background_label=0)*255).astype(np.uint8)
-                        self.mask.append(mask)
-            elif 'crack_pixels' in ann:
-                crack_pixels = ann['crack_pixels']
-                if crack_pixels:
-                    mask = np.zeros(im.shape[:2], dtype=np.uint8)
-                    c = np.array(crack_pixels)
-                    if c.size > 0:
-                        mask[list(c[:, 0]), list(c[:, 1])] = 1
-                        from skimage.segmentation import mark_boundaries
-                        im = (mark_boundaries(im / 255.0, mask, color=(1,0,0), background_label=0)*255).astype(np.uint8)
-                        self.mask.append(mask)
-
-            # --- Draw bounding boxes ---
-            if 'box' in ann:
-                for key in ann['box'].keys():
-                    box_data = ann['box'][key]
-                    bb_pts = np.array(box_data['bounding_box'])
-                    if box_data['class'] == 0:
-                        box_color = (0,0,255)
-                    elif box_data['class'] == 1:
-                        box_color = (0,255,0)
-                    else:
-                        box_color = (255,0,0)
-                    cv2.rectangle(im, tuple(bb_pts[0]), tuple(bb_pts[1]), box_color, 3)
-
-        # ---- Now show the image with overlays ----
-        qimage = QImage(im.astype(np.uint8), im.shape[1], im.shape[0],
-                        im.strides[0], QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(qimage)
-        scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-        self.ImageScreen.setPixmap(scaled_pixmap)'''
     
     def next_image(self):
         try:
@@ -904,167 +593,6 @@ class CrackToolsApplication(Ui_MainWindow):
             self.change_image()
         else:
             self.change_image()
-            
-    '''def clear_segmentation(self):
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
-
-        if not hasattr(self, 'mask') or len(self.mask) == 0:
-            error("No saved masks to delete.")
-            return
-
-        dlg = QDialog(self.MainWindow)
-        dlg.setWindowTitle("Select Segmentations to Delete")
-        layout = QVBoxLayout(dlg)
-        listwidget = QListWidget()
-        listwidget.setSelectionMode(QListWidget.MultiSelection)
-
-        for idx, m in enumerate(self.mask):
-            count = np.count_nonzero(m)
-            listwidget.addItem(f"{idx+1}: {count} nonzero pixels")
-
-        layout.addWidget(listwidget)
-        btns = QHBoxLayout()
-        btn_ok = QPushButton("Delete Selected")
-        btn_cancel = QPushButton("Cancel")
-        btns.addWidget(btn_ok)
-        btns.addWidget(btn_cancel)
-        layout.addLayout(btns)
-
-        btn_ok.clicked.connect(dlg.accept)
-        btn_cancel.clicked.connect(dlg.reject)
-
-        # --- Helper: highlight selected segmentations ---
-        def highlight_selected_segments():
-            # Base image
-            display = self.original_image.copy()
-            # Normal overlays: semi-transparent red
-            for i, m in enumerate(self.mask):
-                color = (255, 0, 0)  # Default: red
-                alpha = 0.25
-                if listwidget.item(i).isSelected():
-                    color = (255, 140, 0)  # Orange for selected
-                    alpha = 0.60
-                if np.any(m):
-                    mask_bool = m.astype(bool)
-                    overlay = np.zeros_like(display)
-                    overlay[mask_bool] = color
-                    display = cv2.addWeighted(display, 1, overlay, alpha, 0)
-            # Show in the main screen
-            im = display.astype(np.uint8)
-            qimage = QImage(im, im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.ImageScreen.setPixmap(scaled_pixmap)
-
-        # Connect the highlight update to selection change
-        listwidget.itemSelectionChanged.connect(highlight_selected_segments)
-
-        # --- Show highlights for initial dialog state ---
-        highlight_selected_segments()
-
-        # Dialog execution
-        if dlg.exec_() == QDialog.Accepted:
-            selected_indices = [i.row() for i in listwidget.selectedIndexes()]
-            if not selected_indices:
-                # Restore original display
-                self.change_image()
-                return
-            for idx in sorted(selected_indices, reverse=True):
-                self.mask.pop(idx)
-            self.annotation["annotations"]["all_masks"] = [m.tolist() for m in self.mask]
-            m = np.sum(np.array(self.mask), axis=0) if len(self.mask) > 0 else np.zeros_like(self.original_image[..., 0])
-            m[m >= 1] = 1.0
-            crack_pixels = np.argwhere(m == 1.0)
-            self.annotation["annotations"]["crack_pixels"] = crack_pixels.tolist()
-            with open(self.ann_name, 'w') as fp:
-                json.dump(self.annotation, fp)
-            print(f"Deleted {len(selected_indices)} segmentations.")
-            self.change_image()
-        else:
-            # Restore normal display if cancelled
-            self.change_image()'''
-    
-    '''def clear_segmentation(self):
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
-
-        # Gather all atomic and combined cracks for deletion dialog
-        ann = self.annotation.get("annotations", {})
-        atomic_cracks = ann.get("atomic_cracks", {})
-        combined_cracks = ann.get("combined_cracks", {})
-        items = []
-        labels = []
-        # For atomic
-        for crack_id in atomic_cracks.keys():
-            items.append(("atomic", crack_id))
-            labels.append(f"Atomic {crack_id}")
-        # For combined
-        for crack_id, crack in combined_cracks.items():
-            members = crack.get("members", [])
-            items.append(("combined", crack_id))
-            labels.append(f"Combined {crack_id} (from: {','.join(map(str, members))})")
-
-        if not items:
-            error("No saved cracks to delete.")
-            return
-
-        dlg = QDialog(self.MainWindow)
-        dlg.setWindowTitle("Select Segments to Delete")
-        layout = QVBoxLayout(dlg)
-        listwidget = QListWidget()
-        listwidget.setSelectionMode(QListWidget.MultiSelection)
-        for lbl in labels:
-            listwidget.addItem(lbl)
-        layout.addWidget(listwidget)
-        btns = QHBoxLayout()
-        btn_ok = QPushButton("Delete Selected")
-        btn_cancel = QPushButton("Cancel")
-        btns.addWidget(btn_ok)
-        btns.addWidget(btn_cancel)
-        layout.addLayout(btns)
-        btn_ok.clicked.connect(dlg.accept)
-        btn_cancel.clicked.connect(dlg.reject)
-
-        def highlight_selected_segments():
-            # This could be improved for visual highlighting, for now just show the base image
-            display = self.original_image.copy()
-            im = display.astype(np.uint8)
-            qimage = QImage(im, im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.ImageScreen.setPixmap(scaled_pixmap)
-        listwidget.itemSelectionChanged.connect(highlight_selected_segments)
-        highlight_selected_segments()
-
-        if dlg.exec_() == QDialog.Accepted:
-            selected_indices = [i.row() for i in listwidget.selectedIndexes()]
-            if not selected_indices:
-                self.change_image()
-                return
-            for idx in sorted(selected_indices, reverse=True):
-                tpe, crack_id = items[idx]
-                if tpe == "atomic":
-                    if crack_id in atomic_cracks:
-                        del atomic_cracks[crack_id]
-                elif tpe == "combined":
-                    if crack_id in combined_cracks:
-                        del combined_cracks[crack_id]
-            self.annotation["annotations"]["atomic_cracks"] = atomic_cracks
-            self.annotation["annotations"]["combined_cracks"] = combined_cracks
-            # Recompute mask
-            masks = []
-            for crack in atomic_cracks.values():
-                if "mask" in crack:
-                    masks.append(np.array(crack["mask"], dtype=np.uint8))
-            m = np.sum(np.stack(masks), axis=0) if masks else np.zeros_like(self.original_image[..., 0])
-            m[m >= 1] = 1.0
-            self.annotation["annotations"]["crack_pixels"] = np.argwhere(m == 1.0).tolist()
-            self.annotation["annotations"]["all_masks"] = [mm.tolist() for mm in masks]
-            with open(self.ann_name, 'w') as fp:
-                json.dump(self.annotation, fp)
-            print(f"Deleted {len(selected_indices)} segmentations.")
-            self.change_image()
-        else:
-            self.change_image()'''
 
     def annotation_full_screen(self):
         try:
@@ -1073,7 +601,7 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
     
-    def select_end_points(self):
+    def select_end_points_manmidlines(self):
         if not hasattr(self, "original_image") or self.original_image is None:
             error("No original image found.")
             return
@@ -1083,7 +611,7 @@ class CrackToolsApplication(Ui_MainWindow):
         boxes = self.get_all_bounding_boxes()
 
         dlg = QDialog(self.MainWindow)
-        dlg.setWindowTitle("Mark Endpoints & Connections")
+        dlg.setWindowTitle("Mark Endpoints, Connections & Midlines")
         dlg.setWindowModality(Qt.ApplicationModal)
         dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowMaximizeButtonHint)
         layout = QVBoxLayout(dlg)
@@ -1092,21 +620,34 @@ class CrackToolsApplication(Ui_MainWindow):
         mode_btn.setCheckable(True)
         layout.addWidget(mode_btn)
 
+        manual_btn = QPushButton("Draw Midline for Selected Connection")
+        manual_btn.setEnabled(False)
+        layout.addWidget(manual_btn)
+
+        # Prepare initial midlines if loaded from file
+        existing_midlines = {}
+        if "annotations" in self.annotation:
+            ann_midlines = self.annotation["annotations"].get("midlines", {})
+            for k_str, pts in ann_midlines.items():
+                try:
+                    i1, i2 = map(int, k_str.split("_"))
+                    existing_midlines[(i1, i2)] = [tuple(map(float, xy)) for xy in pts]
+                except:
+                    pass
+
         connections_for_annot = None
         if hasattr(self, "user_points") and hasattr(self, "user_connections") and self.user_points and self.user_connections:
             points = self.user_points
             connections_for_annot = []
             for conn in self.user_connections:
-                # If already index pairs (tuple of ints), leave unchanged
                 if isinstance(conn[0], int) and isinstance(conn[1], int):
                     connections_for_annot.append(tuple(conn))
-                # If coordinate pairs, convert to indices
                 elif (isinstance(conn[0], (list, tuple)) and isinstance(conn[1], (list, tuple))):
                     def find_index(points, pt):
                         for i, p in enumerate(points):
                             if np.allclose(p, pt):
                                 return i
-                        raise ValueError(f"Point {pt} not found in points list.")
+                        raise ValueError
                     i1 = find_index(points, conn[0])
                     i2 = find_index(points, conn[1])
                     connections_for_annot.append((i1, i2))
@@ -1115,7 +656,8 @@ class CrackToolsApplication(Ui_MainWindow):
             image=self.original_image,
             boxes=boxes,
             initial_points=getattr(self, "user_points", None),
-            initial_connections=connections_for_annot
+            initial_connections=connections_for_annot,
+            initial_midlines=existing_midlines
         )
         annot.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
 
@@ -1131,8 +673,19 @@ class CrackToolsApplication(Ui_MainWindow):
             else:
                 mode_btn.setText("Switch to Connection Mode")
                 mode_btn.setStyleSheet("background: #e2c297;")
+            # Enable manual midline button only if in connection mode and a connection is hovered without midline
+            if annot.connection_mode and annot.hover_line_index is not None:
+                conn = annot.connections[annot.hover_line_index]
+                key = tuple(sorted(conn))
+                manual_btn.setEnabled(key not in annot.midlines)
+            else:
+                manual_btn.setEnabled(False)
+
         mode_btn.clicked.connect(lambda: (annot.toggle_mode(), update_mode_text()))
-        update_mode_text()
+        manual_btn.clicked.connect(lambda: (
+            annot.start_midline_for_connection(annot.connections[annot.hover_line_index])
+            if annot.hover_line_index is not None else None
+        ))
 
         btn_layout = QHBoxLayout()
         btn_done   = QPushButton("Done")
@@ -1149,31 +702,21 @@ class CrackToolsApplication(Ui_MainWindow):
             return False
 
         def on_done():
-            pts = annot.points
-            conns = annot.connections
-
-            # Must have at least one connection
-            if len(conns) == 0:
-                msg = QMessageBox(dlg)
-                msg.setIcon(QMessageBox.Warning)
-                msg.setText("Please create at least one connection between two points before proceeding.")
-                msg.setWindowTitle("No Connections")
-                msg.exec_()
-                return
-
-            # --- Enforce ALL points are inside a box ---
-            bad_pts = [pt for pt in pts if not point_in_any_box(pt, boxes)]
+            # Validate all points inside boxes
+            bad_pts = [pt for pt in annot.points if not point_in_any_box(pt, boxes)]
             if bad_pts:
                 msg = QMessageBox(dlg)
                 msg.setIcon(QMessageBox.Warning)
-                msg.setText(
-                    "All points must be inside a bounding box!\n\n"
-                    + "\n".join([f"Point {i}: {pt}" for i, pt in enumerate(bad_pts)])
-                )
-                msg.setWindowTitle("Points Outside Box")
+                msg.setText("All points must be inside a bounding box!")
                 msg.exec_()
-                return  # Stay in dialog
-
+                return
+            # Save state
+            self.user_points = annot.points
+            self.user_connections = annot.connections
+            self.annotation.setdefault("annotations", {})["midlines"] = {
+                f"{i1}_{i2}": [[float(x), float(y)] for x, y in poly]
+                for (i1, i2), poly in annot.midlines.items()
+            }
             dlg.accept()
 
         btn_done.clicked.connect(on_done)
@@ -1185,17 +728,14 @@ class CrackToolsApplication(Ui_MainWindow):
         if dlg.exec_() != QDialog.Accepted:
             return
 
-        pts = annot.points
-        conns = annot.connections
-        print(f"Selected points: {pts}")
-        self.endpoint_pairs = [(pts[a], pts[b]) for a, b in conns]
-        self.user_points = pts
-        self.user_connections = conns
-        print(f"Selected endpoint pairs: {self.endpoint_pairs}")
+        print(f"Selected points: {self.user_points}")
+        print(f"Selected connections: {self.user_connections}")
+        print(f"Midlines: {self.annotation['annotations']['midlines']}")
 
-        color = "lightblue" if self.endpoint_pairs else "red"
-        self.update_image_crop_button.setStyleSheet(f"background-color: {color}")
-        
+        self.update_image_crop_button.setStyleSheet("background-color: lightblue")
+        self.save_annotation()
+        self.change_image()
+            
     def select_save_end_points(self):
         self.select_end_points()
         self.save_annotation()
@@ -1219,6 +759,7 @@ class CrackToolsApplication(Ui_MainWindow):
             # Crop the image to the bounding box
             self.image_crop = self.original_image[ymin:ymax, xmin:xmax]
             # Ensure the crop is not too small for tracking/segmentation
+            min_crop_size = 16
             h, w = self.image_crop.shape[:2]
             if h < min_crop_size or w < min_crop_size:
                 print(f"Skipping segment: Crop too small for processing ({w}x{h})")
@@ -1429,9 +970,6 @@ class CrackToolsApplication(Ui_MainWindow):
         values = osGFCost_shift[:int(self.osGFCost.shape[0]/2),:,:].real
         X, Y, Z = np.mgrid[:values.shape[0],:values.shape[1],:values.shape[2]]
    
-        # image_gray_cropp_down = scipy.ndimage.zoom(self.image_crop[:,:,color_channel], 
-        #                                         ((Y.shape[1])/self.image_crop.shape[0],
-        #                                                             (Y.shape[2])/self.image_crop.shape[1]), order=3)
         yim = np.linspace(0,self.image_crop_down.shape[0],self.image_crop_down.shape[0])
         zim = np.linspace(0,self.image_crop_down.shape[1],self.image_crop_down.shape[1])
 
@@ -1717,79 +1255,6 @@ class CrackToolsApplication(Ui_MainWindow):
             traceback.print_exc()
             error(e)
             self.edge_tracks_button.setStyleSheet("background-color : red")
-
-    '''def edge_tracking(self):
-        try:
-            color_channel = [0 if self.edge_track_color_box.currentText() == 'R'
-                            else 1 if self.edge_track_color_box.currentText() == 'B' else 2][0]
-            w = self.edge_track_width_box.value()
-            if self.edge_track_color_box.currentText() == "R":
-                color = (255, 0, 0)
-            elif self.edge_track_color_box.currentText() == "G":
-                color = (0, 255, 0)
-            elif self.edge_track_color_box.currentText() == "B":
-                color = (0, 0, 255)
-            elif self.edge_track_color_box.currentText() == "W":
-                color = (255, 255, 255)
-
-            mu = self.mu_box.value()
-            l = self.l_box.value()
-            p = self.p_box.value()
-
-            # USE THE CROP MASKS
-            track_e1_crop, track_e2_crop = ct.segmentation.edges_tracking(
-                self.image_crop[:, :, color_channel],
-                self.pts_crop,
-                self.edge_mask1_crop, self.edge_mask2_crop, self.adjusted_track, mu=mu, l=l, p=p
-            )
-
-            # Only swap if you are SURE it is [y, x]. If already [x, y], do NOT swap!
-            # Let's check if swap needed: x should always be in [0, width], y in [0, height]
-            x1_min, x1_max = np.min(track_e1_crop[0]), np.max(track_e1_crop[0])
-            y1_min, y1_max = np.min(track_e1_crop[1]), np.max(track_e1_crop[1])
-
-            h, w_img = self.image_crop.shape[:2]
-            if (y1_max > w_img-10 and x1_max < h+10):
-                print("Swapping axes [y, x] -> [x, y]")
-                track_e1_crop = track_e1_crop[::-1]
-                track_e2_crop = track_e2_crop[::-1]
-
-            # Offset for drawing
-            track_e1_crop[0] = track_e1_crop[0] - 0.5
-            track_e2_crop[0] = track_e2_crop[0] - 0.5
-            track_e1_crop[1] = track_e1_crop[1] - 0.5
-            track_e2_crop[1] = track_e2_crop[1] - 0.5
-
-            # Clip to image size just in case
-            h, w_img = self.image_crop.shape[:2]
-            track_e1_crop[0] = np.clip(track_e1_crop[0], 0, w_img-1)
-            track_e1_crop[1] = np.clip(track_e1_crop[1], 0, h-1)
-            track_e2_crop[0] = np.clip(track_e2_crop[0], 0, w_img-1)
-            track_e2_crop[1] = np.clip(track_e2_crop[1], 0, h-1)
-
-            # Save crop-coords for later
-            self.track_e1 = [track_e1_crop[0], track_e1_crop[1]]
-            self.track_e2 = [track_e2_crop[0], track_e2_crop[1]]
-
-            # For display, use crop coordinates only!
-            pts1 = np.array(track_e1_crop).transpose(1, 0).reshape((-1, 1, 2)).astype(np.int32)
-            pts2 = np.array(track_e2_crop).transpose(1, 0).reshape((-1, 1, 2)).astype(np.int32)
-
-            im = self.image_crop.astype(np.uint8)
-            im = cv2.polylines(im, [pts1], False, color, w)
-            im = cv2.polylines(im, [pts2], False, color, w)
-            qimage = QImage(im, im.shape[1], im.shape[0],
-                            im.strides[0], QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.edge_tracks_display.width(), self.edge_tracks_display.height(),
-                                        Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.edge_tracks_display.setPixmap(scaled_pixmap)
-            self.edge_tracks_full_screen_button.setStyleSheet("background-color : lightblue")
-            self.save_current_segment_button.setStyleSheet("background-color : lightblue")
-        except Exception as e:
-            error(e)
-            self.edge_tracks_full_screen_button.setStyleSheet("background-color : red")
-            self.save_current_segment_button.setStyleSheet("background-color : red")'''
     
     def edge_tracking(self):
         try:
@@ -1903,10 +1368,6 @@ class CrackToolsApplication(Ui_MainWindow):
             #print(type(self.track_e1), type(self.track_e2), type(self.track), type(self.crack_tracks))
             #print(len(self.track_e1), len(self.track_e2), len(self.track), len(self.crack_tracks))
             print(self.track_e1[0].shape, self.track_e2[0].shape, self.track[0].shape)
-            #print(self.track_e1)
-            #print(self.track_e2)
-            #print(self.track)
-            #print(self.crack_tracks)
 
             # For display, shift polylines to full image
             pts1 = (np.array(self.track_e1).transpose(1, 0) + np.array([xmin, ymin])).reshape((-1, 1, 2)).astype(np.int32)
@@ -1955,22 +1416,6 @@ class CrackToolsApplication(Ui_MainWindow):
             plt.show()
         except Exception as e:
             error(e)
-
-    '''def save_manual_segment(self):
-        try:
-            mask_FM = ct.segmentation.create_mask(self.image,self.manuall_x,self.manuall_y)
-            self.mask.append(mask_FM)
-            m = np.sum(np.array(self.mask),axis = 0)
-            m[m>=1] = 255
-            m = m.astype(dtype=np.uint8)
-            pts = np.array([self.manuall_x,self.manuall_y]).transpose(1,0).reshape((-1,1,2)).astype(np.int32)
-            im = self.image.astype(np.uint8).copy()
-            im = cv2.polylines(im, [pts], False, (0,255,0), 1)
-            self.image = im
-
-            self.save_annotation()
-        except Exception as e:
-            error(e)'''
     
     def save_manual_segment(self):
         try:
@@ -1987,105 +1432,12 @@ class CrackToolsApplication(Ui_MainWindow):
             im = cv2.polylines(im, [pts], False, (0, 255, 0), 1)
             self.image = im
 
-            # 3. Save mask as PNG immediately (in addition to annotation)
-            # Use same base filename and save_folder as JSON annotation
-            #base_name = os.path.splitext(os.path.basename(self.name))[0]
-            #mask_path = os.path.join(self.save_folder, base_name + '_manual_mask.png')
-            #cv2.imwrite(mask_path, m)
-            #print(f"Saved manual mask to: {mask_path}")
-
             # 4. Save annotation as usual
             self.save_annotation()
             self.change_image()
 
         except Exception as e:
             error(e)
-          
-    '''def save_annotation(self):
-        try:
-            # Only save mask PNGs if not using external masks
-            if not getattr(self, "use_masks", False):
-                masks = [np.array(m, dtype=np.uint8) for m in self.mask if m is not None and np.array(m).size > 0]
-                if masks:
-                    m = np.sum(np.stack(masks), axis=0)
-                    m[m >= 1] = 1.0
-                    crack_pixels = np.argwhere(m == 1.0)
-                    self.annotation["annotations"]["crack_pixels"] = crack_pixels.tolist()
-                    self.annotation["annotations"]["all_masks"] = [mm.tolist() for mm in masks]
-                else:
-                    # If no masks, save blank
-                    m = np.zeros(self.image.shape[:2], dtype=np.uint8)
-                    self.annotation["annotations"]["crack_pixels"] = []
-                    self.annotation["annotations"]["all_masks"] = []
-
-                # Save midline tracks
-                self.annotation["annotations"]["tracks"] = self.crack_tracks
-
-                # Save additional geometric data per crack
-                cracks_data = {}
-                for crack_id, track in self.crack_tracks.items():
-                    # Midline
-                    midline = list(zip(track[1], track[0]))  # (x, y)
-
-                    # Get edge1 and edge2 for this crack if available
-                    if hasattr(self, "track_e1") and hasattr(self, "track_e2"):
-                        # Edge points as (x, y)
-                        edge1 = list(zip(self.track_e1[1], self.track_e1[0]))
-                        edge2 = list(zip(self.track_e2[1], self.track_e2[0]))
-
-                        # Calculate widths (Euclidean distance)
-                        e1_arr = np.stack(self.track_e1, axis=1)  # shape (N, 2)
-                        e2_arr = np.stack(self.track_e2, axis=1)
-                        widths = np.linalg.norm(e1_arr - e2_arr, axis=1).tolist()
-
-                        # Calculate angles (orientation of midline)
-                        mid_arr = np.stack([track[0], track[1]], axis=1)
-                        deltas = np.diff(mid_arr, axis=0)
-                        angles = np.degrees(np.arctan2(deltas[:, 1], deltas[:, 0])).tolist()
-                        if len(angles) > 0:
-                            angles.append(angles[-1])  # Pad to match lengths
-
-                        cracks_data[str(crack_id)] = {
-                            "midline": midline,
-                            "edge1": edge1,
-                            "edge2": edge2,
-                            "widths": widths,
-                            "angles": angles
-                        }
-
-                self.annotation["annotations"]["cracks"] = cracks_data
-
-                # Prepare file names
-                base_name = os.path.splitext(os.path.basename(self.name))[0]
-                json_path = os.path.join(self.save_folder, base_name + '.json')
-                mask_bin_path = os.path.join(self.save_folder, base_name + '_mask.png')
-                mask_255_path = os.path.join(self.save_folder, base_name + '_mask255.png')
-
-                # 1. Save JSON annotation
-                json_file = json.dumps(self.annotation)
-                with open(json_path, 'w') as f:
-                    f.write(json_file)
-
-                # 2. Save binary mask
-                mask_bin = (m >= 1).astype('uint8')
-                cv2.imwrite(mask_bin_path, mask_bin)
-
-                # 3. Save 255-scaled mask for viewing
-                mask_255 = mask_bin * 255
-                cv2.imwrite(mask_255_path, mask_255)
-
-                print(f"Saved: {json_path}, {mask_bin_path}, {mask_255_path}")
-
-            else:
-                # If using external mask, just save annotation JSON
-                base_name = os.path.splitext(os.path.basename(self.name))[0]
-                json_path = os.path.join(self.save_folder, base_name + '.json')
-                json_file = json.dumps(self.annotation)
-                with open(json_path, 'w') as f:
-                    f.write(json_file)
-
-        except Exception as e:
-            error(e)'''
     
     def change_image(self):
         import pprint
@@ -2518,7 +1870,7 @@ class CrackToolsApplication(Ui_MainWindow):
             print(f"Could not parse bounding boxes: {e}")
         return boxes
                 
-    def run_pipeline(self, multirun=False):
+    '''def run_pipeline(self, multirun=False):
         """
         For each bounding box:
         - Compute OS/cost ONCE per box
@@ -2671,6 +2023,184 @@ class CrackToolsApplication(Ui_MainWindow):
             ann["user_connections"] = None
             # Save cleared annotation to file
             #self.save_annotation()
+            self.change_image()'''
+    
+    def run_pipeline(self, multirun=False):
+        """
+        For each bounding box:
+        - Compute OS/cost ONCE per box
+        - For each endpoint-pair inside the box, do midline tracking + save midline.
+        After all succeed, clears user endpoints & connections from memory and file.
+        """
+        import gc, json
+        import numpy as np
+        from PyQt5.QtWidgets import QMessageBox
+        from time import time
+
+        def _save_midline_only(midline_points):
+            """
+            Append a single midline (list of [x, y]) into annotations.atomic_cracks.
+            Returns the crack_id used.
+            """
+            # Ensure top-level structure
+            if "annotations" not in self.annotation:
+                self.annotation["annotations"] = {}
+            ann = self.annotation["annotations"]
+            if "atomic_cracks" not in ann or not isinstance(ann["atomic_cracks"], dict):
+                ann["atomic_cracks"] = {}
+
+            # Next id
+            if ann["atomic_cracks"]:
+                next_id = str(max(int(k) for k in ann["atomic_cracks"].keys()) + 1)
+            else:
+                next_id = "0"
+
+            ann["atomic_cracks"][next_id] = {
+                "midline": [[int(x), int(y)] for x, y in midline_points]
+            }
+
+            # Persist to disk
+            base_name = os.path.splitext(os.path.basename(self.name))[0]
+            json_path = os.path.join(self.save_folder, base_name + '.json')
+            with open(json_path, 'w') as f:
+                json.dump(self.annotation, f)
+            return next_id
+
+        gc.collect()
+        print("✅ GPU memory freed from CuPy pool")
+        print("Running midline-only pipeline for all endpoint pairs and bounding boxes...")
+
+        boxes = self.get_all_bounding_boxes()
+        if not boxes:
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Critical)
+            msg.setText("No bounding boxes found! Please draw at least one bounding box before running the pipeline.")
+            msg.setWindowTitle("No Bounding Boxes")
+            msg.exec_()
+            return
+
+        if not multirun:
+            # Re-prompt user for endpoints/connections unless we're in batch
+            self.endpoint_pairs = None
+            self.user_connections = None
+            self.user_points = None
+            self.select_end_points_manmidlines()
+
+        if not hasattr(self, "endpoint_pairs") or not self.endpoint_pairs:
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Critical)
+            msg.setText("No endpoint pairs selected!\n\nPlease use 'Select Endpoints' and create at least one connection before running the pipeline.")
+            msg.setWindowTitle("No Endpoint Pairs")
+            msg.exec_()
+            return
+
+        # Group endpoint pairs by their smallest-area containing bbox
+        box_to_pairs = {}
+        for pair in self.endpoint_pairs:
+            candidates = []
+            for bbox in boxes:
+                xmin, ymin, xmax, ymax = bbox
+                p0, p1 = pair
+                if (xmin <= p0[0] <= xmax and ymin <= p0[1] <= ymax and
+                    xmin <= p1[0] <= xmax and ymin <= p1[1] <= ymax):
+                    area = abs((xmax - xmin) * (ymax - ymin))
+                    candidates.append((area, bbox))
+            if candidates:
+                _, chosen_bbox = min(candidates, key=lambda x: x[0])
+                key = tuple(chosen_bbox)
+                box_to_pairs.setdefault(key, []).append(pair)
+
+        num_success = 0
+        errors = []
+
+        for box_idx, (bbox_key, pairs) in enumerate(box_to_pairs.items()):
+            # Reset state that could leak between boxes
+            self.crack_tracks = {}
+            self.mask = []
+            bbox = list(bbox_key)
+            xmin, ymin, xmax, ymax = bbox
+            print(f"\n=== Processing bounding box {box_idx+1}/{len(box_to_pairs)}: {bbox} ===")
+
+            try:
+                # --- Crop image ONCE for this box (seed with first pair) ---
+                first_pair = pairs[0]
+                self.pts = [np.array(first_pair[0]), np.array(first_pair[1])]
+                self.end_points = [np.array(first_pair[0]), np.array(first_pair[1])]
+                self.active_bbox = bbox
+                self.update_image_crop()  # crops to bbox
+
+                if getattr(self, "skip_current_segment", False):
+                    print("Skipping all pairs in this box: Crop too small.")
+                    continue
+
+                # --- Compute OS and cost ONCE for the box ---
+                print("os (once per box)")
+                t0 = time(); self.update_os(); print(f"os time: {time()-t0:.2f}s")
+                print("cost (once per box)")
+                t0 = time(); self.update_cost(); print(f"cost time: {time()-t0:.2f}s")
+
+                # --- Midline ONLY for each pair in this box ---
+                for idx, pair in enumerate(pairs):
+                    try:
+                        print(f"  > Midline {idx+1}/{len(pairs)} in box: endpoints {pair}")
+                        self.pts = [np.array(pair[0]), np.array(pair[1])]
+                        self.end_points = [np.array(pair[0]), np.array(pair[1])]
+
+                        # Refresh crop-relative points
+                        self.pts_crop = [np.array(pt) - np.array([xmin, ymin]) for pt in self.pts]
+                        downsample = self.downsample_factor_box.value()
+                        self.pts_crop_down = [p / downsample for p in self.pts_crop]
+
+                        # Track midline
+                        t0 = time()
+                        self.midline_tracking()
+                        print(f"    midline tracking time: {time()-t0:.2f}s")
+
+                        # self.track is in FULL image coordinates (see midline_tracking)
+                        midline_xy = list(zip(self.track[1].tolist(), self.track[0].tolist()))  # [(x,y),...]
+
+                        # Save just the midline
+                        crack_id = _save_midline_only(midline_xy)
+                        print(f"    saved midline as atomic crack {crack_id}")
+                        num_success += 1
+
+                    except Exception as e:
+                        print(f"    Exception for endpoints {pair}: {e}")
+                        errors.append(f"Failed midline for endpoints {pair}: {e}")
+                        continue
+
+            except Exception as e:
+                print(f"Exception for bounding box {bbox}: {e}")
+                errors.append(f"Failed for bounding box {bbox}: {e}")
+                continue
+
+        # --- Cleanup / user annotation clearing ---
+        if errors and num_success == 0:
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Critical)
+            msg.setText("\n".join(errors))
+            msg.setWindowTitle("Pipeline Error")
+            msg.exec_()
+        else:
+            if errors:
+                print("\n".join(errors))
+            else:
+                print("✔ All endpoint-groups processed (midline-only, optimized by box).")
+
+            # Clear endpoints & connections from memory and file
+            print("Clearing endpoint and connection annotations after successful pipeline run...")
+            if hasattr(self, "user_points"):
+                del self.user_points
+            if hasattr(self, "user_connections"):
+                del self.user_connections
+            if hasattr(self, "endpoint_pairs"):
+                del self.endpoint_pairs
+
+            ann = self.annotation.get("annotations", {})
+            ann["user_points"] = None
+            ann["user_connections"] = None
+
+            # Refresh UI
             self.change_image()
             
     def update_os_cost(self):
