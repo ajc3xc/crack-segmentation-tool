@@ -265,7 +265,7 @@ class CrackAnnotator(QtWidgets.QWidget):
         self.update()
 
     def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_Backspace):
+        if event.key() in (Qt.Key_Backspace, Qt.Key_Z):
             if self.polyline_mode and self._is_drawing and self.polyline:
                 self._pop_poly_point()
                 self.update()

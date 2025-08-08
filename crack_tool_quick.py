@@ -1156,7 +1156,7 @@ class CrackToolsApplication(Ui_MainWindow):
             track = ct.tools.track_crop_to_full(track_crop,self.pts[0],self.pts[1],y_margin,x_margin)
             #print(self.track_crop, track,downsample_factor)
             self.track = track
-            print(self.track)
+            #print(self.track)
             pts = np.array(track_crop).transpose(1,0).reshape((-1,1,2)).astype(np.int32)
             im = self.image_crop.astype(np.uint8)
             im = cv2.polylines(im, [pts], False, color, w)
@@ -1297,20 +1297,22 @@ class CrackToolsApplication(Ui_MainWindow):
 
             img_gray = self.original_image[:, :, color_channel] * black_crack
             track = np.array(self.track)
-            if getattr(self, "current_source", None) != "manual":
-                # Auto mode: stored as [y, x] but needs to be swapped
-                track = np.vstack([track[1], track[0]])
-            print(f"[EDGE_MASK] track after vstack: shape={track.shape}, sample={track[:, :5]}")
 
-            # Only shift for auto mode
-            if getattr(self, "current_source", None) != "manual":
+            # Always store as [y, x] in full image coordinates
+            if getattr(self, "current_source", None) == "manual":
+                # Manual track was stored in crop coords → convert back to full image coords
+                xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
+                track_full_y = track[0] + ymin
+                track_full_x = track[1] + xmin
+                track = np.vstack([track_full_y, track_full_x])
+                print("[EDGE_MASK] Manual mode - converted crop coords to full image coords")
+            else:
+                # Auto mode: stored as [y, x] but needs swap + shift
+                track = np.vstack([track[1], track[0]])
                 target_point = np.array([self.pts[1][1], self.pts[1][0]])
                 shift_vector = target_point - track[:, 0]
-                print(f"[EDGE_MASK] target_point={target_point}, shift_vector={shift_vector}")
                 track = track + shift_vector[:, np.newaxis]
-                print(f"[EDGE_MASK] track after shift: sample={track[:, :5]}")
-            else:
-                print("[EDGE_MASK] Manual mode - skipping shift")
+                print(f"[EDGE_MASK] Auto mode - applied shift: {shift_vector}")
 
             xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
             self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(img_gray, track)
@@ -1318,23 +1320,26 @@ class CrackToolsApplication(Ui_MainWindow):
             print(f"[EDGE_MASK] edge_mask1 stats: min={self.edge_mask1.min()}, max={self.edge_mask1.max()}, shape={self.edge_mask1.shape}")
             print(f"[EDGE_MASK] edge_mask2 stats: min={self.edge_mask2.min()}, max={self.edge_mask2.max()}, shape={self.edge_mask2.shape}")
 
+            # Crop masks
             self.edge_mask1_crop = self.edge_mask1[ymin:ymax, xmin:xmax]
             self.edge_mask2_crop = self.edge_mask2[ymin:ymax, xmin:xmax]
             print(f"[EDGE_MASK] Cropped masks: shape1={self.edge_mask1_crop.shape}, shape2={self.edge_mask2_crop.shape}")
 
+            # Adjust track to crop coordinates
             shifted_track = np.zeros_like(track)
             shifted_track[0] = track[0] - ymin
             shifted_track[1] = track[1] - xmin
             self.adjusted_track = shifted_track
             print(f"[EDGE_MASK] adjusted_track sample={self.adjusted_track[:, :5]}")
 
+            # Normalize for display
             edge_mask1_crop = self.edge_mask1_crop - np.min(self.edge_mask1_crop)
             if np.max(edge_mask1_crop) != 0:
                 edge_mask1_crop = (edge_mask1_crop * 255 / np.max(edge_mask1_crop)).astype(dtype=np.uint8)
             else:
                 edge_mask1_crop = (edge_mask1_crop * 255).astype(dtype=np.uint8)
 
-            qimage = QImage(edge_mask1_crop.astype(dtype=np.uint8), edge_mask1_crop.shape[1], edge_mask1_crop.shape[0],
+            qimage = QImage(edge_mask1_crop, edge_mask1_crop.shape[1], edge_mask1_crop.shape[0],
                             edge_mask1_crop.strides[0], QImage.Format_Grayscale8)
             pixmap = QPixmap.fromImage(qimage)
             scaled_pixmap = pixmap.scaled(self.edge_map_display.width(), self.edge_map_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
