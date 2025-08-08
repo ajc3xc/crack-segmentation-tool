@@ -11,15 +11,21 @@ min_crop_size = 16
 
 class CrackAnnotator(QtWidgets.QWidget):
     """
-    Extended CrackAnnotator:
-    - Supports multiple midlines, one per connection (tuple of point indices)
-    - Midline drawing only allowed in connection mode, on a selected connection without an existing midline
-    - Midline starts at one endpoint, must end at the other
-    - Hover over midline in connection mode to highlight and right-click to delete
+    Points & connections + manual midlines.
+
+    - Point mode: LMB on canvas adds; LMB on point deletes (and reindexes).
+    - Connection mode: LMB two points = connect; LMB on a connection line = delete.
+    - Manual mode: click an EXISTING point to start → draw by drag/click → click a DIFFERENT EXISTING point to finish.
+      * Ends snap to endpoints
+      * LMB on a hovered midline (in manual OR connection mode) deletes it
+      * Backspace/Z undo last vertex while drawing
+      * Esc cancels current midline
+    - Prevents duplicate pair midlines; warns on abandon.
+
+    Stored midlines: self.midlines[(i1,i2)] = [(x,y), ...] with i1<i2.
     """
     def __init__(self, image=None, boxes=None, initial_points=None, initial_connections=None, initial_midlines=None):
         super().__init__()
-        # Store & prepare image
         self.orig_image = image
         if image is not None:
             h, w, _ = image.shape
@@ -28,136 +34,184 @@ class CrackAnnotator(QtWidgets.QWidget):
             self.img_w, self.img_h = w, h
         else:
             self.image_pixmap = None
-            self.img_w, self.img_h = 100, 100  # default size
+            self.img_w, self.img_h = 100, 100
 
-        # Annotation state
         self.points = list(initial_points) if initial_points else []
-        self.connections = list(initial_connections) if initial_connections else []
+        # normalize connections to sorted tuples with unique set
+        conns = []
+        if initial_connections:
+            for a,b in initial_connections:
+                a,b = int(a), int(b)
+                if a==b: continue
+                pair = (a,b) if a<b else (b,a)
+                if pair not in conns: conns.append(pair)
+        self.connections = conns
 
-        # Midlines: dict[(i1,i2)] = [(x,y),...]
-        self.midlines = dict(initial_midlines) if initial_midlines else {}
+        # point radius scales with image size
+        min_dim = min(self.img_w, self.img_h)
+        self.point_radius = max(3, min(20, int(0.005 * (min_dim if min_dim>0 else 500))))
 
-        # --- Adaptive point radius ---
-        if image is not None:
-            h, w, _ = image.shape
-            min_dim = min(w, h)
-        else:
-            min_dim = 100
-        self.point_radius = max(3, min(20, int(0.005 * min_dim)))
-
-        self.connection_mode = False
-        self.connecting_index = None
-        self.hover_index = None
-        self.hover_line_index = None
-        self.hover_midline_key = None  # for highlighting
-
-        # Bounding boxes
         self.boxes = boxes if boxes is not None else []
-
-        # Zoom state
         self.scale = 1.0
         self.setMouseTracking(True)
         self.update_canvas_size()
 
-        # Midline drawing state
+        # Classic connection mode
+        self.connection_mode = False
+        self.connecting_index = None
+        self.hover_index = None
+        self.hover_line_index = None
+
+        # Manual midline mode
         self.polyline_mode = False
-        self.current_midline_key = None
-        self.current_polyline = []
-        self._is_dragging = False
+        self.polyline = []
+        self._is_drawing = False
+        self._start_idx = None
+
+        # Saved midlines
+        self.midlines = {}
+        if isinstance(initial_midlines, dict):
+            for k, poly in initial_midlines.items():
+                try:
+                    a, b = k.split("_"); i1, i2 = int(a), int(b)
+                    if i1==i2: continue
+                    key = (i1,i2) if i1<i2 else (i2,i1)
+                    self.midlines[key] = [(float(x), float(y)) for x,y in poly]
+                except: pass
+
+        # Hovered midline key for feedback/deletion
+        self._hover_midline_key = None
 
         self.setFocusPolicy(Qt.StrongFocus)
 
-    # ===== Midline helpers =====
-    def start_midline_for_connection(self, conn_key):
-        """Enable midline mode for a given connection (tuple of point indices sorted)"""
-        self.polyline_mode = True
-        self.current_midline_key = tuple(sorted(conn_key))
-        self.current_polyline = []
-        self._is_dragging = False
+    # -------------- mode toggles --------------
+    def toggle_mode(self):
+        self.connection_mode = not self.connection_mode
+        self.connecting_index = None
         self.update()
 
-    def cancel_midline(self):
-        self.polyline_mode = False
-        self.current_midline_key = None
-        self.current_polyline = []
-        self._is_dragging = False
+    def set_mode_polyline(self, enabled: bool, confirm_cb=None):
+        """Enable/disable manual mode. If disabling with active draw, use confirm_cb() -> bool to confirm discard."""
+        if not enabled and self._is_drawing:
+            ok_to_discard = True
+            if confirm_cb is not None:
+                ok_to_discard = confirm_cb()
+            if not ok_to_discard:
+                return False
+            self.polyline = []
+            self._is_drawing = False
+            self._start_idx = None
+        self.polyline_mode = enabled
+        if enabled:
+            self.connecting_index = None
         self.update()
+        return True
 
-    def finish_midline(self):
-        if self.polyline_mode and self.current_midline_key and len(self.current_polyline) >= 2:
-            self.midlines[self.current_midline_key] = list(self.current_polyline)
-        self.cancel_midline()
+    # -------------- util --------------
+    def all_pairs_saturated(self):
+        """True if every unordered pair of points is represented either as a connection OR a midline."""
+        n = len(self.points)
+        if n < 2: return True
+        pairs = set()
+        pairs.update((min(a,b), max(a,b)) for (a,b) in self.connections)
+        pairs.update(self.midlines.keys())
+        need = (n*(n-1))//2
+        return len(pairs) >= need
 
-    def delete_midline(self, conn_key):
-        conn_key = tuple(sorted(conn_key))
-        if conn_key in self.midlines:
-            del self.midlines[conn_key]
-            self.update()
+    def _sorted(self, i, j): return (i,j) if i<j else (j,i)
+    def _add_poly_point(self, p): self.polyline.append((float(p[0]), float(p[1])))
+    def _pop_poly_point(self): 
+        if self.polyline: self.polyline.pop()
 
-    def _add_poly_point(self, p):
-        self.current_polyline.append((float(p[0]), float(p[1])))
-
-    def _pop_poly_point(self):
-        if self.current_polyline:
-            self.current_polyline.pop()
-
-    def clear_current_polyline(self):
-        self.current_polyline = []
-        self.update()
-
-    # ===== Canvas/interaction =====
+    # -------------- canvas plumbing --------------
     def update_canvas_size(self):
-        w = int(self.img_w * self.scale)
-        h = int(self.img_h * self.scale)
-        self.setMinimumSize(w, h)
-        self.resize(w, h)
-        self.update()
+        w = int(self.img_w * self.scale); h = int(self.img_h * self.scale)
+        self.setMinimumSize(w, h); self.resize(w, h); self.update()
 
     def wheelEvent(self, event):
         f = 1.2 if event.angleDelta().y() > 0 else 1/1.2
-        self.scale = max(0.1, min(10.0, self.scale * f))
+        self.scale = max(0.1, min(10.0, self.scale*f))
         self.update_canvas_size()
-        self.update()
 
+    # -------------- mouse/key --------------
     def mousePressEvent(self, event):
         p = self._to_image_coords(event.pos())
-
-        # --- Drawing a midline ---
-        if self.polyline_mode and self.current_midline_key:
-            if event.button() == Qt.LeftButton:
-                self._add_poly_point(p)
-                self._is_dragging = True
-                self.update()
-            elif event.button() == Qt.RightButton:
-                self._pop_poly_point()
-                self.update()
-            return
-
-        # --- In connection mode: right-click delete midline if hovering ---
-        if self.connection_mode and self.hover_midline_key and event.button() == Qt.RightButton:
-            self.delete_midline(self.hover_midline_key)
-            return
-
-        # --- Original connection/point logic ---
         point_i = self._find_point_at(p)
-        line_i = self._find_line_at(p)
+        line_i = self._find_line_at(p)  # connection hit test
+        mid_key = self._midline_hit_test(event.pos(), 10.0)  # midline hit test (screen px)
 
+        # manual mode first
+        if self.polyline_mode:
+            if event.button() == Qt.LeftButton:
+                # delete hovered connection/midline by LMB (even in manual mode)
+                if (not self._is_drawing) and (mid_key is not None):
+                    self.midlines.pop(mid_key, None); self._hover_midline_key=None; self.update(); return
+                if (not self._is_drawing) and (line_i is not None):
+                    # delete connection by LMB in manual mode too
+                    self.connections.pop(line_i); self.update(); return
+
+                # start?
+                if not self._is_drawing:
+                    if point_i is None: return
+                    if len(self.points) < 2: return
+                    self._start_idx = point_i
+                    sx, sy = self.points[self._start_idx]
+                    self.polyline = [(float(sx), float(sy))]
+                    self._is_drawing = True
+                    self.update(); return
+                else:
+                    # trying to finish?
+                    if point_i is not None and point_i != self._start_idx:
+                        key = self._sorted(self._start_idx, point_i)
+                        # block duplicate pair
+                        if (key in self.midlines) or (key in [(min(a,b),max(a,b)) for (a,b) in self.connections]):
+                            # show error via callback (the dialog will own the messagebox)
+                            self._last_pair_error = key
+                            self.update(); return
+                        if len(self.polyline) >= 2:
+                            # snap first/last vertices
+                            sx, sy = self.points[key[0]]; ex, ey = self.points[key[1]]
+                            poly = [(float(sx), float(sy))] + self.polyline[1:-1] + [(float(ex), float(ey))]
+                            self.midlines[key] = poly
+                            # reset and allow more midlines
+                            self.polyline = []; self._is_drawing = False; self._start_idx = None
+                            self.update(); return
+                        # else keep drawing if too short
+                    # else add vertex
+                    self._add_poly_point(p); self.update(); return
+
+            elif event.button() == Qt.RightButton:
+                # undo/cancel
+                if self._is_drawing:
+                    if len(self.polyline) > 1: self._pop_poly_point()
+                    else:
+                        self.polyline=[]; self._is_drawing=False; self._start_idx=None
+                    self.update()
+                return
+
+        # connection / point modes
         if event.button() == Qt.LeftButton:
+            # delete hovered midline by LMB (allowed in connection mode too)
+            if (not self.polyline_mode) and (mid_key is not None):
+                self.midlines.pop(mid_key, None); self._hover_midline_key=None; self.update(); return
+
             if not self.connection_mode:
                 if point_i is None:
                     self.points.append(p)
                 else:
-                    self.connections = [(i1, i2) for i1, i2 in self.connections if i1 != point_i and i2 != point_i]
-                    self.points.pop(point_i)
-                    self.connections = [(i1 - (i1 > point_i), i2 - (i2 > point_i)) for i1, i2 in self.connections]
+                    # delete point and reindex connections + midlines
+                    self._delete_point_reindex(point_i)
             else:
+                # connection mode
                 if (line_i is not None) and (self.connecting_index is None) and (point_i is None):
+                    # delete connection
                     self.connections.pop(line_i)
                 elif point_i is not None:
                     if self.connecting_index is None:
                         self.connecting_index = point_i
                     elif self.connecting_index != point_i:
-                        c = (self.connecting_index, point_i)
+                        c = self._sorted(self.connecting_index, point_i)
+                        # block duplicate
                         if c not in self.connections:
                             self.connections.append(c)
                         self.connecting_index = None
@@ -165,158 +219,147 @@ class CrackAnnotator(QtWidgets.QWidget):
                         self.connecting_index = None
                 else:
                     self.connecting_index = None
-        self.update()
-
-    def mouseReleaseEvent(self, event):
-        self._is_dragging = False
-        # Check if midline should be auto-finished when both endpoints reached
-        if self.polyline_mode and self.current_midline_key:
-            end_pts = [self.points[i] for i in self.current_midline_key]
-            if len(self.current_polyline) >= 2:
-                # If last point is near second endpoint
-                last = self.current_polyline[-1]
-                if self._is_near_point(last, end_pts[1]):
-                    self.finish_midline()
+            self.update(); return
 
     def mouseMoveEvent(self, event):
         p = self._to_image_coords(event.pos())
-
-        if self.polyline_mode and self._is_dragging and (event.buttons() & Qt.LeftButton):
-            self._add_poly_point(p)
-            self.update()
-            return
+        # mid-draw drag adds vertices
+        if self.polyline_mode and self._is_drawing and (event.buttons() & Qt.LeftButton):
+            self._add_poly_point(p); self.update(); return
 
         self.hover_index = self._find_point_at(p)
-        self.hover_midline_key = self._find_midline_at(p)
         if self.connection_mode and self.connecting_index is None and self.hover_index is None:
             self.hover_line_index = self._find_line_at(p)
         else:
             self.hover_line_index = None
+
+        # hover midline (for enlarge)
+        self._hover_midline_key = self._midline_hit_test(event.pos(), 10.0) if (not self._is_drawing) else None
         self.update()
 
     def keyPressEvent(self, event):
-        key = event.key()
-        if key in (Qt.Key_Backspace, Qt.Key_Z):
-            if self.polyline_mode and self.current_polyline:
-                self._pop_poly_point()
-                self.update()
-                return
-        if key in (Qt.Key_C, Qt.Key_Delete):
-            if self.polyline_mode and self.current_polyline:
-                self.clear_current_polyline()
-                return
+        if event.key() in (Qt.Key_Backspace, Qt.Key_Z):
+            if self.polyline_mode and self._is_drawing and self.polyline:
+                self._pop_poly_point(); self.update(); return
+        if event.key() == Qt.Key_Escape:
+            if self.polyline_mode and self._is_drawing:
+                self.polyline=[]; self._is_drawing=False; self._start_idx=None; self.update(); return
         super().keyPressEvent(event)
 
+    # -------------- paint --------------
     def paintEvent(self, event):
-        qp = QPainter(self)
-        qp.setRenderHint(QPainter.Antialiasing)
-
-        # Draw image
+        qp = QPainter(self); qp.setRenderHint(QPainter.Antialiasing)
+        # fit image
         if self.image_pixmap:
             img_w, img_h = self.img_w, self.img_h
             win_w, win_h = self.width(), self.height()
-            scale = min(win_w / img_w, win_h / img_h)
-            xoff = int((win_w - img_w * scale) / 2)
-            yoff = int((win_h - img_h * scale) / 2)
+            scale = min(win_w/img_w, win_h/img_h)
+            xoff = int((win_w - img_w*scale)/2)
+            yoff = int((win_h - img_h*scale)/2)
             self._last_draw_scale, self._last_draw_xoff, self._last_draw_yoff = scale, xoff, yoff
-            qp.drawPixmap(xoff, yoff, int(img_w * scale), int(img_h * scale), self.image_pixmap)
+            qp.drawPixmap(xoff, yoff, int(img_w*scale), int(img_h*scale), self.image_pixmap)
         else:
-            scale, xoff, yoff = 1.0, 0, 0
-            self._last_draw_scale, self._last_draw_xoff, self._last_draw_yoff = scale, xoff, yoff
+            self._last_draw_scale, self._last_draw_xoff, self._last_draw_yoff = 1.0, 0, 0
 
-        # Bounding boxes
-        qp.setPen(QPen(QColor(0, 128, 255), 3))
-        for bbox in self.boxes:
-            xmin, ymin, xmax, ymax = [float(v) for v in bbox]
-            qp.drawRect(int(round(xmin*scale+xoff)), int(round(ymin*scale+yoff)),
-                        int(round((xmax-xmin)*scale)), int(round((ymax-ymin)*scale)))
+        scale = self._last_draw_scale; xoff = self._last_draw_xoff; yoff = self._last_draw_yoff
 
-        # Connections
-        for idx, (i1, i2) in enumerate(self.connections):
-            p1_img, p2_img = self.points[i1], self.points[i2]
-            p1 = QPoint(int(round(p1_img[0]*scale+xoff)), int(round(p1_img[1]*scale+yoff)))
-            p2 = QPoint(int(round(p2_img[0]*scale+xoff)), int(round(p2_img[1]*scale+yoff)))
-            pen = QPen(QColor(0,0,0), 6 if (self.connection_mode and idx==self.hover_line_index and self.hover_index is None) else 4)
-            qp.setPen(pen)
+        # boxes (blue)
+        qp.setPen(QPen(QColor(0,128,255),3))
+        for xmin,ymin,xmax,ymax in self.boxes:
+            qp.drawRect(int(xmin*scale+xoff), int(ymin*scale+yoff),
+                        int((xmax-xmin)*scale), int((ymax-ymin)*scale))
+
+        # connections (black)
+        for idx, (i1,i2) in enumerate(self.connections):
+            x1,y1 = self.points[i1]; x2,y2 = self.points[i2]
+            p1 = QPoint(int(x1*scale+xoff), int(y1*scale+yoff))
+            p2 = QPoint(int(x2*scale+xoff), int(y2*scale+yoff))
+            thick = 6 if (self.connection_mode and self.connecting_index is None and idx==self.hover_line_index and self.hover_index is None) else 4
+            qp.setPen(QPen(QColor(0,0,0), thick))
             qp.drawLine(p1, p2)
-            self._draw_arrowhead(qp, p1, p2)
 
-        # Points
+        # points
         for i,(x,y) in enumerate(self.points):
-            center = QPoint(int(round(x*scale+xoff)), int(round(y*scale+yoff)))
-            brush = QColor(0,200,0) if i==self.hover_index or (self.connection_mode and i==self.connecting_index) else QColor(200,80,80)
-            qp.setBrush(brush)
-            qp.setPen(Qt.NoPen)
+            center = QPoint(int(x*scale+xoff), int(y*scale+yoff))
+            brush = (QColor(0,200,0) if i==self.hover_index or (self.connection_mode and i==self.connecting_index) else QColor(200,80,80))
+            qp.setBrush(brush); qp.setPen(Qt.NoPen)
             qp.drawEllipse(center, int(self.point_radius*scale), int(self.point_radius*scale))
 
-        # Midlines
+        # midlines (cyan)
         for key, poly in self.midlines.items():
-            qp.setPen(QPen(QColor(0, 200, 200), 6 if key==self.hover_midline_key else 4))
+            if len(poly)<2: continue
+            thick = 8 if (key == self._hover_midline_key) else 4
+            qp.setPen(QPen(QColor(0,200,200), thick))
             for i in range(1, len(poly)):
-                p1 = QPoint(int(round(poly[i-1][0]*scale+xoff)), int(round(poly[i-1][1]*scale+yoff)))
-                p2 = QPoint(int(round(poly[i][0]*scale+xoff)), int(round(poly[i][1]*scale+yoff)))
-                qp.drawLine(p1, p2)
+                x1,y1 = poly[i-1]; x2,y2 = poly[i]
+                qp.drawLine(QPoint(int(x1*scale+xoff), int(y1*scale+yoff)),
+                            QPoint(int(x2*scale+xoff), int(y2*scale+yoff)))
 
-        # Current drawing polyline
-        if self.polyline_mode and self.current_polyline:
-            qp.setPen(QPen(QColor(255, 150, 0), 4))
-            for i in range(1, len(self.current_polyline)):
-                p1 = QPoint(int(round(self.current_polyline[i-1][0]*scale+xoff)),
-                            int(round(self.current_polyline[i-1][1]*scale+yoff)))
-                p2 = QPoint(int(round(self.current_polyline[i][0]*scale+xoff)),
-                            int(round(self.current_polyline[i][1]*scale+yoff)))
-                qp.drawLine(p1, p2)
+        # current polyline
+        if self.polyline_mode and len(self.polyline)>=1:
+            qp.setPen(QPen(QColor(0,200,200), 4))
+            for i in range(1, len(self.polyline)):
+                x1,y1 = self.polyline[i-1]; x2,y2 = self.polyline[i]
+                qp.drawLine(QPoint(int(x1*scale+xoff), int(y1*scale+yoff)),
+                            QPoint(int(x2*scale+xoff), int(y2*scale+yoff)))
 
-    def toggle_mode(self):
-        self.connection_mode = not self.connection_mode
-        self.connecting_index = None
-        self.update()
-
-    # Geometry helpers
+    # -------------- helpers --------------
     def _to_image_coords(self, pos):
-        return ((pos.x()-self._last_draw_xoff)/self._last_draw_scale,
-                (pos.y()-self._last_draw_yoff)/self._last_draw_scale)
+        return ((pos.x()-getattr(self,"_last_draw_xoff",0))/getattr(self,"_last_draw_scale",1.0),
+                (pos.y()-getattr(self,"_last_draw_yoff",0))/getattr(self,"_last_draw_scale",1.0))
 
     def _find_point_at(self, pos):
+        r2 = (self.point_radius/self.scale)**2
         for i,(x,y) in enumerate(self.points):
-            if (x-pos[0])**2 + (y-pos[1])**2 <= (self.point_radius/self.scale)**2:
-                return i
-        return None
-
-    def _find_line_at(self, pos):
-        thr = 7 / self.scale
-        for idx,(i1,i2) in enumerate(self.connections):
-            if self._dist_point_to_segment(pos, self.points[i1], self.points[i2]) < thr:
-                return idx
-        return None
-
-    def _find_midline_at(self, pos):
-        thr = 7 / self.scale
-        for key, poly in self.midlines.items():
-            for i in range(1, len(poly)):
-                if self._dist_point_to_segment(pos, poly[i-1], poly[i]) < thr:
-                    return key
+            if (x-pos[0])**2 + (y-pos[1])**2 <= r2: return i
         return None
 
     def _dist_point_to_segment(self, p, a, b):
         import numpy as np
         p,a,b = np.array(p), np.array(a), np.array(b)
-        if np.all(a==b): return np.linalg.norm(p-a)
-        t = max(0, min(1, np.dot(p-a,b-a)/np.dot(b-a,b-a)))
-        proj = a + t*(b-a)
-        return np.linalg.norm(p-proj)
+        if np.all(a==b): return float(np.linalg.norm(p-a))
+        t = max(0,min(1,np.dot(p-a,b-a)/np.dot(b-a,b-a)))
+        proj = a + t*(b-a); return float(np.linalg.norm(p-proj))
 
-    def _draw_arrowhead(self, qp, p1, p2):
+    def _find_line_at(self, pos):
+        thr = 7/self.scale
+        for idx,(i1,i2) in enumerate(self.connections):
+            x1,y1 = self.points[i1]; x2,y2 = self.points[i2]
+            if self._dist_point_to_segment(pos,(x1,y1),(x2,y2)) < thr: return idx
+        return None
+
+    def _midline_hit_test(self, screen_pos, px_thresh=9.0):
+        if not self.midlines: return None
+        s = self._last_draw_scale; xo = self._last_draw_xoff; yo = self._last_draw_yoff
+        sx,sy = screen_pos.x(), screen_pos.y()
+
         import math
-        angle = math.atan2(p2.y()-p1.y(), p2.x()-p1.x())
-        sz = int(10*self.scale)
-        dx1, dy1 = sz*math.cos(angle-math.pi/8), sz*math.sin(angle-math.pi/8)
-        dx2, dy2 = sz*math.cos(angle+math.pi/8), sz*math.sin(angle+math.pi/8)
-        left = QPoint(int(p2.x()-dx1), int(p2.y()-dy1))
-        right = QPoint(int(p2.x()-dx2), int(p2.y()-dy2))
-        qp.setPen(Qt.NoPen)
-        qp.setBrush(QColor(80,80,220))
-        qp.drawPolygon(p2, left, right)
+        def dseg(px,py, ax,ay, bx,by):
+            vx,vy = bx-ax, by-ay; wx,wy = px-ax, py-ay
+            vv = vx*vx+vy*vy
+            if vv <= 1e-12: return math.hypot(px-ax, py-ay)
+            t = max(0.0, min(1.0, (wx*vx+wy*vy)/vv))
+            qx,qy = ax+t*vx, ay+t*vy
+            return math.hypot(px-qx, py-qy)
 
-    def _is_near_point(self, a, b, thr=5):
-        return (a[0]-b[0])**2 + (a[1]-b[1])**2 <= thr**2
+        best = 1e9; hit=None
+        for key, poly in self.midlines.items():
+            for i in range(1,len(poly)):
+                x1,y1 = poly[i-1]; x2,y2 = poly[i]
+                ax,ay = x1*s+xo, y1*s+yo; bx,by = x2*s+xo, y2*s+yo
+                d = dseg(sx,sy, ax,ay, bx,by)
+                if d<best: best=d; hit=key
+        return hit if best<=px_thresh else None
+
+    def _delete_point_reindex(self, idx):
+        # remove connections touching idx
+        self.connections = [(i1 - (i1>idx), i2 - (i2>idx)) for (i1,i2) in self.connections if (i1!=idx and i2!=idx)]
+        # remove midlines touching idx
+        new_mid={}
+        for (i1,i2), poly in self.midlines.items():
+            if i1==idx or i2==idx: continue
+            ni1 = i1 - (i1>idx); ni2 = i2 - (i2>idx)
+            new_mid[(min(ni1,ni2), max(ni1,ni2))]=poly
+        self.midlines = new_mid
+        # remove point
+        self.points.pop(idx)
