@@ -603,25 +603,25 @@ class CrackToolsApplication(Ui_MainWindow):
     
     def select_end_points_manmidlines(self):
         if not hasattr(self, "original_image") or self.original_image is None:
-            error("No original image found."); return
+            error("No original image found.")
+            return
 
         from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
                                     QSizePolicy, QApplication, QMessageBox, QScrollArea, QLabel)
 
         boxes = self.get_all_bounding_boxes()
 
-        # Load any persisted midlines from file
+        # Load persisted midlines from file
         existing_midlines = {}
         if "annotations" in self.annotation:
             ann_midlines = self.annotation["annotations"].get("midlines", {})
             for k_str, pts in ann_midlines.items():
                 try:
-                    i1,i2 = map(int, k_str.split("_"))
-                    existing_midlines[(min(i1,i2), max(i1,i2))] = [tuple(map(float,xy)) for xy in pts]
+                    i1, i2 = map(int, k_str.split("_"))
+                    existing_midlines[(min(i1, i2), max(i1, i2))] = [tuple(map(float, xy)) for xy in pts]
                 except:
                     pass
 
-        # Prepare initial points/connections
         initial_points = getattr(self, "user_points", None)
         initial_conns = getattr(self, "user_connections", None)
 
@@ -631,13 +631,19 @@ class CrackToolsApplication(Ui_MainWindow):
         dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowMaximizeButtonHint)
         layout = QVBoxLayout(dlg)
 
-        mode_btn = QPushButton("Switch to Connection Mode"); mode_btn.setCheckable(True)
+        mode_btn = QPushButton("Switch to Connection Mode")
+        mode_btn.setCheckable(True)
         layout.addWidget(mode_btn)
-        manual_btn = QPushButton("Manual Midlines: OFF"); manual_btn.setCheckable(True)
-        manual_btn.setVisible(False)
+
+        manual_btn = QPushButton("Manual Midlines: OFF")
+        manual_btn.setCheckable(True)
+        manual_btn.setVisible(False)  # only shown in connection mode
         layout.addWidget(manual_btn)
-        hint = QLabel("Manual: click an existing point to start → draw → click a different point to finish.\n"
-                    "Left-click a hovered connection/midline deletes it. Backspace/Z undo; Esc cancels current midline.")
+
+        hint = QLabel(
+            "Manual: click an existing point to start → draw → click a different point to finish.\n"
+            "Left-click a hovered connection/midline deletes it. Backspace/Z undo; Esc cancels current midline."
+        )
         layout.addWidget(hint)
 
         from endpoint_annotator import CrackAnnotator
@@ -646,42 +652,58 @@ class CrackToolsApplication(Ui_MainWindow):
             boxes=boxes,
             initial_points=initial_points,
             initial_connections=initial_conns,
-            initial_midlines={f"{i}_{j}": pts for (i,j),pts in existing_midlines.items()}
+            initial_midlines={f"{i}_{j}": pts for (i, j), pts in existing_midlines.items()}
         )
         annot.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
 
-        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(annot)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(annot)
         layout.addWidget(scroll, 1)
 
         btn_row = QHBoxLayout()
         btn_done, btn_cancel = QPushButton("Done"), QPushButton("Cancel")
-        btn_row.addWidget(btn_done); btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_done)
+        btn_row.addWidget(btn_cancel)
         layout.addLayout(btn_row)
 
         def all_points_in_boxes():
             def in_any(pt):
-                x,y = pt
-                for xmin,ymin,xmax,ymax in boxes:
-                    if xmin<=x<=xmax and ymin<=y<=ymax: return True
+                x, y = pt
+                for xmin, ymin, xmax, ymax in boxes:
+                    if xmin <= x <= xmax and ymin <= y <= ymax:
+                        return True
                 return False
             bad = [pt for pt in annot.points if not in_any(pt)]
-            return (len(bad)==0, bad)
+            return (len(bad) == 0, bad)
 
         def confirm_discard():
-            mb = QMessageBox(dlg); mb.setIcon(QMessageBox.Warning)
+            mb = QMessageBox(dlg)
+            mb.setIcon(QMessageBox.Warning)
             mb.setWindowTitle("Discard current midline?")
             mb.setText("You're in the middle of drawing a midline. Discard it?")
             mb.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
             return mb.exec_() == QMessageBox.Yes
 
         def update_controls_visibility():
-            if annot.connection_mode:
-                mode_btn.setText("Switch to Point Mode"); mode_btn.setStyleSheet("background:#97e297;")
+            if annot.polyline_mode:
+                # Hide connection toggle while actively in manual mode
+                mode_btn.setVisible(False)
+                manual_btn.setVisible(True)
+                manual_btn.setText("Manual Midlines: ON")
+                manual_btn.setStyleSheet("background:#79d2e6;")
             else:
-                mode_btn.setText("Switch to Connection Mode"); mode_btn.setStyleSheet("background:#e2c297;")
-            manual_btn.setVisible(annot.connection_mode and (not annot.all_pairs_saturated()))
-            manual_btn.setText("Manual Midlines: ON" if annot.polyline_mode else "Manual Midlines: OFF")
-            manual_btn.setStyleSheet("background:#79d2e6;" if annot.polyline_mode else "")
+                mode_btn.setVisible(True)
+                if annot.connection_mode:
+                    mode_btn.setText("Switch to Point Mode")
+                    mode_btn.setStyleSheet("background:#97e297;")
+                else:
+                    mode_btn.setText("Switch to Connection Mode")
+                    mode_btn.setStyleSheet("background:#e2c297;")
+                # Only visible in connection mode
+                manual_btn.setVisible(annot.connection_mode and (not annot.all_pairs_saturated()))
+                manual_btn.setText("Manual Midlines: OFF")
+                manual_btn.setStyleSheet("")
 
         mode_btn.clicked.connect(lambda: (annot.toggle_mode(), update_controls_visibility()))
         manual_btn.clicked.connect(lambda checked: (
@@ -694,8 +716,9 @@ class CrackToolsApplication(Ui_MainWindow):
             key = getattr(annot, "_last_pair_error", None)
             if key is not None:
                 annot._last_pair_error = None
-                i1,i2 = key
-                mb = QMessageBox(dlg); mb.setIcon(QMessageBox.Warning)
+                i1, i2 = key
+                mb = QMessageBox(dlg)
+                mb.setIcon(QMessageBox.Warning)
                 mb.setWindowTitle("Pair already used")
                 mb.setText(f"Points {i1} and {i2} already have a connection or manual midline.")
                 mb.exec_()
@@ -709,40 +732,59 @@ class CrackToolsApplication(Ui_MainWindow):
 
             ok, bad = all_points_in_boxes()
             if not ok:
-                mb = QMessageBox(dlg); mb.setIcon(QMessageBox.Warning)
+                mb = QMessageBox(dlg)
+                mb.setIcon(QMessageBox.Warning)
                 mb.setWindowTitle("Points outside boxes")
                 mb.setText("All points must be inside a bounding box.")
-                mb.exec_(); return
+                mb.exec_()
+                return
 
-            # Save back to app
             self.user_points = annot.points
             self.user_connections = annot.connections
 
-            # NEW: build endpoint_pairs for pipeline
-            self.endpoint_pairs = [
-                (self.user_points[i1], self.user_points[i2])
-                for (i1, i2) in self.user_connections
-            ]
+            # Normal endpoint pairs from connections
+            self.endpoint_pairs = []
+            if self.user_connections:
+                self.endpoint_pairs.extend([
+                    (self.user_points[i1], self.user_points[i2])
+                    for (i1, i2) in self.user_connections
+                ])
 
-            # Persist midlines to annotations
-            midlines_out = { f"{i1}_{i2}":[[float(x),float(y)] for (x,y) in poly]
-                            for (i1,i2), poly in annot.midlines.items() }
+            # Manual midline endpoint pairs stored separately
+            self.manual_endpoint_pairs = []
+            for (i1, i2) in annot.midlines.keys():
+                if 0 <= i1 < len(self.user_points) and 0 <= i2 < len(self.user_points):
+                    p1 = self.user_points[i1]
+                    p2 = self.user_points[i2]
+                    self.manual_endpoint_pairs.append((p1, p2))
+                else:
+                    print(f"[WARN] Skipping midline ({i1},{i2}) - index out of range.")
+
+            # Save midlines in annotations
+            midlines_out = {
+                f"{i1}_{i2}": [[float(x), float(y)] for (x, y) in poly]
+                for (i1, i2), poly in annot.midlines.items()
+            }
             self.annotation.setdefault("annotations", {})["midlines"] = midlines_out
 
             dlg.accept()
 
         btn_done.clicked.connect(on_done)
         btn_cancel.clicked.connect(lambda: (
-            (annot.set_mode_polyline(False, confirm_cb=confirm_discard) if (annot.polyline_mode and annot._is_drawing) else None),
+            (annot.set_mode_polyline(False, confirm_cb=confirm_discard)
+            if (annot.polyline_mode and annot._is_drawing) else None),
             dlg.reject()
         ))
 
-        dlg.showMaximized(); QApplication.processEvents()
-        if dlg.exec_() != QDialog.Accepted: return
+        dlg.showMaximized()
+        QApplication.processEvents()
+        if dlg.exec_() != QDialog.Accepted:
+            return
 
         print(f"Points: {self.user_points}")
         print(f"Connections: {self.user_connections}")
         print(f"Endpoint pairs: {self.endpoint_pairs}")
+        print(f"Manual endpoint pairs: {getattr(self, 'manual_endpoint_pairs', [])}")
         print(f"Midlines saved: {len(self.annotation['annotations'].get('midlines', {}))}")
         self.update_image_crop_button.setStyleSheet("background-color: lightblue")
         self.save_annotation()
@@ -1203,7 +1245,7 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
             
-    def edge_mask(self):
+    '''def edge_mask(self):
         import matplotlib.pyplot as plt
         import matplotlib.patches as patches
 
@@ -1266,9 +1308,72 @@ class CrackToolsApplication(Ui_MainWindow):
             import traceback
             traceback.print_exc()
             error(e)
+            self.edge_tracks_button.setStyleSheet("background-color : red")'''
+    
+    def edge_mask(self):
+        try:
+            window_half_size = int(self.edge_filter_size_box.value() / 2)
+            black_crack = [-1 if self.crack_color_box.currentText() == 'Bright crack' else 1][0]
+            color_channel = [0 if self.color_chenel_box.currentText() == 'R'
+                            else 1 if self.color_chenel_box.currentText() == 'B'
+                            else 2][0]
+
+            print(f"[EDGE_MASK] window_half_size={window_half_size}, black_crack={black_crack}, color_channel={color_channel}")
+            print(f"[EDGE_MASK] self.track shape={np.array(self.track).shape}, sample={np.array(self.track)[:, :5]}")
+            print(f"[EDGE_MASK] self.pts={self.pts}, active_bbox={self.active_bbox}, current_source={getattr(self, 'current_source', None)}")
+
+            img_gray = self.original_image[:, :, color_channel] * black_crack
+            track = np.array(self.track)
+            if getattr(self, "current_source", None) != "manual":
+                # Auto mode: stored as [y, x] but needs to be swapped
+                track = np.vstack([track[1], track[0]])
+            print(f"[EDGE_MASK] track after vstack: shape={track.shape}, sample={track[:, :5]}")
+
+            # Only shift for auto mode
+            if getattr(self, "current_source", None) != "manual":
+                target_point = np.array([self.pts[1][1], self.pts[1][0]])
+                shift_vector = target_point - track[:, 0]
+                print(f"[EDGE_MASK] target_point={target_point}, shift_vector={shift_vector}")
+                track = track + shift_vector[:, np.newaxis]
+                print(f"[EDGE_MASK] track after shift: sample={track[:, :5]}")
+            else:
+                print("[EDGE_MASK] Manual mode - skipping shift")
+
+            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
+            self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(img_gray, track)
+
+            print(f"[EDGE_MASK] edge_mask1 stats: min={self.edge_mask1.min()}, max={self.edge_mask1.max()}, shape={self.edge_mask1.shape}")
+            print(f"[EDGE_MASK] edge_mask2 stats: min={self.edge_mask2.min()}, max={self.edge_mask2.max()}, shape={self.edge_mask2.shape}")
+
+            self.edge_mask1_crop = self.edge_mask1[ymin:ymax, xmin:xmax]
+            self.edge_mask2_crop = self.edge_mask2[ymin:ymax, xmin:xmax]
+            print(f"[EDGE_MASK] Cropped masks: shape1={self.edge_mask1_crop.shape}, shape2={self.edge_mask2_crop.shape}")
+
+            shifted_track = np.zeros_like(track)
+            shifted_track[0] = track[0] - ymin
+            shifted_track[1] = track[1] - xmin
+            self.adjusted_track = shifted_track
+            print(f"[EDGE_MASK] adjusted_track sample={self.adjusted_track[:, :5]}")
+
+            edge_mask1_crop = self.edge_mask1_crop - np.min(self.edge_mask1_crop)
+            if np.max(edge_mask1_crop) != 0:
+                edge_mask1_crop = (edge_mask1_crop * 255 / np.max(edge_mask1_crop)).astype(dtype=np.uint8)
+            else:
+                edge_mask1_crop = (edge_mask1_crop * 255).astype(dtype=np.uint8)
+
+            qimage = QImage(edge_mask1_crop.astype(dtype=np.uint8), edge_mask1_crop.shape[1], edge_mask1_crop.shape[0],
+                            edge_mask1_crop.strides[0], QImage.Format_Grayscale8)
+            pixmap = QPixmap.fromImage(qimage)
+            scaled_pixmap = pixmap.scaled(self.edge_map_display.width(), self.edge_map_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+            self.edge_map_display.setPixmap(scaled_pixmap)
+            self.edge_tracks_button.setStyleSheet("background-color : lightblue")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            error(e)
             self.edge_tracks_button.setStyleSheet("background-color : red")
     
-    def edge_tracking(self):
+    '''def edge_tracking(self):
         try:
             color_channel = [0 if self.edge_track_color_box.currentText() == 'R'
                             else 1 if self.edge_track_color_box.currentText() == 'B' else 2][0]
@@ -1315,7 +1420,7 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
             self.edge_tracks_full_screen_button.setStyleSheet("background-color : red")
-            self.save_current_segment_button.setStyleSheet("background-color : red")
+            self.save_current_segment_button.setStyleSheet("background-color : red")'''
     
     def edge_tracks_full_screen(self):
         try:
@@ -1337,7 +1442,7 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
 
-    def save_current_segment(self):
+    '''def save_current_segment(self):
         try:
             xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
 
@@ -1393,7 +1498,7 @@ class CrackToolsApplication(Ui_MainWindow):
             self.save_annotation()
 
         except Exception as e:
-            error(e)
+            error(e)'''
 
     def draw_segment(self):
         try:
@@ -1650,13 +1755,49 @@ class CrackToolsApplication(Ui_MainWindow):
                     combined_cracks.pop(crack_id, None)
 
             # Rebuild masks and crack_pixels
-            new_masks = []
+            '''new_masks = []
             for crack in atomic_cracks.values():
                 if "mask" in crack:
                     new_masks.append(np.array(crack["mask"], dtype=np.uint8))
             for crack in combined_cracks.values():
                 if "mask" in crack:
                     new_masks.append(np.array(crack["mask"], dtype=np.uint8))
+
+            if new_masks:
+                m_sum = np.sum(np.stack(new_masks), axis=0)
+                m_sum[m_sum >= 1] = 1
+                crack_pixels = np.argwhere(m_sum == 1).tolist()
+                all_masks_list = [m.tolist() for m in new_masks]
+            else:
+                crack_pixels = []
+                all_masks_list = []'''
+
+            # Rebuild masks and crack_pixels
+            new_masks = []
+            H, W = self.original_image.shape[:2]
+            for crack in atomic_cracks.values():
+                m = crack.get("mask", [])
+                m_arr = np.array(m, dtype=np.uint8)
+                if m_arr.size == 0:
+                    m_arr = np.zeros((H, W), dtype=np.uint8)
+                elif m_arr.shape != (H, W):
+                    print(f"[WARN] Resizing atomic crack mask from {m_arr.shape} to {(H, W)}")
+                    tmp = np.zeros((H, W), dtype=np.uint8)
+                    tmp[:m_arr.shape[0], :m_arr.shape[1]] = m_arr  # pad/crop
+                    m_arr = tmp
+                new_masks.append(m_arr)
+
+            for crack in combined_cracks.values():
+                m = crack.get("mask", [])
+                m_arr = np.array(m, dtype=np.uint8)
+                if m_arr.size == 0:
+                    m_arr = np.zeros((H, W), dtype=np.uint8)
+                elif m_arr.shape != (H, W):
+                    print(f"[WARN] Resizing combined crack mask from {m_arr.shape} to {(H, W)}")
+                    tmp = np.zeros((H, W), dtype=np.uint8)
+                    tmp[:m_arr.shape[0], :m_arr.shape[1]] = m_arr
+                    m_arr = tmp
+                new_masks.append(m_arr)
 
             if new_masks:
                 m_sum = np.sum(np.stack(new_masks), axis=0)
@@ -2032,76 +2173,47 @@ class CrackToolsApplication(Ui_MainWindow):
             self.change_image()'''
     
     def run_pipeline(self, multirun=False):
-        """
-        For each bounding box:
-        - Compute OS/cost ONCE per box
-        - For each endpoint-pair inside the box, do midline tracking + save midline in FULL image coords.
-        After all succeed, clears user endpoints & connections from memory and file.
-        """
         import gc, json
         import numpy as np
         from PyQt5.QtWidgets import QMessageBox
         from time import time
 
-        def _save_midline_only(midline_points_full):
-            """
-            Append a single midline (list of [x, y]) into annotations.atomic_cracks in FULL image coords.
-            Returns the crack_id used.
-            """
-            if "annotations" not in self.annotation:
-                self.annotation["annotations"] = {}
-            ann = self.annotation["annotations"]
-            if "atomic_cracks" not in ann or not isinstance(ann["atomic_cracks"], dict):
-                ann["atomic_cracks"] = {}
-
-            # Next id
-            if ann["atomic_cracks"]:
-                next_id = str(max(int(k) for k in ann["atomic_cracks"].keys()) + 1)
-            else:
-                next_id = "0"
-
-            ann["atomic_cracks"][next_id] = {
-                "source": "auto",  # mark as automatic
-                "midline": [[int(x), int(y)] for x, y in midline_points_full]
-            }
-
-            # Persist to disk
-            base_name = os.path.splitext(os.path.basename(self.name))[0]
-            json_path = os.path.join(self.save_folder, base_name + '.json')
-            with open(json_path, 'w') as f:
-                json.dump(self.annotation, f)
-            return next_id
-
         gc.collect()
         print("✅ GPU memory freed from CuPy pool")
-        print("Running midline-only pipeline for all endpoint pairs and bounding boxes...")
+        print("Running midline pipeline (auto + manual)...")
 
         boxes = self.get_all_bounding_boxes()
+        print(f"Loaded {len(boxes)} bounding boxes: {boxes}")
         if not boxes:
-            msg = QMessageBox()
-            msg.setIcon(QMessageBox.Critical)
-            msg.setText("No bounding boxes found! Please draw at least one bounding box before running the pipeline.")
-            msg.setWindowTitle("No Bounding Boxes")
-            msg.exec_()
+            QMessageBox.critical(None, "No Bounding Boxes",
+                "Please draw at least one bounding box before running the pipeline.")
             return
 
         if not multirun:
             self.endpoint_pairs = None
             self.user_connections = None
             self.user_points = None
+            self.manual_endpoint_pairs = None
+            print("Calling select_end_points_manmidlines()...")
             self.select_end_points_manmidlines()
 
-        if not hasattr(self, "endpoint_pairs") or not self.endpoint_pairs:
-            msg = QMessageBox()
-            msg.setIcon(QMessageBox.Critical)
-            msg.setText("No endpoint pairs selected!\n\nPlease use 'Select Endpoints' and create at least one connection before running the pipeline.")
-            msg.setWindowTitle("No Endpoint Pairs")
-            msg.exec_()
+        # Merge auto + manual endpoint pairs
+        all_pairs = []
+        if getattr(self, "endpoint_pairs", None):
+            print(f"Auto endpoint_pairs: {self.endpoint_pairs}")
+            all_pairs.extend([(p, "auto") for p in self.endpoint_pairs])
+        if getattr(self, "manual_endpoint_pairs", None):
+            print(f"Manual endpoint_pairs: {self.manual_endpoint_pairs}")
+            all_pairs.extend([(p, "manual") for p in self.manual_endpoint_pairs])
+
+        if not all_pairs:
+            QMessageBox.critical(None, "No Endpoint Pairs",
+                "No endpoint pairs selected!\n\nPlease use 'Select Endpoints' and create at least one connection or manual midline before running the pipeline.")
             return
 
-        # Group endpoint pairs by their smallest-area containing bbox
+        # Group by bbox
         box_to_pairs = {}
-        for pair in self.endpoint_pairs:
+        for (pair, src) in all_pairs:
             candidates = []
             for bbox in boxes:
                 xmin, ymin, xmax, ymax = bbox
@@ -2113,109 +2225,107 @@ class CrackToolsApplication(Ui_MainWindow):
             if candidates:
                 _, chosen_bbox = min(candidates, key=lambda x: x[0])
                 key = tuple(chosen_bbox)
-                box_to_pairs.setdefault(key, []).append(pair)
+                box_to_pairs.setdefault(key, []).append((pair, src))
 
         num_success = 0
         errors = []
 
-        for box_idx, (bbox_key, pairs) in enumerate(box_to_pairs.items()):
+        for bbox_key, pairs in box_to_pairs.items():
             self.crack_tracks = {}
             self.mask = []
-            bbox = list(bbox_key)
-            xmin, ymin, xmax, ymax = bbox
-            print(f"\n=== Processing bounding box {box_idx+1}/{len(box_to_pairs)}: {bbox} ===")
+            xmin, ymin, xmax, ymax = bbox_key
+            print(f"\n=== Processing bbox {bbox_key} ===")
+            print(f"Pairs in this box: {pairs}")
 
             try:
-                # Crop once for this box
-                first_pair = pairs[0]
-                self.pts = [np.array(first_pair[0]), np.array(first_pair[1])]
-                self.end_points = [np.array(first_pair[0]), np.array(first_pair[1])]
-                self.active_bbox = bbox
-                self.update_image_crop()  # crops to bbox
+                # Precompute OS/cost for auto pairs only
+                auto_pairs = [p for p, s in pairs if s == "auto"]
+                if auto_pairs:
+                    first_pair = auto_pairs[0]
+                    print(f"Precomputing OS/cost for auto pair {first_pair}")
+                    self.pts = [np.array(first_pair[0]), np.array(first_pair[1])]
+                    self.end_points = self.pts
+                    self.active_bbox = list(bbox_key)
+                    self.update_image_crop()
+                    if getattr(self, "skip_current_segment", False):
+                        continue
+                    print("os (once per box)")
+                    t0 = time(); self.update_os(); print(f"os time: {time()-t0:.2f}s")
+                    print("cost (once per box)")
+                    t0 = time(); self.update_cost(); print(f"cost time: {time()-t0:.2f}s")
 
-                if getattr(self, "skip_current_segment", False):
-                    print("Skipping all pairs in this box: Crop too small.")
-                    continue
-
-                # Compute OS/cost once
-                print("os (once per box)")
-                t0 = time(); self.update_os(); print(f"os time: {time()-t0:.2f}s")
-                print("cost (once per box)")
-                t0 = time(); self.update_cost(); print(f"cost time: {time()-t0:.2f}s")
-
-                # Midline for each pair
-                for idx, pair in enumerate(pairs):
+                for pair, src in pairs:
                     try:
-                        print(f"  > Midline {idx+1}/{len(pairs)} in box: endpoints {pair}")
-                        self.pts = [np.array(pair[0]), np.array(pair[1])]
-                        self.end_points = [np.array(pair[0]), np.array(pair[1])]
+                        self.active_bbox = list(bbox_key)
+                        print(f"\n--- Processing pair {pair} (source={src}) ---")
+                        if src == "manual":
+                            print(f"[MANUAL] self.user_points: {self.user_points}")
+                            found_key = None
+                            for k, pts in self.annotation["annotations"].get("midlines", {}).items():
+                                p_i, p_j = map(int, k.split("_"))
+                                coords_i = tuple(self.user_points[p_i])
+                                coords_j = tuple(self.user_points[p_j])
+                                if (coords_i, coords_j) == pair or (coords_j, coords_i) == pair:
+                                    found_key = k
+                                    break
+                            print(f"[MANUAL] Found key: {found_key}")
+                            if not found_key:
+                                print(f"[WARN] No midline found for manual pair {pair}")
+                                continue
 
-                        # Convert full image coords -> crop coords for tracking
-                        self.pts_crop = [np.array(pt) - np.array([xmin, ymin]) for pt in self.pts]
-                        downsample = self.downsample_factor_box.value()
-                        self.pts_crop_down = [p / downsample for p in self.pts_crop]
+                            midline_pts_full = self.annotation["annotations"]["midlines"][found_key]
+                            print(f"[MANUAL] midline_pts_full: {midline_pts_full}")
 
-                        # Track midline (in crop coords)
-                        t0 = time()
-                        self.midline_tracking()
-                        print(f"    midline tracking time: {time()-t0:.2f}s")
+                            # Convert full-image coords -> crop coords
+                            track_crop = np.array([
+                                [pt[1] - ymin for pt in midline_pts_full],  # rows (y)
+                                [pt[0] - xmin for pt in midline_pts_full]   # cols (x)
+                            ])
+                            print(f"[MANUAL] track_crop shape={track_crop.shape}, sample={track_crop[:, :5]}")
+                            self.track = track_crop
+                            self.pts = [np.array(pair[0]), np.array(pair[1])]
+                            self.end_points = self.pts
 
-                        # Convert tracked midline (crop coords) -> full image coords
-                        midline_xy_crop = list(zip(self.track[1].tolist(), self.track[0].tolist()))
-                        midline_xy_full = [
-                            (x + xmin, y + ymin)
-                            for x, y in midline_xy_crop
-                        ]
+                            self.update_image_crop()
+                            if getattr(self, "skip_current_segment", False):
+                                continue
+                        else:
+                            print(f"[AUTO] Starting tracking for pair {pair}")
+                            self.pts = [np.array(pair[0]), np.array(pair[1])]
+                            self.end_points = self.pts
+                            self.pts_crop = [np.array(pt) - np.array([xmin, ymin]) for pt in self.pts]
+                            downsample = self.downsample_factor_box.value()
+                            self.pts_crop_down = [p / downsample for p in self.pts_crop]
+                            t0 = time(); self.midline_tracking(); print(f"    midline tracking time: {time()-t0:.2f}s")
 
-                        # Save midline in full image coords
-                        crack_id = _save_midline_only(midline_xy_full)
-                        print(f"    saved midline as atomic crack {crack_id}")
-
-                        # Continue with edge mask/tracking in crop coords
                         print("    edge mask")
+                        self.current_source = src  # so edge_mask knows what mode we're in
                         self.edge_mask()
-                        print("    edge tracking")
-                        self.edge_tracking()
-                        print("    save segment")
-                        self.save_current_segment()
-
+                        print("    edge tracking"); self.edge_tracking()
+                        print("    save segment"); self.save_current_segment()
                         num_success += 1
 
                     except Exception as e:
-                        print(f"    Exception for endpoints {pair}: {e}")
-                        errors.append(f"Failed midline for endpoints {pair}: {e}")
+                        errors.append(f"Failed midline for {pair}: {e}")
                         continue
 
             except Exception as e:
-                print(f"Exception for bounding box {bbox}: {e}")
-                errors.append(f"Failed for bounding box {bbox}: {e}")
+                errors.append(f"Failed for bbox {bbox_key}: {e}")
                 continue
 
-        # Cleanup
-        if errors and num_success == 0:
-            msg = QMessageBox()
-            msg.setIcon(QMessageBox.Critical)
-            msg.setText("\n".join(errors))
-            msg.setWindowTitle("Pipeline Error")
-            msg.exec_()
+        if errors:
+            print("\n".join(errors))
         else:
-            if errors:
-                print("\n".join(errors))
-            else:
-                print("✔ All endpoint-groups processed (midline-only, optimized by box).")
+            print("✔ All endpoint groups processed.")
 
-            if hasattr(self, "user_points"):
-                del self.user_points
-            if hasattr(self, "user_connections"):
-                del self.user_connections
-            if hasattr(self, "endpoint_pairs"):
-                del self.endpoint_pairs
-
-            ann = self.annotation.get("annotations", {})
-            ann["user_points"] = None
-            ann["user_connections"] = None
-
-            self.change_image()
+        self.user_points = None
+        self.user_connections = None
+        self.endpoint_pairs = None
+        self.manual_endpoint_pairs = None
+        ann = self.annotation.get("annotations", {})
+        ann["user_points"] = None
+        ann["user_connections"] = None
+        self.change_image()
             
     def update_os_cost(self):
         """
