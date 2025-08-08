@@ -2319,19 +2319,26 @@ class CrackToolsApplication(Ui_MainWindow):
                         if src == "manual":
                             print(f"[MANUAL] self.user_points: {self.user_points}")
                             found_key = None
-                            for k, pts in self.annotation["annotations"].get("midlines", {}).items():
-                                p_i, p_j = map(int, k.split("_"))
-                                coords_i = tuple(self.user_points[p_i])
-                                coords_j = tuple(self.user_points[p_j])
-                                if (coords_i, coords_j) == pair or (coords_j, coords_i) == pair:
-                                    found_key = k
-                                    break
+                            manual_midlines_dict = getattr(self, "manual_midlines_tmp", {})
+
+                            for k, pts in manual_midlines_dict.items():
+                                try:
+                                    p_i, p_j = map(int, k.split("_"))
+                                    coords_i = tuple(self.user_points[p_i])
+                                    coords_j = tuple(self.user_points[p_j])
+                                    if (coords_i, coords_j) == pair or (coords_j, coords_i) == pair:
+                                        found_key = k
+                                        break
+                                except Exception as e:
+                                    print(f"[WARN] Bad manual midline key {k}: {e}")
+                                    continue
+
                             print(f"[MANUAL] Found key: {found_key}")
                             if not found_key:
                                 print(f"[WARN] No midline found for manual pair {pair}")
                                 continue
 
-                            #midline_pts_full = self.annotation["annotations"]["midlines"][found_key]
+                            midline_pts_full = manual_midlines_dict[found_key]
                             print(f"[MANUAL] midline_pts_full: {midline_pts_full}")
 
                             # Standard bbox crop
