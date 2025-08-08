@@ -247,11 +247,13 @@ class CrackAnnotator(QtWidgets.QWidget):
                     ex, ey = self.points[key[1]]
                     poly = [(float(sx), float(sy))] + self.polyline[1:-1] + [(float(ex), float(ey))]
                     self.midlines[key] = poly
-                # reset
-                self.polyline = []
-                self._is_drawing = False
-                self._start_idx = None
-                self.update()
+                # defer reset until after paint to avoid snap-back artifact
+                QtCore.QTimer.singleShot(0, lambda: (
+                    self.polyline.clear(),
+                    setattr(self, "_is_drawing", False),
+                    setattr(self, "_start_idx", None),
+                    self.update()
+                ))
                 return
             else:
                 # Continue drawing freehand
