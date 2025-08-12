@@ -1897,6 +1897,16 @@ class CrackToolsApplication(Ui_MainWindow):
                 crack_pixels = []
                 all_masks_list = []
 
+            def _scrub_if_no_mask(crack_dict):
+                for c in crack_dict.values():
+                    m = np.array(c.get("mask", []), dtype=np.uint8)
+                    if m.size == 0 or not np.any(m):
+                        c["geodesic_edges"] = {}
+                        c["midline"] = []
+
+            _scrub_if_no_mask(atomic_cracks)
+            _scrub_if_no_mask(combined_cracks)
+
             self.annotation["annotations"]["atomic_cracks"] = atomic_cracks
             self.annotation["annotations"]["combined_cracks"] = combined_cracks
             self.annotation["annotations"]["crack_pixels"] = crack_pixels
