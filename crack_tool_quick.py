@@ -646,6 +646,30 @@ class CrackToolsApplication(Ui_MainWindow):
         )
         layout.addWidget(hint)
 
+        # --- Ensure endpoints exist for loaded midlines ---
+        initial_points = list(getattr(self, "user_points", []) or [])
+        initial_conns = list(getattr(self, "user_connections", []) or [])
+
+        point_index_map = {tuple(pt): idx for idx, pt in enumerate(initial_points)}
+
+        for (i1, i2), poly in existing_midlines.items():
+            start_pt, end_pt = poly[0], poly[-1]
+
+            # Add start point if missing
+            if tuple(start_pt) not in point_index_map:
+                point_index_map[tuple(start_pt)] = len(initial_points)
+                initial_points.append(start_pt)
+            # Add end point if missing
+            if tuple(end_pt) not in point_index_map:
+                point_index_map[tuple(end_pt)] = len(initial_points)
+                initial_points.append(end_pt)
+
+            # Ensure connection exists
+            conn = (point_index_map[tuple(start_pt)], point_index_map[tuple(end_pt)])
+            conn = (min(conn), max(conn))
+            if conn not in initial_conns:
+                initial_conns.append(conn)
+
         from endpoint_annotator import CrackAnnotator
         annot = CrackAnnotator(
             image=self.original_image,
@@ -1944,6 +1968,22 @@ class CrackToolsApplication(Ui_MainWindow):
             error(e)
 
     def save_annotation(self):
+        import numpy as np
+        import json, os, tempfile, shutil
+
+        def _safe_serialize(obj):
+            """Recursively convert NumPy types to Python native types."""
+            import numpy as np
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, (np.generic,)):
+                return obj.item()
+            elif isinstance(obj, dict):
+                return {k: _safe_serialize(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [_safe_serialize(v) for v in obj]
+            return obj
+
         try:
             # 1) masks summary (unchanged)
             if not getattr(self, "use_masks", False):
@@ -2016,7 +2056,7 @@ class CrackToolsApplication(Ui_MainWindow):
                 valid_midline_keys.add(k)
                 next_base += 1
 
-            # 🔹 Filter out cracks with no mask area
+            # Filter out cracks with no mask area
             filtered_cracks = {}
             for cid, crack in cracks_data_atomic.items():
                 mask_arr = np.array(crack.get("mask", []), dtype=np.uint8)
@@ -2027,37 +2067,35 @@ class CrackToolsApplication(Ui_MainWindow):
                     filtered_cracks[cid] = crack
             cracks_data_atomic = filtered_cracks
 
-            # ✅ Remove ghost midlines from annotations
+            # Remove ghost midlines
             ann["midlines"] = {k: v for k, v in manual_mid.items() if k in valid_midline_keys}
+            ann["atomic_cracks"] = cracks_data_atomic
 
-            # Preserve combined if present
+            # Preserve combined cracks
             cracks_data_combined = {}
             if hasattr(self, "combined_cracks"):
                 for combo_id, combo in self.combined_cracks.items():
-                    cracks_data_combined[str(combo_id)] = {
-                        "members": combo["members"],
-                        "midline": combo["midline"],
-                        "geodesic_edges": combo["geodesic_edges"],
-                        "widths": combo.get("widths", []),
-                        "angles": combo.get("angles", []),
-                        "mask": combo.get("mask", [])
-                    }
-
-            ann["atomic_cracks"] = cracks_data_atomic
+                    cracks_data_combined[str(combo_id)] = _safe_serialize(combo)
             ann["combined_cracks"] = cracks_data_combined
 
+            # ---- Safe JSON write ----
+            safe_annotation = _safe_serialize(self.annotation)
             base_name = os.path.splitext(os.path.basename(self.name))[0]
             json_path = os.path.join(self.save_folder, base_name + '.json')
             mask_bin_path = os.path.join(self.save_folder, base_name + '_mask.png')
             mask_255_path = os.path.join(self.save_folder, base_name + '_mask255.png')
 
-            with open(json_path, 'w') as f:
-                json.dump(self.annotation, f)
+            import tempfile
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=self.save_folder, suffix=".json")
+            with open(tmp_fd, 'w') as f:
+                json.dump(safe_annotation, f)
+            shutil.move(tmp_path, json_path)
 
             mask_bin = (m >= 1).astype('uint8') if 'm' in locals() else np.zeros(self.image.shape[:2], dtype=np.uint8)
             cv2.imwrite(mask_bin_path, mask_bin)
             cv2.imwrite(mask_255_path, mask_bin * 255)
             print(f"Saved: {json_path}, {mask_bin_path}, {mask_255_path}")
+
         except Exception as e:
             error(e)
           
@@ -2293,9 +2331,16 @@ class CrackToolsApplication(Ui_MainWindow):
         num_success = 0
         errors = []
 
-        for bbox_key, pairs in box_to_pairs.items():
+        # Ensure we don't wipe existing cracks/masks
+        if not hasattr(self, "crack_tracks"):
             self.crack_tracks = {}
+        if not hasattr(self, "mask"):
             self.mask = []
+
+        # Track crack index across the whole run
+        crack_index_offset = len(self.crack_tracks)
+
+        for bbox_key, pairs in box_to_pairs.items():
             xmin, ymin, xmax, ymax = bbox_key
             print(f"\n=== Processing bbox {bbox_key} ===")
             print(f"Pairs in this box: {pairs}")
@@ -2321,11 +2366,10 @@ class CrackToolsApplication(Ui_MainWindow):
                     try:
                         self.active_bbox = list(bbox_key)
                         print(f"\n--- Processing pair {pair} (source={src}) ---")
-                        if src == "manual":
-                            print(f"[MANUAL] self.user_points: {self.user_points}")
-                            found_key = None
-                            manual_midlines_dict = getattr(self, "manual_midlines_tmp", {})
 
+                        if src == "manual":
+                            manual_midlines_dict = getattr(self, "manual_midlines_tmp", {})
+                            found_key = None
                             for k, pts in manual_midlines_dict.items():
                                 try:
                                     p_i, p_j = map(int, k.split("_"))
@@ -2344,36 +2388,23 @@ class CrackToolsApplication(Ui_MainWindow):
                                 continue
 
                             midline_pts_full = manual_midlines_dict[found_key]
-                            print(f"[MANUAL] midline_pts_full: {midline_pts_full}")
-
-                            # Standard bbox crop
-                            self.active_bbox = list(bbox_key)
-                            xmin, ymin, xmax, ymax = self.active_bbox
                             self.pts = [np.array(pair[0]), np.array(pair[1])]
                             self.end_points = self.pts
 
-                            # Crop image for bbox
                             self.update_image_crop()
                             if getattr(self, "skip_current_segment", False):
                                 continue
 
-                            # Convert full-image coords → crop coords (y=row, x=col)
                             track_crop = np.array([
                                 [pt[1] - ymin for pt in midline_pts_full],  # rows
                                 [pt[0] - xmin for pt in midline_pts_full]   # cols
                             ])
-                            print(f"[MANUAL] track_crop shape={track_crop.shape}, sample={track_crop[:, :5]}")
-
-                            # Store track in the same orientation as auto mode uses
                             self.track = track_crop
-
-                            # Also compute pts_crop & pts_crop_down for consistency
                             self.pts_crop = [np.array(pt) - np.array([xmin, ymin]) for pt in self.pts]
                             downsample = self.downsample_factor_box.value()
                             self.pts_crop_down = [p / downsample for p in self.pts_crop]
+
                         else:
-                            # AUTO branch stays the same
-                            print(f"[AUTO] Starting tracking for pair {pair}")
                             self.pts = [np.array(pair[0]), np.array(pair[1])]
                             self.end_points = self.pts
                             self.pts_crop = [np.array(pt) - np.array([xmin, ymin]) for pt in self.pts]
@@ -2381,11 +2412,14 @@ class CrackToolsApplication(Ui_MainWindow):
                             self.pts_crop_down = [p / downsample for p in self.pts_crop]
                             t0 = time(); self.midline_tracking(); print(f"    midline tracking time: {time()-t0:.2f}s")
 
-                        print("    edge mask")
-                        self.current_source = src  # so edge_mask knows what mode we're in
+                        self.current_source = src
                         self.edge_mask()
-                        print("    edge tracking"); self.edge_tracking()
-                        print("    save segment"); self.save_current_segment()
+                        self.edge_tracking()
+
+                        # Force crack ID so we don't overwrite
+                        self.current_crack_id = crack_index_offset
+                        self.save_current_segment()
+                        crack_index_offset += 1
                         num_success += 1
 
                     except Exception as e:
