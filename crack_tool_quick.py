@@ -104,7 +104,7 @@ class CrackToolsApplication(Ui_MainWindow):
 
     def clear_user_annotations(self):
         """Clears all user-drawn endpoints and connections, then refreshes the image."""
-        del self.user_points, self.user_connections
+        #del self.user_points, self.user_connections
         self.annotation["annotations"]["user_points"] = None
         self.annotation["annotations"]["user_connections"] = None
         self.save_annotation()
@@ -606,15 +606,23 @@ class CrackToolsApplication(Ui_MainWindow):
             error("No original image found.")
             return
 
-        from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
-                                    QSizePolicy, QApplication, QMessageBox, QScrollArea, QLabel)
+        from PyQt5.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
+            QSizePolicy, QApplication, QMessageBox, QScrollArea, QLabel
+        )
 
         boxes = self.get_all_bounding_boxes()
 
-        # Load persisted midlines from file
+        # --- Separate "read-only" midlines & connections from editable ones ---
+        readonly_midlines = {}
+        readonly_connections = []
         existing_midlines = {}
+
         if "annotations" in self.annotation:
-            ann_midlines = self.annotation["annotations"].get("midlines", {})
+            ann = self.annotation["annotations"]
+
+            # Existing manual midlines (global coords) → store for bbox conversion
+            ann_midlines = ann.get("midlines", {})
             for k_str, pts in ann_midlines.items():
                 try:
                     i1, i2 = map(int, k_str.split("_"))
@@ -622,8 +630,97 @@ class CrackToolsApplication(Ui_MainWindow):
                 except:
                     pass
 
-        initial_points = getattr(self, "user_points", None)
-        initial_conns = getattr(self, "user_connections", None)
+            # Existing auto connections (from atomic cracks) — global coords
+            for crack in ann.get("atomic_cracks", {}).values():
+                if crack.get("source") == "auto":
+                    ml = crack.get("midline", [])
+                    if len(ml) >= 2:
+                        p1, p2 = tuple(ml[0]), tuple(ml[-1])
+                        readonly_connections.append((p1, p2))
+
+        # --- Ensure all endpoints exist in initial points ---
+        initial_points = list(getattr(self, "user_points", []) or [])
+        point_index_map = {tuple(pt): idx for idx, pt in enumerate(initial_points)}
+
+        def ensure_point(pt):
+            if tuple(pt) not in point_index_map:
+                point_index_map[tuple(pt)] = len(initial_points)
+                initial_points.append(pt)
+            return point_index_map[tuple(pt)]
+
+        # --- Convert read-only midlines to local bbox coordinates ---
+        '''for (i1, i2), poly in existing_midlines.items():
+            # Find bbox that contains start/end
+            start_pt, end_pt = poly[0], poly[-1]
+            bbox_match = None
+            for xmin, ymin, xmax, ymax in boxes:
+                if (xmin <= start_pt[0] <= xmax and ymin <= start_pt[1] <= ymax) or \
+                (xmin <= end_pt[0] <= xmax and ymin <= end_pt[1] <= ymax):
+                    bbox_match = (xmin, ymin)
+                    break
+
+            if bbox_match:
+                offset_x, offset_y = bbox_match
+                shifted_poly = [(x - offset_x, y - offset_y) for (x, y) in poly]
+            else:
+                shifted_poly = poly[:]  # fallback to original if no bbox match
+
+            start_idx = ensure_point(shifted_poly[0])
+            end_idx = ensure_point(shifted_poly[-1])
+            readonly_midlines[(start_idx, end_idx)] = shifted_poly
+
+        # --- Convert read-only connections to local bbox coordinates ---
+        readonly_conn_idx = []
+        for p1, p2 in readonly_connections:
+            bbox_match = None
+            for xmin, ymin, xmax, ymax in boxes:
+                if (xmin <= p1[0] <= xmax and ymin <= p1[1] <= ymax) or \
+                (xmin <= p2[0] <= xmax and ymin <= p2[1] <= ymax):
+                    bbox_match = (xmin, ymin)
+                    break
+
+            if bbox_match:
+                offset_x, offset_y = bbox_match
+                p1_local = (p1[0] - offset_x, p1[1] - offset_y)
+                p2_local = (p2[0] - offset_x, p2[1] - offset_y)
+            else:
+                p1_local, p2_local = p1, p2
+
+            idx1 = ensure_point(p1_local)
+            idx2 = ensure_point(p2_local)
+            readonly_conn_idx.append((min(idx1, idx2), max(idx1, idx2)))'''
+        
+        # --- Fill read-only midlines (keep in full-image coords) ---
+        for (i1, i2), poly in existing_midlines.items():
+            start_idx = ensure_point(poly[0])
+            end_idx = ensure_point(poly[-1])
+            readonly_midlines[(start_idx, end_idx)] = poly
+
+        # --- Fill read-only connections (keep in full-image coords) ---
+        readonly_conn_idx = []
+        for p1, p2 in readonly_connections:
+            idx1 = ensure_point(p1)
+            idx2 = ensure_point(p2)
+            readonly_conn_idx.append((min(idx1, idx2), max(idx1, idx2)))
+
+        print(readonly_connections, readonly_conn_idx)
+
+        initial_conns = list(getattr(self, "user_connections", []) or [])
+
+        from endpoint_annotator import CrackAnnotator
+        annot = CrackAnnotator(
+            image=self.original_image,
+            boxes=boxes,
+            initial_points=initial_points,
+            initial_connections=initial_conns,
+            initial_midlines={},  # start fresh editable set
+        )
+
+        # Attach read-only sets to annotator
+        annot.readonly_midlines = readonly_midlines
+        annot.readonly_connections = readonly_conn_idx
+
+        annot.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
 
         dlg = QDialog(self.MainWindow)
         dlg.setWindowTitle("Endpoints, Connections & Manual Midlines")
@@ -637,48 +734,14 @@ class CrackToolsApplication(Ui_MainWindow):
 
         manual_btn = QPushButton("Manual Midlines: OFF")
         manual_btn.setCheckable(True)
-        manual_btn.setVisible(False)  # only shown in connection mode
+        manual_btn.setVisible(False)
         layout.addWidget(manual_btn)
 
         hint = QLabel(
             "Manual: Left-hold on starting point → draw (hold/click) → finish w/ hold/click endpoint.\n"
-            "Left-click: remove hovered connection. Backspace/right-hold: undo (fast,slow); Esc: cancel."
+            "Read-only cracks shown in gray — can't be deleted."
         )
         layout.addWidget(hint)
-
-        # --- Ensure endpoints exist for loaded midlines ---
-        initial_points = list(getattr(self, "user_points", []) or [])
-        initial_conns = list(getattr(self, "user_connections", []) or [])
-
-        point_index_map = {tuple(pt): idx for idx, pt in enumerate(initial_points)}
-
-        for (i1, i2), poly in existing_midlines.items():
-            start_pt, end_pt = poly[0], poly[-1]
-
-            # Add start point if missing
-            if tuple(start_pt) not in point_index_map:
-                point_index_map[tuple(start_pt)] = len(initial_points)
-                initial_points.append(start_pt)
-            # Add end point if missing
-            if tuple(end_pt) not in point_index_map:
-                point_index_map[tuple(end_pt)] = len(initial_points)
-                initial_points.append(end_pt)
-
-            # Ensure connection exists
-            conn = (point_index_map[tuple(start_pt)], point_index_map[tuple(end_pt)])
-            conn = (min(conn), max(conn))
-            if conn not in initial_conns:
-                initial_conns.append(conn)
-
-        from endpoint_annotator import CrackAnnotator
-        annot = CrackAnnotator(
-            image=self.original_image,
-            boxes=boxes,
-            initial_points=initial_points,
-            initial_connections=initial_conns,
-            initial_midlines={f"{i}_{j}": pts for (i, j), pts in existing_midlines.items()}
-        )
-        annot.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -698,7 +761,19 @@ class CrackToolsApplication(Ui_MainWindow):
                     if xmin <= x <= xmax and ymin <= y <= ymax:
                         return True
                 return False
-            bad = [pt for pt in annot.points if not in_any(pt)]
+
+            # Build set of point indices from read-only items
+            readonly_point_idxs = set()
+            for (i1, i2) in annot.readonly_connections:
+                readonly_point_idxs.update([i1, i2])
+            for (i1, i2) in annot.readonly_midlines.keys():
+                readonly_point_idxs.update([i1, i2])
+
+            # Only check points that are NOT in readonly sets
+            bad = [
+                pt for idx, pt in enumerate(annot.points)
+                if idx not in readonly_point_idxs and not in_any(pt)
+            ]
             return (len(bad) == 0, bad)
 
         def confirm_discard():
@@ -711,7 +786,6 @@ class CrackToolsApplication(Ui_MainWindow):
 
         def update_controls_visibility():
             if annot.polyline_mode:
-                # Hide connection toggle while actively in manual mode
                 mode_btn.setVisible(False)
                 manual_btn.setVisible(True)
                 manual_btn.setText("Manual Midlines: ON")
@@ -724,7 +798,6 @@ class CrackToolsApplication(Ui_MainWindow):
                 else:
                     mode_btn.setText("Switch to Connection Mode")
                     mode_btn.setStyleSheet("background:#e2c297;")
-                # Only visible in connection mode
                 manual_btn.setVisible(annot.connection_mode and (not annot.all_pairs_saturated()))
                 manual_btn.setText("Manual Midlines: OFF")
                 manual_btn.setStyleSheet("")
@@ -736,19 +809,7 @@ class CrackToolsApplication(Ui_MainWindow):
         ))
         update_controls_visibility()
 
-        def handle_duplicate_pair_warning():
-            key = getattr(annot, "_last_pair_error", None)
-            if key is not None:
-                annot._last_pair_error = None
-                i1, i2 = key
-                mb = QMessageBox(dlg)
-                mb.setIcon(QMessageBox.Warning)
-                mb.setWindowTitle("Pair already used")
-                mb.setText(f"Points {i1} and {i2} already have a connection or manual midline.")
-                mb.exec_()
-
         def on_done():
-            handle_duplicate_pair_warning()
             if annot.polyline_mode and annot._is_drawing:
                 if not confirm_discard():
                     return
@@ -756,40 +817,21 @@ class CrackToolsApplication(Ui_MainWindow):
 
             ok, bad = all_points_in_boxes()
             if not ok:
-                mb = QMessageBox(dlg)
-                mb.setIcon(QMessageBox.Warning)
-                mb.setWindowTitle("Points outside boxes")
-                mb.setText("All points must be inside a bounding box.")
-                mb.exec_()
+                QMessageBox.warning(dlg, "Points outside boxes", "All points must be inside a bounding box.")
                 return
 
             self.user_points = annot.points
-            self.user_connections = annot.connections
+            self.user_connections = [c for c in annot.connections if c not in annot.readonly_connections]
 
-            # Normal endpoint pairs from connections
-            self.endpoint_pairs = []
-            if self.user_connections:
-                self.endpoint_pairs.extend([
-                    (self.user_points[i1], self.user_points[i2])
-                    for (i1, i2) in self.user_connections
-                ])
+            self.endpoint_pairs = [
+                (self.user_points[i1], self.user_points[i2])
+                for (i1, i2) in self.user_connections
+            ]
 
-            # Manual midline endpoint pairs stored separately
             self.manual_endpoint_pairs = []
-            for (i1, i2) in annot.midlines.keys():
-                if 0 <= i1 < len(self.user_points) and 0 <= i2 < len(self.user_points):
-                    p1 = self.user_points[i1]
-                    p2 = self.user_points[i2]
-                    self.manual_endpoint_pairs.append((p1, p2))
-                else:
-                    print(f"[WARN] Skipping midline ({i1},{i2}) - index out of range.")
+            for (i1, i2), poly in annot.midlines.items():
+                self.manual_endpoint_pairs.append((self.user_points[i1], self.user_points[i2]))
 
-            # Save midlines in annotations
-            midlines_out = {
-                f"{i1}_{i2}": [[float(x), float(y)] for (x, y) in poly]
-                for (i1, i2), poly in annot.midlines.items()
-            }
-            # Replace the line that writes to annotation["midlines"] with:
             self.manual_midlines_tmp = {
                 f"{i1}_{i2}": [[float(x), float(y)] for (x, y) in poly]
                 for (i1, i2), poly in annot.midlines.items()
@@ -798,11 +840,7 @@ class CrackToolsApplication(Ui_MainWindow):
             dlg.accept()
 
         btn_done.clicked.connect(on_done)
-        btn_cancel.clicked.connect(lambda: (
-            (annot.set_mode_polyline(False, confirm_cb=confirm_discard)
-            if (annot.polyline_mode and annot._is_drawing) else None),
-            dlg.reject()
-        ))
+        btn_cancel.clicked.connect(lambda: dlg.reject())
 
         dlg.showMaximized()
         QApplication.processEvents()
@@ -813,10 +851,8 @@ class CrackToolsApplication(Ui_MainWindow):
         print(f"Connections: {self.user_connections}")
         print(f"Endpoint pairs: {self.endpoint_pairs}")
         print(f"Manual endpoint pairs: {getattr(self, 'manual_endpoint_pairs', [])}")
-        print(f"Midlines saved: {len(self.annotation['annotations'].get('midlines', {}))}")
+        print(f"Midlines saved: {len(self.manual_midlines_tmp)}")
         self.update_image_crop_button.setStyleSheet("background-color: lightblue")
-        #self.save_annotation()
-        #self.change_image()
             
     # in select_save_end_points
     def select_save_end_points(self):
@@ -1783,6 +1819,7 @@ class CrackToolsApplication(Ui_MainWindow):
 
         btn_ok.clicked.connect(dlg.accept)
         btn_cancel.clicked.connect(dlg.reject)
+        self.change_image()
 
         def highlight_selected_segments():
             display = self.original_image.copy()
@@ -1820,7 +1857,14 @@ class CrackToolsApplication(Ui_MainWindow):
             for idx in sorted(selected_indices, reverse=True):
                 tpe, crack_id = items[idx]
                 if tpe == "atomic":
+                    # Remove atomic crack
                     atomic_cracks.pop(crack_id, None)
+                    # Also remove from any combined cracks' members
+                    for cid, combo in list(combined_cracks.items()):
+                        if crack_id in combo.get("members", []):
+                            combo["members"] = [m for m in combo["members"] if m != crack_id]
+                            if not combo["members"]:
+                                combined_cracks.pop(cid, None)
                 elif tpe == "combined":
                     combined_cracks.pop(crack_id, None)
 
