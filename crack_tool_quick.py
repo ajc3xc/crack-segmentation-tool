@@ -1707,9 +1707,11 @@ class CrackToolsApplication(Ui_MainWindow):
                     for p in up:
                         x, y = int(round(p[0])), int(round(p[1]))
                         if 0 <= x < W and 0 <= y < H:
-                            cv2.circle(im, (x, y), 3, (255, 0, 255), -1)
+                            #cv2.circle(im, (x, y), 3, (255, 0, 255), -1)
+                            endpoint_radius = max(3, int(min(H, W) * 0.0035))  # 0.35% of min dimension
+                            cv2.circle(im, (x, y), endpoint_radius, (255, 0, 255), -1)
                     # draw connections (magenta lines between point indices)
-                    for c in uc:
+                    '''for c in uc:
                         try:
                             i1, i2 = int(c[0]), int(c[1])
                             if 0 <= i1 < len(up) and 0 <= i2 < len(up):
@@ -1718,7 +1720,7 @@ class CrackToolsApplication(Ui_MainWindow):
                                 cv2.line(im, p1, p2, (255, 0, 255), 2)
                         except Exception:
                             # Be forgiving if something malformed sneaks in
-                            pass
+                            pass'''
 
             # ==========================================================
             # 2) LEGACY FALLBACK: if no per-crack masks were drawn,
