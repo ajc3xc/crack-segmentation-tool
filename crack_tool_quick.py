@@ -2147,11 +2147,6 @@ class CrackToolsApplication(Ui_MainWindow):
             print(f"[DEBUG] After deletion: all_masks = {len(ann['all_masks'])}, crack_pixels = {len(ann['crack_pixels'])}")
 
             self.change_image()
-
-            print(f"[DEBUG] After deletion: atomic = {list(atomic_cracks.keys())}")
-            print(f"[DEBUG] After deletion: combined = {list(combined_cracks.keys())}")
-            print(f"[DEBUG] After deletion: all_masks = {len(ann['all_masks'])}, crack_pixels = {len(ann['crack_pixels'])}")
-            self.change_image()
         else:
             self.change_image()
 
