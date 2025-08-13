@@ -2066,6 +2066,25 @@ class CrackToolsApplication(Ui_MainWindow):
                     print(f"[DEBUG] Deleting combined crack_id={crack_id}")
                     combined_cracks.pop(crack_id, None)
 
+            # --- Reindex cracks ---
+            # ✅ Fully reset IDs to start from 0
+            if atomic_cracks:
+                new_atomic = {}
+                for new_id, crack in enumerate(
+                    [atomic_cracks[k] for k in sorted(atomic_cracks.keys(), key=lambda x: int(x))]
+                ):
+                    new_atomic[str(new_id)] = crack
+                atomic_cracks.clear()
+                atomic_cracks.update(new_atomic)
+
+            if combined_cracks:
+                new_combined = {}
+                for new_id, crack in enumerate(
+                    [combined_cracks[k] for k in sorted(combined_cracks.keys(), key=lambda x: int(x))]
+                ):
+                    new_combined[str(new_id)] = crack
+                combined_cracks.clear()
+                combined_cracks.update(new_combined)
             # --- If no atomics remain -> full wipe ---
             self.annotation["annotations"]["atomic_cracks"] = atomic_cracks
             self.annotation["annotations"]["combined_cracks"] = combined_cracks
