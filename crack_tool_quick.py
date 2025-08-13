@@ -2120,13 +2120,37 @@ class CrackToolsApplication(Ui_MainWindow):
                 ann["all_masks"] = [m.tolist() for m in new_masks]
 
             # --- Save changes ---
+            # --- Save JSON changes ---
             with open(self.ann_name, 'w') as fp:
                 json.dump(self.annotation, fp)
+
+            # --- Save PNG masks (same logic as save_annotation but without re-dumping JSON) ---
+            import os, cv2, numpy as np
+            base_name = os.path.splitext(os.path.basename(self.name))[0]
+            mask_bin_path = os.path.join(self.save_folder, base_name + '_mask.png')
+            mask_255_path = os.path.join(self.save_folder, base_name + '_mask255.png')
+
+            if ann.get("all_masks"):
+                masks_arr = [np.array(m, dtype=np.uint8) for m in ann["all_masks"]]
+                m = np.sum(np.stack(masks_arr), axis=0)
+                m[m >= 1] = 1
+            else:
+                m = np.zeros((H, W), dtype=np.uint8)
+
+            cv2.imwrite(mask_bin_path, m.astype('uint8'))
+            cv2.imwrite(mask_255_path, m.astype('uint8') * 255)
+
+            print(f"Saved masks: {mask_bin_path}, {mask_255_path}")
 
             print(f"[DEBUG] After deletion: atomic = {list(atomic_cracks.keys())}")
             print(f"[DEBUG] After deletion: combined = {list(combined_cracks.keys())}")
             print(f"[DEBUG] After deletion: all_masks = {len(ann['all_masks'])}, crack_pixels = {len(ann['crack_pixels'])}")
 
+            self.change_image()
+
+            print(f"[DEBUG] After deletion: atomic = {list(atomic_cracks.keys())}")
+            print(f"[DEBUG] After deletion: combined = {list(combined_cracks.keys())}")
+            print(f"[DEBUG] After deletion: all_masks = {len(ann['all_masks'])}, crack_pixels = {len(ann['crack_pixels'])}")
             self.change_image()
         else:
             self.change_image()
