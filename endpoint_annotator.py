@@ -729,39 +729,51 @@ class CrackAnnotator(QtWidgets.QWidget):
         xoff = self._last_draw_xoff
         yoff = self._last_draw_yoff
 
+        # NEW: handle crop offset if present
+        crop_xmin, crop_ymin = getattr(self, "crop_offset", (0, 0))
+
+        def apply_offset(pt):
+            """Convert from crop coords to full image coords if needed."""
+            return (pt[0] + crop_xmin, pt[1] + crop_ymin)
+
+        # Bounding boxes
         qp.setPen(QPen(QColor(0, 128, 255), 3))
         for xmin, ymin, xmax, ymax in self.boxes:
-            qp.drawRect(int(xmin * scale + xoff), int(ymin * scale + yoff),
+            qp.drawRect(int((xmin) * scale + xoff), int((ymin) * scale + yoff),
                         int((xmax - xmin) * scale), int((ymax - ymin) * scale))
 
         # Read-only connections
         qp.setPen(QPen(QColor(150, 150, 150), 2, Qt.DashLine))
         for i1, i2 in self.readonly_connections:
             if i1 < len(self.points) and i2 < len(self.points):
-                qp.drawLine(QPoint(int(self.points[i1][0] * scale + xoff), int(self.points[i1][1] * scale + yoff)),
-                            QPoint(int(self.points[i2][0] * scale + xoff), int(self.points[i2][1] * scale + yoff)))
+                p1 = apply_offset(self.points[i1])
+                p2 = apply_offset(self.points[i2])
+                qp.drawLine(QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                            QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff)))
 
         # Read-only midlines
         qp.setPen(QPen(QColor(150, 150, 150), 2))
         for key, poly in self.readonly_midlines.items():
             for i in range(1, len(poly)):
-                x1, y1 = poly[i - 1]
-                x2, y2 = poly[i]
-                qp.drawLine(QPoint(int(x1 * scale + xoff), int(y1 * scale + yoff)),
-                            QPoint(int(x2 * scale + xoff), int(y2 * scale + yoff)))
+                p1 = apply_offset(poly[i - 1])
+                p2 = apply_offset(poly[i])
+                qp.drawLine(QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                            QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff)))
 
         # Editable connections
         for idx, (i1, i2) in enumerate(self.connections):
             if i1 < len(self.points) and i2 < len(self.points):
-                p1 = QPoint(int(self.points[i1][0] * scale + xoff), int(self.points[i1][1] * scale + yoff))
-                p2 = QPoint(int(self.points[i2][0] * scale + xoff), int(self.points[i2][1] * scale + yoff))
+                p1 = apply_offset(self.points[i1])
+                p2 = apply_offset(self.points[i2])
                 thick = 6 if (self.connection_mode and self.connecting_index is None
-                              and idx == self.hover_line_index and self.hover_index is None) else 4
+                            and idx == self.hover_line_index and self.hover_index is None) else 4
                 qp.setPen(QPen(QColor(0, 0, 0), thick))
-                qp.drawLine(p1, p2)
+                qp.drawLine(QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                            QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff)))
 
         # Points
         for i, (x, y) in enumerate(self.points):
+            x, y = apply_offset((x, y))
             center = QPoint(int(x * scale + xoff), int(y * scale + yoff))
             brush = QColor(0, 200, 0) if i == self.hover_index or (
                     self.connection_mode and i == self.connecting_index) else QColor(200, 80, 80)
@@ -776,19 +788,19 @@ class CrackAnnotator(QtWidgets.QWidget):
             thick = 8 if (self.connection_mode and key == self._hover_midline_key) else 4
             qp.setPen(QPen(QColor(0, 200, 200), thick))
             for i in range(1, len(poly)):
-                x1, y1 = poly[i - 1]
-                x2, y2 = poly[i]
-                qp.drawLine(QPoint(int(x1 * scale + xoff), int(y1 * scale + yoff)),
-                            QPoint(int(x2 * scale + xoff), int(y2 * scale + yoff)))
+                p1 = apply_offset(poly[i - 1])
+                p2 = apply_offset(poly[i])
+                qp.drawLine(QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                            QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff)))
 
         # Current polyline
         if self.polyline_mode and len(self.polyline) >= 1:
             qp.setPen(QPen(QColor(0, 200, 200), 4))
             for i in range(1, len(self.polyline)):
-                x1, y1 = self.polyline[i - 1]
-                x2, y2 = self.polyline[i]
-                qp.drawLine(QPoint(int(x1 * scale + xoff), int(y1 * scale + yoff)),
-                            QPoint(int(x2 * scale + xoff), int(y2 * scale + yoff)))
+                p1 = apply_offset(self.polyline[i - 1])
+                p2 = apply_offset(self.polyline[i])
+                qp.drawLine(QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                            QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff)))
 
     def _to_image_coords(self, pos):
         return ((pos.x() - self._last_draw_xoff) / self._last_draw_scale,

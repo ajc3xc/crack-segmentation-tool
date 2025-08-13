@@ -1537,6 +1537,137 @@ class CrackToolsApplication(Ui_MainWindow):
 
         except Exception as e:
             error(e)'''
+    
+    def save_annotation(self):
+        self._debug_print_atomic_cracks("save_annotation START")
+        import numpy as np
+        import json, os, tempfile, shutil
+
+        def _safe_serialize(obj):
+            """Recursively convert NumPy types to Python native types."""
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, (np.generic,)):
+                return obj.item()
+            elif isinstance(obj, dict):
+                return {k: _safe_serialize(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [_safe_serialize(v) for v in obj]
+            return obj
+
+        try:
+            ann = self.annotation.setdefault("annotations", {})
+            H, W = self.image.shape[:2]
+
+            # --- Merge from existing JSON if present ---
+            base_name = os.path.splitext(os.path.basename(self.name))[0]
+            json_path = os.path.join(self.save_folder, base_name + '.json')
+            if os.path.exists(json_path):
+                try:
+                    with open(json_path, 'r') as f:
+                        existing_data = json.load(f)
+                    existing_cracks = existing_data.get("annotations", {}).get("atomic_cracks", {})
+                    ann.setdefault("atomic_cracks", {}).update(existing_cracks)
+                except Exception as e:
+                    print(f"[WARN] Failed to merge existing cracks: {e}")
+
+            # 1) Update masks summary for legacy consumers
+            if not getattr(self, "use_masks", False):
+                masks = [np.array(m, dtype=np.uint8) for m in self.mask
+                        if m is not None and np.array(m).size > 0]
+                m = np.sum(np.stack(masks), axis=0) if masks else np.zeros(self.image.shape[:2], dtype=np.uint8)
+                m[m >= 1] = 1.0
+                ann["crack_pixels"] = np.argwhere(m == 1.0).tolist()
+                ann["all_masks"] = [mm.tolist() for mm in masks] if masks else []
+
+            # 2) Filter & validate all cracks (merged + new)
+            filtered_cracks = {}
+            for cid, crack in ann.get("atomic_cracks", {}).items():
+                mask_arr = np.array(crack.get("mask", []), dtype=np.uint8)
+                has_mask = mask_arr.size > 0 and mask_arr.shape == (H, W) and np.any(mask_arr)
+                has_edges = bool(crack.get("geodesic_edges", {}).get("edge1")) or \
+                            bool(crack.get("geodesic_edges", {}).get("edge2"))
+                has_midline = len(crack.get("midline", [])) > 1
+
+                if has_mask or has_edges or has_midline:
+                    if not has_mask:
+                        mask_arr = np.zeros((H, W), dtype=np.uint8)
+                    crack["mask"] = mask_arr.tolist()
+                    filtered_cracks[cid] = crack
+
+            ann["atomic_cracks"] = filtered_cracks
+
+            # Preserve combined cracks
+            if hasattr(self, "combined_cracks"):
+                ann["combined_cracks"] = _safe_serialize(self.combined_cracks)
+
+            # ---- Safe JSON write ----
+            safe_annotation = _safe_serialize(self.annotation)
+            mask_bin_path = os.path.join(self.save_folder, base_name + '_mask.png')
+            mask_255_path = os.path.join(self.save_folder, base_name + '_mask255.png')
+
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=self.save_folder, suffix=".json")
+            with open(tmp_fd, 'w') as f:
+                json.dump(safe_annotation, f)
+            shutil.move(tmp_path, json_path)
+
+            mask_bin = (m >= 1).astype('uint8') if 'm' in locals() else np.zeros(self.image.shape[:2], dtype=np.uint8)
+            cv2.imwrite(mask_bin_path, mask_bin)
+            cv2.imwrite(mask_255_path, mask_bin * 255)
+            print(f"Saved: {json_path}, {mask_bin_path}, {mask_255_path}")
+
+        except Exception as e:
+            error(e)
+    
+    def save_current_segment(self):
+        try:
+            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
+
+            # Build full mask
+            edge_x_crop = np.concatenate((self.track_e1[1][::-1], self.track_e2[1]))
+            edge_y_crop = np.concatenate((self.track_e1[0][::-1], self.track_e2[0]))
+            mask_crop = ct.segmentation.create_mask(self.image_crop, edge_y_crop, edge_x_crop)
+
+            full_mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
+            h, w = mask_crop.shape
+            full_mask[ymin:ymin + h, xmin:xmin + w] = mask_crop
+
+            # Allocate crack ID only if not editing an existing one
+            if not hasattr(self, "current_crack_id") or str(self.current_crack_id) not in self.annotation.get("annotations", {}).get("atomic_cracks", {}):
+                existing_ids = [int(cid) for cid in self.annotation.get("annotations", {}).get("atomic_cracks", {}).keys() if cid.isdigit()]
+                self.current_crack_id = max(existing_ids, default=-1) + 1
+
+            # Save track
+            self.crack_tracks[self.current_crack_id] = [list(x) for x in self.track]
+
+            # Ensure mask list has correct length
+            while len(self.mask) <= self.current_crack_id:
+                self.mask.append(np.zeros_like(full_mask))
+            self.mask[self.current_crack_id] = full_mask
+
+            # Save into annotation atomic_cracks
+            ann = self.annotation.setdefault("annotations", {})
+            atomic_cracks = ann.setdefault("atomic_cracks", {})
+
+            atomic_cracks[str(self.current_crack_id)] = {
+                "source": "auto",
+                "midline": [[int(self.track[0][i] + xmin), int(self.track[1][i] + ymin)]
+                            for i in range(len(self.track[0]))],
+                "geodesic_edges": {
+                    "edge1": [[int(self.track_e1[0][i] + xmin), int(self.track_e1[1][i] + ymin)]
+                            for i in range(len(self.track_e1[0]))],
+                    "edge2": [[int(self.track_e2[0][i] + xmin), int(self.track_e2[1][i] + ymin)]
+                            for i in range(len(self.track_e2[0]))]
+                },
+                "mask": full_mask.tolist(),
+                "user_points": getattr(self, "user_points", []),
+                "user_connections": getattr(self, "user_connections", [])
+            }
+
+            self.save_annotation()
+
+        except Exception as e:
+            error(e)
 
     def draw_segment(self):
         try:
@@ -1607,15 +1738,17 @@ class CrackToolsApplication(Ui_MainWindow):
         self.filename_label_2.setText(os.path.basename(self.name))
         base_name = os.path.splitext(os.path.basename(self.name))[0]
 
-        # ---- MASK LOADING ----
+        # ---- MASK LOADING (optional external masks) ----
         self.current_mask = None
         if getattr(self, "use_masks", False) and hasattr(self, "mask_map"):
             mask_path = self.mask_map.get(base_name)
             if mask_path:
                 if mask_path.endswith('.npy'):
-                    mask = np.load(mask_path); mask = (mask > 0).astype(np.uint8) if mask.max()>1 else mask.astype(np.uint8)
+                    mask = np.load(mask_path)
+                    mask = (mask > 0).astype(np.uint8) if mask.max() > 1 else mask.astype(np.uint8)
                 else:
-                    mask = cv2.imread(mask_path, 0); mask = (mask > 0).astype(np.uint8) if mask is not None else None
+                    mask = cv2.imread(mask_path, 0)
+                    mask = (mask > 0).astype(np.uint8) if mask is not None else None
                 self.current_mask = mask
 
         im = self.original_image.copy()
@@ -1624,32 +1757,17 @@ class CrackToolsApplication(Ui_MainWindow):
         self.ann_name = os.path.join(self.save_folder, base_name + '.json')
         self.mask_name_bin = os.path.join(self.save_folder, base_name + '_mask.png')
         self.mask_name_255 = os.path.join(self.save_folder, base_name + '_mask255.png')
-        self.mask = []
+        self.mask = []               # in-memory rendered masks for this image
         self.annotation = {}
+
+        H, W = im.shape[:2]
 
         if os.path.exists(self.ann_name):
             with open(self.ann_name) as f:
                 self.annotation = json.load(f)
             ann = self.annotation.get('annotations', {})
 
-            # draw masks as blue boundaries
-            if 'all_masks' in ann:
-                for m_arr in ann['all_masks']:
-                    mask = np.array(m_arr, dtype=np.uint8)
-                    if mask.shape == im.shape[:2]:
-                        from skimage.segmentation import mark_boundaries
-                        im = (mark_boundaries(im/255.0, mask, color=(0,0,1), background_label=0)*255).astype(np.uint8)
-                        self.mask.append(mask)
-            elif 'crack_pixels' in ann:
-                c = np.array(ann['crack_pixels'])
-                if c.size>0:
-                    mask = np.zeros(im.shape[:2], dtype=np.uint8)
-                    mask[list(c[:,0]), list(c[:,1])] = 1
-                    from skimage.segmentation import mark_boundaries
-                    im = (mark_boundaries(im/255.0, mask, color=(0,0,1), background_label=0)*255).astype(np.uint8)
-                    self.mask.append(mask)
-
-            # bounding boxes
+            # ---- Bounding boxes (unchanged) ----
             if 'box' in ann:
                 for key, box_data in ann['box'].items():
                     bb_pts = np.array(box_data['bounding_box'])
@@ -1658,91 +1776,88 @@ class CrackToolsApplication(Ui_MainWindow):
                     else: box_color = (255,0,0)
                     cv2.rectangle(im, tuple(bb_pts[0]), tuple(bb_pts[1]), box_color, 3)
 
-            # cracks (auto/manual) — show different colors
-            # auto = green midline + yellow edges; manual = cyan midline
-            '''for crack_type in ["atomic_cracks", "combined_cracks"]:
-                cracks = ann.get(crack_type, {})
+            # ==========================================================
+            # 1) NEW MODEL: draw from per-crack "atomic_cracks" first
+            # ==========================================================
+            drew_any_atomic = False
+            for crack_type in ["atomic_cracks", "combined_cracks"]:
+                cracks = ann.get(crack_type, {}) or {}
                 for crack_id, crack in cracks.items():
+                    # --- mask ---
+                    mask_arr = np.array(crack.get("mask", []), dtype=np.uint8)
+                    has_valid_mask = (mask_arr.size > 0 and mask_arr.shape == (H, W) and np.any(mask_arr))
+                    if has_valid_mask:
+                        from skimage.segmentation import mark_boundaries
+                        im = (mark_boundaries(im/255.0, mask_arr, color=(0,0,1), background_label=0)*255).astype(np.uint8)
+                        self.mask.append(mask_arr)
+                        drew_any_atomic = True
+
+                    # --- midline ---
                     midline = np.array(crack.get("midline", []), dtype=float)
                     src = crack.get("source", "auto" if crack_type=="atomic_cracks" else "auto")
-                    color = (0,255,0) if (src=="auto" and crack_type=="atomic_cracks") else (255,0,0) if crack_type=="combined_cracks" else (0,200,200)
+                    mid_color = (0,255,0) if (src=="auto" and crack_type=="atomic_cracks") else \
+                                (255,0,0) if crack_type=="combined_cracks" else (0,200,200)
                     if len(midline) > 1:
                         for i in range(1, len(midline)):
                             pt1 = (int(round(midline[i-1][0])), int(round(midline[i-1][1])))
                             pt2 = (int(round(midline[i][0])),  int(round(midline[i][1])))
-                            cv2.line(im, pt1, pt2, color, 2)
+                            cv2.line(im, pt1, pt2, mid_color, 2)
 
-                    # edges (only for auto where present)
-                    edges = crack.get("geodesic_edges", {})
+                    # --- geodesic edges ---
+                    edges = crack.get("geodesic_edges", {}) or {}
+                    # Debug (uncomment if needed):
+                    # edge_lens = {k: len(v) for k, v in edges.items()}
+                    # print(f"[DRAW DEBUG] {crack_type} {crack_id} edges: {edge_lens}")
                     for k, edge_pts in edges.items():
-                        edge_pts = np.array(edge_pts)
+                        edge_pts = np.array(edge_pts, dtype=float)
                         if len(edge_pts) > 1:
                             for i in range(1, len(edge_pts)):
                                 pt1 = (int(round(edge_pts[i - 1][0])), int(round(edge_pts[i - 1][1])))
                                 pt2 = (int(round(edge_pts[i][0])), int(round(edge_pts[i][1])))
-                                cv2.line(im, pt1, pt2, (255, 255, 0), 1)'''
-            
-            # cracks (auto/manual) — show different colors
-            for crack_type in ["atomic_cracks", "combined_cracks"]:
-                cracks = ann.get(crack_type, {})
-                for crack_id, crack in cracks.items():
-                    # Skip if mask is empty AND midline has no length
-                    mask_arr = np.array(crack.get("mask", []), dtype=np.uint8)
-                    midline = np.array(crack.get("midline", []), dtype=float)
-                    # Skip if mask empty — regardless of midline presence
-                    if (mask_arr.size == 0 or not np.any(mask_arr)) and (len(midline) <= 1):
-                        continue  # nothing to draw
+                                cv2.line(im, pt1, pt2, (255, 255, 0), 2)  # thicker for visibility
 
-                    # If mask has data, add to self.mask for display
-                    if mask_arr.size and np.any(mask_arr) and mask_arr.shape == im.shape[:2]:
-                        im = (mark_boundaries(im/255.0, mask_arr, color=(0,0,1), background_label=0)*255).astype(np.uint8)
-                        self.mask.append(mask_arr)
+                    # --- user_points / user_connections (NOW per crack) ---
+                    up = crack.get("user_points", []) or []
+                    uc = crack.get("user_connections", []) or []
+                    # draw points (magenta)
+                    for p in up:
+                        x, y = int(round(p[0])), int(round(p[1]))
+                        if 0 <= x < W and 0 <= y < H:
+                            cv2.circle(im, (x, y), 3, (255, 0, 255), -1)
+                    # draw connections (magenta lines between point indices)
+                    for c in uc:
+                        try:
+                            i1, i2 = int(c[0]), int(c[1])
+                            if 0 <= i1 < len(up) and 0 <= i2 < len(up):
+                                p1 = (int(round(up[i1][0])), int(round(up[i1][1])))
+                                p2 = (int(round(up[i2][0])), int(round(up[i2][1])))
+                                cv2.line(im, p1, p2, (255, 0, 255), 2)
+                        except Exception:
+                            # Be forgiving if something malformed sneaks in
+                            pass
 
-                    src = crack.get("source", "auto" if crack_type=="atomic_cracks" else "auto")
-                    color = (0,255,0) if (src=="auto" and crack_type=="atomic_cracks") else \
-                            (255,0,0) if crack_type=="combined_cracks" else (0,200,200)
+            # ==========================================================
+            # 2) LEGACY FALLBACK: if no per-crack masks were drawn,
+            #    we still honor 'all_masks' / 'crack_pixels'
+            # ==========================================================
+            if not drew_any_atomic:
+                if 'all_masks' in ann:
+                    for m_arr in ann['all_masks']:
+                        mask = np.array(m_arr, dtype=np.uint8)
+                        if mask.shape == im.shape[:2] and np.any(mask):
+                            from skimage.segmentation import mark_boundaries
+                            im = (mark_boundaries(im/255.0, mask, color=(0,0,1), background_label=0)*255).astype(np.uint8)
+                            self.mask.append(mask)
+                elif 'crack_pixels' in ann:
+                    c = np.array(ann['crack_pixels'])
+                    if c.size>0:
+                        mask = np.zeros(im.shape[:2], dtype=np.uint8)
+                        mask[list(c[:,0]), list(c[:,1])] = 1
+                        from skimage.segmentation import mark_boundaries
+                        im = (mark_boundaries(im/255.0, mask, color=(0,0,1), background_label=0)*255).astype(np.uint8)
+                        self.mask.append(mask)
 
-                    '''if len(midline) > 1:
-                        for i in range(1, len(midline)):
-                            pt1 = (int(round(midline[i-1][0])), int(round(midline[i-1][1])))
-                            pt2 = (int(round(midline[i][0])),  int(round(midline[i][1])))
-                            cv2.line(im, pt1, pt2, color, 2)'''
-
-                    # edges (only for auto where present)
-                    edges = crack.get("geodesic_edges", {})
-                    for k, edge_pts in edges.items():
-                        edge_pts = np.array(edge_pts)
-                        if len(edge_pts) > 1:
-                            for i in range(1, len(edge_pts)):
-                                pt1 = (int(round(edge_pts[i - 1][0])), int(round(edge_pts[i - 1][1])))
-                                pt2 = (int(round(edge_pts[i][0])), int(round(edge_pts[i][1])))
-                                cv2.line(im, pt1, pt2, (255, 255, 0), 1)
-
-            # ALSO render any manual midlines that haven't been promoted to atomic yet (defensive)
-            if "midlines" in ann:
-                for k, poly in ann["midlines"].items():
-                    # only draw if this midline has a matching atomic/combined crack with area
-                    has_valid_mask = False
-                    for crack_group in ("atomic_cracks", "combined_cracks"):
-                        for crack in ann.get(crack_group, {}).values():
-                            mask_arr = np.array(crack.get("mask", []), dtype=np.uint8)
-                            if np.any(mask_arr):
-                                has_valid_mask = True
-                                break
-                        if has_valid_mask:
-                            break
-
-                    if not has_valid_mask:
-                        continue  # skip ghosts
-
-                    poly = np.array(poly)
-                    if len(poly) > 1:
-                        for i in range(1, len(poly)):
-                            pt1 = (int(poly[i - 1][0]), int(poly[i - 1][1]))
-                            pt2 = (int(poly[i][0]), int(poly[i][1]))
-                            cv2.line(im, pt1, pt2, (0, 200, 200), 2)
-
-
+        # ---- Render to screen ----
         qimage = QImage(im.astype(np.uint8), im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(qimage)
         scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
@@ -1751,28 +1866,25 @@ class CrackToolsApplication(Ui_MainWindow):
     def clear_segmentation(self):
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
 
-        # --- Safety guard ---
         if not hasattr(self, "annotation") or not isinstance(self.annotation, dict):
             error("No annotation data loaded.")
             return
 
         ann = self.annotation.get("annotations", {})
-        atomic_cracks = ann.get("atomic_cracks", {}).copy()
-        combined_cracks = ann.get("combined_cracks", {}).copy()
+        atomic_cracks = ann.setdefault("atomic_cracks", {})
+        combined_cracks = ann.setdefault("combined_cracks", {})
 
         masks = []
         labels = []
         items = []
 
-        print(atomic_cracks.keys())
-
         H, W = self.original_image.shape[:2]
 
-        # --- Atomic ---
+        # Atomic cracks
         for crack_id, crack in atomic_cracks.items():
             m = np.array(crack.get("mask", []), dtype=np.uint8)
-            if m.size == 0 or np.count_nonzero(m) == 0:
-                continue  # skip empty/ghost cracks
+            if m.size == 0 or not np.any(m):
+                continue
             if m.shape != (H, W):
                 print(f"[WARN] Resizing atomic crack mask from {m.shape} to {(H, W)}")
                 tmp = np.zeros((H, W), dtype=np.uint8)
@@ -1782,10 +1894,10 @@ class CrackToolsApplication(Ui_MainWindow):
             labels.append(f"Atomic {crack_id}")
             items.append(("atomic", crack_id))
 
-        # --- Combined ---
+        # Combined cracks
         for crack_id, crack in combined_cracks.items():
             m = np.array(crack.get("mask", []), dtype=np.uint8)
-            if m.size == 0 or np.count_nonzero(m) == 0:
+            if m.size == 0 or not np.any(m):
                 continue
             if m.shape != (H, W):
                 print(f"[WARN] Resizing combined crack mask from {m.shape} to {(H, W)}")
@@ -1801,6 +1913,7 @@ class CrackToolsApplication(Ui_MainWindow):
             error("No saved cracks with area to delete.")
             return
 
+        # Selection dialog
         dlg = QDialog(self.MainWindow)
         dlg.setWindowTitle("Select Segments to Delete")
         layout = QVBoxLayout(dlg)
@@ -1824,25 +1937,21 @@ class CrackToolsApplication(Ui_MainWindow):
         def highlight_selected_segments():
             display = self.original_image.copy()
             for i, m in enumerate(masks):
-                color = (255, 0, 0)   # default red
+                color = (255, 0, 0)
                 alpha = 0.25
                 if listwidget.item(i).isSelected():
-                    color = (255, 255, 0)  # yellow highlight
+                    color = (255, 255, 0)
                     alpha = 0.6
                 if np.any(m):
-                    mask_bool = m.astype(bool)
                     overlay = np.zeros_like(display)
-                    overlay[mask_bool] = color
+                    overlay[m.astype(bool)] = color
                     display = cv2.addWeighted(display, 1, overlay, alpha, 0)
-
             im = display.astype(np.uint8)
             qimage = QImage(im, im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qimage)
             scaled_pixmap = pixmap.scaled(
-                self.ImageScreen.width(),
-                self.ImageScreen.height(),
-                Qt.KeepAspectRatio,
-                Qt.FastTransformation
+                self.ImageScreen.width(), self.ImageScreen.height(),
+                Qt.KeepAspectRatio, Qt.FastTransformation
             )
             self.ImageScreen.setPixmap(scaled_pixmap)
 
@@ -1854,69 +1963,64 @@ class CrackToolsApplication(Ui_MainWindow):
             if not selected_indices:
                 self.change_image()
                 return
+
+            print(f"[DEBUG] clear_segmentation START")
+            print(f"  Atomic cracks before = {list(atomic_cracks.keys())}")
+            print(f"  Combined cracks before = {list(combined_cracks.keys())}")
+
             for idx in sorted(selected_indices, reverse=True):
                 tpe, crack_id = items[idx]
                 if tpe == "atomic":
-                    # Remove atomic crack
+                    print(f"[DEBUG] Deleting atomic crack_id={crack_id}")
                     atomic_cracks.pop(crack_id, None)
-                    # Also remove from any combined cracks' members
                     for cid, combo in list(combined_cracks.items()):
                         if crack_id in combo.get("members", []):
                             combo["members"] = [m for m in combo["members"] if m != crack_id]
                             if not combo["members"]:
                                 combined_cracks.pop(cid, None)
                 elif tpe == "combined":
+                    print(f"[DEBUG] Deleting combined crack_id={crack_id}")
                     combined_cracks.pop(crack_id, None)
 
-            # Rebuild masks and crack_pixels
+            # Write back into the live self.annotation object
+            self.annotation["annotations"]["atomic_cracks"] = atomic_cracks
+            self.annotation["annotations"]["combined_cracks"] = combined_cracks
+
+            # Purge masks and pixels and rebuild
+            ann["all_masks"] = []
+            ann["crack_pixels"] = []
             new_masks = []
             for crack in atomic_cracks.values():
                 m = np.array(crack.get("mask", []), dtype=np.uint8)
-                if m.size > 0 and np.count_nonzero(m) > 0:
-                    if m.shape != (H, W):
-                        tmp = np.zeros((H, W), dtype=np.uint8)
-                        tmp[:m.shape[0], :m.shape[1]] = m
-                        m = tmp
+                if m.shape != (H, W):
+                    tmp = np.zeros((H, W), dtype=np.uint8)
+                    tmp[:m.shape[0], :m.shape[1]] = m
+                    m = tmp
+                if np.any(m):
                     new_masks.append(m)
-
             for crack in combined_cracks.values():
                 m = np.array(crack.get("mask", []), dtype=np.uint8)
-                if m.size > 0 and np.count_nonzero(m) > 0:
-                    if m.shape != (H, W):
-                        tmp = np.zeros((H, W), dtype=np.uint8)
-                        tmp[:m.shape[0], :m.shape[1]] = m
-                        m = tmp
+                if m.shape != (H, W):
+                    tmp = np.zeros((H, W), dtype=np.uint8)
+                    tmp[:m.shape[0], :m.shape[1]] = m
+                    m = tmp
+                if np.any(m):
                     new_masks.append(m)
-
             if new_masks:
                 m_sum = np.sum(np.stack(new_masks), axis=0)
                 m_sum[m_sum >= 1] = 1
-                crack_pixels = np.argwhere(m_sum == 1).tolist()
-                all_masks_list = [m.tolist() for m in new_masks]
-            else:
-                crack_pixels = []
-                all_masks_list = []
+                ann["crack_pixels"] = np.argwhere(m_sum == 1).tolist()
+                ann["all_masks"] = [m.tolist() for m in new_masks]
 
-            def _scrub_if_no_mask(crack_dict):
-                for c in crack_dict.values():
-                    m = np.array(c.get("mask", []), dtype=np.uint8)
-                    if m.size == 0 or not np.any(m):
-                        c["geodesic_edges"] = {}
-                        c["midline"] = []
-
-            _scrub_if_no_mask(atomic_cracks)
-            _scrub_if_no_mask(combined_cracks)
-
-            self.annotation["annotations"]["atomic_cracks"] = atomic_cracks
-            self.annotation["annotations"]["combined_cracks"] = combined_cracks
-            self.annotation["annotations"]["crack_pixels"] = crack_pixels
-            self.annotation["annotations"]["all_masks"] = all_masks_list
-
+            # Save JSON
             with open(self.ann_name, 'w') as fp:
                 json.dump(self.annotation, fp)
+
+            print(f"[DEBUG] After deletion: atomic = {list(atomic_cracks.keys())}")
+            print(f"[DEBUG] After deletion: combined = {list(combined_cracks.keys())}")
             print(f"Deleted {len(selected_indices)} segmentations.")
-            self.change_image()
-        else:
+
+            # Refresh view
             self.change_image()
 
     def edge_tracking(self):
@@ -1970,188 +2074,247 @@ class CrackToolsApplication(Ui_MainWindow):
             self.edge_tracks_full_screen_button.setStyleSheet("background-color : red")
             self.save_current_segment_button.setStyleSheet("background-color : red")
 
+    def _debug_print_atomic_cracks(self, label):
+        ann = self.annotation.get("annotations", {})
+        cracks = ann.get("atomic_cracks", {})
+        print(f"\n[DEBUG] {label}: {len(cracks)} cracks currently stored.")
+        for cid, crack in cracks.items():
+            src = crack.get("source", "?")
+            midline_len = len(crack.get("midline", []))
+            mask_nonzero = np.count_nonzero(np.array(crack.get("mask", []), dtype=np.uint8))
+            print(f"    ID={cid} src={src} midline_len={midline_len} mask_pixels={mask_nonzero}")
+    
+    def select_end_points_manmidlines(self):
+        self._debug_print_atomic_cracks("select_end_points_manmidlines START")
+        if not hasattr(self, "original_image") or self.original_image is None:
+            error("No original image found.")
+            return
 
-    def save_current_segment(self):
-        try:
-            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
-            edge_x_crop = np.concatenate((self.track_e1[1][::-1], self.track_e2[1]))
-            edge_y_crop = np.concatenate((self.track_e1[0][::-1], self.track_e2[0]))
+        from PyQt5.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
+            QSizePolicy, QApplication, QMessageBox, QScrollArea, QLabel
+        )
 
-            mask_crop = ct.segmentation.create_mask(
-                self.image_crop,
-                edge_y_crop, edge_x_crop
-            )
+        boxes = self.get_all_bounding_boxes()
 
-            full_mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
-            h, w = mask_crop.shape
-            full_mask[ymin:ymin+h, xmin:xmin+w] = mask_crop
+        # --- Separate "read-only" midlines & connections from editable ones ---
+        readonly_midlines = {}
+        readonly_connections = []
+        existing_midlines = {}
 
-            # If editing existing crack, replace its mask in self.mask
-            if hasattr(self, "current_crack_id") and self.current_crack_id < len(self.mask):
-                self.mask[self.current_crack_id] = full_mask
+        if "annotations" in self.annotation:
+            ann = self.annotation["annotations"]
+
+            # Existing manual midlines (global coords) → store for bbox conversion
+            ann_midlines = ann.get("midlines", {})
+            for k_str, pts in ann_midlines.items():
+                try:
+                    i1, i2 = map(int, k_str.split("_"))
+                    existing_midlines[(min(i1, i2), max(i1, i2))] = [tuple(map(float, xy)) for xy in pts]
+                except:
+                    pass
+
+            # Existing auto connections (from atomic cracks) — global coords
+            for crack in ann.get("atomic_cracks", {}).values():
+                if crack.get("source") == "auto":
+                    ml = crack.get("midline", [])
+                    if len(ml) >= 2:
+                        p1, p2 = tuple(ml[0]), tuple(ml[-1])
+                        readonly_connections.append((p1, p2))
+
+        # --- Ensure all endpoints exist in initial points ---
+        # Try to load points/connections from current crack if available
+        initial_points = []
+        initial_conns = []
+        if hasattr(self, "current_crack_id"):
+            crack_id_str = str(self.current_crack_id)
+            crack_entry = self.annotation.get("annotations", {}).get("atomic_cracks", {}).get(crack_id_str, {})
+            initial_points = list(crack_entry.get("user_points", []) or [])
+            initial_conns = list(crack_entry.get("user_connections", []) or [])
+
+        if not initial_points:
+            initial_points = list(getattr(self, "user_points", []) or [])
+        if not initial_conns:
+            initial_conns = list(getattr(self, "user_connections", []) or [])
+
+        point_index_map = {tuple(pt): idx for idx, pt in enumerate(initial_points)}
+
+        def ensure_point(pt):
+            if tuple(pt) not in point_index_map:
+                point_index_map[tuple(pt)] = len(initial_points)
+                initial_points.append(pt)
+            return point_index_map[tuple(pt)]
+
+        # --- Fill read-only midlines (full-image coords, no crop offset) ---
+        for (i1, i2), poly in existing_midlines.items():
+            start_idx = ensure_point(poly[0])  # direct global coords
+            end_idx = ensure_point(poly[-1])
+            readonly_midlines[(start_idx, end_idx)] = poly  # store as-is
+
+        # --- Fill read-only connections (full-image coords, no crop offset) ---
+        readonly_conn_idx = []
+        for p1, p2 in readonly_connections:
+            idx1 = ensure_point(p1)  # direct global coords
+            idx2 = ensure_point(p2)
+            readonly_conn_idx.append((min(idx1, idx2), max(idx1, idx2)))
+
+        print(readonly_connections, readonly_conn_idx)
+
+        from endpoint_annotator import CrackAnnotator
+        annot = CrackAnnotator(
+            image=self.original_image,
+            boxes=boxes,
+            initial_points=initial_points,
+            initial_connections=initial_conns,
+            initial_midlines={},  # start fresh editable set
+        )
+
+        # Attach read-only sets to annotator
+        annot.readonly_midlines = readonly_midlines
+        annot.readonly_connections = readonly_conn_idx
+
+        annot.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
+
+        dlg = QDialog(self.MainWindow)
+        dlg.setWindowTitle("Endpoints, Connections & Manual Midlines")
+        dlg.setWindowModality(Qt.ApplicationModal)
+        dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowMaximizeButtonHint)
+        layout = QVBoxLayout(dlg)
+
+        mode_btn = QPushButton("Switch to Connection Mode")
+        mode_btn.setCheckable(True)
+        layout.addWidget(mode_btn)
+
+        manual_btn = QPushButton("Manual Midlines: OFF")
+        manual_btn.setCheckable(True)
+        manual_btn.setVisible(False)
+        layout.addWidget(manual_btn)
+
+        hint = QLabel(
+            "Manual: Left-hold on starting point → draw (hold/click) → finish w/ hold/click endpoint.\n"
+            "Read-only cracks shown in gray — can't be deleted."
+        )
+        layout.addWidget(hint)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(annot)
+        layout.addWidget(scroll, 1)
+
+        btn_row = QHBoxLayout()
+        btn_done, btn_cancel = QPushButton("Done"), QPushButton("Cancel")
+        btn_row.addWidget(btn_done)
+        btn_row.addWidget(btn_cancel)
+        layout.addLayout(btn_row)
+
+        def all_points_in_boxes():
+            def in_any(pt):
+                x, y = pt
+                for xmin, ymin, xmax, ymax in boxes:
+                    if xmin <= x <= xmax and ymin <= y <= ymax:
+                        return True
+                return False
+
+            # Build set of point indices from read-only items
+            readonly_point_idxs = set()
+            for (i1, i2) in annot.readonly_connections:
+                readonly_point_idxs.update([i1, i2])
+            for (i1, i2) in annot.readonly_midlines.keys():
+                readonly_point_idxs.update([i1, i2])
+
+            # Only check points that are NOT in readonly sets
+            bad = [
+                pt for idx, pt in enumerate(annot.points)
+                if idx not in readonly_point_idxs and not in_any(pt)
+            ]
+            return (len(bad) == 0, bad)
+
+        def confirm_discard():
+            mb = QMessageBox(dlg)
+            mb.setIcon(QMessageBox.Warning)
+            mb.setWindowTitle("Discard current midline?")
+            mb.setText("You're in the middle of drawing a midline. Discard it?")
+            mb.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            return mb.exec_() == QMessageBox.Yes
+
+        def update_controls_visibility():
+            if annot.polyline_mode:
+                mode_btn.setVisible(False)
+                manual_btn.setVisible(True)
+                manual_btn.setText("Manual Midlines: ON")
+                manual_btn.setStyleSheet("background:#79d2e6;")
             else:
-                self.mask.append(full_mask)
+                mode_btn.setVisible(True)
+                if annot.connection_mode:
+                    mode_btn.setText("Switch to Point Mode")
+                    mode_btn.setStyleSheet("background:#97e297;")
+                else:
+                    mode_btn.setText("Switch to Connection Mode")
+                    mode_btn.setStyleSheet("background:#e2c297;")
+                manual_btn.setVisible(annot.connection_mode and (not annot.all_pairs_saturated()))
+                manual_btn.setText("Manual Midlines: OFF")
+                manual_btn.setStyleSheet("")
 
-            track = [list(x) for x in self.track]
+        mode_btn.clicked.connect(lambda: (annot.toggle_mode(), update_controls_visibility()))
+        manual_btn.clicked.connect(lambda checked: (
+            annot.set_mode_polyline(checked, confirm_cb=confirm_discard),
+            update_controls_visibility()
+        ))
+        update_controls_visibility()
 
-            if not hasattr(self, "current_crack_id") or self.current_crack_id not in self.crack_tracks:
-                self.current_crack_id = len(self.crack_tracks)
+        def on_done():
+            if annot.polyline_mode and annot._is_drawing:
+                if not confirm_discard():
+                    return
+                annot.set_mode_polyline(False)
 
-            self.crack_tracks[self.current_crack_id] = track
+            ok, bad = all_points_in_boxes()
+            if not ok:
+                QMessageBox.warning(dlg, "Points outside boxes", "All points must be inside a bounding box.")
+                return
 
-            # Update display mask
-            m = np.sum(np.array(self.mask), axis=0)
-            m[m >= 1] = 255
-            m = m.astype(dtype=np.uint8)
-            qimage = QImage(m, m.shape[1], m.shape[0], m.strides[0], QImage.Format_Grayscale8)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.all_segments_display.width(), self.all_segments_display.height(),
-                                        Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.all_segments_display.setPixmap(scaled_pixmap)
+            # Save global for pipeline
+            self.user_points = annot.points
+            self.user_connections = [c for c in annot.connections if c not in annot.readonly_connections]
 
-            # Shift polylines to full image
-            pts1 = (np.array(self.track_e1).T + np.array([xmin, ymin])).reshape((-1, 1, 2)).astype(np.int32)
-            pts2 = (np.array(self.track_e2).T + np.array([xmin, ymin])).reshape((-1, 1, 2)).astype(np.int32)
-            im = self.image.astype(np.uint8).copy()
-            im = cv2.polylines(im, [pts1], False, (0, 255, 0), 1)
-            im = cv2.polylines(im, [pts2], False, (0, 255, 0), 1)
-            self.image = im
+            self.endpoint_pairs = [
+                (self.user_points[i1], self.user_points[i2])
+                for (i1, i2) in self.user_connections
+            ]
 
-            self.save_annotation()
-        except Exception as e:
-            error(e)
+            self.manual_endpoint_pairs = []
+            for (i1, i2), poly in annot.midlines.items():
+                self.manual_endpoint_pairs.append((self.user_points[i1], self.user_points[i2]))
 
-    def save_annotation(self):
-        import numpy as np
-        import json, os, tempfile, shutil
+            self.manual_midlines_tmp = {
+                f"{i1}_{i2}": [[float(x), float(y)] for (x, y) in poly]
+                for (i1, i2), poly in annot.midlines.items()
+            }
 
-        def _safe_serialize(obj):
-            """Recursively convert NumPy types to Python native types."""
-            import numpy as np
-            if isinstance(obj, np.ndarray):
-                return obj.tolist()
-            elif isinstance(obj, (np.generic,)):
-                return obj.item()
-            elif isinstance(obj, dict):
-                return {k: _safe_serialize(v) for k, v in obj.items()}
-            elif isinstance(obj, (list, tuple)):
-                return [_safe_serialize(v) for v in obj]
-            return obj
+            # If editing a specific crack, store its points/connections directly in that crack
+            if hasattr(self, "current_crack_id"):
+                crack_id_str = str(self.current_crack_id)
+                crack_entry = self.annotation.get("annotations", {}).get("atomic_cracks", {}).setdefault(crack_id_str, {})
+                crack_entry["user_points"] = list(self.user_points)
+                crack_entry["user_connections"] = list(self.user_connections)
 
-        try:
-            # 1) masks summary (unchanged)
-            if not getattr(self, "use_masks", False):
-                masks = [np.array(m, dtype=np.uint8) for m in self.mask
-                        if m is not None and np.array(m).size > 0]
-                m = np.sum(np.stack(masks), axis=0) if masks else np.zeros(self.image.shape[:2], dtype=np.uint8)
-                m[m >= 1] = 1.0
-                self.annotation.setdefault("annotations", {})["crack_pixels"] = np.argwhere(m == 1.0).tolist()
-                self.annotation["annotations"]["all_masks"] = [mm.tolist() for mm in masks] if masks else []
+            dlg.accept()
 
-            ann = self.annotation.setdefault("annotations", {})
+        btn_done.clicked.connect(on_done)
+        btn_cancel.clicked.connect(lambda: dlg.reject())
 
-            # 2) auto-tracked cracks
-            cracks_data_atomic = {}
-            xmin, ymin, xmax, ymax = [int(round(v)) for v in getattr(
-                self, "active_bbox",
-                [0, 0, self.image.shape[1], self.image.shape[0]]
-            )]
+        dlg.showMaximized()
+        QApplication.processEvents()
+        if dlg.exec_() != QDialog.Accepted:
+            return
 
-            for crack_id, track in getattr(self, "crack_tracks", {}).items():
-                midline = [[int(track[0][i] + xmin), int(track[1][i] + ymin)]
-                        for i in range(len(track[0]))]
-                edge1 = [[int(self.track_e1[0][i] + xmin), int(self.track_e1[1][i] + ymin)]
-                        for i in range(len(self.track_e1[0]))] if hasattr(self, "track_e1") else []
-                edge2 = [[int(self.track_e2[0][i] + xmin), int(self.track_e2[1][i] + ymin)]
-                        for i in range(len(self.track_e2[0]))] if hasattr(self, "track_e2") else []
-                mask = self.mask[crack_id] if (hasattr(self, "mask") and crack_id < len(self.mask)) \
-                    else np.zeros(self.image.shape[:2], dtype=np.uint8)
-
-                cracks_data_atomic[str(crack_id)] = {
-                    "source": "auto",
-                    "midline": midline,
-                    "geodesic_edges": {"edge1": edge1, "edge2": edge2},
-                    "mask": mask.tolist()
-                }
-
-            # 3) manual midlines → atomic_cracks only if valid
-            manual_mid = getattr(self, "manual_midlines_tmp", {})
-            valid_midline_keys = set()
-            next_base = max([int(k) for k in cracks_data_atomic.keys()], default=-1) + 1
-            H, W = self.image.shape[:2]
-
-            for k, poly in manual_mid.items():
-                mask_candidate = None
-                has_valid_mask = False
-                if hasattr(self, "mask") and next_base < len(self.mask):
-                    mask_candidate = self.mask[next_base]
-                    if mask_candidate is not None and np.any(mask_candidate):
-                        has_valid_mask = True
-
-                has_edges = hasattr(self, "track_e1") and hasattr(self, "track_e2") \
-                            and len(getattr(self, "track_e1", [[], []])[0]) > 1
-
-                if not has_valid_mask and not has_edges:
-                    print(f"[SKIP] Manual midline {k} has no mask/edges — not saving")
-                    continue
-
-                midline = [[int(x), int(y)] for (x, y) in poly]
-                cracks_data_atomic[str(next_base)] = {
-                    "source": "manual",
-                    "midline": midline,
-                    "geodesic_edges": {
-                        "edge1": getattr(self, "track_e1", []),
-                        "edge2": getattr(self, "track_e2", [])
-                    } if has_edges else {},
-                    "mask": mask_candidate.tolist()
-                            if (mask_candidate is not None and mask_candidate.shape == (H, W))
-                            else []
-                }
-                valid_midline_keys.add(k)
-                next_base += 1
-
-            # Filter out cracks with no mask area
-            filtered_cracks = {}
-            for cid, crack in cracks_data_atomic.items():
-                mask_arr = np.array(crack.get("mask", []), dtype=np.uint8)
-                if mask_arr.size == 0 or mask_arr.shape != (H, W):
-                    mask_arr = np.zeros((H, W), dtype=np.uint8)
-                if np.any(mask_arr):
-                    crack["mask"] = mask_arr.tolist()
-                    filtered_cracks[cid] = crack
-            cracks_data_atomic = filtered_cracks
-
-            # Remove ghost midlines
-            ann["midlines"] = {k: v for k, v in manual_mid.items() if k in valid_midline_keys}
-            ann["atomic_cracks"] = cracks_data_atomic
-
-            # Preserve combined cracks
-            cracks_data_combined = {}
-            if hasattr(self, "combined_cracks"):
-                for combo_id, combo in self.combined_cracks.items():
-                    cracks_data_combined[str(combo_id)] = _safe_serialize(combo)
-            ann["combined_cracks"] = cracks_data_combined
-
-            # ---- Safe JSON write ----
-            safe_annotation = _safe_serialize(self.annotation)
-            base_name = os.path.splitext(os.path.basename(self.name))[0]
-            json_path = os.path.join(self.save_folder, base_name + '.json')
-            mask_bin_path = os.path.join(self.save_folder, base_name + '_mask.png')
-            mask_255_path = os.path.join(self.save_folder, base_name + '_mask255.png')
-
-            import tempfile
-            tmp_fd, tmp_path = tempfile.mkstemp(dir=self.save_folder, suffix=".json")
-            with open(tmp_fd, 'w') as f:
-                json.dump(safe_annotation, f)
-            shutil.move(tmp_path, json_path)
-
-            mask_bin = (m >= 1).astype('uint8') if 'm' in locals() else np.zeros(self.image.shape[:2], dtype=np.uint8)
-            cv2.imwrite(mask_bin_path, mask_bin)
-            cv2.imwrite(mask_255_path, mask_bin * 255)
-            print(f"Saved: {json_path}, {mask_bin_path}, {mask_255_path}")
-
-        except Exception as e:
-            error(e)
+        print(f"Points: {self.user_points}")
+        print(f"Connections: {self.user_connections}")
+        print(f"Endpoint pairs: {self.endpoint_pairs}")
+        print(f"Manual endpoint pairs: {getattr(self, 'manual_endpoint_pairs', [])}")
+        print(f"Midlines saved: {len(self.manual_midlines_tmp)}")
+        self.update_image_crop_button.setStyleSheet("background-color: lightblue")
+        self._debug_print_atomic_cracks("select_end_points_manmidlines AFTER ACCEPT")
           
     def get_all_bounding_boxes(self):
         """
@@ -2171,167 +2334,13 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             print(f"Could not parse bounding boxes: {e}")
         return boxes
-                
-    '''def run_pipeline(self, multirun=False):
-        """
-        For each bounding box:
-        - Compute OS/cost ONCE per box
-        - For each endpoint-pair inside the box, do midline/edge tracking/saving.
-        After all succeed, clears user endpoints & connections from memory and file.
-        """
-        import gc
-
-        gc.collect()
-        print("✅ GPU memory freed from CuPy pool")
-        print("Running optimized pipeline for all endpoint pairs and bounding boxes...")
-
-        boxes = self.get_all_bounding_boxes()
-        if not boxes:
-            msg = QMessageBox()
-            msg.setIcon(QMessageBox.Critical)
-            msg.setText("No bounding boxes found! Please draw at least one bounding box before running the pipeline.")
-            msg.setWindowTitle("No Bounding Boxes")
-            msg.exec_()
-            return
-
-        if not multirun:
-            self.endpoint_pairs = None
-            self.user_connections = None
-            self.user_points = None
-            self.select_end_points()
-        if not hasattr(self, "endpoint_pairs") or not self.endpoint_pairs or len(self.endpoint_pairs) == 0:
-            msg = QMessageBox()
-            msg.setIcon(QMessageBox.Critical)
-            msg.setText("No endpoint pairs selected!\n\nPlease use 'Select Endpoints' and create at least one connection before running the pipeline.")
-            msg.setWindowTitle("No Endpoint Pairs")
-            msg.exec_()
-            return
-
-        # Step 1: Group endpoint pairs by bounding box
-        box_to_pairs = {}
-        for pair in self.endpoint_pairs:
-            candidates = []
-            for bbox in boxes:
-                xmin, ymin, xmax, ymax = bbox
-                p0, p1 = pair
-                if (xmin <= p0[0] <= xmax and ymin <= p0[1] <= ymax and
-                    xmin <= p1[0] <= xmax and ymin <= p1[1] <= ymax):
-                    area = abs((xmax - xmin) * (ymax - ymin))
-                    candidates.append((area, bbox))
-            if candidates:
-                # Pick the box with the smallest area
-                _, chosen_bbox = min(candidates, key=lambda x: x[0])
-                key = tuple(chosen_bbox)
-                if key not in box_to_pairs:
-                    box_to_pairs[key] = []
-                box_to_pairs[key].append(pair)
-
-        num_success = 0
-        errors = []
-        from time import time
-
-        for box_idx, (bbox_key, pairs) in enumerate(box_to_pairs.items()):
-            # FIX: Reset for this box
-            self.crack_tracks = {}
-            self.atomic_normal_edges = {}
-            self.mask = []
-            bbox = list(bbox_key)
-            xmin, ymin, xmax, ymax = bbox
-            print(f"\n=== Processing bounding box {box_idx+1}/{len(box_to_pairs)}: {bbox} ===")
-            try:
-                # --- Crop image ONCE for this box ---
-                # We'll use the first pair just to set up the crop
-                first_pair = pairs[0]
-                self.pts = [np.array(first_pair[0]), np.array(first_pair[1])]
-                self.end_points = [np.array(first_pair[0]), np.array(first_pair[1])]
-                self.active_bbox = bbox
-                self.update_image_crop()   # Crops only to bounding box!
-
-                if hasattr(self, "skip_current_segment") and self.skip_current_segment:
-                    print(f"Skipping all pairs in this box: Crop too small.")
-                    continue
-
-                # --- Compute OS and cost ONCE for the box ---
-                print("os (once per box)")
-                start_time = time()
-                self.update_os()
-                print(f"os time: {time() - start_time:.2f} seconds")
-                print("cost (once per box)")
-                start_time = time()
-                self.update_cost()
-                print(f"cost time: {time() - start_time:.2f} seconds")
-                print(np.unique(self.costFunction), self.costFunction.shape)
-                # --- Now do midline/edge/save for EACH pair in this box ---
-                for idx, pair in enumerate(pairs):
-                    print(f"  > Branch {idx+1}/{len(pairs)} in box: endpoints {pair}")
-                    self.pts = [np.array(pair[0]), np.array(pair[1])]
-                    self.end_points = [np.array(pair[0]), np.array(pair[1])]
-                    # Need to update the crop-shifted points
-                    xmin, ymin, xmax, ymax = bbox
-                    self.pts_crop = [np.array(pt) - np.array([xmin, ymin]) for pt in self.pts]
-
-                    # Downsample if needed (keep logic from update_image_crop)
-                    downsample_factor = self.downsample_factor_box.value()
-                    self.pts_crop_down = [x / downsample_factor for x in self.pts_crop]
-
-                    try:
-                        print("    midline tracking")
-                        start_time = time()
-                        self.midline_tracking()
-                        print(f"    midline tracking time: {time() - start_time:.2f} seconds")
-                        #return
-                        print("    edge mask")
-                        self.edge_mask()
-                        print("    edge tracking")
-                        self.edge_tracking()
-                        #return
-                        print("    save segment")
-                        self.save_current_segment()
-                        num_success += 1
-                    except Exception as e:
-                        print(f"    Exception for endpoints {pair}: {e}")
-                        errors.append(f"Failed for endpoints {pair}: {e}")
-                        continue
-
-            except Exception as e:
-                print(f"Exception for bounding box {bbox}: {e}")
-                errors.append(f"Failed for bounding box {bbox}: {e}")
-                continue
-
-        # --- CLEANUP/DELETE: Only if everything worked ---
-        if errors and num_success == 0:
-            msg = QMessageBox()
-            msg.setIcon(QMessageBox.Critical)
-            msg.setText("\n".join(errors))
-            msg.setWindowTitle("Pipeline Error")
-            msg.exec_()
-        else:
-            if errors:
-                print("\n".join(errors))
-            else:
-                print("✔ All endpoint-groups processed (optimized by box).")
-            # --- Now remove user_points/user_connections/endpoint_pairs from memory and file
-            print("Clearing endpoint and connection annotations after successful pipeline run...")
-            # Remove from memory
-            if hasattr(self, "user_points"):
-                del self.user_points
-            if hasattr(self, "user_connections"):
-                del self.user_connections
-            if hasattr(self, "endpoint_pairs"):
-                del self.endpoint_pairs
-            # Remove from file
-            ann = self.annotation.get("annotations", {})
-            ann["user_points"] = None
-            ann["user_connections"] = None
-            # Save cleared annotation to file
-            #self.save_annotation()
-            self.change_image()'''
     
     def run_pipeline(self, multirun=False):
         import gc, json
         import numpy as np
         from PyQt5.QtWidgets import QMessageBox
         from time import time
+        self._debug_print_atomic_cracks("run_pipeline START")
 
         gc.collect()
         print("✅ GPU memory freed from CuPy pool")
@@ -2344,6 +2353,7 @@ class CrackToolsApplication(Ui_MainWindow):
                 "Please draw at least one bounding box before running the pipeline.")
             return
 
+        # Only ask for endpoints if not in multi-run
         if not multirun:
             self.endpoint_pairs = None
             self.user_connections = None
@@ -2352,7 +2362,6 @@ class CrackToolsApplication(Ui_MainWindow):
             print("Calling select_end_points_manmidlines()...")
             self.select_end_points_manmidlines()
 
-        # Merge auto + manual endpoint pairs
         all_pairs = []
         if getattr(self, "endpoint_pairs", None):
             print(f"Auto endpoint_pairs: {self.endpoint_pairs}")
@@ -2366,7 +2375,7 @@ class CrackToolsApplication(Ui_MainWindow):
                 "No endpoint pairs selected!\n\nPlease use 'Select Endpoints' and create at least one connection or manual midline before running the pipeline.")
             return
 
-        # Group by bbox
+        # Group pairs by containing bbox
         box_to_pairs = {}
         for (pair, src) in all_pairs:
             candidates = []
@@ -2382,17 +2391,18 @@ class CrackToolsApplication(Ui_MainWindow):
                 key = tuple(chosen_bbox)
                 box_to_pairs.setdefault(key, []).append((pair, src))
 
-        num_success = 0
-        errors = []
-
-        # Ensure we don't wipe existing cracks/masks
         if not hasattr(self, "crack_tracks"):
             self.crack_tracks = {}
         if not hasattr(self, "mask"):
             self.mask = []
 
-        # Track crack index across the whole run
+        # start crack index at the next unused
         crack_index_offset = len(self.crack_tracks)
+        num_success = 0
+        errors = []
+
+        ann = self.annotation.setdefault("annotations", {})
+        atomic_cracks = ann.setdefault("atomic_cracks", {})
 
         for bbox_key, pairs in box_to_pairs.items():
             xmin, ymin, xmax, ymax = bbox_key
@@ -2400,7 +2410,6 @@ class CrackToolsApplication(Ui_MainWindow):
             print(f"Pairs in this box: {pairs}")
 
             try:
-                # Precompute OS/cost for auto pairs only
                 auto_pairs = [p for p, s in pairs if s == "auto"]
                 if auto_pairs:
                     first_pair = auto_pairs[0]
@@ -2420,6 +2429,8 @@ class CrackToolsApplication(Ui_MainWindow):
                     try:
                         self.active_bbox = list(bbox_key)
                         print(f"\n--- Processing pair {pair} (source={src}) ---")
+
+                        crack_id = str(crack_index_offset)
 
                         if src == "manual":
                             manual_midlines_dict = getattr(self, "manual_midlines_tmp", {})
@@ -2444,7 +2455,6 @@ class CrackToolsApplication(Ui_MainWindow):
                             midline_pts_full = manual_midlines_dict[found_key]
                             self.pts = [np.array(pair[0]), np.array(pair[1])]
                             self.end_points = self.pts
-
                             self.update_image_crop()
                             if getattr(self, "skip_current_segment", False):
                                 continue
@@ -2470,9 +2480,15 @@ class CrackToolsApplication(Ui_MainWindow):
                         self.edge_mask()
                         self.edge_tracking()
 
-                        # Force crack ID so we don't overwrite
+                        # Assign new crack entry
                         self.current_crack_id = crack_index_offset
                         self.save_current_segment()
+
+                        # Store points/connections inside the crack itself
+                        atomic_cracks[crack_id] = atomic_cracks.get(crack_id, {})
+                        atomic_cracks[crack_id]["user_points"] = list(getattr(self, "user_points", []) or [])
+                        atomic_cracks[crack_id]["user_connections"] = list(getattr(self, "user_connections", []) or [])
+
                         crack_index_offset += 1
                         num_success += 1
 
@@ -2484,18 +2500,24 @@ class CrackToolsApplication(Ui_MainWindow):
                 errors.append(f"Failed for bbox {bbox_key}: {e}")
                 continue
 
+        # Save updated annotation with all cracks
+        ann["atomic_cracks"] = atomic_cracks
+        self.annotation["annotations"] = ann
+
         if errors:
             print("\n".join(errors))
         else:
             print("✔ All endpoint groups processed.")
 
+        # clear global temp vars but keep per-crack stored
         self.user_points = None
         self.user_connections = None
         self.endpoint_pairs = None
         self.manual_endpoint_pairs = None
-        ann = self.annotation.get("annotations", {})
-        ann["user_points"] = None
-        ann["user_connections"] = None
+
+        with open(self.ann_name, 'w') as fp:
+            json.dump(self.annotation, fp)
+        self._debug_print_atomic_cracks("run_pipeline END")
         self.change_image()
             
     def update_os_cost(self):
