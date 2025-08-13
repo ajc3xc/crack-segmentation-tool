@@ -1623,7 +1623,7 @@ class CrackToolsApplication(Ui_MainWindow):
         try:
             xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
 
-            # Build full mask
+            # Build full-image mask from crop edges
             edge_x_crop = np.concatenate((self.track_e1[1][::-1], self.track_e2[1]))
             edge_y_crop = np.concatenate((self.track_e1[0][::-1], self.track_e2[0]))
             mask_crop = ct.segmentation.create_mask(self.image_crop, edge_y_crop, edge_x_crop)
@@ -1632,25 +1632,20 @@ class CrackToolsApplication(Ui_MainWindow):
             h, w = mask_crop.shape
             full_mask[ymin:ymin + h, xmin:xmin + w] = mask_crop
 
-            # Allocate crack ID only if not editing an existing one
-            if not hasattr(self, "current_crack_id") or str(self.current_crack_id) not in self.annotation.get("annotations", {}).get("atomic_cracks", {}):
-                existing_ids = [int(cid) for cid in self.annotation.get("annotations", {}).get("atomic_cracks", {}).keys() if cid.isdigit()]
-                self.current_crack_id = max(existing_ids, default=-1) + 1
-
-            # Save track
-            self.crack_tracks[self.current_crack_id] = [list(x) for x in self.track]
-
-            # Ensure mask list has correct length
-            while len(self.mask) <= self.current_crack_id:
-                self.mask.append(np.zeros_like(full_mask))
-            self.mask[self.current_crack_id] = full_mask
-
-            # Save into annotation atomic_cracks
+            # Ensure annotation scaffold
             ann = self.annotation.setdefault("annotations", {})
             atomic_cracks = ann.setdefault("atomic_cracks", {})
 
-            atomic_cracks[str(self.current_crack_id)] = {
-                "source": "auto",
+            # Ensure we have a valid crack id (int) and unique key (str)
+            if not hasattr(self, "current_crack_id"):
+                # Shouldn’t happen — run_pipeline sets this — but be safe
+                existing_ids = [int(cid) for cid in atomic_cracks.keys() if str(cid).isdigit()]
+                self.current_crack_id = max(existing_ids, default=-1) + 1
+            cid_str = str(int(self.current_crack_id))
+
+            # Save edges/midline relative to full image
+            crack_entry = {
+                "source": getattr(self, "current_source", "auto"),
                 "midline": [[int(self.track[0][i] + xmin), int(self.track[1][i] + ymin)]
                             for i in range(len(self.track[0]))],
                 "geodesic_edges": {
@@ -1660,11 +1655,41 @@ class CrackToolsApplication(Ui_MainWindow):
                             for i in range(len(self.track_e2[0]))]
                 },
                 "mask": full_mask.tolist(),
-                "user_points": getattr(self, "user_points", []),
-                "user_connections": getattr(self, "user_connections", [])
+                # CRUCIAL: write only this pair’s endpoints/connections to this crack
+                "user_points": [list(map(float, p)) for p in (getattr(self, "user_points", []) or [])],
+                "user_connections": [list(map(int, c)) for c in (getattr(self, "user_connections", []) or [])],
             }
 
-            self.save_annotation()
+            # Write into atomic_cracks
+            atomic_cracks[cid_str] = crack_entry
+
+            # Maintain in-memory convenience structures
+            if not hasattr(self, "crack_tracks"):
+                self.crack_tracks = {}
+            self.crack_tracks[int(self.current_crack_id)] = [list(x) for x in self.track]
+
+            while len(self.mask) <= int(self.current_crack_id):
+                self.mask.append(np.zeros_like(full_mask))
+            self.mask[int(self.current_crack_id)] = full_mask
+
+            # Also update legacy summaries (all_masks / crack_pixels) so viewers stay in sync
+            masks = [np.array(c.get("mask", []), dtype=np.uint8)
+                    for c in atomic_cracks.values()]
+            masks = [m if (m.ndim == 2 and m.shape == full_mask.shape) else np.zeros_like(full_mask) for m in masks]
+            if masks:
+                msum = np.sum(np.stack(masks), axis=0)
+                msum[msum >= 1] = 1
+                ann["all_masks"] = [m.tolist() for m in masks]
+                ann["crack_pixels"] = np.argwhere(msum == 1).tolist()
+            else:
+                ann["all_masks"] = []
+                ann["crack_pixels"] = []
+
+            # Persist now so nothing gets lost
+            base_name = os.path.splitext(os.path.basename(self.name))[0]
+            json_path = os.path.join(self.save_folder, base_name + '.json')
+            with open(json_path, 'w') as f:
+                json.dump(self.annotation, f)
 
         except Exception as e:
             error(e)
@@ -1880,40 +1905,43 @@ class CrackToolsApplication(Ui_MainWindow):
 
         H, W = self.original_image.shape[:2]
 
-        # Atomic cracks
+        # --- Atomic cracks ---
         for crack_id, crack in atomic_cracks.items():
             m = np.array(crack.get("mask", []), dtype=np.uint8)
-            if m.size == 0 or not np.any(m):
-                continue
-            if m.shape != (H, W):
+            has_mask = m.size > 0 and np.any(m)
+            if has_mask and m.shape != (H, W):
                 print(f"[WARN] Resizing atomic crack mask from {m.shape} to {(H, W)}")
                 tmp = np.zeros((H, W), dtype=np.uint8)
                 tmp[:m.shape[0], :m.shape[1]] = m
                 m = tmp
+            if not has_mask:
+                m = np.zeros((H, W), dtype=np.uint8)
             masks.append(m)
-            labels.append(f"Atomic {crack_id}")
+            label = f"Atomic {crack_id}" + ("" if has_mask else " (empty)")
+            labels.append(label)
             items.append(("atomic", crack_id))
 
-        # Combined cracks
+        # --- Combined cracks ---
         for crack_id, crack in combined_cracks.items():
             m = np.array(crack.get("mask", []), dtype=np.uint8)
-            if m.size == 0 or not np.any(m):
-                continue
-            if m.shape != (H, W):
+            has_mask = m.size > 0 and np.any(m)
+            if has_mask and m.shape != (H, W):
                 print(f"[WARN] Resizing combined crack mask from {m.shape} to {(H, W)}")
                 tmp = np.zeros((H, W), dtype=np.uint8)
                 tmp[:m.shape[0], :m.shape[1]] = m
                 m = tmp
+            if not has_mask:
+                m = np.zeros((H, W), dtype=np.uint8)
             masks.append(m)
             members = crack.get("members", [])
-            labels.append(f"Combined {crack_id} (from: {','.join(map(str, members))})")
+            labels.append(f"Combined {crack_id} (from: {','.join(map(str, members))})" + ("" if has_mask else " (empty)"))
             items.append(("combined", crack_id))
 
         if not masks:
-            error("No saved cracks with area to delete.")
+            error("No saved cracks to delete.")
             return
 
-        # Selection dialog
+        # --- Selection dialog ---
         dlg = QDialog(self.MainWindow)
         dlg.setWindowTitle("Select Segments to Delete")
         layout = QVBoxLayout(dlg)
@@ -1968,11 +1996,18 @@ class CrackToolsApplication(Ui_MainWindow):
             print(f"  Atomic cracks before = {list(atomic_cracks.keys())}")
             print(f"  Combined cracks before = {list(combined_cracks.keys())}")
 
+            # --- Delete selected cracks and associated data ---
             for idx in sorted(selected_indices, reverse=True):
                 tpe, crack_id = items[idx]
                 if tpe == "atomic":
                     print(f"[DEBUG] Deleting atomic crack_id={crack_id}")
+                    if crack_id in atomic_cracks:
+                        # Remove user points & connections
+                        atomic_cracks[crack_id].pop("user_points", None)
+                        atomic_cracks[crack_id].pop("user_connections", None)
+                        atomic_cracks[crack_id].pop("geodesic_edges", None)
                     atomic_cracks.pop(crack_id, None)
+                    # Remove from any combined crack membership
                     for cid, combo in list(combined_cracks.items()):
                         if crack_id in combo.get("members", []):
                             combo["members"] = [m for m in combo["members"] if m != crack_id]
@@ -1982,13 +2017,11 @@ class CrackToolsApplication(Ui_MainWindow):
                     print(f"[DEBUG] Deleting combined crack_id={crack_id}")
                     combined_cracks.pop(crack_id, None)
 
-            # Write back into the live self.annotation object
+            # --- Write back ---
             self.annotation["annotations"]["atomic_cracks"] = atomic_cracks
             self.annotation["annotations"]["combined_cracks"] = combined_cracks
 
-            # Purge masks and pixels and rebuild
-            ann["all_masks"] = []
-            ann["crack_pixels"] = []
+            # --- Rebuild masks and crack_pixels ---
             new_masks = []
             for crack in atomic_cracks.values():
                 m = np.array(crack.get("mask", []), dtype=np.uint8)
@@ -1996,31 +2029,33 @@ class CrackToolsApplication(Ui_MainWindow):
                     tmp = np.zeros((H, W), dtype=np.uint8)
                     tmp[:m.shape[0], :m.shape[1]] = m
                     m = tmp
-                if np.any(m):
-                    new_masks.append(m)
+                new_masks.append(m)
             for crack in combined_cracks.values():
                 m = np.array(crack.get("mask", []), dtype=np.uint8)
                 if m.shape != (H, W):
                     tmp = np.zeros((H, W), dtype=np.uint8)
                     tmp[:m.shape[0], :m.shape[1]] = m
                     m = tmp
-                if np.any(m):
-                    new_masks.append(m)
+                new_masks.append(m)
+
+            ann["all_masks"] = []
+            ann["crack_pixels"] = []
             if new_masks:
                 m_sum = np.sum(np.stack(new_masks), axis=0)
                 m_sum[m_sum >= 1] = 1
                 ann["crack_pixels"] = np.argwhere(m_sum == 1).tolist()
                 ann["all_masks"] = [m.tolist() for m in new_masks]
 
-            # Save JSON
+            # --- Save changes ---
             with open(self.ann_name, 'w') as fp:
                 json.dump(self.annotation, fp)
 
             print(f"[DEBUG] After deletion: atomic = {list(atomic_cracks.keys())}")
             print(f"[DEBUG] After deletion: combined = {list(combined_cracks.keys())}")
-            print(f"Deleted {len(selected_indices)} segmentations.")
+            print(f"[DEBUG] After deletion: all_masks = {len(ann['all_masks'])}, crack_pixels = {len(ann['crack_pixels'])}")
 
-            # Refresh view
+            self.change_image()
+        else:
             self.change_image()
 
     def edge_tracking(self):
@@ -2340,7 +2375,23 @@ class CrackToolsApplication(Ui_MainWindow):
         import numpy as np
         from PyQt5.QtWidgets import QMessageBox
         from time import time
-        self._debug_print_atomic_cracks("run_pipeline START")
+
+        def _next_crack_id_str():
+            ann = self.annotation.get("annotations", {})
+            ac = ann.get("atomic_cracks", {})
+            ids = []
+            for k in ac.keys():
+                try:
+                    ids.append(int(k))
+                except:
+                    pass
+            return str(max(ids) + 1 if ids else 0)
+
+        def _ensure_ann():
+            self.annotation = self.annotation if isinstance(self.annotation, dict) else {}
+            self.annotation.setdefault("annotations", {})
+            self.annotation["annotations"].setdefault("atomic_cracks", {})
+            self.annotation["annotations"].setdefault("combined_cracks", {})
 
         gc.collect()
         print("✅ GPU memory freed from CuPy pool")
@@ -2353,8 +2404,12 @@ class CrackToolsApplication(Ui_MainWindow):
                 "Please draw at least one bounding box before running the pipeline.")
             return
 
-        # Only ask for endpoints if not in multi-run
+        _ensure_ann()
+        ann = self.annotation["annotations"]
+        ac_store = ann["atomic_cracks"]
+
         if not multirun:
+            # Let the user pick points/connections/midlines
             self.endpoint_pairs = None
             self.user_connections = None
             self.user_points = None
@@ -2362,6 +2417,7 @@ class CrackToolsApplication(Ui_MainWindow):
             print("Calling select_end_points_manmidlines()...")
             self.select_end_points_manmidlines()
 
+        # Merge auto + manual endpoint pairs (global, from annotator)
         all_pairs = []
         if getattr(self, "endpoint_pairs", None):
             print(f"Auto endpoint_pairs: {self.endpoint_pairs}")
@@ -2375,7 +2431,7 @@ class CrackToolsApplication(Ui_MainWindow):
                 "No endpoint pairs selected!\n\nPlease use 'Select Endpoints' and create at least one connection or manual midline before running the pipeline.")
             return
 
-        # Group pairs by containing bbox
+        # Group by bbox (so OS/cost is reused per box)
         box_to_pairs = {}
         for (pair, src) in all_pairs:
             candidates = []
@@ -2391,18 +2447,12 @@ class CrackToolsApplication(Ui_MainWindow):
                 key = tuple(chosen_bbox)
                 box_to_pairs.setdefault(key, []).append((pair, src))
 
-        if not hasattr(self, "crack_tracks"):
-            self.crack_tracks = {}
+        errors = []
+        # Make sure we don't blow away memory of previous masks
         if not hasattr(self, "mask"):
             self.mask = []
-
-        # start crack index at the next unused
-        crack_index_offset = len(self.crack_tracks)
-        num_success = 0
-        errors = []
-
-        ann = self.annotation.setdefault("annotations", {})
-        atomic_cracks = ann.setdefault("atomic_cracks", {})
+        if not hasattr(self, "crack_tracks"):
+            self.crack_tracks = {}
 
         for bbox_key, pairs in box_to_pairs.items():
             xmin, ymin, xmax, ymax = bbox_key
@@ -2410,6 +2460,7 @@ class CrackToolsApplication(Ui_MainWindow):
             print(f"Pairs in this box: {pairs}")
 
             try:
+                # Precompute OS/cost once per box for auto pairs
                 auto_pairs = [p for p, s in pairs if s == "auto"]
                 if auto_pairs:
                     first_pair = auto_pairs[0]
@@ -2425,98 +2476,111 @@ class CrackToolsApplication(Ui_MainWindow):
                     print("cost (once per box)")
                     t0 = time(); self.update_cost(); print(f"cost time: {time()-t0:.2f}s")
 
-                for pair, src in pairs:
+                # Process each pair -> one atomic crack per pair
+                for (p0, p1), src in pairs:
                     try:
                         self.active_bbox = list(bbox_key)
-                        print(f"\n--- Processing pair {pair} (source={src}) ---")
+                        print(f"\n--- Processing pair {(p0, p1)} (source={src}) ---")
 
-                        crack_id = str(crack_index_offset)
+                        # IMPORTANT: make per-crack, pair-local endpoints for saving
+                        # These two lines are what ensure each atomic_crack only stores its own pair.
+                        pair_user_points = [tuple(p0), tuple(p1)]
+                        pair_user_connections = [[0, 1]]  # exactly one connection per crack
 
                         if src == "manual":
+                            # For manual, we reuse the drawn polyline as midline (full-image coords)
                             manual_midlines_dict = getattr(self, "manual_midlines_tmp", {})
                             found_key = None
-                            for k, pts in manual_midlines_dict.items():
+                            # manual_midlines_tmp keys are "i_j" based on annotator indices; match geometrically
+                            for k, poly in manual_midlines_dict.items():
                                 try:
-                                    p_i, p_j = map(int, k.split("_"))
-                                    coords_i = tuple(self.user_points[p_i])
-                                    coords_j = tuple(self.user_points[p_j])
-                                    if (coords_i, coords_j) == pair or (coords_j, coords_i) == pair:
+                                    i1, i2 = map(int, k.split("_"))
+                                    c_i = tuple(self.user_points[i1])
+                                    c_j = tuple(self.user_points[i2])
+                                    if (c_i, c_j) == (p0, p1) or (c_i, c_j) == (p1, p0):
                                         found_key = k
                                         break
-                                except Exception as e:
-                                    print(f"[WARN] Bad manual midline key {k}: {e}")
-                                    continue
+                                except Exception:
+                                    pass
 
                             print(f"[MANUAL] Found key: {found_key}")
-                            if not found_key:
-                                print(f"[WARN] No midline found for manual pair {pair}")
-                                continue
-
-                            midline_pts_full = manual_midlines_dict[found_key]
-                            self.pts = [np.array(pair[0]), np.array(pair[1])]
+                            self.pts = [np.array(p0), np.array(p1)]
                             self.end_points = self.pts
                             self.update_image_crop()
                             if getattr(self, "skip_current_segment", False):
                                 continue
 
-                            track_crop = np.array([
-                                [pt[1] - ymin for pt in midline_pts_full],  # rows
-                                [pt[0] - xmin for pt in midline_pts_full]   # cols
-                            ])
-                            self.track = track_crop
-                            self.pts_crop = [np.array(pt) - np.array([xmin, ymin]) for pt in self.pts]
-                            downsample = self.downsample_factor_box.value()
-                            self.pts_crop_down = [p / downsample for p in self.pts_crop]
-
+                            if found_key:
+                                # Convert full-image manual polyline to crop coords and set as self.track
+                                poly = np.array(manual_midlines_dict[found_key], dtype=float)  # [[x,y],...]
+                                # track is [y, x]
+                                cy = poly[:, 1] - ymin
+                                cx = poly[:, 0] - xmin
+                                self.track = np.vstack([cy, cx])
+                                self.pts_crop = [np.array(self.pts[0]) - np.array([xmin, ymin]),
+                                                np.array(self.pts[1]) - np.array([xmin, ymin])]
+                                downsample = self.downsample_factor_box.value()
+                                self.pts_crop_down = [p / downsample for p in self.pts_crop]
+                            else:
+                                # No manual poly found; fall back to auto tracker in manual mode
+                                self.pts = [np.array(p0), np.array(p1)]
+                                self.end_points = self.pts
+                                self.pts_crop = [np.array(pt) - np.array([xmin, ymin]) for pt in self.pts]
+                                downsample = self.downsample_factor_box.value()
+                                self.pts_crop_down = [p / downsample for p in self.pts_crop]
+                                t0 = time(); self.midline_tracking(); print(f"    midline tracking time: {time()-t0:.2f}s")
                         else:
-                            self.pts = [np.array(pair[0]), np.array(pair[1])]
+                            # Auto
+                            self.pts = [np.array(p0), np.array(p1)]
                             self.end_points = self.pts
                             self.pts_crop = [np.array(pt) - np.array([xmin, ymin]) for pt in self.pts]
                             downsample = self.downsample_factor_box.value()
                             self.pts_crop_down = [p / downsample for p in self.pts_crop]
                             t0 = time(); self.midline_tracking(); print(f"    midline tracking time: {time()-t0:.2f}s")
 
+                        # Build edge masks & geodesic edges for this pair
                         self.current_source = src
                         self.edge_mask()
                         self.edge_tracking()
 
-                        # Assign new crack entry
-                        self.current_crack_id = crack_index_offset
+                        # ======= Assign a brand-new crack ID for THIS pair =======
+                        new_cid = _next_crack_id_str()
+                        self.current_crack_id = int(new_cid)
+
+                        # Temporarily set *pair-local* globals so save_current_segment writes them into that crack
+                        self.user_points = pair_user_points
+                        self.user_connections = pair_user_connections
+
+                        # Save segment (midline + edges + mask + per-crack endpoints)
                         self.save_current_segment()
 
-                        # Store points/connections inside the crack itself
-                        atomic_cracks[crack_id] = atomic_cracks.get(crack_id, {})
-                        atomic_cracks[crack_id]["user_points"] = list(getattr(self, "user_points", []) or [])
-                        atomic_cracks[crack_id]["user_connections"] = list(getattr(self, "user_connections", []) or [])
-
-                        crack_index_offset += 1
-                        num_success += 1
+                        # Clear pair-local globals so next crack doesn't accidentally inherit them
+                        self.user_points = None
+                        self.user_connections = None
 
                     except Exception as e:
-                        errors.append(f"Failed midline for {pair}: {e}")
+                        errors.append(f"Failed midline for {(p0, p1)}: {e}")
                         continue
 
             except Exception as e:
                 errors.append(f"Failed for bbox {bbox_key}: {e}")
                 continue
 
-        # Save updated annotation with all cracks
-        ann["atomic_cracks"] = atomic_cracks
-        self.annotation["annotations"] = ann
-
+        # Done with all boxes/pairs
         if errors:
             print("\n".join(errors))
         else:
             print("✔ All endpoint groups processed.")
 
-        # clear global temp vars but keep per-crack stored
-        self.user_points = None
-        self.user_connections = None
+        # Clear UI temp state (per-run scratch)
         self.endpoint_pairs = None
         self.manual_endpoint_pairs = None
 
+        # Persist JSON
         with open(self.ann_name, 'w') as fp:
             json.dump(self.annotation, fp)
+
+        # Debug print & refresh view
         self._debug_print_atomic_cracks("run_pipeline END")
         self.change_image()
             
