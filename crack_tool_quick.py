@@ -2183,87 +2183,14 @@ class CrackToolsApplication(Ui_MainWindow):
 
         boxes = self.get_all_bounding_boxes()
 
-        # --- Separate "read-only" midlines & connections from editable ones ---
-        '''readonly_midlines = {}
-        readonly_connections = []
-        existing_midlines = {}
-
-        if "annotations" in self.annotation:
-            ann = self.annotation["annotations"]
-
-            # Existing manual midlines (global coords) → store for bbox conversion
-            ann_midlines = ann.get("midlines", {})
-            for k_str, pts in ann_midlines.items():
-                try:
-                    i1, i2 = map(int, k_str.split("_"))
-                    existing_midlines[(min(i1, i2), max(i1, i2))] = [tuple(map(float, xy)) for xy in pts]
-                except:
-                    pass
-
-            # Existing auto connections (from atomic cracks) — global coords
-            # Existing auto connections (from atomic cracks) — prefer saved user_points over midline ends
-            for crack in ann.get("atomic_cracks", {}).values():
-                if crack.get("source") == "auto":
-                    up = crack.get("user_points", [])
-                    if len(up) == 2:
-                        # Use the exact user-picked endpoints
-                        p1, p2 = tuple(up[0]), tuple(up[1])
-                        readonly_connections.append((p1, p2))
-                    else:
-                        # Fallback: use first/last point of midline if user_points missing
-                        ml = crack.get("midline", [])
-                        if len(ml) >= 2:
-                            p1, p2 = tuple(ml[0]), tuple(ml[-1])
-                            readonly_connections.append((p1, p2))
-
-        # --- Ensure all endpoints exist in initial points ---
-        # Try to load points/connections from current crack if available
-        initial_points = []
-        initial_conns = []
-        if hasattr(self, "current_crack_id"):
-            crack_id_str = str(self.current_crack_id)
-            crack_entry = self.annotation.get("annotations", {}).get("atomic_cracks", {}).get(crack_id_str, {})
-            initial_points = list(crack_entry.get("user_points", []) or [])
-            initial_conns = list(crack_entry.get("user_connections", []) or [])
-
-        if not initial_points:
-            initial_points = list(getattr(self, "user_points", []) or [])
-        if not initial_conns:
-            initial_conns = list(getattr(self, "user_connections", []) or [])
-
-        point_index_map = {tuple(pt): idx for idx, pt in enumerate(initial_points)}
-
-        def ensure_point(pt):
-            if tuple(pt) not in point_index_map:
-                point_index_map[tuple(pt)] = len(initial_points)
-                initial_points.append(pt)
-            return point_index_map[tuple(pt)]
-
-        # --- Fill read-only midlines (full-image coords, no crop offset) ---
-        for (i1, i2), poly in existing_midlines.items():
-            start_idx = ensure_point(poly[0])  # direct global coords
-            end_idx = ensure_point(poly[-1])
-            readonly_midlines[(start_idx, end_idx)] = poly  # store as-is
-
-        # --- Fill read-only connections (full-image coords, no crop offset) ---
-        readonly_conn_idx = []
-        for p1, p2 in readonly_connections:
-            idx1 = ensure_point(p1)  # direct global coords
-            idx2 = ensure_point(p2)
-            readonly_conn_idx.append((min(idx1, idx2), max(idx1, idx2)))
-
-        print(readonly_connections, readonly_conn_idx)'''
-
-        # --- Separate "read-only" midlines & connections from editable ones ---
         readonly_midlines = {}
         readonly_connections = []
         existing_midlines = {}
 
-        # --- Ensure all endpoints exist in initial points ---
         initial_points = list(getattr(self, "user_points", []) or [])
         initial_conns = list(getattr(self, "user_connections", []) or [])
         point_index_map = {tuple(pt): idx for idx, pt in enumerate(initial_points)}
-        
+
         def ensure_point(pt):
             if tuple(pt) not in point_index_map:
                 point_index_map[tuple(pt)] = len(initial_points)
@@ -2273,19 +2200,17 @@ class CrackToolsApplication(Ui_MainWindow):
         if "annotations" in self.annotation:
             ann = self.annotation["annotations"]
 
-            # Existing manual midlines (global coords) → store for bbox conversion
             ann_midlines = ann.get("midlines", {})
             for k_str, pts in ann_midlines.items():
                 try:
                     i1, i2 = map(int, k_str.split("_"))
-                    poly = [tuple(map(float, xy)) for xy in pts]
-                    existing_midlines[(min(i1, i2), max(i1, i2))] = poly
+                    if i1 != i2:  # Prevent self-midlines here
+                        poly = [tuple(map(float, xy)) for xy in pts]
+                        existing_midlines[(min(i1, i2), max(i1, i2))] = poly
                 except Exception as e:
                     print(f"[WARN] Failed to parse manual midline {k_str}: {e}")
 
-            # Existing cracks from atomic_cracks (include auto + manual)
             for cid, crack in ann.get("atomic_cracks", {}).items():
-                # Skip the one currently being edited so it stays editable
                 if hasattr(self, "current_crack_id") and str(cid) == str(self.current_crack_id):
                     continue
 
@@ -2303,6 +2228,9 @@ class CrackToolsApplication(Ui_MainWindow):
                 idx1 = ensure_point(p1)
                 idx2 = ensure_point(p2)
 
+                if idx1 == idx2:
+                    continue  # Prevent self-midlines here too
+
                 if src == "manual":
                     poly = crack.get("midline", [])
                     if poly:
@@ -2310,18 +2238,18 @@ class CrackToolsApplication(Ui_MainWindow):
                 else:
                     readonly_connections.append((p1, p2))
 
-        # --- Fill read-only midlines ---
         for (i1, i2), poly in existing_midlines.items():
             start_idx = ensure_point(poly[0])
             end_idx = ensure_point(poly[-1])
-            readonly_midlines[(start_idx, end_idx)] = poly
+            if start_idx != end_idx:
+                readonly_midlines[(start_idx, end_idx)] = poly
 
-        # --- Fill read-only connections (converted to annotator indices) ---
         readonly_conn_idx = []
         for p1, p2 in readonly_connections:
             idx1 = ensure_point(p1)
             idx2 = ensure_point(p2)
-            readonly_conn_idx.append((min(idx1, idx2), max(idx1, idx2)))
+            if idx1 != idx2:
+                readonly_conn_idx.append((min(idx1, idx2), max(idx1, idx2)))
 
         from endpoint_annotator import CrackAnnotator
         annot = CrackAnnotator(
@@ -2329,12 +2257,85 @@ class CrackToolsApplication(Ui_MainWindow):
             boxes=boxes,
             initial_points=initial_points,
             initial_connections=initial_conns,
-            initial_midlines={},  # start fresh editable set
+            initial_midlines={},
         )
 
-        # Attach read-only sets to annotator
         annot.readonly_midlines = readonly_midlines
         annot.readonly_connections = readonly_conn_idx
+
+        # Also enforce at the widget level:
+        # Wrap the original mousePressEvent to prevent bad start/finish overlaps
+        # Also enforce at the widget level:
+        orig_mousePressEvent = annot.mousePressEvent
+
+        def guarded_mousePressEvent(ev):
+            p = annot._to_image_coords(ev.pos())
+            point_i = annot._find_point_at(p)
+
+            # Gather extra debug state
+            last_pt = annot.polyline[-1] if annot.polyline else None
+            last_two_pts = annot.polyline[-2:] if len(annot.polyline) >= 2 else []
+            conn_key = None
+            if annot._is_drawing and point_i is not None and point_i != annot._start_idx:
+                conn_key = annot._sorted(annot._start_idx, point_i)
+            exists_midline = conn_key in annot.midlines if conn_key else None
+            exists_conn = conn_key in annot.connections if conn_key else None
+            exists_readonly_conn = conn_key in annot.readonly_connections if conn_key else None
+            exists_readonly_mid = conn_key in annot.readonly_midlines if conn_key else None
+
+            start_pt = annot.points[annot._start_idx] if annot._start_idx is not None and annot._start_idx < len(annot.points) else None
+
+            print(
+                f"[GUARDED_PRESS] btn={ev.button()} at {p} | "
+                f"point_i={point_i}, start_idx={annot._start_idx}, start_pt={start_pt} | "
+                f"_is_drawing={annot._is_drawing}, polyline_mode={annot.polyline_mode} | "
+                f"polyline_len={len(annot.polyline)}, last_pt={last_pt}, last_two_pts={last_two_pts} | "
+                f"_just_committed_midline={getattr(annot, '_just_committed_midline', False)}, "
+                f"_last_polyline_end_idx={getattr(annot, '_last_polyline_end_idx', None)} | "
+                f"conn_key={conn_key}, exists_midline={exists_midline}, exists_conn={exists_conn}, "
+                f"exists_readonly_conn={exists_readonly_conn}, exists_readonly_mid={exists_readonly_mid}"
+            )
+
+            # If not in polyline mode — just pass through immediately
+            if not annot.polyline_mode:
+                print("[GUARDED_PRESS] Not in polyline_mode — passing through")
+                orig_mousePressEvent(ev)
+                return
+
+            # --- Prevent immediate restart after a commit on either endpoint of last line ---
+            if getattr(annot, "_just_committed_midline", False):
+                last_end = getattr(annot, "_last_polyline_end_idx", None)
+                last_start = getattr(annot, "_last_polyline_start_idx", None)
+                if point_i is not None and point_i in (last_end, last_start):
+                    print(
+                        f"[GUARDED_PRESS] blocked: click is on endpoint {point_i} of last committed line "
+                        f"({last_start}, {last_end}) — skipping to avoid rubberband"
+                    )
+                    annot._just_committed_midline = False
+                    return
+                # Reset flag if click is elsewhere
+                annot._just_committed_midline = False
+
+            # Polyline mode but NOT drawing yet
+            if not annot._is_drawing:
+                if point_i is not None and annot._start_idx == point_i:
+                    print("[GUARDED_PRESS] blocked: start on same point as last start")
+                    return
+                print("[GUARDED_PRESS] passing to orig to START polyline")
+                orig_mousePressEvent(ev)
+                return
+
+            # Polyline mode AND currently drawing
+            if point_i is not None and point_i != annot._start_idx:
+                print(f"[GUARDED_PRESS] finishing midline via click on endpoint {point_i}, key={conn_key}")
+            elif point_i is None:
+                print("[GUARDED_PRESS] adding freehand point via click")
+            else:
+                print("[GUARDED_PRESS] ignored click (same as start idx)")
+
+            orig_mousePressEvent(ev)
+
+        annot.mousePressEvent = guarded_mousePressEvent
 
         annot.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
 
@@ -2354,7 +2355,7 @@ class CrackToolsApplication(Ui_MainWindow):
         layout.addWidget(manual_btn)
 
         hint = QLabel(
-            "Manual: Left-hold on starting point → draw (hold/click) → finish w/ hold/click endpoint.\n"
+            "Manual: Left-hold on starting point → draw → finish on a *different* endpoint.\n"
             "Read-only cracks shown in gray — can't be deleted."
         )
         layout.addWidget(hint)
@@ -2377,15 +2378,11 @@ class CrackToolsApplication(Ui_MainWindow):
                     if xmin <= x <= xmax and ymin <= y <= ymax:
                         return True
                 return False
-
-            # Build set of point indices from read-only items
             readonly_point_idxs = set()
             for (i1, i2) in annot.readonly_connections:
                 readonly_point_idxs.update([i1, i2])
             for (i1, i2) in annot.readonly_midlines.keys():
                 readonly_point_idxs.update([i1, i2])
-
-            # Only check points that are NOT in readonly sets
             bad = [
                 pt for idx, pt in enumerate(annot.points)
                 if idx not in readonly_point_idxs and not in_any(pt)
@@ -2436,7 +2433,6 @@ class CrackToolsApplication(Ui_MainWindow):
                 QMessageBox.warning(dlg, "Points outside boxes", "All points must be inside a bounding box.")
                 return
 
-            # Save global for pipeline
             self.user_points = annot.points
             self.user_connections = [c for c in annot.connections if c not in annot.readonly_connections]
 
@@ -2447,14 +2443,14 @@ class CrackToolsApplication(Ui_MainWindow):
 
             self.manual_endpoint_pairs = []
             for (i1, i2), poly in annot.midlines.items():
-                self.manual_endpoint_pairs.append((self.user_points[i1], self.user_points[i2]))
+                if i1 != i2:  # Final check to prevent self-midline
+                    self.manual_endpoint_pairs.append((self.user_points[i1], self.user_points[i2]))
 
             self.manual_midlines_tmp = {
                 f"{i1}_{i2}": [[float(x), float(y)] for (x, y) in poly]
-                for (i1, i2), poly in annot.midlines.items()
+                for (i1, i2), poly in annot.midlines.items() if i1 != i2
             }
 
-            # If editing a specific crack, store its points/connections directly in that crack
             if hasattr(self, "current_crack_id"):
                 crack_id_str = str(self.current_crack_id)
                 crack_entry = self.annotation.get("annotations", {}).get("atomic_cracks", {}).setdefault(crack_id_str, {})
@@ -2478,7 +2474,7 @@ class CrackToolsApplication(Ui_MainWindow):
         print(f"Midlines saved: {len(self.manual_midlines_tmp)}")
         self.update_image_crop_button.setStyleSheet("background-color: lightblue")
         self._debug_print_atomic_cracks("select_end_points_manmidlines AFTER ACCEPT")
-        self.all_selected_points = list(self.user_points)  # Keep a durable copy
+        self.all_selected_points = list(self.user_points)
           
     def get_all_bounding_boxes(self):
         """
