@@ -190,7 +190,7 @@ def compute_tangent_normals(x, y):
     normal = np.stack([-dy / norm, dx / norm], axis=1)
     return tangent, normal
 
-def normal_intersections_bruteforce(mid_x, mid_y, edge_x, edge_y, normal_length):
+'''def normal_intersections_bruteforce(mid_x, mid_y, edge_x, edge_y, normal_length):
     tangent, normal = compute_tangent_normals(mid_x, mid_y)
     n = len(mid_x)
     result_x = np.full(n, np.nan)
@@ -230,7 +230,46 @@ def normal_intersections_bruteforce(mid_x, mid_y, edge_x, edge_y, normal_length)
             j = np.argmin(dists)
             result_x[i], result_y[i] = edge_x[j], edge_y[j]
 
-    return result_x, result_y
+    return result_x, result_y'''
+
+from shapely.geometry import LineString, Point, MultiPoint, GeometryCollection
+
+def normal_intersections_bruteforce(mid_x, mid_y, edge_x, edge_y, normal_length):
+    _, normal = compute_tangent_normals(mid_x, mid_y)
+    edge_line = LineString(np.column_stack([edge_x, edge_y]))
+    n = len(mid_x)
+    rx = np.full(n, np.nan, float)
+    ry = np.full(n, np.nan, float)
+
+    for i in range(n):
+        mx, my = float(mid_x[i]), float(mid_y[i])
+        if not np.isfinite(mx) or not np.isfinite(my): 
+            continue
+        nx, ny = normal[i]
+        a = (mx - normal_length*nx, my - normal_length*ny)
+        b = (mx + normal_length*nx, my + normal_length*ny)
+        inter = edge_line.intersection(LineString([a, b]))
+
+        def nearest_on_edge(px, py):
+            t = edge_line.project(Point(px, py))
+            p = edge_line.interpolate(t)
+            return p.x, p.y
+
+        if inter.is_empty:
+            rx[i], ry[i] = nearest_on_edge(mx, my)
+        elif isinstance(inter, Point):
+            rx[i], ry[i] = inter.x, inter.y
+        elif isinstance(inter, (MultiPoint, GeometryCollection)):
+            # pick the hit closest to the mid point
+            pts = [g for g in getattr(inter, 'geoms', []) if isinstance(g, Point)]
+            if pts:
+                j = np.argmin([np.hypot(p.x - mx, p.y - my) for p in pts])
+                rx[i], ry[i] = pts[j].x, pts[j].y
+            else:
+                rx[i], ry[i] = nearest_on_edge(mx, my)
+        else:
+            rx[i], ry[i] = nearest_on_edge(mx, my)
+    return rx, ry
 
 def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp, midline, mu=5, l=1, p=12):
     # --- Geodesic edge extraction (unchanged from your code) ---
@@ -381,7 +420,7 @@ def edges_tracking(
         height, width = image_crop.shape[:2]
         normal_length = int(np.ceil(np.hypot(height, width)))
 
-        # Inputs: mid_x, mid_y, edge_x, edge_y (all (N,))
+        '''# Inputs: mid_x, mid_y, edge_x, edge_y (all (N,))
         edge1_x, edge1_y = normal_intersections_bruteforce(mid_x, mid_y, track_e1[:,0], track_e1[:,1], normal_length)
         edge2_x, edge2_y = normal_intersections_bruteforce(mid_x, mid_y, track_e2[:,0], track_e2[:,1], normal_length)
         edge1_x = np.clip(edge1_x, 0, width-1)
@@ -393,6 +432,23 @@ def edges_tracking(
     return {
         "geodesic_edges": [track_e1, track_e2],  # (N,2) as (x, y)
         "normal_edge_points": normal_edges
+    }'''
+
+        normal_edges = [[edge1_x.copy(), edge1_y.copy()],
+                    [edge2_x.copy(), edge2_y.copy()]]
+
+        # For mask use only:
+        edge1_x = np.clip(edge1_x, 0, width-1)
+        edge1_y = np.clip(edge1_y, 0, height-1)
+        edge2_x = np.clip(edge2_x, 0, width-1)
+        edge2_y = np.clip(edge2_y, 0, height-1)
+
+        normal_edges_clipped = [[edge1_x, edge1_y], [edge2_x, edge2_y]]
+
+    return {
+        "geodesic_edges": [track_e1, track_e2],
+        "normal_edge_points_clipped": normal_edges_clipped,
+        "normal_edge_points": normal_edges  # <-- for exact geometry
     }
 
 import numpy as np

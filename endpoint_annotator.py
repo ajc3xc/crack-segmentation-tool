@@ -275,6 +275,9 @@ class CrackAnnotator(QtWidgets.QWidget):
                     self.connecting_index = None
             self.update()
 
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.RightButton:
+            self._erase_timer.stop()
 
     def mouseMoveEvent(self, event):
         p = self._to_image_coords(event.pos())
