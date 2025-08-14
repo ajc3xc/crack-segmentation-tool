@@ -821,6 +821,7 @@ class CrackToolsApplication(Ui_MainWindow):
                 return
 
             self.user_points = annot.points
+            self.all_selected_points = list(self.user_points)  # keep permanent copy for matching later
             self.user_connections = [c for c in annot.connections if c not in annot.readonly_connections]
 
             self.endpoint_pairs = [
@@ -836,6 +837,23 @@ class CrackToolsApplication(Ui_MainWindow):
                 f"{i1}_{i2}": [[float(x), float(y)] for (x, y) in poly]
                 for (i1, i2), poly in annot.midlines.items()
             }
+
+            
+            print("\n[DEBUG] --- Saving manual midlines from annotator ---")
+            print(f"[DEBUG] Annotator midlines count: {len(annot.midlines)}")
+            for key, poly in annot.midlines.items():
+                print(f"[DEBUG] Key: {key}, FirstPt: {poly[0] if poly else None}, LastPt: {poly[-1] if poly else None}")
+            print(f"[DEBUG] Annotator points: {annot.points}")
+            print(f"[DEBUG] Annotator connections: {annot.connections}")
+
+            self.manual_midlines_tmp = {
+                f"{i1}_{i2}": [[float(x), float(y)] for (x, y) in poly]
+                for (i1, i2), poly in annot.midlines.items()
+            }
+
+            print(f"[DEBUG] Stored manual_midlines_tmp keys: {list(self.manual_midlines_tmp.keys())}")
+            for k, v in self.manual_midlines_tmp.items():
+                print(f"[DEBUG]   {k}: first={v[0]}, last={v[-1]}")
 
             dlg.accept()
 
@@ -1277,72 +1295,7 @@ class CrackToolsApplication(Ui_MainWindow):
             im = self.image.astype(np.uint8)
         except Exception as e:
             error(e)
-            
-    '''def edge_mask(self):
-        import matplotlib.pyplot as plt
-        import matplotlib.patches as patches
-
-        try:
-            window_half_size = int(self.edge_filter_size_box.value() / 2)
-            black_crack = [-1 if self.crack_color_box.currentText() == 'Bright crack' else 1][0]
-            color_channel = [0 if self.color_chenel_box.currentText() == 'R'
-                            else 1 if self.color_chenel_box.currentText() == 'B'
-                            else 2][0]
-
-            print("window_half_size:", window_half_size)
-            img_gray = self.original_image[:, :, color_channel] * black_crack
-            track = np.array(self.track)
-            
-            track = np.vstack([track[1], track[0]])
-            
-            # Compute shift to align track[:, 0] to self.pts[1]
-            target_point = np.array([self.pts[1][1], self.pts[1][0]])
-            shift_vector = target_point - track[:, 0]  # shape: (2,)
-
-            # Apply shift to all points
-            track = track + shift_vector[:, np.newaxis]  # broadcast to all columns
-            
-            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
-            self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(
-                img_gray, track
-            )
-
-            # --- Crop the edge masks to the bounding box for further use ---
-            #print("Cropping edge masks with:", ymin, ymax, xmin, xmax)
-            self.edge_mask1_crop = self.edge_mask1[ymin:ymax, xmin:xmax]
-            self.edge_mask2_crop = self.edge_mask2[ymin:ymax, xmin:xmax]
-
-            # --- Also crop the image for reference and shift track for crop ---
-            crop_img = img_gray[ymin:ymax, xmin:xmax]
-            shifted_track = np.zeros_like(track)
-            shifted_track[0] = track[0] - ymin
-            shifted_track[1] = track[1] - xmin
-
-            # Store for later use: always correct for the crop!
-            self.adjusted_track = shifted_track
-
-            # --- Plot: cropped image, shifted track ---
-
-            # --- Plot: cropped edge mask for display ---
-            edge_mask1_crop = self.edge_mask1_crop - np.min(self.edge_mask1_crop)
-            if np.max(edge_mask1_crop) != 0:
-                edge_mask1_crop = (edge_mask1_crop * 255 / np.max(edge_mask1_crop)).astype(dtype=np.uint8)
-            else:
-                edge_mask1_crop = (edge_mask1_crop * 255).astype(dtype=np.uint8)
-
-            # --- Set for Qt display as before ---
-            qimage = QImage(edge_mask1_crop.astype(dtype=np.uint8), edge_mask1_crop.shape[1], edge_mask1_crop.shape[0],
-                            edge_mask1_crop.strides[0], QImage.Format_Grayscale8)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.edge_map_display.width(), self.edge_map_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.edge_map_display.setPixmap(scaled_pixmap)
-            self.edge_tracks_button.setStyleSheet("background-color : lightblue")
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            error(e)
-            self.edge_tracks_button.setStyleSheet("background-color : red")'''
-    
+                
     def edge_mask(self):
         try:
             window_half_size = int(self.edge_filter_size_box.value() / 2)
@@ -1535,7 +1488,7 @@ class CrackToolsApplication(Ui_MainWindow):
 
             atomic_cracks[str(self.current_crack_id)] = {
                 "source": "auto",
-                "midline": [[int(self.track[1][i] + xmin), int(self.track[0][i] + ymin)]
+                "midline": [[int(self.track[0][i] + xmin), int(self.track[1][i] + ymin)]
                             for i in range(len(self.track[0]))],
                 "geodesic_edges": {
                     "edge1": [[int(self.track_e1[0][i] + xmin), int(self.track_e1[1][i] + ymin)]
@@ -2442,6 +2395,7 @@ class CrackToolsApplication(Ui_MainWindow):
         print(f"Midlines saved: {len(self.manual_midlines_tmp)}")
         self.update_image_crop_button.setStyleSheet("background-color: lightblue")
         self._debug_print_atomic_cracks("select_end_points_manmidlines AFTER ACCEPT")
+        self.all_selected_points = list(self.user_points)  # Keep a durable copy
           
     def get_all_bounding_boxes(self):
         """
@@ -2506,6 +2460,7 @@ class CrackToolsApplication(Ui_MainWindow):
             self.user_connections = None
             self.user_points = None
             self.manual_endpoint_pairs = None
+            self.all_selected_points = None  # reset before each run
             print("Calling select_end_points_manmidlines()...")
             self.select_end_points_manmidlines()
 
@@ -2583,16 +2538,31 @@ class CrackToolsApplication(Ui_MainWindow):
                             # For manual, we reuse the drawn polyline as midline (full-image coords)
                             manual_midlines_dict = getattr(self, "manual_midlines_tmp", {})
                             found_key = None
+
+                            # Make sure we have a durable copy of all selection points from earlier
+                            all_points = getattr(self, "all_selected_points", None)
+                            if all_points is None:
+                                # Fallback: try to use user_points if all_points wasn't stored
+                                all_points = getattr(self, "user_points", [])
+
+                            print("\n[DEBUG] --- Matching manual midline ---")
+                            print(f"[DEBUG] manual_midlines_tmp keys at runtime: {list(manual_midlines_dict.keys())}")
+                            print(f"[DEBUG] all_points at runtime: {all_points}")
+                            print(f"[DEBUG] Trying to match p0={p0}  p1={p1}")
+
                             # manual_midlines_tmp keys are "i_j" based on annotator indices; match geometrically
                             for k, poly in manual_midlines_dict.items():
                                 try:
                                     i1, i2 = map(int, k.split("_"))
-                                    c_i = tuple(self.user_points[i1])
-                                    c_j = tuple(self.user_points[i2])
+                                    c_i = tuple(all_points[i1])
+                                    c_j = tuple(all_points[i2])
+                                    print(f"[DEBUG] Checking key={k}, c_i={c_i}, c_j={c_j}")
                                     if (c_i, c_j) == (p0, p1) or (c_i, c_j) == (p1, p0):
+                                        print(f"[DEBUG] Found match for key={k}")
                                         found_key = k
                                         break
-                                except Exception:
+                                except Exception as e:
+                                    print(f"[DEBUG] Error parsing key={k}: {e}")
                                     pass
 
                             print(f"[MANUAL] Found key: {found_key}")
@@ -2605,22 +2575,18 @@ class CrackToolsApplication(Ui_MainWindow):
                             if found_key:
                                 # Convert full-image manual polyline to crop coords and set as self.track
                                 poly = np.array(manual_midlines_dict[found_key], dtype=float)  # [[x,y],...]
-                                # track is [y, x]
                                 cy = poly[:, 1] - ymin
                                 cx = poly[:, 0] - xmin
-                                self.track = np.vstack([cy, cx])
-                                self.pts_crop = [np.array(self.pts[0]) - np.array([xmin, ymin]),
-                                                np.array(self.pts[1]) - np.array([xmin, ymin])]
+                                self.track = np.vstack([cx, cy])
+                                self.pts_crop = [
+                                    np.array(self.pts[0]) - np.array([xmin, ymin]),
+                                    np.array(self.pts[1]) - np.array([xmin, ymin])
+                                ]
                                 downsample = self.downsample_factor_box.value()
                                 self.pts_crop_down = [p / downsample for p in self.pts_crop]
                             else:
-                                # No manual poly found; fall back to auto tracker in manual mode
-                                self.pts = [np.array(p0), np.array(p1)]
-                                self.end_points = self.pts
-                                self.pts_crop = [np.array(pt) - np.array([xmin, ymin]) for pt in self.pts]
-                                downsample = self.downsample_factor_box.value()
-                                self.pts_crop_down = [p / downsample for p in self.pts_crop]
-                                t0 = time(); self.midline_tracking(); print(f"    midline tracking time: {time()-t0:.2f}s")
+                                error(f"No manual polyline found for manual crack {p0}→{p1}")
+                                return
                         else:
                             # Auto
                             self.pts = [np.array(p0), np.array(p1)]
