@@ -1475,35 +1475,26 @@ class CrackToolsApplication(Ui_MainWindow):
             mask_crop = ct.segmentation.create_mask(self.image_crop, edge_y_crop, edge_x_crop)
 
             # --- Create per-crack mask only for this crack's polygon ---
-            print("Saving segment")
             full_mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
             h, w = mask_crop.shape
             full_mask[ymin:ymin + h, xmin:xmin + w] = mask_crop
-
-            # NEW: keep a *per-crack* mask (only the filled crack area)
             per_crack_mask = (full_mask > 0).astype(np.uint8)
 
-            # Save into annotation atomic_cracks
+            src = getattr(self, "current_source", "auto")
+            track_arr = np.array(self.adjusted_track, dtype=float)
+
+            # For manual, adjusted_track is already in crop coords
+            midline_coords = [
+                [int(track_arr[1][i] + xmin), int(track_arr[0][i] + ymin)]
+                for i in range(track_arr.shape[1])
+            ]
+
             # Save into annotation atomic_cracks
             ann = self.annotation.setdefault("annotations", {})
             atomic_cracks = ann.setdefault("atomic_cracks", {})
 
-            track_arr = np.array(self.track, dtype=float)
-
-            if getattr(self, "current_source", "auto") == "manual":
-                midline_coords = [
-                    [int(track_arr[1][i] + xmin), int(track_arr[0][i] + ymin)]
-                    for i in range(len(track_arr[0]))
-                ]
-            else:  # auto midline already in global coords
-                midline_coords = [
-                    [int(track_arr[0][i]), int(track_arr[1][i])]
-                    for i in range(len(track_arr[0]))
-                ]
-
-
             atomic_cracks[str(self.current_crack_id)] = {
-                "source": getattr(self, "current_source", "auto"),
+                "source": src,
                 "midline": midline_coords,
                 "geodesic_edges": {
                     "edge1": [[int(self.track_e1[0][i] + xmin), int(self.track_e1[1][i] + ymin)]
@@ -2210,12 +2201,20 @@ class CrackToolsApplication(Ui_MainWindow):
                     pass
 
             # Existing auto connections (from atomic cracks) — global coords
+            # Existing auto connections (from atomic cracks) — prefer saved user_points over midline ends
             for crack in ann.get("atomic_cracks", {}).values():
                 if crack.get("source") == "auto":
-                    ml = crack.get("midline", [])
-                    if len(ml) >= 2:
-                        p1, p2 = tuple(ml[0]), tuple(ml[-1])
+                    up = crack.get("user_points", [])
+                    if len(up) == 2:
+                        # Use the exact user-picked endpoints
+                        p1, p2 = tuple(up[0]), tuple(up[1])
                         readonly_connections.append((p1, p2))
+                    else:
+                        # Fallback: use first/last point of midline if user_points missing
+                        ml = crack.get("midline", [])
+                        if len(ml) >= 2:
+                            p1, p2 = tuple(ml[0]), tuple(ml[-1])
+                            readonly_connections.append((p1, p2))
 
         # --- Ensure all endpoints exist in initial points ---
         # Try to load points/connections from current crack if available
