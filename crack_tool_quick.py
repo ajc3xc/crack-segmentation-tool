@@ -1475,6 +1475,7 @@ class CrackToolsApplication(Ui_MainWindow):
             mask_crop = ct.segmentation.create_mask(self.image_crop, edge_y_crop, edge_x_crop)
 
             # --- Create per-crack mask only for this crack's polygon ---
+            print("Saving segment")
             full_mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
             h, w = mask_crop.shape
             full_mask[ymin:ymin + h, xmin:xmin + w] = mask_crop
@@ -1483,20 +1484,34 @@ class CrackToolsApplication(Ui_MainWindow):
             per_crack_mask = (full_mask > 0).astype(np.uint8)
 
             # Save into annotation atomic_cracks
+            # Save into annotation atomic_cracks
             ann = self.annotation.setdefault("annotations", {})
             atomic_cracks = ann.setdefault("atomic_cracks", {})
 
+            track_arr = np.array(self.track, dtype=float)
+
+            if getattr(self, "current_source", "auto") == "manual":
+                midline_coords = [
+                    [int(track_arr[1][i] + xmin), int(track_arr[0][i] + ymin)]
+                    for i in range(len(track_arr[0]))
+                ]
+            else:  # auto midline already in global coords
+                midline_coords = [
+                    [int(track_arr[0][i]), int(track_arr[1][i])]
+                    for i in range(len(track_arr[0]))
+                ]
+
+
             atomic_cracks[str(self.current_crack_id)] = {
                 "source": getattr(self, "current_source", "auto"),
-                "midline": [[int(self.track[1][i] + xmin), int(self.track[0][i] + ymin)]
-                            for i in range(len(self.track[0]))],
+                "midline": midline_coords,
                 "geodesic_edges": {
                     "edge1": [[int(self.track_e1[0][i] + xmin), int(self.track_e1[1][i] + ymin)]
                             for i in range(len(self.track_e1[0]))],
                     "edge2": [[int(self.track_e2[0][i] + xmin), int(self.track_e2[1][i] + ymin)]
                             for i in range(len(self.track_e2[0]))]
                 },
-                "mask": per_crack_mask.tolist(),  # store *only this crack's area*
+                "mask": per_crack_mask.tolist(),
                 "user_points": getattr(self, "user_points", []),
                 "user_connections": getattr(self, "user_connections", [])
             }
