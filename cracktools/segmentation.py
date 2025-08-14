@@ -420,10 +420,10 @@ def edges_tracking(
         height, width = image_crop.shape[:2]
         normal_length = int(np.ceil(np.hypot(height, width)))
 
-        '''# Inputs: mid_x, mid_y, edge_x, edge_y (all (N,))
+        # Inputs: mid_x, mid_y, edge_x, edge_y (all (N,))
         edge1_x, edge1_y = normal_intersections_bruteforce(mid_x, mid_y, track_e1[:,0], track_e1[:,1], normal_length)
         edge2_x, edge2_y = normal_intersections_bruteforce(mid_x, mid_y, track_e2[:,0], track_e2[:,1], normal_length)
-        edge1_x = np.clip(edge1_x, 0, width-1)
+        '''edge1_x = np.clip(edge1_x, 0, width-1)
         edge1_y = np.clip(edge1_y, 0, height-1)
         edge2_x = np.clip(edge2_x, 0, width-1)
         edge2_y = np.clip(edge2_y, 0, height-1)

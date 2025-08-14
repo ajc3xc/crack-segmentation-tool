@@ -1529,9 +1529,9 @@ class CrackToolsApplication(Ui_MainWindow):
             xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
 
             # Build full mask for this crack
-            poly_x = np.concatenate((self.track_e1[0][::-1], self.track_e2[0]))  # x coords
-            poly_y = np.concatenate((self.track_e1[1][::-1], self.track_e2[1]))  # y coords
-            mask_crop = ct.segmentation.create_mask(self.image_crop, poly_x, poly_y)
+            edge_x_crop = np.concatenate((self.track_e1[1][::-1], self.track_e2[1]))
+            edge_y_crop = np.concatenate((self.track_e1[0][::-1], self.track_e2[0]))
+            mask_crop = ct.segmentation.create_mask(self.image_crop, edge_y_crop, edge_x_crop)
 
             # Per-crack mask in full-image space
             full_mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
@@ -1544,7 +1544,7 @@ class CrackToolsApplication(Ui_MainWindow):
 
             # Convert midline to full-image coords
             midline_coords = [
-                [int(track_arr[0][i] + xmin), int(track_arr[1][i] + ymin)]
+                [int(track_arr[1][i] + xmin), int(track_arr[0][i] + ymin)]
                 for i in range(track_arr.shape[1])
             ]
 
@@ -1595,10 +1595,6 @@ class CrackToolsApplication(Ui_MainWindow):
 
             # Save annotation & masks
             self.save_annotation()
-            mask_bin_path = os.path.join(self.annotation_dir, "mask_bin.png")
-            mask_255_path = os.path.join(self.annotation_dir, "mask_255.png")
-            cv2.imwrite(mask_bin_path, m)
-            cv2.imwrite(mask_255_path, m * 255)
 
         except Exception as e:
             error(e)
