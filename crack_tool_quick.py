@@ -2184,7 +2184,7 @@ class CrackToolsApplication(Ui_MainWindow):
         boxes = self.get_all_bounding_boxes()
 
         # --- Separate "read-only" midlines & connections from editable ones ---
-        readonly_midlines = {}
+        '''readonly_midlines = {}
         readonly_connections = []
         existing_midlines = {}
 
@@ -2252,7 +2252,76 @@ class CrackToolsApplication(Ui_MainWindow):
             idx2 = ensure_point(p2)
             readonly_conn_idx.append((min(idx1, idx2), max(idx1, idx2)))
 
-        print(readonly_connections, readonly_conn_idx)
+        print(readonly_connections, readonly_conn_idx)'''
+
+        # --- Separate "read-only" midlines & connections from editable ones ---
+        readonly_midlines = {}
+        readonly_connections = []
+        existing_midlines = {}
+
+        # --- Ensure all endpoints exist in initial points ---
+        initial_points = list(getattr(self, "user_points", []) or [])
+        initial_conns = list(getattr(self, "user_connections", []) or [])
+        point_index_map = {tuple(pt): idx for idx, pt in enumerate(initial_points)}
+        
+        def ensure_point(pt):
+            if tuple(pt) not in point_index_map:
+                point_index_map[tuple(pt)] = len(initial_points)
+                initial_points.append(pt)
+            return point_index_map[tuple(pt)]
+
+        if "annotations" in self.annotation:
+            ann = self.annotation["annotations"]
+
+            # Existing manual midlines (global coords) → store for bbox conversion
+            ann_midlines = ann.get("midlines", {})
+            for k_str, pts in ann_midlines.items():
+                try:
+                    i1, i2 = map(int, k_str.split("_"))
+                    poly = [tuple(map(float, xy)) for xy in pts]
+                    existing_midlines[(min(i1, i2), max(i1, i2))] = poly
+                except Exception as e:
+                    print(f"[WARN] Failed to parse manual midline {k_str}: {e}")
+
+            # Existing cracks from atomic_cracks (include auto + manual)
+            for cid, crack in ann.get("atomic_cracks", {}).items():
+                # Skip the one currently being edited so it stays editable
+                if hasattr(self, "current_crack_id") and str(cid) == str(self.current_crack_id):
+                    continue
+
+                src = crack.get("source", "auto")
+                up = crack.get("user_points", [])
+                if len(up) == 2:
+                    p1, p2 = tuple(up[0]), tuple(up[1])
+                else:
+                    ml = crack.get("midline", [])
+                    if len(ml) >= 2:
+                        p1, p2 = tuple(ml[0]), tuple(ml[-1])
+                    else:
+                        continue
+
+                idx1 = ensure_point(p1)
+                idx2 = ensure_point(p2)
+
+                if src == "manual":
+                    poly = crack.get("midline", [])
+                    if poly:
+                        readonly_midlines[(idx1, idx2)] = [tuple(map(float, xy)) for xy in poly]
+                else:
+                    readonly_connections.append((p1, p2))
+
+        # --- Fill read-only midlines ---
+        for (i1, i2), poly in existing_midlines.items():
+            start_idx = ensure_point(poly[0])
+            end_idx = ensure_point(poly[-1])
+            readonly_midlines[(start_idx, end_idx)] = poly
+
+        # --- Fill read-only connections (converted to annotator indices) ---
+        readonly_conn_idx = []
+        for p1, p2 in readonly_connections:
+            idx1 = ensure_point(p1)
+            idx2 = ensure_point(p2)
+            readonly_conn_idx.append((min(idx1, idx2), max(idx1, idx2)))
 
         from endpoint_annotator import CrackAnnotator
         annot = CrackAnnotator(
