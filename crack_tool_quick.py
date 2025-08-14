@@ -1488,7 +1488,7 @@ class CrackToolsApplication(Ui_MainWindow):
 
             atomic_cracks[str(self.current_crack_id)] = {
                 "source": getattr(self, "current_source", "auto"),
-                "midline": [[int(self.track[0][i] + xmin), int(self.track[1][i] + ymin)]
+                "midline": [[int(self.track[1][i] + xmin), int(self.track[0][i] + ymin)]
                             for i in range(len(self.track[0]))],
                 "geodesic_edges": {
                     "edge1": [[int(self.track_e1[0][i] + xmin), int(self.track_e1[1][i] + ymin)]
@@ -2577,7 +2577,7 @@ class CrackToolsApplication(Ui_MainWindow):
                                 poly = np.array(manual_midlines_dict[found_key], dtype=float)  # [[x,y],...]
                                 cy = poly[:, 1] - ymin
                                 cx = poly[:, 0] - xmin
-                                self.track = np.vstack([cx, cy])
+                                self.track = np.vstack([cy, cx])
                                 self.pts_crop = [
                                     np.array(self.pts[0]) - np.array([xmin, ymin]),
                                     np.array(self.pts[1]) - np.array([xmin, ymin])
