@@ -1487,7 +1487,7 @@ class CrackToolsApplication(Ui_MainWindow):
             atomic_cracks = ann.setdefault("atomic_cracks", {})
 
             atomic_cracks[str(self.current_crack_id)] = {
-                "source": "auto",
+                "source": getattr(self, "current_source", "auto"),
                 "midline": [[int(self.track[0][i] + xmin), int(self.track[1][i] + ymin)]
                             for i in range(len(self.track[0]))],
                 "geodesic_edges": {
