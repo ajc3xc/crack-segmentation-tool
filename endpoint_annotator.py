@@ -216,12 +216,17 @@ class CrackAnnotator(QtWidgets.QWidget):
                         return
                     if point_i is not None and point_i != self._start_idx:
                         self._commit_midline(point_i)
-                    else:
+                    elif point_i is None:
+                        # Clicked empty space → add new point to polyline
+                        self.polyline.append((float(p.x()), float(p.y())))
+                        print(f"[PRESS] Added polyline point: {self.polyline[-1]}")
+                        self.update()
+                    '''else:
                         print("[PRESS] Ending midline without snapping to another endpoint")
                         self.polyline.clear()
                         self._is_drawing = False
                         self._start_idx = None
-                        self.update()
+                        self.update()'''
                     return
 
             elif event.button() == Qt.RightButton:

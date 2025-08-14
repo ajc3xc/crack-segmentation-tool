@@ -1527,17 +1527,22 @@ class CrackToolsApplication(Ui_MainWindow):
     def save_current_segment(self):
         try:
             xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
+            print(f"[DEBUG] BBox: {(xmin, ymin, xmax, ymax)}")
 
             # Build full mask for this crack
             edge_x_crop = np.concatenate((self.track_e1[1][::-1], self.track_e2[1]))
             edge_y_crop = np.concatenate((self.track_e1[0][::-1], self.track_e2[0]))
             mask_crop = ct.segmentation.create_mask(self.image_crop, edge_y_crop, edge_x_crop)
+            print(f"[DEBUG] mask_crop nonzero: {np.count_nonzero(mask_crop)}")
 
             # Per-crack mask in full-image space
             full_mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
             h, w = mask_crop.shape
             full_mask[ymin:ymin + h, xmin:xmin + w] = mask_crop
+            print(f"[DEBUG] full_mask nonzero after insert: {np.count_nonzero(full_mask)}")
+
             per_crack_mask = (full_mask > 0).astype(np.uint8)
+            print(f"[DEBUG] per_crack_mask nonzero: {np.count_nonzero(per_crack_mask)}")
 
             src = getattr(self, "current_source", "auto")
             track_arr = np.array(self.adjusted_track, dtype=float)
@@ -1579,19 +1584,22 @@ class CrackToolsApplication(Ui_MainWindow):
                 "user_points": getattr(self, "user_points", []),
                 "user_connections": getattr(self, "user_connections", [])
             }
+            print(f"[DEBUG] atomic_cracks now: {list(atomic_cracks.keys())}")
 
             # --- BLACK MASK FIX ---
             # Rebuild combined mask from all cracks if needed
             H, W = self.image.shape[:2]
             all_masks = []
-            for crack in atomic_cracks.values():
+            for cid, crack in atomic_cracks.items():
                 mask_arr = np.array(crack.get("mask", []), dtype=np.uint8)
+                print(f"[DEBUG] crack {cid} mask nonzero before combine: {np.count_nonzero(mask_arr)}")
                 if mask_arr.shape == (H, W) and np.any(mask_arr):
                     all_masks.append(mask_arr)
             if all_masks:
                 m = np.clip(np.sum(np.stack(all_masks), axis=0), 0, 1).astype(np.uint8)
             else:
                 m = np.zeros((H, W), dtype=np.uint8)
+            print(f"[DEBUG] combined mask nonzero: {np.count_nonzero(m)}")
 
             # Save annotation & masks
             self.save_annotation()
