@@ -218,7 +218,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                         self._commit_midline(point_i)
                     elif point_i is None:
                         # Clicked empty space → add new point to polyline
-                        self.polyline.append((float(p.x()), float(p.y())))
+                        px, py = p  # unpack the tuple
+                        self.polyline.append((float(px), float(py)))
                         print(f"[PRESS] Added polyline point: {self.polyline[-1]}")
                         self.update()
                     '''else:

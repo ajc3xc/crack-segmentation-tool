@@ -1384,7 +1384,7 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
     
-    def save_annotation(self):
+    '''def save_annotation(self):
         self._debug_print_atomic_cracks("save_annotation START")
         import numpy as np
         import json, os, tempfile, shutil
@@ -1460,6 +1460,115 @@ class CrackToolsApplication(Ui_MainWindow):
             mask_bin = (m >= 1).astype('uint8') if 'm' in locals() else np.zeros(self.image.shape[:2], dtype=np.uint8)
             cv2.imwrite(mask_bin_path, mask_bin)
             cv2.imwrite(mask_255_path, mask_bin * 255)
+            print(f"Saved: {json_path}, {mask_bin_path}, {mask_255_path}")
+
+        except Exception as e:
+            error(e)'''
+    
+    def save_annotation(self):
+        self._debug_print_atomic_cracks("save_annotation START")
+        import numpy as np
+        import json, os, tempfile, shutil
+
+        def _safe_serialize(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, (np.generic,)):
+                return obj.item()
+            elif isinstance(obj, dict):
+                return {k: _safe_serialize(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [_safe_serialize(v) for v in obj]
+            return obj
+
+        try:
+            ann = self.annotation.setdefault("annotations", {})
+            H, W = self.image.shape[:2]
+
+            # --- Merge from existing JSON, but let IN-MEMORY cracks override disk ---
+            base_name = os.path.splitext(os.path.basename(self.name))[0]
+            json_path = os.path.join(self.save_folder, base_name + '.json')
+            existing_cracks = {}
+            if os.path.exists(json_path):
+                try:
+                    with open(json_path, 'r') as f:
+                        existing_data = json.load(f)
+                    existing_cracks = existing_data.get("annotations", {}).get("atomic_cracks", {}) or {}
+                except Exception as e:
+                    print(f"[WARN] Failed to read existing JSON: {e}")
+
+            current_cracks = ann.setdefault("atomic_cracks", {})
+            merged_cracks = dict(existing_cracks)
+            merged_cracks.update(current_cracks)  # <-- in-memory wins
+            ann["atomic_cracks"] = merged_cracks
+
+            # 1) Build legacy summaries + combined mask (prefer atomic_cracks)
+            # Try to assemble combined from per-crack masks first
+            combined_from_atomic = []
+            for cid, crack in ann["atomic_cracks"].items():
+                mask_arr = np.array(crack.get("mask", []), dtype=np.uint8)
+                if mask_arr.shape == (H, W) and np.any(mask_arr):
+                    combined_from_atomic.append(mask_arr)
+                else:
+                    if mask_arr.size and mask_arr.shape != (H, W):
+                        print(f"[DEBUG] crack {cid} mask has wrong shape {mask_arr.shape}, expected {(H, W)}")
+
+            if combined_from_atomic:
+                mask_combined = np.clip(np.sum(np.stack(combined_from_atomic, axis=0), axis=0), 0, 1).astype(np.uint8)
+            else:
+                # Fallback to legacy self.mask list
+                legacy_masks = [np.array(m, dtype=np.uint8) for m in getattr(self, "mask", [])
+                                if m is not None and np.array(m).size > 0]
+                if legacy_masks:
+                    mask_combined = (np.sum(np.stack(legacy_masks, axis=0), axis=0) >= 1).astype(np.uint8)
+                else:
+                    mask_combined = np.zeros((H, W), dtype=np.uint8)
+
+            print(f"[DEBUG] mask_combined nonzero: {np.count_nonzero(mask_combined)}  "
+                f"(from_atomic={len(combined_from_atomic)}, from_legacy={len(getattr(self, 'mask', []))})")
+
+            # Legacy fields for downstream tools (always set from mask_combined)
+            ann["crack_pixels"] = np.argwhere(mask_combined == 1).tolist()
+            # Optional: also expose individual masks for legacy consumers
+            ann["all_masks"] = [np.array(crack.get("mask", []), dtype=np.uint8).tolist()
+                                for crack in ann["atomic_cracks"].values()
+                                if np.array(crack.get("mask", [])).shape == (H, W)]
+
+            # 2) Filter & validate all cracks (ensure valid masks are stored)
+            filtered_cracks = {}
+            for cid, crack in ann.get("atomic_cracks", {}).items():
+                mask_arr = np.array(crack.get("mask", []), dtype=np.uint8)
+                has_mask = mask_arr.size > 0 and mask_arr.shape == (H, W) and np.any(mask_arr)
+                has_edges = bool(crack.get("geodesic_edges", {}).get("edge1")) or \
+                            bool(crack.get("geodesic_edges", {}).get("edge2"))
+                has_midline = len(crack.get("midline", [])) > 1
+
+                if has_mask or has_edges or has_midline:
+                    if not has_mask:
+                        mask_arr = np.zeros((H, W), dtype=np.uint8)
+                    crack["mask"] = mask_arr.tolist()
+                    filtered_cracks[cid] = crack
+
+            ann["atomic_cracks"] = filtered_cracks
+            print(f"[DEBUG] save_annotation END: {len(filtered_cracks)} cracks kept.")
+
+            # Preserve combined cracks if present
+            if hasattr(self, "combined_cracks"):
+                ann["combined_cracks"] = _safe_serialize(self.combined_cracks)
+
+            # ---- Safe JSON write ----
+            safe_annotation = _safe_serialize(self.annotation)
+            mask_bin_path = os.path.join(self.save_folder, base_name + '_mask.png')
+            mask_255_path = os.path.join(self.save_folder, base_name + '_mask255.png')
+
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=self.save_folder, suffix=".json")
+            with os.fdopen(tmp_fd, 'w') as f:  # <-- fdopen, not open()
+                json.dump(safe_annotation, f)
+            shutil.move(tmp_path, json_path)
+
+            # Always write the combined mask we just built
+            cv2.imwrite(mask_bin_path, mask_combined)
+            cv2.imwrite(mask_255_path, mask_combined * 255)
             print(f"Saved: {json_path}, {mask_bin_path}, {mask_255_path}")
 
         except Exception as e:
@@ -1765,16 +1874,6 @@ class CrackToolsApplication(Ui_MainWindow):
                             endpoint_radius = max(3, int(min(H, W) * 0.0035))  # 0.35% of min dimension
                             cv2.circle(im, (x, y), endpoint_radius, (255, 0, 255), -1)
                     # draw connections (magenta lines between point indices)
-                    '''for c in uc:
-                        try:
-                            i1, i2 = int(c[0]), int(c[1])
-                            if 0 <= i1 < len(up) and 0 <= i2 < len(up):
-                                p1 = (int(round(up[i1][0])), int(round(up[i1][1])))
-                                p2 = (int(round(up[i2][0])), int(round(up[i2][1])))
-                                cv2.line(im, p1, p2, (255, 0, 255), 2)
-                        except Exception:
-                            # Be forgiving if something malformed sneaks in
-                            pass'''
 
             # ==========================================================
             # 2) LEGACY FALLBACK: if no per-crack masks were drawn,
