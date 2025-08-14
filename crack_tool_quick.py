@@ -2355,8 +2355,9 @@ class CrackToolsApplication(Ui_MainWindow):
         layout.addWidget(manual_btn)
 
         hint = QLabel(
-            "Manual: Left-hold on starting point → draw → finish on a *different* endpoint.\n"
-            "Read-only cracks shown in gray — can't be deleted."
+            "Editable: Auto/Manual in black/light-blue.     Read-only: Auto/Manual cracks in gray/biege — cant delete in editor, must delete segment in Delete Segmentations.\n"
+            "Click unconnected point in Connection Mode to create new point.        Hover and click in respective mode to delete.\n"
+            "Manual: Left-hold on starting point → draw → finish on a different endpoint.       Backspace/Z or Right-hold for fast/slow deletion."
         )
         layout.addWidget(hint)
 

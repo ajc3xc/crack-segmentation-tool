@@ -341,7 +341,7 @@ class CrackAnnotator(QtWidgets.QWidget):
                             QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff)))
 
         # Read-only midlines
-        qp.setPen(QPen(QColor(150, 150, 150), 2))
+        qp.setPen(QPen(QColor(150, 150, 0), 2))
         for key, poly in self.readonly_midlines.items():
             for i in range(1, len(poly)):
                 p1 = apply_offset(poly[i - 1])
@@ -390,6 +390,21 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p2 = apply_offset(self.polyline[i])
                 qp.drawLine(QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
                             QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff)))
+                
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Backspace, Qt.Key_Z):
+            if self.polyline_mode and self._is_drawing and self.polyline:
+                self._pop_poly_point()
+                self.update()
+                return
+        if event.key() == Qt.Key_Escape:
+            if self.polyline_mode and self._is_drawing:
+                self.polyline.clear()
+                self._is_drawing = False
+                self._start_idx = None
+                self.update()
+                return
+        super().keyPressEvent(event)
 
     def _to_image_coords(self, pos):
         return ((pos.x() - self._last_draw_xoff) / self._last_draw_scale,
