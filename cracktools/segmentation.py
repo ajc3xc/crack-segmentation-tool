@@ -271,7 +271,7 @@ def normal_intersections_bruteforce(mid_x, mid_y, edge_x, edge_y, normal_length)
             rx[i], ry[i] = nearest_on_edge(mx, my)
     return rx, ry
 
-def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp, midline, mu=5, l=1, p=12):
+'''def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp, midline, mu=5, l=1, p=12):
     # --- Geodesic edge extraction (unchanged from your code) ---
     seeds = np.array([*pts_cropp[0][::-1]])
     tips = np.array([*pts_cropp[1][::-1]])
@@ -340,7 +340,7 @@ def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp, mi
     edge2_x = np.clip(edge2_x, 0, width-1)
     edge2_y = np.clip(edge2_y, 0, height-1)
 
-    return [edge1_x, edge1_y], [edge2_x, edge2_y]
+    return [edge1_x, edge1_y], [edge2_x, edge2_y]'''
 
 def edges_tracking(
     image_crop, pts_cropp,
@@ -423,16 +423,6 @@ def edges_tracking(
         # Inputs: mid_x, mid_y, edge_x, edge_y (all (N,))
         edge1_x, edge1_y = normal_intersections_bruteforce(mid_x, mid_y, track_e1[:,0], track_e1[:,1], normal_length)
         edge2_x, edge2_y = normal_intersections_bruteforce(mid_x, mid_y, track_e2[:,0], track_e2[:,1], normal_length)
-        '''edge1_x = np.clip(edge1_x, 0, width-1)
-        edge1_y = np.clip(edge1_y, 0, height-1)
-        edge2_x = np.clip(edge2_x, 0, width-1)
-        edge2_y = np.clip(edge2_y, 0, height-1)
-        normal_edges = [[edge1_x, edge1_y], [edge2_x, edge2_y]]
-
-    return {
-        "geodesic_edges": [track_e1, track_e2],  # (N,2) as (x, y)
-        "normal_edge_points": normal_edges
-    }'''
 
         normal_edges = [[edge1_x.copy(), edge1_y.copy()],
                     [edge2_x.copy(), edge2_y.copy()]]

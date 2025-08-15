@@ -501,6 +501,10 @@ class CrackUtils:
     def clear_boxes(self):
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
 
+        if not hasattr(self, "annotation") or not isinstance(self.annotation, dict):
+            error("No annotation data loaded.")
+            return
+        
         # Load all boxes from your annotation data structure
         box_dict = self.annotation.get('annotations', {}).get('box', {})
         if not box_dict:

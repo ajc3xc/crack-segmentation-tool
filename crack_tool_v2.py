@@ -583,7 +583,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             track = np.array(self.track)
 
             # Always store as [y, x] in full image coordinates
-            if getattr(self, "current_source", None) == "manual":
+            if getattr(self, "current_source", None) in ("manual", "manual_poly"):
                 # Manual track was stored in crop coords → convert back to full image coords
                 xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
                 track_full_y = track[0] + ymin
@@ -718,7 +718,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             new_id = str(max(ids) + 1 if ids else 0)
 
             ac[new_id] = {
-                "source": "manual",
+                "source": "manual_poly",
                 "midline": [],                  # no midline now
                 "geodesic_edges": {},           # no edges now
                 "normal_edge_points": None,
@@ -930,12 +930,22 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             normal_edges = res["normal_edge_points"]
             normal_edges_clipped = res["normal_edge_points_clipped"]
 
-            # If editing an existing crack, reuse its ID
-            if hasattr(self, "current_crack_id") and self.current_crack_id in self.crack_tracks:
-                crack_id = self.current_crack_id
+            # ---- Respect pre-assigned crack ID (set in run_pipeline) ----
+            if not hasattr(self, "crack_tracks"):
+                self.crack_tracks = {}
+
+            if hasattr(self, "current_crack_id") and self.current_crack_id is not None:
+                crack_id = int(self.current_crack_id)
             else:
-                crack_id = len(self.crack_tracks)
-            self.current_crack_id = crack_id
+                # Fallback allocator if someone calls edge_tracking() ad-hoc
+                ann = self.annotation.get("annotations", {})
+                ac = ann.get("atomic_cracks", {})
+                used = {int(k) for k in ac.keys() if str(k).isdigit()}
+                used |= set(int(k) for k in self.crack_tracks.keys())
+                crack_id = (max(used) + 1) if used else 0
+                self.current_crack_id = crack_id
+
+            print(f"Using crack id {self.current_crack_id} in edge_tracking")
 
             self.crack_tracks[crack_id] = [track_e1[:, 0], track_e1[:, 1]]
             self.track_e1 = [track_e1[:, 0], track_e1[:, 1]]
@@ -1039,6 +1049,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             # Add full, unclipped normal-edge points (convert to full image coords)
             normal_edges = getattr(self, "normal_edge_points", {}).get(self.current_crack_id)
             normal_edges_full = None
+            print(self.current_crack_id, self.normal_edge_points.keys(), normal_edges is not None)
             if normal_edges is not None:
                 (e1x, e1y), (e2x, e2y) = normal_edges  # crop coords
                 e1_global = np.stack([e1x + xmin, e1y + ymin], axis=1)
@@ -1134,7 +1145,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 if idx1 == idx2:
                     continue  # Prevent self-midlines here too
 
-                if src == "manual":
+                if src in ("manual", "manual_poly"):
                     poly = crack.get("midline", [])
                     if poly:
                         readonly_midlines[(idx1, idx2)] = [tuple(map(float, xy)) for xy in poly]
@@ -1388,15 +1399,13 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         def _next_crack_id_str():
             ann = self.annotation.get("annotations", {})
             ac = ann.get("atomic_cracks", {})
-            used_ids = sorted(int(k) for k in ac.keys() if k.isdigit())
-            
-            # Find the first free ID
+            # Already saved
+            used_ids = {int(k) for k in ac.keys() if str(k).isdigit()}
+            # In-progress but not saved yet (keys are ints)
+            used_ids |= set(int(k) for k in getattr(self, "crack_tracks", {}).keys())
             next_id = 0
-            for uid in used_ids:
-                if uid == next_id:
-                    next_id += 1
-                else:
-                    break
+            while next_id in used_ids:
+                next_id += 1
             return str(next_id)
 
         def _ensure_ann():
@@ -1432,9 +1441,12 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         # Merge auto + manual endpoint pairs (global, from annotator)
         all_pairs = []
+        # Merge auto + manual endpoint pairs (global, from annotator)
+        all_pairs = []
         if getattr(self, "endpoint_pairs", None):
             print(f"Auto endpoint_pairs: {self.endpoint_pairs}")
             all_pairs.extend([(p, "auto") for p in self.endpoint_pairs])
+
         if getattr(self, "manual_endpoint_pairs", None):
             print(f"Manual endpoint_pairs: {self.manual_endpoint_pairs}")
             all_pairs.extend([(p, "manual") for p in self.manual_endpoint_pairs])
@@ -1500,7 +1512,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                         pair_user_points = [tuple(p0), tuple(p1)]
                         pair_user_connections = [[0, 1]]  # exactly one connection per crack
 
-                        if src == "manual":
+                        if src in ("manual", "manual_poly"):
                             # For manual, we reuse the drawn polyline as midline (full-image coords)
                             manual_midlines_dict = getattr(self, "manual_midlines_tmp", {})
                             found_key = None
@@ -1561,15 +1573,15 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                             downsample = self.downsample_factor_box.value()
                             self.pts_crop_down = [p / downsample for p in self.pts_crop]
                             t0 = time(); self.midline_tracking(); print(f"    midline tracking time: {time()-t0:.2f}s")
-
+                        
+                        # ======= Assign a brand-new crack ID for THIS pair =======
+                        new_cid = _next_crack_id_str()
+                        self.current_crack_id = int(new_cid)
+                        
                         # Build edge masks & geodesic edges for this pair
                         self.current_source = src
                         self.edge_mask()
                         self.edge_tracking()
-
-                        # ======= Assign a brand-new crack ID for THIS pair =======
-                        new_cid = _next_crack_id_str()
-                        self.current_crack_id = int(new_cid)
 
                         # Temporarily set *pair-local* globals so save_current_segment writes them into that crack
                         self.user_points = pair_user_points
@@ -1853,6 +1865,10 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
         from PyQt5.QtGui import QImage, QPixmap
         import numpy as np, cv2
+
+        if not hasattr(self, "annotation") or not isinstance(self.annotation, dict):
+            error("No annotation data loaded.")
+            return
 
         ann = self.annotation.setdefault("annotations", {})
         combined = ann.setdefault("combined_cracks", {})
