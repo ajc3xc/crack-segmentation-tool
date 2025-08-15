@@ -647,48 +647,6 @@ class CrackToolsApplication(Ui_MainWindow):
                 point_index_map[tuple(pt)] = len(initial_points)
                 initial_points.append(pt)
             return point_index_map[tuple(pt)]
-
-        # --- Convert read-only midlines to local bbox coordinates ---
-        '''for (i1, i2), poly in existing_midlines.items():
-            # Find bbox that contains start/end
-            start_pt, end_pt = poly[0], poly[-1]
-            bbox_match = None
-            for xmin, ymin, xmax, ymax in boxes:
-                if (xmin <= start_pt[0] <= xmax and ymin <= start_pt[1] <= ymax) or \
-                (xmin <= end_pt[0] <= xmax and ymin <= end_pt[1] <= ymax):
-                    bbox_match = (xmin, ymin)
-                    break
-
-            if bbox_match:
-                offset_x, offset_y = bbox_match
-                shifted_poly = [(x - offset_x, y - offset_y) for (x, y) in poly]
-            else:
-                shifted_poly = poly[:]  # fallback to original if no bbox match
-
-            start_idx = ensure_point(shifted_poly[0])
-            end_idx = ensure_point(shifted_poly[-1])
-            readonly_midlines[(start_idx, end_idx)] = shifted_poly
-
-        # --- Convert read-only connections to local bbox coordinates ---
-        readonly_conn_idx = []
-        for p1, p2 in readonly_connections:
-            bbox_match = None
-            for xmin, ymin, xmax, ymax in boxes:
-                if (xmin <= p1[0] <= xmax and ymin <= p1[1] <= ymax) or \
-                (xmin <= p2[0] <= xmax and ymin <= p2[1] <= ymax):
-                    bbox_match = (xmin, ymin)
-                    break
-
-            if bbox_match:
-                offset_x, offset_y = bbox_match
-                p1_local = (p1[0] - offset_x, p1[1] - offset_y)
-                p2_local = (p2[0] - offset_x, p2[1] - offset_y)
-            else:
-                p1_local, p2_local = p1, p2
-
-            idx1 = ensure_point(p1_local)
-            idx2 = ensure_point(p2_local)
-            readonly_conn_idx.append((min(idx1, idx2), max(idx1, idx2)))'''
         
         # --- Fill read-only midlines (keep in full-image coords) ---
         for (i1, i2), poly in existing_midlines.items():
@@ -1383,89 +1341,8 @@ class CrackToolsApplication(Ui_MainWindow):
             plt.show()
         except Exception as e:
             error(e)
-    
+        
     '''def save_annotation(self):
-        self._debug_print_atomic_cracks("save_annotation START")
-        import numpy as np
-        import json, os, tempfile, shutil
-
-        def _safe_serialize(obj):
-            """Recursively convert NumPy types to Python native types."""
-            if isinstance(obj, np.ndarray):
-                return obj.tolist()
-            elif isinstance(obj, (np.generic,)):
-                return obj.item()
-            elif isinstance(obj, dict):
-                return {k: _safe_serialize(v) for k, v in obj.items()}
-            elif isinstance(obj, (list, tuple)):
-                return [_safe_serialize(v) for v in obj]
-            return obj
-
-        try:
-            ann = self.annotation.setdefault("annotations", {})
-            H, W = self.image.shape[:2]
-
-            # --- Merge from existing JSON if present ---
-            base_name = os.path.splitext(os.path.basename(self.name))[0]
-            json_path = os.path.join(self.save_folder, base_name + '.json')
-            if os.path.exists(json_path):
-                try:
-                    with open(json_path, 'r') as f:
-                        existing_data = json.load(f)
-                    existing_cracks = existing_data.get("annotations", {}).get("atomic_cracks", {})
-                    ann.setdefault("atomic_cracks", {}).update(existing_cracks)
-                except Exception as e:
-                    print(f"[WARN] Failed to merge existing cracks: {e}")
-
-            # 1) Update masks summary for legacy consumers
-            if not getattr(self, "use_masks", False):
-                masks = [np.array(m, dtype=np.uint8) for m in self.mask
-                        if m is not None and np.array(m).size > 0]
-                m = np.sum(np.stack(masks), axis=0) if masks else np.zeros(self.image.shape[:2], dtype=np.uint8)
-                m[m >= 1] = 1.0
-                ann["crack_pixels"] = np.argwhere(m == 1.0).tolist()
-                ann["all_masks"] = [mm.tolist() for mm in masks] if masks else []
-
-            # 2) Filter & validate all cracks (merged + new)
-            filtered_cracks = {}
-            for cid, crack in ann.get("atomic_cracks", {}).items():
-                mask_arr = np.array(crack.get("mask", []), dtype=np.uint8)
-                has_mask = mask_arr.size > 0 and mask_arr.shape == (H, W) and np.any(mask_arr)
-                has_edges = bool(crack.get("geodesic_edges", {}).get("edge1")) or \
-                            bool(crack.get("geodesic_edges", {}).get("edge2"))
-                has_midline = len(crack.get("midline", [])) > 1
-
-                if has_mask or has_edges or has_midline:
-                    if not has_mask:
-                        mask_arr = np.zeros((H, W), dtype=np.uint8)
-                    crack["mask"] = mask_arr.tolist()
-                    filtered_cracks[cid] = crack
-
-            ann["atomic_cracks"] = filtered_cracks
-
-            # Preserve combined cracks
-            if hasattr(self, "combined_cracks"):
-                ann["combined_cracks"] = _safe_serialize(self.combined_cracks)
-
-            # ---- Safe JSON write ----
-            safe_annotation = _safe_serialize(self.annotation)
-            mask_bin_path = os.path.join(self.save_folder, base_name + '_mask.png')
-            mask_255_path = os.path.join(self.save_folder, base_name + '_mask255.png')
-
-            tmp_fd, tmp_path = tempfile.mkstemp(dir=self.save_folder, suffix=".json")
-            with open(tmp_fd, 'w') as f:
-                json.dump(safe_annotation, f)
-            shutil.move(tmp_path, json_path)
-
-            mask_bin = (m >= 1).astype('uint8') if 'm' in locals() else np.zeros(self.image.shape[:2], dtype=np.uint8)
-            cv2.imwrite(mask_bin_path, mask_bin)
-            cv2.imwrite(mask_255_path, mask_bin * 255)
-            print(f"Saved: {json_path}, {mask_bin_path}, {mask_255_path}")
-
-        except Exception as e:
-            error(e)'''
-    
-    def save_annotation(self):
         self._debug_print_atomic_cracks("save_annotation START")
         import numpy as np
         import json, os, tempfile, shutil
@@ -1572,68 +1449,132 @@ class CrackToolsApplication(Ui_MainWindow):
             print(f"Saved: {json_path}, {mask_bin_path}, {mask_255_path}")
 
         except Exception as e:
-            error(e)
-    
-    '''def save_current_segment(self):
-        try:
-            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
-
-            # Build full mask
-            edge_x_crop = np.concatenate((self.track_e1[1][::-1], self.track_e2[1]))
-            edge_y_crop = np.concatenate((self.track_e1[0][::-1], self.track_e2[0]))
-            mask_crop = ct.segmentation.create_mask(self.image_crop, edge_y_crop, edge_x_crop)
-
-            # --- Create per-crack mask only for this crack's polygon ---
-            full_mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
-            h, w = mask_crop.shape
-            full_mask[ymin:ymin + h, xmin:xmin + w] = mask_crop
-            per_crack_mask = (full_mask > 0).astype(np.uint8)
-
-            src = getattr(self, "current_source", "auto")
-            track_arr = np.array(self.adjusted_track, dtype=float)
-
-            # For manual, adjusted_track is already in crop coords
-            midline_coords = [
-                [int(track_arr[1][i] + xmin), int(track_arr[0][i] + ymin)]
-                for i in range(track_arr.shape[1])
-            ]
-
-            # Save into annotation atomic_cracks
-            ann = self.annotation.setdefault("annotations", {})
-            atomic_cracks = ann.setdefault("atomic_cracks", {})
-
-            normal_edges = getattr(self, "normal_edge_points", {}).get(self.current_crack_id)
-            normal_edges_full = None
-            if normal_edges is not None:
-                (e1x, e1y), (e2x, e2y) = normal_edges  # crop coords
-                e1_global = np.stack([e1x + xmin, e1y + ymin], axis=1)
-                e2_global = np.stack([e2x + xmin, e2y + ymin], axis=1)
-                normal_edges_full = {
-                    "edge1": e1_global.tolist(),
-                    "edge2": e2_global.tolist()
-                }
-
-            atomic_cracks[str(self.current_crack_id)] = {
-                "source": src,
-                "midline": midline_coords,
-                "geodesic_edges": {
-                    "edge1": [[int(self.track_e1[0][i] + xmin), int(self.track_e1[1][i] + ymin)]
-                            for i in range(len(self.track_e1[0]))],
-                    "edge2": [[int(self.track_e2[0][i] + xmin), int(self.track_e2[1][i] + ymin)]
-                            for i in range(len(self.track_e2[0]))]
-                },
-                "normal_edge_points": normal_edges_full,  # <--- NEW
-                "mask": per_crack_mask.tolist(),
-                "user_points": getattr(self, "user_points", []),
-                "user_connections": getattr(self, "user_connections", [])
-            }
-
-            self.save_annotation()
-
-        except Exception as e:
             error(e)'''
     
-    def save_current_segment(self):
+    def save_annotation(self):
+        self._debug_print_atomic_cracks("save_annotation START")
+        import numpy as np
+        import json, os, tempfile, shutil
+
+        def _safe_serialize(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, (np.generic,)):
+                return obj.item()
+            elif isinstance(obj, dict):
+                return {k: _safe_serialize(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [_safe_serialize(v) for v in obj]
+            return obj
+
+        try:
+            ann = self.annotation.setdefault("annotations", {})
+            H, W = self.image.shape[:2]
+
+            # --- Merge from existing JSON, but let IN-MEMORY cracks override disk ---
+            base_name = os.path.splitext(os.path.basename(self.name))[0]
+            json_path = os.path.join(self.save_folder, base_name + '.json')
+            existing_cracks = {}
+            if os.path.exists(json_path):
+                try:
+                    with open(json_path, 'r') as f:
+                        existing_data = json.load(f)
+                    existing_cracks = existing_data.get("annotations", {}).get("atomic_cracks", {}) or {}
+                except Exception as e:
+                    print(f"[WARN] Failed to read existing JSON: {e}")
+
+            '''current_cracks = ann.setdefault("atomic_cracks", {})
+            merged_cracks = dict(existing_cracks)
+            merged_cracks.update(current_cracks)  # in-memory wins
+            ann["atomic_cracks"] = merged_cracks'''
+
+            # --- COMPACTION PASS: convert any full masks -> crop + bbox, then drop full mask ---
+            for cid, crack in list(ann["atomic_cracks"].items()):
+                m = np.array(crack.get("mask", []), dtype=np.uint8)
+                if m.size > 0 and m.shape == (H, W) and np.any(m):
+                    ys, xs = np.where(m > 0)
+                    y0, y1 = int(ys.min()), int(ys.max() + 1)
+                    x0, x1 = int(xs.min()), int(xs.max() + 1)
+                    crop = m[y0:y1, x0:x1].astype(np.uint8)
+                    crack["mask_crop"] = crop.tolist()
+                    crack["mask_bbox"] = [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]  # [x, y, w, h]
+                    if "mask" in crack:
+                        del crack["mask"]
+
+            # --- Build combined mask from crops (or legacy full masks if present) ---
+            mask_combined = np.zeros((H, W), dtype=np.uint8)
+            from_atomic = 0
+            for cid, crack in ann["atomic_cracks"].items():
+                mc = crack.get("mask_crop", None)
+                bb = crack.get("mask_bbox", None)
+                if mc is not None and bb is not None:
+                    crop = np.array(mc, dtype=np.uint8)
+                    x, y, w_box, h_box = [int(v) for v in bb]
+                    x2, y2 = min(x + w_box, W), min(y + h_box, H)
+                    w_eff, h_eff = max(0, x2 - x), max(0, y2 - y)
+                    if h_eff > 0 and w_eff > 0:
+                        crop = (crop > 0).astype(np.uint8)[:h_eff, :w_eff]
+                        mask_combined[y:y+h_eff, x:x+w_eff] |= crop
+                        from_atomic += 1
+                else:
+                    # super-legacy: if a full mask slipped through, OR it in
+                    m = np.array(crack.get("mask", []), dtype=np.uint8)
+                    if m.size > 0 and m.shape == (H, W) and np.any(m):
+                        mask_combined |= (m > 0).astype(np.uint8)
+
+            print(f"[DEBUG] mask_combined nonzero: {int(mask_combined.sum())}  (from_atomic={from_atomic})")
+
+            # Minimal legacy fields (do NOT dump per-crack full masks to JSON)
+            #ann["crack_pixels"] = np.argwhere(mask_combined == 1).tolist()
+            # Keep 'all_masks' empty to avoid JSON bloat; legacy readers will use crack_pixels.
+            #ann["all_masks"] = []
+
+            # --- Filter & keep valid cracks (by crop+bbox OR edges OR midline) ---
+            filtered_cracks = {}
+            for cid, crack in ann.get("atomic_cracks", {}).items():
+                has_crop = (crack.get("mask_crop") is not None) and (crack.get("mask_bbox") is not None) \
+                        and np.any(np.array(crack.get("mask_crop"), dtype=np.uint8))
+                full_m = np.array(crack.get("mask", []), dtype=np.uint8)
+                has_full = full_m.size > 0 and full_m.shape == (H, W) and np.any(full_m)
+
+                has_mask = has_crop or has_full
+                edges = crack.get("geodesic_edges", {}) or {}
+                has_edges = bool(edges.get("edge1")) or bool(edges.get("edge2"))
+                has_midline = len(crack.get("midline", [])) > 1
+
+                if has_mask or has_edges or has_midline:
+                    # ensure no bloated 'mask' if we already have compact storage
+                    if has_crop and "mask" in crack:
+                        del crack["mask"]
+                    filtered_cracks[cid] = crack
+
+            ann["atomic_cracks"] = filtered_cracks
+            print(f"[DEBUG] save_annotation END: {len(filtered_cracks)} cracks kept.")
+
+            if hasattr(self, "combined_cracks"):
+                ann["combined_cracks"] = _safe_serialize(self.combined_cracks)
+
+            # ---- Safe JSON write ----
+            safe_annotation = _safe_serialize(self.annotation)
+            mask_bin_path = os.path.join(self.save_folder, base_name + '_mask.png')
+            mask_255_path = os.path.join(self.save_folder, base_name + '_mask255.png')
+
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=self.save_folder, suffix=".json")
+            with os.fdopen(tmp_fd, 'w') as f:
+                json.dump(safe_annotation, f)
+            shutil.move(tmp_path, json_path)
+
+            # PNG compression (0 fastest/biggest → 9 slowest/smallest)
+            comp = int(getattr(self, "png_compression_level", 9))
+            comp = max(0, min(comp, 9))
+            cv2.imwrite(mask_bin_path, mask_combined, [cv2.IMWRITE_PNG_COMPRESSION, comp])
+            cv2.imwrite(mask_255_path, mask_combined * 255, [cv2.IMWRITE_PNG_COMPRESSION, comp])
+            print(f"Saved: {json_path}, {mask_bin_path}, {mask_255_path}  (png_compression_level={comp})")
+
+        except Exception as e:
+            error(e)
+        
+    '''def save_current_segment(self):
         try:
             xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
             print(f"[DEBUG] BBox: {(xmin, ymin, xmax, ymax)}")
@@ -1714,6 +1655,68 @@ class CrackToolsApplication(Ui_MainWindow):
             self.save_annotation()
 
         except Exception as e:
+            error(e)'''
+    
+    def save_current_segment(self):
+        try:
+            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
+            print(f"[DEBUG] BBox: {(xmin, ymin, xmax, ymax)}")
+
+            # Build crop mask from the two edges (in crop coords)
+            edge_x_crop = np.concatenate((self.track_e1[1][::-1], self.track_e2[1]))
+            edge_y_crop = np.concatenate((self.track_e1[0][::-1], self.track_e2[0]))
+            mask_crop = ct.segmentation.create_mask(self.image_crop, edge_y_crop, edge_x_crop).astype(np.uint8)
+            h, w = mask_crop.shape[:2]
+            print(f"[DEBUG] mask_crop shape={mask_crop.shape}, nonzero={int((mask_crop>0).sum())}")
+
+            src = getattr(self, "current_source", "auto")
+            track_arr = np.array(self.adjusted_track, dtype=float)
+
+            # Convert midline to full-image coords
+            midline_coords = [
+                [int(track_arr[1][i] + xmin), int(track_arr[0][i] + ymin)]
+                for i in range(track_arr.shape[1])
+            ]
+
+            # Prepare annotation dict
+            ann = self.annotation.setdefault("annotations", {})
+            atomic_cracks = ann.setdefault("atomic_cracks", {})
+
+            # Add full, unclipped normal-edge points (convert to full image coords)
+            normal_edges = getattr(self, "normal_edge_points", {}).get(self.current_crack_id)
+            normal_edges_full = None
+            if normal_edges is not None:
+                (e1x, e1y), (e2x, e2y) = normal_edges  # crop coords
+                e1_global = np.stack([e1x + xmin, e1y + ymin], axis=1)
+                e2_global = np.stack([e2x + xmin, e2y + ymin], axis=1)
+                normal_edges_full = {"edge1": e1_global.tolist(), "edge2": e2_global.tolist()}
+
+            # Save crack entry (store ONLY the crop + bbox, not a full-size mask)
+            atomic_cracks[str(self.current_crack_id)] = {
+                "source": src,
+                "midline": midline_coords,
+                "geodesic_edges": {
+                    "edge1": [[int(self.track_e1[0][i] + xmin), int(self.track_e1[1][i] + ymin)]
+                            for i in range(len(self.track_e1[0]))],
+                    "edge2": [[int(self.track_e2[0][i] + xmin), int(self.track_e2[1][i] + ymin)]
+                            for i in range(len(self.track_e2[0]))]
+                },
+                "normal_edge_points": normal_edges_full,
+                # NEW: compact storage
+                "mask_crop": mask_crop.tolist(),                 # (h, w) binary array
+                "mask_bbox": [int(xmin), int(ymin), int(w), int(h)],  # [x, y, w, h] in full image
+                "user_points": getattr(self, "user_points", []),
+                "user_connections": getattr(self, "user_connections", [])
+            }
+            print(f"[DEBUG] atomic_cracks now: {list(atomic_cracks.keys())}")
+
+            # Hint for loaders: use per-crack masks rather than legacy lists
+            self.use_masks = True
+
+            # Persist to disk (save_annotation will rebuild & export a combined mask)
+            self.save_annotation()
+
+        except Exception as e:
             error(e)
 
     def draw_segment(self):
@@ -1772,7 +1775,7 @@ class CrackToolsApplication(Ui_MainWindow):
         except Exception as e:
             error(e)
     
-    def change_image(self):
+    '''def change_image(self):
         import pprint
 
         self.bb_pts_list = []
@@ -1900,197 +1903,156 @@ class CrackToolsApplication(Ui_MainWindow):
         qimage = QImage(im.astype(np.uint8), im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(qimage)
         scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+        self.ImageScreen.setPixmap(scaled_pixmap)'''
+    
+    def change_image(self):
+        import pprint
+
+        self.bb_pts_list = []
+        w = self.segment_width_box_2.value()
+
+        self.update_selected_item(os.path.basename(self.image_names[self.n]))
+        self.name = self.image_names[self.n]
+        self.image = cv2.imread(self.name)[:, :, ::-1].astype(np.uint8)
+        self.original_image = self.image.copy()
+        self.filename_label_2.setText(os.path.basename(self.name))
+        base_name = os.path.splitext(os.path.basename(self.name))[0]
+
+        # ---- MASK LOADING (optional external masks) ----
+        self.current_mask = None
+        if getattr(self, "use_masks", False) and hasattr(self, "mask_map"):
+            mask_path = self.mask_map.get(base_name)
+            if mask_path:
+                if mask_path.endswith('.npy'):
+                    mask = np.load(mask_path)
+                    mask = (mask > 0).astype(np.uint8) if mask.max() > 1 else mask.astype(np.uint8)
+                else:
+                    mask = cv2.imread(mask_path, 0)
+                    mask = (mask > 0).astype(np.uint8) if mask is not None else None
+                self.current_mask = mask
+
+        im = self.original_image.copy()
+
+        # -------- Load annotation data --------
+        self.ann_name = os.path.join(self.save_folder, base_name + '.json')
+        self.mask_name_bin = os.path.join(self.save_folder, base_name + '_mask.png')
+        self.mask_name_255 = os.path.join(self.save_folder, base_name + '_mask255.png')
+        self.mask = []               # in-memory rendered masks for this image
+        self.annotation = {}
+
+        H, W = im.shape[:2]
+
+        if os.path.exists(self.ann_name):
+            with open(self.ann_name) as f:
+                self.annotation = json.load(f)
+            ann = self.annotation.get('annotations', {})
+
+            # ---- Bounding boxes (unchanged) ----
+            if 'box' in ann:
+                for key, box_data in ann['box'].items():
+                    bb_pts = np.array(box_data['bounding_box'])
+                    if box_data['class'] == 0: box_color = (0,0,255)
+                    elif box_data['class'] == 1: box_color = (0,255,0)
+                    else: box_color = (255,0,0)
+                    cv2.rectangle(im, tuple(bb_pts[0]), tuple(bb_pts[1]), box_color, 3)
+
+            # ==========================================================
+            # 1) Draw from per-crack "atomic_cracks" (supports mask_crop+bbox)
+            # ==========================================================
+            drew_any_atomic = False
+            for crack_type in ["atomic_cracks", "combined_cracks"]:
+                cracks = ann.get(crack_type, {}) or {}
+                for crack_id, crack in cracks.items():
+                    # --- reconstruct (full) mask for display ---
+                    mask_full = None
+
+                    # preferred: compact crop+bbox
+                    mask_crop = crack.get("mask_crop", None)
+                    mask_bbox = crack.get("mask_bbox", None)
+                    if mask_crop is not None and mask_bbox is not None:
+                        crop = np.array(mask_crop, dtype=np.uint8)
+                        x, y, w_box, h_box = [int(v) for v in mask_bbox]
+                        # guard/clamp
+                        x2, y2 = min(x + w_box, W), min(y + h_box, H)
+                        w_eff, h_eff = max(0, x2 - x), max(0, y2 - y)
+                        if h_eff > 0 and w_eff > 0:
+                            crop = (crop > 0).astype(np.uint8)
+                            # clamp crop to effective region if mismatched
+                            crop = crop[:h_eff, :w_eff]
+                            mask_full = np.zeros((H, W), dtype=np.uint8)
+                            mask_full[y:y+h_eff, x:x+w_eff] = crop
+
+                    # legacy: full mask stored
+                    if mask_full is None:
+                        m_arr = np.array(crack.get("mask", []), dtype=np.uint8)
+                        if m_arr.size > 0 and m_arr.shape == (H, W) and np.any(m_arr):
+                            mask_full = (m_arr > 0).astype(np.uint8)
+
+                    # draw mask if we got one
+                    if mask_full is not None and np.any(mask_full):
+                        from skimage.segmentation import mark_boundaries
+                        im = (mark_boundaries(im/255.0, mask_full, color=(0,0,1), background_label=0)*255).astype(np.uint8)
+                        self.mask.append(mask_full)
+                        drew_any_atomic = True
+
+                    # --- midline ---
+                    midline = np.array(crack.get("midline", []), dtype=float)
+                    src = crack.get("source", "auto" if crack_type=="atomic_cracks" else "auto")
+                    mid_color = (0,255,0) if (src=="auto" and crack_type=="atomic_cracks") else \
+                                (255,0,0) if crack_type=="combined_cracks" else (0,200,200)
+                    if len(midline) > 1:
+                        for i in range(1, len(midline)):
+                            pt1 = (int(round(midline[i-1][0])), int(round(midline[i-1][1])))
+                            pt2 = (int(round(midline[i][0])),  int(round(midline[i][1])))
+                            cv2.line(im, pt1, pt2, mid_color, 2)
+
+                    # --- geodesic edges ---
+                    edges = crack.get("geodesic_edges", {}) or {}
+                    for k, edge_pts in edges.items():
+                        edge_pts = np.array(edge_pts, dtype=float)
+                        if len(edge_pts) > 1:
+                            for i in range(1, len(edge_pts)):
+                                pt1 = (int(round(edge_pts[i - 1][0])), int(round(edge_pts[i - 1][1])))
+                                pt2 = (int(round(edge_pts[i][0])), int(round(edge_pts[i][1])))
+                                cv2.line(im, pt1, pt2, (255, 255, 0), 2)
+
+                    # --- user points / connections ---
+                    up = crack.get("user_points", []) or []
+                    for p in up:
+                        x0, y0 = int(round(p[0])), int(round(p[1]))
+                        if 0 <= x0 < W and 0 <= y0 < H:
+                            endpoint_radius = max(3, int(min(H, W) * 0.0035))
+                            cv2.circle(im, (x0, y0), endpoint_radius, (255, 0, 255), -1)
+
+            # ==========================================================
+            # 2) LEGACY FALLBACK if no atomic masks drawn
+            # ==========================================================
+            if not drew_any_atomic:
+                ann_masks = ann.get('all_masks', [])
+                if ann_masks:
+                    for m_arr in ann_masks:
+                        mask = np.array(m_arr, dtype=np.uint8)
+                        if mask.shape == im.shape[:2] and np.any(mask):
+                            from skimage.segmentation import mark_boundaries
+                            im = (mark_boundaries(im/255.0, mask, color=(0,0,1), background_label=0)*255).astype(np.uint8)
+                            self.mask.append(mask)
+                else:
+                    c = np.array(ann.get('crack_pixels', []))
+                    if c.size > 0:
+                        mask = np.zeros(im.shape[:2], dtype=np.uint8)
+                        mask[list(c[:,0]), list(c[:,1])] = 1
+                        from skimage.segmentation import mark_boundaries
+                        im = (mark_boundaries(im/255.0, mask, color=(0,0,1), background_label=0)*255).astype(np.uint8)
+                        self.mask.append(mask)
+
+        # ---- Render to screen ----
+        qimage = QImage(im.astype(np.uint8), im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimage)
+        scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(),
+                                    Qt.KeepAspectRatio, Qt.FastTransformation)
         self.ImageScreen.setPixmap(scaled_pixmap)
-    
+        
     '''def clear_segmentation(self):
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
-        import numpy as np, json, cv2
-
-        if not hasattr(self, "annotation") or not isinstance(self.annotation, dict):
-            error("No annotation data loaded.")
-            return
-
-        ann = self.annotation.get("annotations", {})
-        atomic_cracks = ann.setdefault("atomic_cracks", {})
-        combined_cracks = ann.setdefault("combined_cracks", {})
-
-        masks = []
-        labels = []
-        items = []
-
-        H, W = self.original_image.shape[:2]
-
-        # --- Atomic cracks ---
-        for crack_id, crack in atomic_cracks.items():
-            m = np.array(crack.get("mask", []), dtype=np.uint8)
-            has_mask = m.size > 0 and np.any(m)
-            if has_mask and m.shape != (H, W):
-                print(f"[WARN] Resizing atomic crack mask from {m.shape} to {(H, W)}")
-                tmp = np.zeros((H, W), dtype=np.uint8)
-                tmp[:m.shape[0], :m.shape[1]] = m
-                m = tmp
-            if not has_mask:
-                m = np.zeros((H, W), dtype=np.uint8)
-            masks.append(m)
-            label = f"Atomic {crack_id}" + ("" if has_mask else " (empty)")
-            labels.append(label)
-            items.append(("atomic", crack_id))
-
-        # --- Combined cracks ---
-        for crack_id, crack in combined_cracks.items():
-            m = np.array(crack.get("mask", []), dtype=np.uint8)
-            has_mask = m.size > 0 and np.any(m)
-            if has_mask and m.shape != (H, W):
-                print(f"[WARN] Resizing combined crack mask from {m.shape} to {(H, W)}")
-                tmp = np.zeros((H, W), dtype=np.uint8)
-                tmp[:m.shape[0], :m.shape[1]] = m
-                m = tmp
-            if not has_mask:
-                m = np.zeros((H, W), dtype=np.uint8)
-            masks.append(m)
-            members = crack.get("members", [])
-            labels.append(f"Combined {crack_id} (from: {','.join(map(str, members))})" + ("" if has_mask else " (empty)"))
-            items.append(("combined", crack_id))
-
-        # --- If no cracks, but legacy data exists, allow wipe instead of error ---
-        if not masks:
-            if ann.get("crack_pixels") or ann.get("all_masks"):
-                print("[DEBUG] No cracks but legacy masks/pixels exist -> wiping")
-                ann["crack_pixels"] = []
-                ann["all_masks"] = []
-                ann["combined_cracks"] = {}
-                with open(self.ann_name, 'w') as fp:
-                    json.dump(self.annotation, fp)
-                self.change_image()
-            else:
-                error("No saved cracks to delete.")
-            return
-
-        # --- Selection dialog ---
-        dlg = QDialog(self.MainWindow)
-        dlg.setWindowTitle("Select Segments to Delete")
-        layout = QVBoxLayout(dlg)
-        listwidget = QListWidget()
-        listwidget.setSelectionMode(QListWidget.MultiSelection)
-        for lbl in labels:
-            listwidget.addItem(lbl)
-        layout.addWidget(listwidget)
-
-        btns = QHBoxLayout()
-        btn_ok = QPushButton("Delete Selected")
-        btn_cancel = QPushButton("Cancel")
-        btns.addWidget(btn_ok)
-        btns.addWidget(btn_cancel)
-        layout.addLayout(btns)
-
-        btn_ok.clicked.connect(dlg.accept)
-        btn_cancel.clicked.connect(dlg.reject)
-        self.change_image()
-
-        def highlight_selected_segments():
-            display = self.original_image.copy()
-            for i, m in enumerate(masks):
-                color = (255, 0, 0)
-                alpha = 0.25
-                if listwidget.item(i).isSelected():
-                    color = (255, 255, 0)
-                    alpha = 0.6
-                if np.any(m):
-                    overlay = np.zeros_like(display)
-                    overlay[m.astype(bool)] = color
-                    display = cv2.addWeighted(display, 1, overlay, alpha, 0)
-            im = display.astype(np.uint8)
-            qimage = QImage(im, im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(
-                self.ImageScreen.width(), self.ImageScreen.height(),
-                Qt.KeepAspectRatio, Qt.FastTransformation
-            )
-            self.ImageScreen.setPixmap(scaled_pixmap)
-
-        listwidget.itemSelectionChanged.connect(highlight_selected_segments)
-        highlight_selected_segments()
-
-        if dlg.exec_() == QDialog.Accepted:
-            selected_indices = [i.row() for i in listwidget.selectedIndexes()]
-            if not selected_indices:
-                self.change_image()
-                return
-
-            print(f"[DEBUG] clear_segmentation START")
-            print(f"  Atomic cracks before = {list(atomic_cracks.keys())}")
-            print(f"  Combined cracks before = {list(combined_cracks.keys())}")
-
-            # --- Delete selected cracks and associated data ---
-            for idx in sorted(selected_indices, reverse=True):
-                tpe, crack_id = items[idx]
-                if tpe == "atomic":
-                    print(f"[DEBUG] Deleting atomic crack_id={crack_id}")
-                    if crack_id in atomic_cracks:
-                        atomic_cracks[crack_id].pop("user_points", None)
-                        atomic_cracks[crack_id].pop("user_connections", None)
-                        atomic_cracks[crack_id].pop("geodesic_edges", None)
-                    atomic_cracks.pop(crack_id, None)
-                    # Remove from any combined crack membership
-                    for cid, combo in list(combined_cracks.items()):
-                        if crack_id in combo.get("members", []):
-                            combo["members"] = [m for m in combo["members"] if m != crack_id]
-                            if not combo["members"]:
-                                combined_cracks.pop(cid, None)
-                elif tpe == "combined":
-                    print(f"[DEBUG] Deleting combined crack_id={crack_id}")
-                    combined_cracks.pop(crack_id, None)
-
-            # --- If no atomics remain -> wipe combined + legacy masks/pixels ---
-            # --- Write back ---
-            self.annotation["annotations"]["atomic_cracks"] = atomic_cracks
-            self.annotation["annotations"]["combined_cracks"] = combined_cracks
-            if not atomic_cracks:
-                print("[DEBUG] No atomic cracks remain -> wiping combined_cracks, crack_pixels, all_masks")
-                combined_cracks.clear()
-                ann["crack_pixels"] = []
-                ann["all_masks"] = []
-            else:
-                # --- Rebuild masks/pixels from remaining cracks ---
-                new_masks = []
-                for crack in atomic_cracks.values():
-                    m = np.array(crack.get("mask", []), dtype=np.uint8)
-                    if m.shape != (H, W):
-                        tmp = np.zeros((H, W), dtype=np.uint8)
-                        tmp[:m.shape[0], :m.shape[1]] = m
-                        m = tmp
-                    if np.any(m):
-                        new_masks.append(m)
-                for crack in combined_cracks.values():
-                    m = np.array(crack.get("mask", []), dtype=np.uint8)
-                    if m.shape != (H, W):
-                        tmp = np.zeros((H, W), dtype=np.uint8)
-                        tmp[:m.shape[0], :m.shape[1]] = m
-                        m = tmp
-                    if np.any(m):
-                        new_masks.append(m)
-
-                ann["all_masks"] = []
-                ann["crack_pixels"] = []
-                if new_masks:
-                    m_sum = np.sum(np.stack(new_masks), axis=0)
-                    m_sum[m_sum >= 1] = 1
-                    ann["crack_pixels"] = np.argwhere(m_sum == 1).tolist()
-                    ann["all_masks"] = [m.tolist() for m in new_masks]
-
-            # --- Save changes ---
-            with open(self.ann_name, 'w') as fp:
-                json.dump(self.annotation, fp)
-
-            print(f"[DEBUG] After deletion: atomic = {list(atomic_cracks.keys())}")
-            print(f"[DEBUG] After deletion: combined = {list(combined_cracks.keys())}")
-            print(f"[DEBUG] After deletion: all_masks = {len(ann['all_masks'])}, crack_pixels = {len(ann['crack_pixels'])}")
-
-            self.change_image()
-        else:
-            self.change_image()'''
-    
-    def clear_segmentation(self):
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
         import numpy as np, json, cv2
 
@@ -2301,7 +2263,103 @@ class CrackToolsApplication(Ui_MainWindow):
 
             self.change_image()
         else:
+            self.change_image()'''
+    
+    def clear_segmentation(self):
+        """
+        Select and delete cracks directly from self.annotation JSON.
+        Works with compact mask_crop/mask_bbox or legacy mask. No merging/padding.
+        """
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
+        from PyQt5.QtGui import QImage, QPixmap
+        import numpy as np, cv2
+
+        # Ensure annotation structure exists
+        if not hasattr(self, "annotation") or not isinstance(self.annotation, dict):
+            error("No annotation data loaded.")
+            return
+        ann = self.annotation.setdefault("annotations", {})
+        atomic_cracks = ann.setdefault("atomic_cracks", {})
+        combined_cracks = ann.setdefault("combined_cracks", {})
+
+        if not atomic_cracks and not combined_cracks:
+            error("No saved cracks to delete.")
+            return
+
+        # Build list items
+        labels = []
+        items = []
+        for crack_id in sorted(atomic_cracks.keys(), key=lambda x: int(x)):
+            labels.append(f"Atomic {crack_id}")
+            items.append(("atomic", crack_id))
+        for crack_id, crack in sorted(combined_cracks.items(), key=lambda kv: int(kv[0])):
+            members = crack.get("members", [])
+            labels.append(f"Combined {crack_id} (from: {','.join(map(str, members))})")
+            items.append(("combined", crack_id))
+
+        # Dialog UI
+        dlg = QDialog(self.MainWindow)
+        dlg.setWindowTitle("Select Segments to Delete")
+        layout = QVBoxLayout(dlg)
+        listwidget = QListWidget()
+        listwidget.setSelectionMode(QListWidget.MultiSelection)
+        for lbl in labels:
+            listwidget.addItem(lbl)
+        layout.addWidget(listwidget)
+        btns = QHBoxLayout()
+        btn_ok = QPushButton("Delete Selected")
+        btn_cancel = QPushButton("Cancel")
+        btns.addWidget(btn_ok); btns.addWidget(btn_cancel)
+        layout.addLayout(btns)
+        btn_ok.clicked.connect(dlg.accept)
+        btn_cancel.clicked.connect(dlg.reject)
+
+        if dlg.exec_() != QDialog.Accepted:
             self.change_image()
+            return
+
+        selected_indices = [i.row() for i in listwidget.selectedIndexes()]
+        if not selected_indices:
+            self.change_image()
+            return
+
+        print(f"[DEBUG] clear_segmentation START")
+        print(f"  Before delete → atomic={list(atomic_cracks.keys())}, combined={list(combined_cracks.keys())}")
+
+        # Nuke selected entries
+        for idx in sorted(selected_indices, reverse=True):
+            tpe, crack_id = items[idx]
+            if tpe == "atomic":
+                print(f"[DEBUG] Deleting atomic crack_id={crack_id}")
+                atomic_cracks.pop(str(crack_id), None)
+                # Remove from combined cracks’ members; drop empty combined
+                for cid, combo in list(combined_cracks.items()):
+                    if crack_id in combo.get("members", []):
+                        combo["members"] = [m for m in combo["members"] if m != crack_id]
+                        if not combo["members"]:
+                            print(f"[DEBUG] Removing empty combined crack {cid}")
+                            combined_cracks.pop(cid, None)
+            else:
+                print(f"[DEBUG] Deleting combined crack_id={crack_id}")
+                combined_cracks.pop(str(crack_id), None)
+
+        # Reindex IDs to 0..N-1 (strings)
+        if atomic_cracks:
+            new_atomic = {}
+            for new_id, key in enumerate(sorted(atomic_cracks.keys(), key=lambda x: int(x))):
+                new_atomic[str(new_id)] = atomic_cracks[key]
+            atomic_cracks.clear(); atomic_cracks.update(new_atomic)
+        if combined_cracks:
+            new_combined = {}
+            for new_id, key in enumerate(sorted(combined_cracks.keys(), key=lambda x: int(x))):
+                new_combined[str(new_id)] = combined_cracks[key]
+            combined_cracks.clear(); combined_cracks.update(new_combined)
+
+        print(f"[DEBUG] After delete (pre-save) → atomic={list(atomic_cracks.keys())}, combined={list(combined_cracks.keys())}")
+
+        # Persist (no merge from disk) and refresh
+        self.save_annotation()
+        self.change_image()
 
     def edge_tracking(self):
         try:
