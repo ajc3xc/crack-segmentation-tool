@@ -4,6 +4,14 @@ import numpy as np
 import cv2
 from skimage.segmentation import mark_boundaries
 
+from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog, QMessageBox
+def error(e):
+    msg = QMessageBox()
+    msg.setIcon(QMessageBox.Critical)
+    msg.setText(f"Error: {e}")
+    msg.setWindowTitle("Error")
+    msg.exec_()
+
 # ---------- Mask reconstruction / compaction ----------
 
 def reconstruct_full_mask_from_crack(crack: dict, H: int, W: int) -> np.ndarray:
@@ -130,3 +138,8 @@ def safe_json_dump(obj: dict, path: str) -> None:
     with os.fdopen(fd, "w") as f:
         json.dump(obj, f)
     shutil.move(tmp, path)
+
+# base_app.py
+import os, cv2, numpy as np
+from typing import Any, Dict, List
+# uses your existing helpers from this repo
