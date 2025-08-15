@@ -739,139 +739,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         except Exception as e:
             error(e)
-            
-    '''def clear_segmentation(self):
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
-        import numpy as np, json, cv2, os
-
-        if not hasattr(self, "annotation") or not isinstance(self.annotation, dict):
-            error("No annotation data loaded.")
-            return
-
-        ann = self.annotation.get("annotations", {})
-        atomic_cracks = ann.setdefault("atomic_cracks", {})
-        combined_cracks = ann.setdefault("combined_cracks", {})
-
-        masks = []
-        labels = []
-        items = []
-
-        H, W = self.original_image.shape[:2]
-
-        # --- Atomic cracks ---
-        for crack_id, crack in atomic_cracks.items():
-            m = reconstruct_full_mask_from_crack(crack, H, W)
-            masks.append(m)
-            labels.append(f"Atomic {crack_id}" + ("" if np.any(m) else " (empty)"))
-            items.append(("atomic", crack_id))
-
-        # --- Combined cracks ---
-        for crack_id, crack in combined_cracks.items():
-            m = reconstruct_full_mask_from_crack(crack, H, W)
-            masks.append(m)
-            members = crack.get("members", [])
-            labels.append(f"Combined {crack_id} (from: {','.join(map(str, members))})" + ("" if np.any(m) else " (empty)"))
-            items.append(("combined", crack_id))
-
-        if not masks:
-            error("No saved cracks to delete.")
-            return
-
-        # --- Selection dialog ---
-        dlg = QDialog(self.MainWindow)
-        dlg.setWindowTitle("Select Segments to Delete")
-        layout = QVBoxLayout(dlg)
-        listwidget = QListWidget()
-        listwidget.setSelectionMode(QListWidget.MultiSelection)
-        for lbl in labels:
-            listwidget.addItem(lbl)
-        layout.addWidget(listwidget)
-
-        btns = QHBoxLayout()
-        btn_ok = QPushButton("Delete Selected")
-        btn_cancel = QPushButton("Cancel")
-        btns.addWidget(btn_ok)
-        btns.addWidget(btn_cancel)
-        layout.addLayout(btns)
-
-        btn_ok.clicked.connect(dlg.accept)
-        btn_cancel.clicked.connect(dlg.reject)
-
-        def highlight_selected_segments():
-            display = self.original_image.copy()
-            for i, m in enumerate(masks):
-                color = (255, 0, 0)
-                alpha = 0.25
-                if listwidget.item(i).isSelected():
-                    color = (255, 255, 0)
-                    alpha = 0.6
-                if np.any(m):
-                    overlay = np.zeros_like(display)
-                    overlay[m.astype(bool)] = color
-                    display = cv2.addWeighted(display, 1, overlay, alpha, 0)
-            im = display.astype(np.uint8)
-            from PyQt5.QtGui import QImage, QPixmap
-            from PyQt5.QtCore import Qt
-            qimage = QImage(im, im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(
-                self.ImageScreen.width(), self.ImageScreen.height(),
-                Qt.KeepAspectRatio, Qt.FastTransformation
-            )
-            self.ImageScreen.setPixmap(scaled_pixmap)
-
-        listwidget.itemSelectionChanged.connect(highlight_selected_segments)
-        highlight_selected_segments()
-
-        if dlg.exec_() == QDialog.Accepted:
-            selected_indices = [i.row() for i in listwidget.selectedIndexes()]
-            if not selected_indices:
-                self.change_image()
-                return
-
-            print(f"[DEBUG] clear_segmentation START")
-            print(f"  Atomic cracks before = {list(atomic_cracks.keys())}")
-            print(f"  Combined cracks before = {list(combined_cracks.keys())}")
-
-            # --- Delete selected ---
-            for idx in sorted(selected_indices, reverse=True):
-                tpe, crack_id = items[idx]
-                if tpe == "atomic":
-                    print(f"[DEBUG] Deleting atomic crack_id={crack_id}")
-                    atomic_cracks.pop(crack_id, None)
-                    for cid, combo in list(combined_cracks.items()):
-                        if crack_id in combo.get("members", []):
-                            combo["members"] = [m for m in combo["members"] if m != crack_id]
-                            if not combo["members"]:
-                                combined_cracks.pop(cid, None)
-                elif tpe == "combined":
-                    print(f"[DEBUG] Deleting combined crack_id={crack_id}")
-                    combined_cracks.pop(crack_id, None)
-
-            # --- Reindex cracks ---
-            if atomic_cracks:
-                new_atomic = {}
-                for new_id, crack in enumerate([atomic_cracks[k] for k in sorted(atomic_cracks.keys(), key=lambda x: int(x))]):
-                    new_atomic[str(new_id)] = crack
-                atomic_cracks.clear()
-                atomic_cracks.update(new_atomic)
-
-            if combined_cracks:
-                new_combined = {}
-                for new_id, crack in enumerate([combined_cracks[k] for k in sorted(combined_cracks.keys(), key=lambda x: int(x))]):
-                    new_combined[str(new_id)] = crack
-                combined_cracks.clear()
-                combined_cracks.update(new_combined)
-
-            self.annotation["annotations"]["atomic_cracks"] = atomic_cracks
-            self.annotation["annotations"]["combined_cracks"] = combined_cracks
-
-            # --- Save + refresh ---
-            self.save_annotation()
-            self.change_image()
-        else:
-            self.change_image()'''
-    
+                
     def clear_segmentation(self):
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
         import numpy as np, cv2
@@ -991,14 +859,47 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                             combined_cracks.pop(cid, None)
 
             # --- Reindex atomic cracks only ---
+            # --- Reindex atomic cracks (build old->new map first) ---
             if atomic_cracks:
-                new_atomic = {}
-                for new_id, crack in enumerate(
-                    [atomic_cracks[k] for k in sorted(atomic_cracks.keys(), key=lambda x: int(x))]
-                ):
-                    new_atomic[str(new_id)] = crack
+                old_ids_sorted = sorted(atomic_cracks.keys(), key=lambda x: int(x))
+                old_to_new = {old_id: str(i) for i, old_id in enumerate(old_ids_sorted)}
+                new_atomic = {old_to_new[old_id]: atomic_cracks[old_id] for old_id in old_ids_sorted}
                 atomic_cracks.clear()
                 atomic_cracks.update(new_atomic)
+
+            # --- Remap combined crack members after atomic reindex, drop small ones, and rebuild crops ---
+            if combined_cracks:
+                H, W = self.original_image.shape[:2]
+                to_delete = []
+                for cid, combo in list(combined_cracks.items()):
+                    members_old = combo.get("members", [])
+                    # remap to new ids; keep only those still present
+                    members_new = [old_to_new[m] for m in members_old if m in old_to_new]
+                    if len(members_new) < 2:
+                        to_delete.append(cid)
+                        continue
+
+                    combo["members"] = members_new
+
+                    # rebuild union/crop from remapped members
+                    union_mask = np.zeros((H, W), dtype=np.uint8)
+                    for m_id in members_new:
+                        member_crack = atomic_cracks.get(m_id)
+                        if member_crack is not None:
+                            union_mask |= reconstruct_full_mask_from_crack(member_crack, H, W)
+
+                    if np.any(union_mask):
+                        ys, xs = np.where(union_mask > 0)
+                        y0, y1 = int(ys.min()), int(ys.max() + 1)
+                        x0, x1 = int(xs.min()), int(xs.max() + 1)
+                        crop = union_mask[y0:y1, x0:x1].astype(np.uint8)
+                        combo["mask_crop"] = crop.tolist()
+                        combo["mask_bbox"] = [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
+                    else:
+                        to_delete.append(cid)
+
+                for cid in to_delete:
+                    combined_cracks.pop(cid, None)
 
             self.annotation["annotations"]["atomic_cracks"] = atomic_cracks
             self.annotation["annotations"]["combined_cracks"] = combined_cracks
@@ -1766,13 +1667,10 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
     # crack_tool_v2.py  --- CrackToolsApplication.combine_segments  (REPLACE WHOLE METHOD)
     def combine_segments(self):
         """
-        Combine multiple atomic cracks into one combined crack **only if** they intersect
-        and the union is a single connected component.
-
-        - Multi-select dialog w/ live highlight
-        - Blocks if any selected crack has zero overlap with the others
-        - Blocks if the union has >1 connected component
-        - Writes combined entry: {"source":"combined","members":[...],"mask_crop","mask_bbox"}
+        Combine multiple cracks (atomic or already-combined) into a new combined crack.
+        - If an atomic crack belongs to a combined crack, it is listed under that combined crack instead.
+        - Each crack appears only once in the selection list.
+        - Requires at least two entries in the list to start combining.
         """
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout, QMessageBox
         from PyQt5.QtGui import QImage, QPixmap
@@ -1781,13 +1679,10 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         if not hasattr(self, "annotation") or not isinstance(self.annotation, dict):
             error("No annotation data loaded.")
             return
+
         ann = self.annotation.setdefault("annotations", {})
         atomic_cracks = ann.setdefault("atomic_cracks", {})
         combined_cracks = ann.setdefault("combined_cracks", {})
-
-        if not atomic_cracks:
-            error("No atomic cracks to combine.")
-            return
 
         H, W = self.original_image.shape[:2]
 
@@ -1809,40 +1704,65 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 return (full > 0).astype(np.uint8)
             return np.zeros((H, W), dtype=np.uint8)
 
-        def endpoints_key(crack):
-            up = crack.get("user_points", []) or []
-            uc = crack.get("user_connections", []) or []
-            if len(up) == 2 and any(list(c) == [0,1] or list(c) == [1,0] for c in uc):
-                a = tuple(map(float, up[0])); b = tuple(map(float, up[1]))
-                return tuple(sorted([a, b]))
-            return None
+        # --- Build a unique display list where each atomic belongs to at most one combined
+        display_items = []  # list of (type, id)
+        seen_atomic = set()
 
-        atom_ids_sorted = sorted(atomic_cracks.keys(), key=lambda s: int(s))
-        labels = [f"Atomic {cid}" for cid in atom_ids_sorted]
+        # First, add combined cracks as single entries
+        for cmb_id, cmb in sorted(combined_cracks.items(), key=lambda kv: int(kv[0])):
+            members = cmb.get("members", [])
+            if any(m in atomic_cracks for m in members):
+                display_items.append(("combined", cmb_id))
+                seen_atomic.update(members)
+
+        # Then add remaining atomic cracks
+        for atom_id in sorted(atomic_cracks.keys(), key=lambda s: int(s)):
+            if atom_id not in seen_atomic:
+                display_items.append(("atomic", atom_id))
+
+        # If fewer than two selectable entries, abort
+        if len(display_items) < 2:
+            error("Need at least two segments (atomic or combined) to combine.")
+            return
 
         # --- Dialog
-        dlg = QDialog(self.MainWindow); dlg.setWindowTitle("Combine Segments")
+        dlg = QDialog(self.MainWindow)
+        dlg.setWindowTitle("Combine Segments")
         layout = QVBoxLayout(dlg)
 
-        listwidget = QListWidget(); listwidget.setSelectionMode(QListWidget.MultiSelection)
-        for lbl in labels: listwidget.addItem(lbl)
+        listwidget = QListWidget()
+        listwidget.setSelectionMode(QListWidget.MultiSelection)
+        for tpe, cid in display_items:
+            if tpe == "atomic":
+                lbl = f"Atomic {cid}"
+            else:
+                members = combined_cracks[cid].get("members", [])
+                lbl = f"Combined {cid} (members: {','.join(members)})"
+            listwidget.addItem(lbl)
         layout.addWidget(listwidget)
 
         btns = QHBoxLayout()
-        btn_ok = QPushButton("Combine Selected"); btn_cancel = QPushButton("Cancel")
-        btns.addWidget(btn_ok); btns.addWidget(btn_cancel); layout.addLayout(btns)
-        btn_ok.clicked.connect(dlg.accept); btn_cancel.clicked.connect(dlg.reject)
+        btn_ok = QPushButton("Combine Selected")
+        btn_cancel = QPushButton("Cancel")
+        btns.addWidget(btn_ok)
+        btns.addWidget(btn_cancel)
+        layout.addLayout(btns)
 
-        # --- Live highlight
+        btn_ok.clicked.connect(dlg.accept)
+        btn_cancel.clicked.connect(dlg.reject)
+
+        # --- Highlight selection
         def highlight():
             display = self.original_image.copy()
-            for i, cid in enumerate(atom_ids_sorted):
-                crack = atomic_cracks[cid]
+            for i, (tpe, cid) in enumerate(display_items):
+                crack = atomic_cracks[cid] if tpe == "atomic" else combined_cracks[cid]
                 m_full = mask_from_crack(crack)
                 if np.any(m_full):
-                    color = (255, 0, 0); alpha = 0.25
+                    color = (255, 0, 0)
+                    alpha = 0.25
                     if listwidget.item(i).isSelected():
-                        color = (255, 255, 0); alpha = 0.6
+                        color = (255, 255, 0)
+                        alpha = 0.6
                     overlay = np.zeros_like(display)
                     overlay[m_full.astype(bool)] = color
                     display = cv2.addWeighted(display, 1, overlay, alpha, 0)
@@ -1853,7 +1773,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                                 Qt.KeepAspectRatio, Qt.FastTransformation)
             self.ImageScreen.setPixmap(scaled)
 
-        listwidget.itemSelectionChanged.connect(highlight); highlight()
+        listwidget.itemSelectionChanged.connect(highlight)
+        highlight()
 
         if dlg.exec_() != QDialog.Accepted:
             self.change_image()
@@ -1861,65 +1782,57 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         selected_rows = [i.row() for i in listwidget.selectedIndexes()]
         if len(selected_rows) < 2:
-            error("Select at least two atomic segments to combine.")
+            error("Select at least two segments to combine.")
             self.change_image()
             return
-        selected_ids = [atom_ids_sorted[i] for i in selected_rows]
 
-        # --- Disallow duplicate endpoint-pair merges (order-insensitive)
-        keys = {}
-        for cid in selected_ids:
-            k = endpoints_key(atomic_cracks[cid])
-            if k is not None:
-                if k in keys:
-                    QMessageBox.critical(self.MainWindow, "Cannot Combine",
-                        f"Selected segments {keys[k]} and {cid} share the same endpoints. This combine is blocked.")
-                    self.change_image(); return
-                keys[k] = cid
+        # --- Gather all atomic members from selection
+        selected_atomic_ids = set()
+        for idx in selected_rows:
+            tpe, cid = display_items[idx]
+            if tpe == "atomic":
+                selected_atomic_ids.add(cid)
+            else:
+                selected_atomic_ids.update(combined_cracks[cid].get("members", []))
 
-        # --- Require pairwise overlap & single connected component
-        masks = {cid: mask_from_crack(atomic_cracks[cid]) for cid in selected_ids}
+        # --- Build union mask
         union_mask = np.zeros((H, W), dtype=np.uint8)
-        for m in masks.values(): union_mask |= (m > 0).astype(np.uint8)
-
-        # (a) every selected must overlap at least one other selected
-        for cid in selected_ids:
-            others = np.zeros((H, W), dtype=np.uint8)
-            for oid, om in masks.items():
-                if oid == cid: continue
-                others |= (om > 0).astype(np.uint8)
-            if np.count_nonzero(masks[cid] & others) == 0:
-                QMessageBox.critical(self.MainWindow, "Cannot Combine",
-                    f"Selected segment {cid} does not intersect with any of the others.")
-                self.change_image(); return
-
-        # (b) union must be a single connected component
-        num_labels, labels_im = cv2.connectedComponents((union_mask > 0).astype(np.uint8))
-        # num_labels counts background as 1 label ⇒ components = num_labels - 1
-        if num_labels - 1 > 1:
-            QMessageBox.critical(self.MainWindow, "Cannot Combine",
-                "The union of selected segments is not connected (multiple components).")
-            self.change_image(); return
+        for aid in selected_atomic_ids:
+            if aid in atomic_cracks:
+                union_mask |= mask_from_crack(atomic_cracks[aid])
 
         if not np.any(union_mask):
-            error("The union of the selected masks is empty — nothing to combine.")
-            self.change_image(); return
+            error("The union of selected masks is empty — nothing to combine.")
+            self.change_image()
+            return
 
         ys, xs = np.where(union_mask > 0)
         y0, y1 = int(ys.min()), int(ys.max() + 1)
         x0, x1 = int(xs.min()), int(xs.max() + 1)
         crop = union_mask[y0:y1, x0:x1].astype(np.uint8)
 
+        # --- Remove old combined cracks that are subsumed by this merge
+        to_delete = []
+        for cmb_id, cmb in list(combined_cracks.items()):
+            members = set(cmb.get("members", []))
+            # If all members are in the new combined set, mark for deletion
+            if members.issubset(selected_atomic_ids):
+                to_delete.append(cmb_id)
+        for cmb_id in to_delete:
+            combined_cracks.pop(cmb_id, None)
+
         # --- Allocate a new combined id
         cmb_ids = []
         for k in combined_cracks.keys():
-            try: cmb_ids.append(int(k))
-            except: pass
+            try:
+                cmb_ids.append(int(k))
+            except:
+                pass
         new_cmb_id = str(max(cmb_ids) + 1 if cmb_ids else 0)
 
         combined_cracks[new_cmb_id] = {
             "source": "combined",
-            "members": [str(c) for c in selected_ids],
+            "members": list(selected_atomic_ids),
             "midline": [],
             "geodesic_edges": {},
             "mask_crop": crop.tolist(),
