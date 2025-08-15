@@ -962,24 +962,24 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                     atomic_cracks.pop(crack_id, None)
                     # Remove from combined_cracks members if present
                     for cid, combo in list(combined_cracks.items()):
-                        # Remove deleted atomic crack from this combined crack's members
+                        # Remove deleted atomic cracks from members
                         combo["members"] = [m for m in combo.get("members", []) if m in atomic_cracks]
 
-                        if not combo["members"]:
+                        # Delete if fewer than 2 members remain
+                        if len(combo["members"]) < 2:
                             combined_cracks.pop(cid, None)
                             continue
 
-                        # Get full image size (not old crop size)
+                        # Get full image size
                         H, W = self.original_image.shape[:2]
 
-                        # --- Rebuild full-size union mask from updated members ---
+                        # --- Rebuild union mask ---
                         union_mask = np.zeros((H, W), dtype=np.uint8)
                         for m_id in combo["members"]:
                             member_crack = atomic_cracks.get(m_id)
                             if member_crack is not None:
                                 union_mask |= reconstruct_full_mask_from_crack(member_crack, H, W)
 
-                        # If there's still something left, recalculate crop+bbox fresh
                         if np.any(union_mask):
                             ys, xs = np.where(union_mask > 0)
                             y0, y1 = int(ys.min()), int(ys.max() + 1)
@@ -988,9 +988,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                             combo["mask_crop"] = crop.tolist()
                             combo["mask_bbox"] = [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
                         else:
-                            combined_cracks.pop(cid, None)  # Delete if mask is now empty
-
-
+                            combined_cracks.pop(cid, None)
 
             # --- Reindex atomic cracks only ---
             if atomic_cracks:
