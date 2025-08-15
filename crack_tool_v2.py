@@ -879,7 +879,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                         to_delete.append(cid)
                         continue
 
-                    combo["members"] = members_new
+                    combo["members"] = sorted(members_new, key=lambda s: int(s))  # ensure ascending order
 
                     # rebuild union/crop from remapped members
                     union_mask = np.zeros((H, W), dtype=np.uint8)
@@ -1832,7 +1832,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         combined_cracks[new_cmb_id] = {
             "source": "combined",
-            "members": list(selected_atomic_ids),
+            "members": sorted(selected_atomic_ids, key=lambda s: int(s)),  # ensure ascending order
             "midline": [],
             "geodesic_edges": {},
             "mask_crop": crop.tolist(),
