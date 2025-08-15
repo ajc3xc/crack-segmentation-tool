@@ -1374,11 +1374,6 @@ class CrackToolsApplication(Ui_MainWindow):
                 except Exception as e:
                     print(f"[WARN] Failed to read existing JSON: {e}")
 
-            '''current_cracks = ann.setdefault("atomic_cracks", {})
-            merged_cracks = dict(existing_cracks)
-            merged_cracks.update(current_cracks)  # in-memory wins
-            ann["atomic_cracks"] = merged_cracks'''
-
             # --- COMPACTION PASS: convert any full masks -> crop + bbox, then drop full mask ---
             for cid, crack in list(ann["atomic_cracks"].items()):
                 m = np.array(crack.get("mask", []), dtype=np.uint8)
@@ -1850,75 +1845,6 @@ class CrackToolsApplication(Ui_MainWindow):
         # Persist (no merge from disk) and refresh
         self.save_annotation()
         self.change_image()
-    
-    '''def edge_tracking(self):
-        try:
-            color_channel = [0 if self.edge_track_color_box.currentText() == 'R'
-                            else 1 if self.edge_track_color_box.currentText() == 'B' else 2][0]
-            w = self.edge_track_width_box.value()
-            mu = self.mu_box.value()
-            l = self.l_box.value()
-            p = self.p_box.value()
-
-            res = ct.segmentation.edges_tracking(
-                self.image_crop[:, :, color_channel],
-                self.pts_crop,
-                self.edge_mask1_crop, self.edge_mask2_crop, self.adjusted_track, mu=mu, l=l, p=p,
-                return_normal_edges=True
-            )
-
-            track_e1, track_e2 = res["geodesic_edges"]
-            normal_edges = res["normal_edge_points"]
-            normal_edges_clipped = res["normal_edge_points_clipped"]
-
-            # If editing an existing crack, reuse its ID
-            if hasattr(self, "current_crack_id") and self.current_crack_id in self.crack_tracks:
-                crack_id = self.current_crack_id
-            else:
-                crack_id = len(self.crack_tracks)
-            self.current_crack_id = crack_id
-
-            self.crack_tracks[crack_id] = [track_e1[:,0], track_e1[:,1]]
-            self.track_e1 = [track_e1[:,0], track_e1[:,1]]
-            self.track_e2 = [track_e2[:,0], track_e2[:,1]]
-
-            # --- NEW: store both crop and full-image normal edges ---
-            if not hasattr(self, "normal_edge_points"):
-                self.normal_edge_points = {}
-            if not hasattr(self, "normal_edge_points_full"):
-                self.normal_edge_points_full = {}
-
-            self.normal_edge_points[crack_id] = normal_edges  # crop coords
-
-            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
-            (e1x, e1y), (e2x, e2y) = normal_edges
-            e1_global = np.stack([e1x + xmin, e1y + ymin], axis=1)
-            e2_global = np.stack([e2x + xmin, e2y + ymin], axis=1)
-            self.normal_edge_points_full[crack_id] = {
-                "edge1": e1_global.tolist(),
-                "edge2": e2_global.tolist()
-            }
-
-            if not hasattr(self, "normal_edge_points_clipped"):
-                self.normal_edge_points_clipped = {}
-            self.normal_edge_points_clipped[crack_id] = normal_edges_clipped
-
-            pts1 = np.array([track_e1[:,0], track_e1[:,1]]).T.reshape((-1, 1, 2)).astype(np.int32)
-            pts2 = np.array([track_e2[:,0], track_e2[:,1]]).T.reshape((-1, 1, 2)).astype(np.int32)
-            im = self.image_crop.astype(np.uint8)
-            im = cv2.polylines(im, [pts1], False, (0,255,0), w)
-            im = cv2.polylines(im, [pts2], False, (0,255,0), w)
-            qimage = QImage(im, im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.edge_tracks_display.width(), self.edge_tracks_display.height(),
-                                        Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.edge_tracks_display.setPixmap(scaled_pixmap)
-            self.edge_tracks_full_screen_button.setStyleSheet("background-color : lightblue")
-            self.save_current_segment_button.setStyleSheet("background-color : lightblue")
-        except Exception as e:
-            error(e)
-            self.edge_tracks_full_screen_button.setStyleSheet("background-color : red")
-            self.save_current_segment_button.setStyleSheet("background-color : red")'''
     
     def edge_tracking(self):
         try:
