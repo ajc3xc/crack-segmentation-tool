@@ -343,7 +343,8 @@ def runReedsSheppGF(sides, dims, seeds, tips, metric):
         'arrayOrdering' : 'RowMajor',
         'tips' : tips,
         #'mode':'gpu',
-        'metric' : metric})
+        'metric' : metric,
+        'verbosity': 0})
     #print("...")
     hfmIn.SetRect(sides = sides, dims = dims)
     if hfmIn.mode=='gpu': 

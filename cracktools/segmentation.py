@@ -378,7 +378,8 @@ def edges_tracking(
         'seeds': np.expand_dims(seeds, axis=0),
         'arrayOrdering': 'RowMajor',
         'tips': np.expand_dims(tips, axis=0),
-        'metric': metric
+        'metric': metric,
+        'verbosity': 0,
     })
     hfmIn.SetRect(sides=sides, dims=dims)
     hfmOut = hfmIn.Run()
@@ -390,7 +391,8 @@ def edges_tracking(
         'seeds': np.expand_dims(seeds, axis=0),
         'arrayOrdering': 'RowMajor',
         'tips': np.expand_dims(tips, axis=0),
-        'metric': metric
+        'metric': metric,
+        'verbosity': 0,
     })
     hfmIn.SetRect(sides=sides, dims=dims)
     hfmOut = hfmIn.Run()
