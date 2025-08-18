@@ -1652,7 +1652,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
             self.edge_mask()
 
-            midline_xy_crop = np.vstack([self.adjusted_track[1], self.adjusted_track[0]])
+            midline_xy_crop = np.vstack([self.adjusted_track[0], self.adjusted_track[1]])
             res = ct.segmentation.edges_tracking(
                 self.image_crop[:, :, color_idx],
                 self.pts_crop,
@@ -1685,7 +1685,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             y0, y1 = int(ys.min()), int(ys.max() + 1)
             x0, x1 = int(xs.min()), int(xs.max() + 1)
             crop = union_mask[y0:y1, x0:x1].astype(np.uint8)
-            h, w = crop.shape
+            w, h = crop.shape
         else:
             x0 = y0 = 0
             h = w = 1

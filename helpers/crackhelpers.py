@@ -15,32 +15,35 @@ def error(e):
 # ---------- Mask reconstruction / compaction ----------
 
 def reconstruct_full_mask_from_crack(crack: dict, H: int, W: int) -> np.ndarray:
-    """
-    Rebuild a full-size (H,W) mask from a crack dict that may contain:
-      - compact storage: "mask_crop" + "mask_bbox"
-      - legacy:          "mask" (full image mask)
-    Returns uint8 binary mask (0/1). If nothing valid, returns all-zeros.
-    """
     mc = crack.get("mask_crop", None)
     bb = crack.get("mask_bbox", None)
+
     if mc is not None and bb is not None:
         crop = np.array(mc, dtype=np.uint8)
         x, y, w, h = [int(v) for v in bb]
         mask = np.zeros((H, W), dtype=np.uint8)
-        x2, y2 = min(x + w, W), min(y + h, H)
-        w_eff, h_eff = max(0, x2 - x), max(0, y2 - y)
-        if h_eff > 0 and w_eff > 0:
-            crop = (crop > 0).astype(np.uint8)[:h_eff, :w_eff]
-            mask[y:y + h_eff, x:x + w_eff] = crop
-        return mask
 
-    # legacy fallback
+        # auto-fix legacy swapped bbox order [x,y,h,w]
+        if crop.shape == (w, h) and (h, w) != crop.shape:
+            print(f"[DEBUG] fixing transposed legacy mask for crack (expected (h={h},w={w}), got {crop.shape})")
+            crop = crop.T
+            h, w = crop.shape  # update after transpose
+
+        # if mismatch, clip
+        h_eff, w_eff = crop.shape
+        h_eff, w_eff = min(h_eff, h), min(w_eff, w)
+
+        if h_eff > 0 and w_eff > 0:
+            mask[y:y+h_eff, x:x+w_eff] = crop[:h_eff, :w_eff]
+
+        return (mask > 0).astype(np.uint8)
+
+    # legacy full-size
     m = np.array(crack.get("mask", []), dtype=np.uint8)
-    if m.size > 0 and m.shape == (H, W) and np.any(m):
+    if m.size > 0 and m.shape == (H, W):
         return (m > 0).astype(np.uint8)
 
     return np.zeros((H, W), dtype=np.uint8)
-
 
 def compact_full_masks_in_ann(ann: dict, H: int, W: int) -> None:
     """
