@@ -773,7 +773,7 @@ class CrackUtils:
             error(e)
     
     # crackutils.py  --- CrackUtils.change_image  (REPLACE WHOLE METHOD)
-    def change_image(self):
+    '''def change_image(self):
         import os, json, cv2
         import numpy as np
         from skimage.segmentation import mark_boundaries  # for colored boundaries
@@ -894,5 +894,230 @@ class CrackUtils:
             self.all_segments_display.height(),
             is_gray=True
         )
+        self.all_segments_display.setPixmap(pixmap_mask)'''
+    
+    # crackutils.py  --- CrackUtils.change_image (DEBUG PATCHED)
+    def change_image(self):
+        import os, json, cv2
+        import numpy as np
+        import matplotlib.pyplot as plt
+        from skimage.segmentation import mark_boundaries  # for colored boundaries
+
+        self.current_crack_id = None
+        self.bb_pts_list = []
+        w = self.segment_width_box_2.value()
+
+        self.update_selected_item(os.path.basename(self.image_names[self.n]))
+        self.name = self.image_names[self.n]
+        self.image = cv2.imread(self.name)[:, :, ::-1].astype(np.uint8)
+        self.original_image = self.image.copy()
+        self.filename_label_2.setText(os.path.basename(self.name))
+        base_name = os.path.splitext(os.path.basename(self.name))[0]
+
+        # ---- MASK LOADING (optional external masks) ----
+        self.current_mask = None
+        if getattr(self, "use_masks", False) and hasattr(self, "mask_map"):
+            mask_path = self.mask_map.get(base_name)
+            if mask_path:
+                if mask_path.endswith('.npy'):
+                    mask = np.load(mask_path)
+                    mask = (mask > 0).astype(np.uint8) if mask.max() > 1 else mask.astype(np.uint8)
+                else:
+                    mask = cv2.imread(mask_path, 0)
+                    mask = (mask > 0).astype(np.uint8) if mask is not None else None
+                self.current_mask = mask
+
+        im = self.original_image.copy()
+        H, W = im.shape[:2]
+
+        # -------- Load annotation data --------
+        self.ann_name = os.path.join(self.save_folder, base_name + '.json')
+        self.mask_name_bin = os.path.join(self.save_folder, base_name + '_mask.png')
+        self.mask_name_255 = os.path.join(self.save_folder, base_name + '_mask255.png')
+        self.mask = []
+        self.annotation = {}
+
+        if os.path.exists(self.ann_name):
+            with open(self.ann_name) as f:
+                self.annotation = json.load(f)
+            ann = self.annotation.get('annotations', {}) or {}
+            atomic = ann.get("atomic_cracks", {}) or {}
+            combined = ann.get("combined_cracks", {}) or {}
+
+            # ---- Bounding boxes ----
+            if 'box' in ann:
+                for key, box_data in ann['box'].items():
+                    bb_pts = np.array(box_data['bounding_box'])
+                    if box_data['class'] == 0: box_color = (0,0,255)
+                    elif box_data['class'] == 1: box_color = (0,255,0)
+                    else: box_color = (255,0,0)
+                    cv2.rectangle(im, tuple(bb_pts[0]), tuple(bb_pts[1]), box_color, 3)
+
+            # ---- Atomic cracks ----
+            for crack_id, crack in atomic.items():
+                mask_full = reconstruct_full_mask_from_crack(crack, H, W)
+                if np.any(mask_full):
+                    im = (mark_boundaries(im/255.0, (mask_full>0).astype(np.uint8),
+                                        color=(0.0, 1.0, 1.0), background_label=0)*255).astype(np.uint8)
+                    self.mask.append(mask_full)
+
+                midline = np.array(crack.get("midline", []), dtype=float)
+                if len(midline) > 1:
+                    for i in range(1, len(midline)):
+                        pt1 = (int(round(midline[i-1][0])), int(round(midline[i-1][1])))
+                        pt2 = (int(round(midline[i][0])),  int(round(midline[i][1])))
+                        cv2.line(im, pt1, pt2, (0,200,200), 2)
+
+                edges = crack.get("geodesic_edges", {}) or {}
+                for _, edge_pts in edges.items():
+                    edge_pts = np.array(edge_pts, dtype=float)
+                    if len(edge_pts) > 1:
+                        for i in range(1, len(edge_pts)):
+                            pt1 = (int(round(edge_pts[i-1][0])), int(round(edge_pts[i-1][1])))
+                            pt2 = (int(round(edge_pts[i][0])),  int(round(edge_pts[i][1])))
+                            cv2.line(im, pt1, pt2, (255,255,0), 2)
+
+                up = crack.get("user_points", []) or []
+                for p in up:
+                    x, y = int(round(p[0])), int(round(p[1]))
+                    if 0 <= x < W and 0 <= y < H:
+                        endpoint_radius = max(3, int(min(H, W) * 0.0035))
+                        cv2.circle(im, (x, y), endpoint_radius, (255, 0, 255), -1)
+
+            # ---- Combined cracks ----
+            # ---- Combined cracks ----
+            for crack_id, crack in list(combined.items()):
+                members = [m for m in crack.get("members", []) if m in atomic]
+                crack["members"] = members
+                if not members:
+                    continue
+
+                mask_full = reconstruct_full_mask_from_crack(crack, H, W)
+                if np.any(mask_full):
+                    im = (mark_boundaries(im/255.0, (mask_full>0).astype(np.uint8),
+                                        color=(1.0, 0.6, 0.6), background_label=0)*255).astype(np.uint8)
+
+                mc = crack.get("mask_crop"); bb = crack.get("mask_bbox")
+                if mc is not None and bb is not None:
+                    x, y, w, h = map(int, bb)
+                    mask_crop = np.array(mc, dtype=np.uint8)
+
+                    print(f"[DEBUG change_image] placing combined {crack_id}: "
+                        f"bbox(w={w},h={h}), mask_crop.shape={mask_crop.shape}")
+
+                    # Build union of member atomic masks for comparison
+                    union_members = np.zeros((H, W), dtype=np.uint8)
+                    for mid in members:
+                        m = reconstruct_full_mask_from_crack(atomic[mid], H, W)
+                        union_members |= m
+
+                    union_crop = union_members[y:y+h, x:x+w]
+
+                    # Compare shapes
+                    if mask_crop.shape != (h, w):
+                        print(f"  ⚠️ Shape mismatch: expected ({h},{w}), got {mask_crop.shape}")
+                        if mask_crop.shape == (w, h):
+                            print(f"  → fixing by transpose for {crack_id}")
+                            mask_crop = mask_crop.T
+
+                    # Compare content
+                    diff = np.sum(np.abs(mask_crop.astype(int) - union_crop.astype(int)))
+                    print(f"  [DEBUG] combined {crack_id}: pixel diff vs union={diff}")
+
+                    # Place in canvas
+                    mask_canvas = np.zeros((H, W), dtype=np.uint8)
+                    try:
+                        mask_canvas[y:y+h, x:x+w] = mask_crop[:h, :w]
+                    except Exception as e:
+                        print(f"[DEBUG change_image] ERROR placing mask_crop for combined {crack_id}: {e}")
+
+                    # --- Debug figure ---
+                    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+                    axes[0].imshow(self.original_image); axes[0].set_title("Original Image")
+
+                    axes[1].imshow(union_members, cmap="gray")
+                    axes[1].set_title("Union of atomic members")
+
+                    axes[2].imshow(mask_crop, cmap="gray")
+                    axes[2].set_title(f"Combined {crack_id} crop (shape={mask_crop.shape})")
+
+                    axes[3].imshow(union_crop, cmap="gray")
+                    axes[3].set_title("Union crop in bbox")
+
+                    for ax in axes: ax.axis("off")
+                    plt.tight_layout()
+                    out_path = f"debug_combined_{crack_id}.png"
+                    plt.savefig(out_path); plt.close()
+                    print(f"[DEBUG change_image] wrote {out_path}")
+
+            '''for crack_id, crack in list(combined.items()):
+                members = [m for m in crack.get("members", []) if m in atomic]
+                crack["members"] = members
+                if not members:
+                    continue
+
+                mask_full = reconstruct_full_mask_from_crack(crack, H, W)
+                if np.any(mask_full):
+                    im = (mark_boundaries(im/255.0, (mask_full>0).astype(np.uint8),
+                                        color=(1.0, 0.6, 0.6), background_label=0)*255).astype(np.uint8)
+
+                mc = crack.get("mask_crop"); bb = crack.get("mask_bbox")
+                if mc is not None and bb is not None:
+                    x, y, w, h = map(int, bb)
+                    mask_crop = np.array(mc, dtype=np.uint8)
+
+                    print(f"[DEBUG change_image] placing combined {crack_id}: "
+                        f"bbox(w={w},h={h}), mask_crop.shape={mask_crop.shape}")
+
+                    if mask_crop.shape != (h, w):
+                        print(f"  ⚠️ Shape mismatch: expected ({h},{w}), got {mask_crop.shape}")
+                        # auto-fix if clearly just transposed
+                        if mask_crop.shape == (w, h):
+                            print(f"  → fixing by transpose for {crack_id}")
+                            mask_crop = mask_crop.T
+
+                    mask_canvas = np.zeros((H, W), dtype=np.uint8)
+                    try:
+                        mask_canvas[y:y+h, x:x+w] = mask_crop[:h, :w]
+                    except Exception as e:
+                        print(f"[DEBUG change_image] ERROR placing mask_crop for combined {crack_id}: {e}")
+
+                    # --- Debug figure ---
+                    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+                    axes[0].imshow(self.original_image); axes[0].set_title("Original Image")
+                    axes[1].imshow(self.original_image)
+                    axes[1].imshow(mask_canvas, alpha=0.5, cmap="Reds")
+                    axes[1].set_title(f"Combined {crack_id} in full coords")
+                    axes[2].imshow(mask_crop, cmap="gray")
+                    axes[2].set_title(f"mask_crop raw (shape={mask_crop.shape})")
+                    for ax in axes: ax.axis("off")
+                    plt.tight_layout()
+                    out_path = f"debug_combined_{crack_id}.png"
+                    plt.savefig(out_path); plt.close()
+                    print(f"[DEBUG change_image] wrote {out_path}")'''
+
+        # ---- Render main image to screen ----
+        _, pixmap = numpy_to_qimage_and_scaled_pixmap(
+            im.astype(np.uint8), self.ImageScreen.width(), self.ImageScreen.height(), is_gray=False
+        )
+        self.ImageScreen.setPixmap(pixmap)
+
+        # ---- Update all-segments preview ----
+        ann = self.annotation.get("annotations", {})
+        atomic = ann.get("atomic_cracks", {}) or {}
+        combined = ann.get("combined_cracks", {}) or {}
+
+        full_mask_display = build_combined_mask(atomic, H, W)
+        for crack in combined.values():
+            full_mask_display |= reconstruct_full_mask_from_crack(crack, H, W)
+        full_mask_display[full_mask_display > 0] = 1
+
+        _, pixmap_mask = numpy_to_qimage_and_scaled_pixmap(
+            (full_mask_display * 255).astype(np.uint8),
+            self.all_segments_display.width(),
+            self.all_segments_display.height(),
+            is_gray=True
+        )
         self.all_segments_display.setPixmap(pixmap_mask)
+
 
