@@ -1729,7 +1729,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 "edge2": _flatten(norm2_segs),
             },
             "mask_crop": crop.tolist(),
-            "mask_bbox": [int(x0), int(y0), int(w), int(h)]
+            "mask_bbox": [int(y0), int(x0), int(w), int(h)]
         }
         return combined
         
