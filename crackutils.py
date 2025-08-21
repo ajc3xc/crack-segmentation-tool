@@ -1032,7 +1032,7 @@ class CrackUtils:
                         print(f"[DEBUG change_image] ERROR placing mask_crop for combined {crack_id}: {e}")
 
                     # --- Debug figure ---
-                    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+                    '''fig, axes = plt.subplots(1, 4, figsize=(20, 5))
                     axes[0].imshow(self.original_image); axes[0].set_title("Original Image")
 
                     axes[1].imshow(union_members, cmap="gray")
@@ -1048,7 +1048,7 @@ class CrackUtils:
                     plt.tight_layout()
                     out_path = f"debug_combined_{crack_id}.png"
                     plt.savefig(out_path); plt.close()
-                    print(f"[DEBUG change_image] wrote {out_path}")
+                    print(f"[DEBUG change_image] wrote {out_path}")'''
 
             '''for crack_id, crack in list(combined.items()):
                 members = [m for m in crack.get("members", []) if m in atomic]

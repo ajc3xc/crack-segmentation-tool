@@ -1618,7 +1618,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         # ---- Zoom bbox
         all_x = []; all_y = []
         for S in segs:
-            all_x.extend(S[:,0]); all_y.extend(S[:,1])
+            all_x.extend(S[:,1]); all_y.extend(S[:,0])
         min_x = max(0, int(np.floor(min(all_x) - pad)))
         max_x = min(W, int(np.ceil(max(all_x) + pad)))
         min_y = max(0, int(np.floor(min(all_y) - pad)))
@@ -1642,7 +1642,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
             cy = S[:,1] - y0
             cx = S[:,0] - x0
-            self.track = np.vstack([cy, cx])
+            self.track = np.vstack([cx, cy])
             self.current_source = "manual_poly"
 
             self.pts_crop = [np.array(self.pts[0]) - np.array([x0, y0]),
@@ -1685,7 +1685,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             y0, y1 = int(ys.min()), int(ys.max() + 1)
             x0, x1 = int(xs.min()), int(xs.max() + 1)
             crop = union_mask[y0:y1, x0:x1].astype(np.uint8)
-            w, h = crop.shape
+            h, w = crop.shape
         else:
             x0 = y0 = 0
             h = w = 1
@@ -1700,11 +1700,45 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             dbg_canvas[y0:y0+h, x0:x0+w] = crop
         except Exception as e:
             print(f"[DEBUG _build_combined_crack] ERROR placing crop into dbg_canvas: {e}")
-        plt.imshow(self.original_image)
-        plt.imshow(dbg_canvas, cmap="Reds", alpha=0.4)
-        plt.title("DEBUG: Placement of saved combined mask")
-        plt.savefig("debug_save_combined.png")
+                # ---- Debug visualize placement at SAVE time
+        dbg_canvas = np.zeros((H, W), dtype=np.uint8)
+        try:
+            dbg_canvas[y0:y0+h, x0:x0+w] = crop
+        except Exception as e:
+            print(f"[DEBUG _build_combined_crack] ERROR placing crop into dbg_canvas: {e}")
+                # ---- Extra zoomed plot with lines + normals (old style, fixed axis order) ----
+        fig, ax = plt.subplots(figsize=(12, 8))
+        ax.imshow(self.original_image[y0:y0+h, x0:x0+w])
+        ax.set_title("Combined crack segments with edges + normals (zoomed)")
+        midline_labeled = False
+
+        for S, e1, e2, n1, n2 in zip(segs, edge1_segs, edge2_segs, norm1_segs, norm2_segs):
+            # plot midline + edges (y - y0, x - x0)
+            ax.plot(S[:,0] - y0, S[:,1] - x0,
+                    'g-', linewidth=1.0, label='Midline' if not midline_labeled else None)
+            ax.plot(e1[:,0] - y0, e1[:,1] - x0,
+                    'r-', linewidth=1.0, label='Edge 1' if not midline_labeled else None)
+            ax.plot(e2[:,0] - y0, e2[:,1] - x0,
+                    'b-', linewidth=1.0, label='Edge 2' if not midline_labeled else None)
+
+            # draw normals
+            for i in range(0, len(n1), max(1, len(n1)//100)):
+                ax.plot([S[i % len(S),0] - y0, n1[i,1] - y0],
+                        [S[i % len(S),1] - x0, n1[i,0] - x0],
+                        color='orange', linewidth=0.4, alpha=0.7)
+                ax.plot([S[i % len(S),0] - y0, n2[i,1] - y0],
+                        [S[i % len(S),1] - x0, n2[i,0] - x0],
+                        color='purple', linewidth=0.4, alpha=0.7)
+
+            midline_labeled = True
+
+        ax.invert_yaxis()
+        ax.axis('equal')
+        ax.legend()
+        plt.tight_layout()
+        plt.savefig("debug_combined_zoom.png")
         plt.close()
+        import sys; sys.exit(1)
 
         # ---- Final dict
         def _flatten(seg_list):
