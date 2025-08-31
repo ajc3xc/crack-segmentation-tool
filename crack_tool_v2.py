@@ -1640,9 +1640,13 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             if getattr(self, "skip_current_segment", False):
                 continue
 
+            #cy = S[:,1] - y0
+            #cx = S[:,0] - x0
+            #self.track = np.vstack([cx, cy])
             cy = S[:,1] - y0
             cx = S[:,0] - x0
-            self.track = np.vstack([cx, cy])
+            self.track = np.vstack([cy, cx])   # <-- y first, x second
+
             self.current_source = "manual_poly"
 
             self.pts_crop = [np.array(self.pts[0]) - np.array([x0, y0]),
@@ -1652,12 +1656,13 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
             self.edge_mask()
 
-            midline_xy_crop = np.vstack([self.adjusted_track[0], self.adjusted_track[1]])
+            #midline_xy_crop = np.vstack([self.adjusted_track[0], self.adjusted_track[1]])
+            midline_yx_crop = np.vstack([self.adjusted_track[0], self.adjusted_track[1]])
             res = ct.segmentation.edges_tracking(
                 self.image_crop[:, :, color_idx],
                 self.pts_crop,
                 self.edge_mask1_crop, self.edge_mask2_crop,
-                midline=midline_xy_crop, mu=mu, l=l, p=p,
+                midline=midline_yx_crop, mu=mu, l=l, p=p,
                 return_normal_edges=True
             )
             track_e1, track_e2 = res["geodesic_edges"]
