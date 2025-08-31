@@ -5,6 +5,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt
 
+min_crop_size = 16
+
 #This class is basically is all of the utility / save and load or unimportant functions that aren't directly accessible via a ui button or aren't important
 class CrackUtils:
     """
