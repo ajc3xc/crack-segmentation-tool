@@ -1239,7 +1239,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         self._debug_print_atomic_cracks("select_end_points_manmidlines AFTER ACCEPT")
         self.all_selected_points = list(self.user_points)
     
-    def run_pipeline(self, multirun=False):
+    '''def run_pipeline(self, multirun=False):
         import gc, json
         import numpy as np
         from PyQt5.QtWidgets import QMessageBox
@@ -1467,6 +1467,250 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         # Debug print & refresh view
         self._debug_print_atomic_cracks("run_pipeline END")
+        self.change_image()'''
+        
+    def run_pipeline(self, multirun=False):
+        import gc, json
+        import numpy as np
+        from PyQt5.QtWidgets import QMessageBox
+        from time import time
+
+        # ---- helpers ---------------------------------------------------------
+        def _ensure_ann():
+            # make sure base structure exists
+            if not isinstance(self.annotation, dict):
+                self.annotation = {}
+            ann = self.annotation.setdefault("annotations", {})
+            ann.setdefault("atomic_cracks", {})
+            ann.setdefault("combined_cracks", {})
+            # scrub any stray non-numeric keys like "None"
+            bad_keys = [k for k in ann["atomic_cracks"].keys() if not str(k).isdigit()]
+            for bk in bad_keys:
+                ann["atomic_cracks"].pop(bk, None)
+            return ann
+
+        def _next_crack_id_str():
+            """
+            Return the lowest non-negative id that is NOT used in saved atomic_cracks.
+            This ignores any in-memory caches so deleted ids are reused.
+            """
+            ann = self.annotation.get("annotations", {})
+            ac = ann.get("atomic_cracks", {})
+            used = sorted(int(k) for k in ac.keys() if str(k).isdigit())
+            nxt = 0
+            for k in used:
+                if k == nxt:
+                    nxt += 1
+                elif k > nxt:
+                    break
+            return str(nxt)
+
+        # ---- start -----------------------------------------------------------
+        gc.collect()
+        print("✅ GPU memory freed from CuPy pool")
+        print("Running midline pipeline (auto + manual)...")
+
+        # reset scratch between runs so ids don't leak/inflate
+        self.current_crack_id = None
+        self.crack_tracks = {}        # in-memory geodesic paths per id (scratch only)
+
+        ann = _ensure_ann()
+        ac_store = ann["atomic_cracks"]
+
+        boxes = self.get_all_bounding_boxes()
+        print(f"Loaded {len(boxes)} bounding boxes: {boxes}")
+        if not boxes:
+            QMessageBox.critical(None, "No Bounding Boxes",
+                "Please draw at least one bounding box before running the pipeline.")
+            return
+
+        if not multirun:
+            # Let the user pick points/connections/midlines
+            self.endpoint_pairs = None
+            self.user_connections = None
+            self.user_points = None
+            self.manual_endpoint_pairs = None
+            self.all_selected_points = None  # reset before each run
+            print("Calling select_end_points_manmidlines()...")
+            self.select_end_points_manmidlines()
+
+        # Merge auto + manual endpoint pairs (global, from annotator)
+        all_pairs = []
+        if getattr(self, "endpoint_pairs", None):
+            print(f"Auto endpoint_pairs: {self.endpoint_pairs}")
+            all_pairs.extend([(p, "auto") for p in self.endpoint_pairs])
+
+        if getattr(self, "manual_endpoint_pairs", None):
+            print(f"Manual endpoint_pairs: {self.manual_endpoint_pairs}")
+            all_pairs.extend([(p, "manual") for p in self.manual_endpoint_pairs])
+
+        if not all_pairs:
+            QMessageBox.critical(
+                None, "No Endpoint Pairs",
+                "No endpoint pairs selected!\n\nPlease use 'Select Endpoints' and create at least one connection or manual midline before running the pipeline."
+            )
+            return
+
+        # Group by bbox (so OS/cost is reused per box)
+        box_to_pairs = {}
+        for (pair, src) in all_pairs:
+            candidates = []
+            for bbox in boxes:
+                xmin, ymin, xmax, ymax = bbox
+                p0, p1 = pair
+                if (xmin <= p0[0] <= xmax and ymin <= p0[1] <= ymax and
+                    xmin <= p1[0] <= xmax and ymin <= p1[1] <= ymax):
+                    area = abs((xmax - xmin) * (ymax - ymin))
+                    candidates.append((area, bbox))
+            if candidates:
+                _, chosen_bbox = min(candidates, key=lambda x: x[0])
+                key = tuple(chosen_bbox)
+                box_to_pairs.setdefault(key, []).append((pair, src))
+
+        errors = []
+
+        # Make sure we don't blow away memory of previous masks
+        if not hasattr(self, "mask"):
+            self.mask = []
+
+        for bbox_key, pairs in box_to_pairs.items():
+            xmin, ymin, xmax, ymax = bbox_key
+            print(f"\n=== Processing bbox {bbox_key} ===")
+            print(f"Pairs in this box: {pairs}")
+
+            try:
+                # Precompute OS/cost once per box for auto pairs
+                auto_pairs = [p for p, s in pairs if s == "auto"]
+                if auto_pairs:
+                    first_pair = auto_pairs[0]
+                    print(f"Precomputing OS/cost for auto pair {first_pair}")
+                    self.pts = [np.array(first_pair[0]), np.array(first_pair[1])]
+                    self.end_points = self.pts
+                    self.active_bbox = list(bbox_key)
+                    self.update_image_crop()
+                    if getattr(self, "skip_current_segment", False):
+                        continue
+                    print("os (once per box)")
+                    t0 = time(); self.update_os(); print(f"os time: {time()-t0:.2f}s")
+                    print("cost (once per box)")
+                    t0 = time(); self.update_cost(); print(f"cost time: {time()-t0:.2f}s")
+
+                # Process each pair -> one atomic crack per pair
+                for (p0, p1), src in pairs:
+                    try:
+                        self.active_bbox = list(bbox_key)
+                        print(f"\n--- Processing pair {(p0, p1)} (source={src}) ---")
+
+                        # Per-crack, pair-local endpoints for saving
+                        pair_user_points = [tuple(p0), tuple(p1)]
+                        pair_user_connections = [[0, 1]]  # exactly one connection per crack
+
+                        if src in ("manual", "manual_poly"):
+                            # For manual, we reuse the drawn polyline as midline (full-image coords)
+                            manual_midlines_dict = getattr(self, "manual_midlines_tmp", {})
+                            found_key = None
+
+                            # Durable copy of selection points from earlier
+                            all_points = getattr(self, "all_selected_points", None)
+                            if all_points is None:
+                                all_points = getattr(self, "user_points", [])
+
+                            print("\n[DEBUG] --- Matching manual midline ---")
+                            print(f"[DEBUG] manual_midlines_tmp keys at runtime: {list(manual_midlines_dict.keys())}")
+                            print(f"[DEBUG] all_points at runtime: {all_points}")
+                            print(f"[DEBUG] Trying to match p0={p0}  p1={p1}")
+
+                            # manual_midlines_tmp keys are "i_j" from annotator indices; match geometrically
+                            for k, poly in manual_midlines_dict.items():
+                                try:
+                                    i1, i2 = map(int, k.split("_"))
+                                    c_i = tuple(all_points[i1])
+                                    c_j = tuple(all_points[i2])
+                                    print(f"[DEBUG] Checking key={k}, c_i={c_i}, c_j={c_j}")
+                                    if (c_i, c_j) == (p0, p1) or (c_i, c_j) == (p1, p0):
+                                        print(f"[DEBUG] Found match for key={k}")
+                                        found_key = k
+                                        break
+                                except Exception as e:
+                                    print(f"[DEBUG] Error parsing key={k}: {e}")
+
+                            print(f"[MANUAL] Found key: {found_key}")
+                            self.pts = [np.array(p0), np.array(p1)]
+                            self.end_points = self.pts
+                            self.update_image_crop()
+                            if getattr(self, "skip_current_segment", False):
+                                continue
+
+                            if found_key:
+                                # Convert full-image manual polyline to crop coords and set as self.track
+                                poly = np.array(manual_midlines_dict[found_key], dtype=float)  # [[x,y],...]
+                                cy = poly[:, 1] - ymin
+                                cx = poly[:, 0] - xmin
+                                self.track = np.vstack([cy, cx])
+                                self.pts_crop = [
+                                    np.array(self.pts[0]) - np.array([xmin, ymin]),
+                                    np.array(self.pts[1]) - np.array([xmin, ymin])
+                                ]
+                                downsample = self.downsample_factor_box.value()
+                                self.pts_crop_down = [p / downsample for p in self.pts_crop]
+                            else:
+                                msg = f"No manual polyline found for manual crack {p0}→{p1}"
+                                print("ERROR:", msg)
+                                errors.append(msg)
+                                continue
+                        else:
+                            # Auto mode
+                            self.pts = [np.array(p0), np.array(p1)]
+                            self.end_points = self.pts
+                            self.pts_crop = [np.array(pt) - np.array([xmin, ymin]) for pt in self.pts]
+                            downsample = self.downsample_factor_box.value()
+                            self.pts_crop_down = [p / downsample for p in self.pts_crop]
+                            t0 = time(); self.midline_tracking(); print(f"    midline tracking time: {time()-t0:.2f}s")
+
+                        # ======= Assign a brand-new crack ID for THIS pair (gap-free) =======
+                        new_cid = _next_crack_id_str()
+                        self.current_crack_id = int(new_cid)
+
+                        # Geodesic edges & masks for this pair
+                        self.current_source = src
+                        self.edge_mask()
+                        self.edge_tracking()
+
+                        # Pair-local globals so save_current_segment writes them into that crack
+                        self.user_points = pair_user_points
+                        self.user_connections = pair_user_connections
+
+                        # Save segment (midline + edges + mask + per-crack endpoints)
+                        self.save_current_segment()
+
+                        # Clear pair-local globals so next crack doesn't inherit them
+                        self.user_points = None
+                        self.user_connections = None
+
+                    except Exception as e:
+                        errors.append(f"Failed midline for {(p0, p1)}: {e}")
+                        continue
+
+            except Exception as e:
+                errors.append(f"Failed for bbox {bbox_key}: {e}")
+                continue
+
+        # Done with all boxes/pairs
+        if errors:
+            print("\n".join(errors))
+        else:
+            print("✔ All endpoint groups processed.")
+
+        # Clear UI temp state (per-run scratch)
+        self.endpoint_pairs = None
+        self.manual_endpoint_pairs = None
+
+        # Persist JSON
+        with open(self.ann_name, 'w') as fp:
+            json.dump(self.annotation, fp)
+
+        # Debug print & refresh view
+        self._debug_print_atomic_cracks("run_pipeline END")
         self.change_image()
             
     def update_os_cost(self):
@@ -1524,253 +1768,6 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             summary += f"\nErrors:\n" + "\n".join(errors)
         print(summary)
         QMessageBox.information(self.MainWindow, "Batch pipeline finished", summary)
-
-    '''def _build_combined_crack(self, member_ids, pad=10):
-        """
-        Build a fully recomputed combined crack from member atomic cracks:
-        - merges midlines into disjoint segments using shapely
-        - for each segment: recompute edge masks + geodesic edges + widths (normal_edge_points)
-        - unions all per-segment masks into a compact crop+bbox
-        Also produces debug plots (zoomed + full image reference).
-        """
-        import numpy as np, cv2
-        import matplotlib.pyplot as plt
-        from shapely.geometry import LineString
-        from shapely.ops import unary_union, linemerge
-
-        ann = self.annotation.setdefault("annotations", {})
-        atomic = ann.setdefault("atomic_cracks", {})
-
-        H, W = self.original_image.shape[:2]
-
-        # ---- Collect masks + midlines from members ----
-        def full_mask_from_atomic(crack):
-            mc = crack.get("mask_crop"); bb = crack.get("mask_bbox")
-            if mc is not None and bb is not None:
-                crop = np.array(mc, dtype=np.uint8)
-                x, y, w, h = map(int, bb)
-                x2, y2 = min(x+w, W), min(y+h, H)
-                w_eff, h_eff = max(0, x2-x), max(0, y2-y)
-                if h_eff > 0 and w_eff > 0:
-                    crop = (crop > 0).astype(np.uint8)[:h_eff, :w_eff]
-                    m = np.zeros((H, W), dtype=np.uint8)
-                    m[y:y+h_eff, x:x+w_eff] = crop
-                    return m
-            return np.zeros((H, W), dtype=np.uint8)
-
-        union_mask = np.zeros((H, W), dtype=np.uint8)
-        lines = []
-        for mid in member_ids:
-            crack = atomic.get(mid)
-            if not crack:
-                continue
-            union_mask |= full_mask_from_atomic(crack)
-            ml = crack.get("midline", []) or []
-            if len(ml) >= 2:
-                try:
-                    lines.append(LineString([(float(p[0]), float(p[1])) for p in ml if p is not None]))
-                except Exception:
-                    pass
-
-        # ---- If no midlines exist, fallback
-        if not lines:
-            if np.any(union_mask):
-                ys, xs = np.where(union_mask > 0)
-                y0, y1 = int(ys.min()), int(ys.max()+1)
-                x0, x1 = int(xs.min()), int(xs.max()+1)
-                crop = union_mask[y0:y1, x0:x1].astype(np.uint8)
-
-                print(f"[DEBUG _build_combined_crack] Fallback crop shape={crop.shape}, "
-                    f"bbox=({x0},{y0},{x1-x0},{y1-y0})")
-
-                return {
-                    "source": "combined",
-                    "members": sorted(member_ids, key=lambda s: int(s)),
-                    "midline": [],
-                    "midline_segments": [],
-                    "geodesic_edges": {},
-                    "normal_edge_points": None,
-                    "mask_crop": crop.tolist(),
-                    "mask_bbox": [x0, y0, x1-x0, y1-y0]
-                }
-            return None
-
-        # ---- Merge midlines ----
-        U = unary_union(lines)
-        M = linemerge(U)
-        if M.geom_type == "LineString":
-            segs = [np.asarray(M.coords)]
-        elif M.geom_type == "MultiLineString":
-            segs = [np.asarray(g.coords) for g in M.geoms]
-        else:
-            segs = []
-        segs = [s for s in segs if s.shape[0] >= 2]
-
-        # ---- Params
-        color_idx = 0 if self.edge_track_color_box.currentText() == 'R' else \
-                    1 if self.edge_track_color_box.currentText() == 'B' else 2
-        mu = self.mu_box.value(); l = self.l_box.value(); p = self.p_box.value()
-
-        edge1_segs, edge2_segs = [], []
-        norm1_segs, norm2_segs = [], []
-        union_mask[:] = 0
-
-        # ---- Zoom bbox
-        all_x = []; all_y = []
-        for S in segs:
-            all_x.extend(S[:,1]); all_y.extend(S[:,0])
-        min_x = max(0, int(np.floor(min(all_x) - pad)))
-        max_x = min(W, int(np.ceil(max(all_x) + pad)))
-        min_y = max(0, int(np.floor(min(all_y) - pad)))
-        max_y = min(H, int(np.ceil(max(all_y) + pad)))
-
-        # ---- Process each segment
-        for S in segs:
-            x0 = max(0, int(np.floor(S[:,0].min()) - pad))
-            x1 = min(W, int(np.ceil(S[:,0].max()) + pad))
-            y0 = max(0, int(np.floor(S[:,1].min()) - pad))
-            y1 = min(H, int(np.ceil(S[:,1].max()) + pad))
-            if x1 - x0 < 2 or y1 - y0 < 2:
-                continue
-
-            self.active_bbox = [x0, y0, x1, y1]
-            self.pts = [np.array([S[0,0], S[0,1]]), np.array([S[-1,0], S[-1,1]])]
-            self.end_points = self.pts
-            self.update_image_crop()
-            if getattr(self, "skip_current_segment", False):
-                continue
-
-            #cy = S[:,1] - y0
-            #cx = S[:,0] - x0
-            #self.track = np.vstack([cx, cy])
-            cy = S[:,1] - y0
-            cx = S[:,0] - x0
-            self.track = np.vstack([cy, cx])   # <-- y first, x second
-
-            self.current_source = "manual_poly"
-
-            self.pts_crop = [np.array(self.pts[0]) - np.array([x0, y0]),
-                            np.array(self.pts[1]) - np.array([x0, y0])]
-            down = self.downsample_factor_box.value()
-            self.pts_crop_down = [p / down for p in self.pts_crop]
-
-            self.edge_mask()
-
-            #midline_xy_crop = np.vstack([self.adjusted_track[0], self.adjusted_track[1]])
-            midline_yx_crop = np.vstack([self.adjusted_track[0], self.adjusted_track[1]])
-            res = ct.segmentation.edges_tracking(
-                self.image_crop[:, :, color_idx],
-                self.pts_crop,
-                self.edge_mask1_crop, self.edge_mask2_crop,
-                midline=midline_yx_crop, mu=mu, l=l, p=p,
-                return_normal_edges=True
-            )
-            track_e1, track_e2 = res["geodesic_edges"]
-            (e1x, e1y), (e2x, e2y) = res["normal_edge_points"]
-
-            track_e1_full = np.column_stack([track_e1[:,0] + x0, track_e1[:,1] + y0])
-            track_e2_full = np.column_stack([track_e2[:,0] + x0, track_e2[:,1] + y0])
-            e1_pts_full   = np.column_stack([e1x + x0, e1y + y0])
-            e2_pts_full   = np.column_stack([e2x + x0, e2y + y0])
-
-            edge1_segs.append(track_e1_full)
-            edge2_segs.append(track_e2_full)
-            norm1_segs.append(e1_pts_full)
-            norm2_segs.append(e2_pts_full)
-
-            # Masks
-            ex = np.concatenate((track_e1_full[:,0][::-1], track_e2_full[:,0]))
-            ey = np.concatenate((track_e1_full[:,1][::-1], track_e2_full[:,1]))
-            mask_seg = ct.segmentation.create_mask(self.original_image, ey, ex).astype(np.uint8)
-            union_mask |= (mask_seg > 0).astype(np.uint8)
-
-                # ---- Crop out union mask (old-style, consistent with combine_segments)
-        if np.any(union_mask):
-            ys, xs = np.where(union_mask > 0)
-            y0, y1 = int(ys.min()), int(ys.max() + 1)
-            x0, x1 = int(xs.min()), int(xs.max() + 1)
-            crop = union_mask[y0:y1, x0:x1].astype(np.uint8)
-            h, w = crop.shape
-        else:
-            x0 = y0 = 0
-            h = w = 1
-            crop = np.zeros((h, w), np.uint8)
-
-        print(f"[DEBUG _build_combined_crack] Final crop shape={crop.shape}, "
-              f"bbox=({x0},{y0},{w},{h}), nonzero={crop.sum()}")
-
-        # ---- Debug visualize placement at SAVE time
-        dbg_canvas = np.zeros((H, W), dtype=np.uint8)
-        try:
-            dbg_canvas[y0:y0+h, x0:x0+w] = crop
-        except Exception as e:
-            print(f"[DEBUG _build_combined_crack] ERROR placing crop into dbg_canvas: {e}")
-                # ---- Debug visualize placement at SAVE time
-        dbg_canvas = np.zeros((H, W), dtype=np.uint8)
-        try:
-            dbg_canvas[y0:y0+h, x0:x0+w] = crop
-        except Exception as e:
-            print(f"[DEBUG _build_combined_crack] ERROR placing crop into dbg_canvas: {e}")
-                # ---- Extra zoomed plot with lines + normals (old style, fixed axis order) ----
-        fig, ax = plt.subplots(figsize=(12, 8))
-        ax.imshow(self.original_image[y0:y0+h, x0:x0+w])
-        ax.set_title("Combined crack segments with edges + normals (zoomed)")
-        midline_labeled = False
-
-        for S, e1, e2, n1, n2 in zip(segs, edge1_segs, edge2_segs, norm1_segs, norm2_segs):
-            # plot midline + edges (y - y0, x - x0)
-            ax.plot(S[:,0] - y0, S[:,1] - x0,
-                    'g-', linewidth=1.0, label='Midline' if not midline_labeled else None)
-            ax.plot(e1[:,0] - y0, e1[:,1] - x0,
-                    'r-', linewidth=1.0, label='Edge 1' if not midline_labeled else None)
-            ax.plot(e2[:,0] - y0, e2[:,1] - x0,
-                    'b-', linewidth=1.0, label='Edge 2' if not midline_labeled else None)
-
-            # draw normals
-            for i in range(0, len(n1), max(1, len(n1)//100)):
-                ax.plot([S[i % len(S),0] - y0, n1[i,1] - y0],
-                        [S[i % len(S),1] - x0, n1[i,0] - x0],
-                        color='orange', linewidth=0.4, alpha=0.7)
-                ax.plot([S[i % len(S),0] - y0, n2[i,1] - y0],
-                        [S[i % len(S),1] - x0, n2[i,0] - x0],
-                        color='purple', linewidth=0.4, alpha=0.7)
-
-            midline_labeled = True
-
-        ax.invert_yaxis()
-        ax.axis('equal')
-        ax.legend()
-        plt.tight_layout()
-        plt.savefig("debug_combined_zoom.png")
-        plt.close()
-        import sys; sys.exit(1)
-
-        # ---- Final dict
-        def _flatten(seg_list):
-            out = []
-            for i, arr in enumerate(seg_list):
-                out.extend([[float(x), float(y)] for x, y in arr])
-                if i < len(seg_list)-1:
-                    out.append([None, None])
-            return out
-
-        combined = {
-            "source": "combined",
-            "members": sorted(member_ids, key=lambda s: int(s)),
-            "midline_segments": [ [[float(x), float(y)] for (x,y) in s] for s in segs ],
-            "midline": _flatten(segs),
-            "geodesic_edges": {
-                "edge1": _flatten(edge1_segs),
-                "edge2": _flatten(edge2_segs),
-            },
-            "normal_edge_points": {
-                "edge1": _flatten(norm1_segs),
-                "edge2": _flatten(norm2_segs),
-            },
-            "mask_crop": crop.tolist(),
-            "mask_bbox": [int(y0), int(x0), int(w), int(h)]
-        }
-        return combined'''
         
     def _build_combined_crack(self, member_ids, pad=10):
         """
