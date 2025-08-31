@@ -35,7 +35,7 @@ class Ui_MainWindow(object):
         self.label_34.setScaledContents(True)
         self.label_34.setObjectName("label_34")
         self.files_list = QtWidgets.QListWidget(self.tab_5)
-        self.files_list.setGeometry(QtCore.QRect(0, 45, 201, 290))
+        self.files_list.setGeometry(QtCore.QRect(0, 45, 204, 290))
         self.files_list.setObjectName("files_list")
         #self.folder_line_edit = QtWidgets.QLineEdit(self.tab_5)
         #self.folder_line_edit.setGeometry(QtCore.QRect(0, 50, 0, 0))
