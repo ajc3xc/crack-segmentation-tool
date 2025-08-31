@@ -271,78 +271,7 @@ def normal_intersections_bruteforce(mid_x, mid_y, edge_x, edge_y, normal_length)
             rx[i], ry[i] = nearest_on_edge(mx, my)
     return rx, ry
 
-'''def edges_tracking(image_crop, pts_cropp, edge_mask1_cropp, edge_mask2_cropp, midline, mu=5, l=1, p=12):
-    # --- Geodesic edge extraction (unchanged from your code) ---
-    seeds = np.array([*pts_cropp[0][::-1]])
-    tips = np.array([*pts_cropp[1][::-1]])
-    b = np.array([0, image_crop.shape[0]])
-    c = np.array([0, image_crop.shape[1]])
-    sides = np.array([b, c])
-    dims = np.array([image_crop.shape[0], image_crop.shape[1]])
-
-    DxZ, DyZ = np.gradient(image_crop)
-    a11 = scipy.ndimage.gaussian_filter(mu * DxZ**2, 1, order=(0,0))
-    a12 = scipy.ndimage.gaussian_filter(mu * DxZ * DyZ, 1, order=(0,0))
-    a21 = scipy.ndimage.gaussian_filter(mu * DxZ * DyZ, 1, order=(0,0))
-    a22 = scipy.ndimage.gaussian_filter(mu * DyZ**2, 1, order=(0,0))
-    df = np.array([[1 + a11, a12], [a21, 1 + a22]])
-    metric1 = (1 + edge_mask1_cropp.squeeze() * l) ** p * df
-    metric2 = (1 + edge_mask2_cropp.squeeze() * l) ** p * df
-
-    metric = Riemann(metric1)
-    hfmIn = Eikonal.dictIn({
-        'model': 'Riemann2',
-        'seeds': np.expand_dims(seeds, axis=0),
-        'arrayOrdering': 'RowMajor',
-        'tips': np.expand_dims(tips, axis=0),
-        'metric': metric
-    })
-    hfmIn.SetRect(sides=sides, dims=dims)
-    hfmOut = hfmIn.Run()
-    track_e1 = [g.T for g in hfmOut['geodesics']][0]
-
-    metric = Riemann(metric2)
-    hfmIn = Eikonal.dictIn({
-        'model': 'Riemann2',
-        'seeds': np.expand_dims(seeds, axis=0),
-        'arrayOrdering': 'RowMajor',
-        'tips': np.expand_dims(tips, axis=0),
-        'metric': metric
-    })
-    hfmIn.SetRect(sides=sides, dims=dims)
-    hfmOut = hfmIn.Run()
-    track_e2 = [g.T for g in hfmOut['geodesics']][0]
-
-    # --- Robust midline handling ---
-    if isinstance(midline, np.ndarray):
-        if midline.shape[0] == 2:  # shape (2, N)
-            mid_y, mid_x = midline[0], midline[1]
-        elif midline.shape[1] == 2:  # shape (N, 2)
-            mid_y, mid_x = midline[:, 0], midline[:, 1]
-        else:
-            raise ValueError("midline array must be shape (2, N) or (N, 2)")
-    elif isinstance(midline, list) and len(midline) == 2:
-        mid_y, mid_x = midline[0], midline[1]
-    else:
-        raise ValueError("midline must be a (2, N) or (N, 2) array, or a list [y_array, x_array]")
-
-    # --- Normal length & bounds ---
-    height, width = image_crop.shape[:2]
-    normal_length = int(np.ceil(np.hypot(height, width)))
-
-    # --- Normal intersections ---
-    edge1_x, edge1_y = normal_intersections_bruteforce(mid_x, mid_y, track_e1[:,1], track_e1[:,0], normal_length)
-    edge2_x, edge2_y = normal_intersections_bruteforce(mid_x, mid_y, track_e2[:,1], track_e2[:,0], normal_length)
-
-    # --- Output clipping ---
-    edge1_x = np.clip(edge1_x, 0, width-1)
-    edge1_y = np.clip(edge1_y, 0, height-1)
-    edge2_x = np.clip(edge2_x, 0, width-1)
-    edge2_y = np.clip(edge2_y, 0, height-1)
-
-    return [edge1_x, edge1_y], [edge2_x, edge2_y]'''
-
-def edges_tracking(
+'''def edges_tracking(
     image_crop, pts_cropp,
     edge_mask1_cropp, edge_mask2_cropp,
     midline=None, mu=5, l=1, p=12,
@@ -441,6 +370,112 @@ def edges_tracking(
         "geodesic_edges": [track_e1, track_e2],
         "normal_edge_points_clipped": normal_edges_clipped,
         "normal_edge_points": normal_edges  # <-- for exact geometry
+    }
+'''
+
+def edges_tracking(
+    image_crop, pts_cropp,
+    edge_mask1_cropp, edge_mask2_cropp,
+    midline=None, mu=5, l=1, p=12,
+    return_normal_edges=True
+):
+    """
+    Returns:
+      {
+        "geodesic_edges": [track_e1, track_e2],          # (N,2) arrays (x, y)
+        "normal_edge_points": [ [edge1_x, edge1_y], [edge2_x, edge2_y] ] or None,
+        "normal_edge_points_clipped": same but clipped to image bounds
+      }
+    """
+    # seeds/tips come in crop coords as (x,y) in your code; hfmm wants (y,x)
+    seeds = np.array([*pts_cropp[0][::-1]])
+    tips  = np.array([*pts_cropp[1][::-1]])
+    b = np.array([0, image_crop.shape[0]])
+    c = np.array([0, image_crop.shape[1]])
+    sides = np.array([b, c])
+    dims = np.array([image_crop.shape[0], image_crop.shape[1]])
+
+    DxZ, DyZ = np.gradient(image_crop)
+    a11 = scipy.ndimage.gaussian_filter(mu * DxZ**2, 1, order=(0,0))
+    a12 = scipy.ndimage.gaussian_filter(mu * DxZ * DyZ, 1, order=(0,0))
+    a21 = scipy.ndimage.gaussian_filter(mu * DxZ * DyZ, 1, order=(0,0))
+    a22 = scipy.ndimage.gaussian_filter(mu * DyZ**2, 1, order=(0,0))
+    df = np.array([[1 + a11, a12], [a21, 1 + a22]])
+
+    metric1 = (1 + edge_mask1_cropp.squeeze() * l) ** p * df
+    metric2 = (1 + edge_mask2_cropp.squeeze() * l) ** p * df
+
+    # ---- geodesic 1
+    metric = Riemann(metric1)
+    hfmIn = Eikonal.dictIn({
+        'model': 'Riemann2',
+        'seeds': np.expand_dims(seeds, axis=0),
+        'arrayOrdering': 'RowMajor',
+        'tips': np.expand_dims(tips, axis=0),
+        'metric': metric,
+        'verbosity': 0,
+    })
+    hfmIn.SetRect(sides=sides, dims=dims)
+    hfmOut = hfmIn.Run()
+    track_e1 = [g.T for g in hfmOut['geodesics']][0]     # (N,2) (y,x)
+
+    # ---- geodesic 2
+    metric = Riemann(metric2)
+    hfmIn = Eikonal.dictIn({
+        'model': 'Riemann2',
+        'seeds': np.expand_dims(seeds, axis=0),
+        'arrayOrdering': 'RowMajor',
+        'tips': np.expand_dims(tips, axis=0),
+        'metric': metric,
+        'verbosity': 0,
+    })
+    hfmIn.SetRect(sides=sides, dims=dims)
+    hfmOut = hfmIn.Run()
+    track_e2 = [g.T for g in hfmOut['geodesics']][0]     # (N,2) (y,x)
+
+    # → convert to (x,y) for all downstream code
+    track_e1 = np.stack([track_e1[:,1], track_e1[:,0]], axis=1)  # (N,2) (x,y)
+    track_e2 = np.stack([track_e2[:,1], track_e2[:,0]], axis=1)
+
+    normal_edges = None
+    normal_edges_clipped = None
+
+    if return_normal_edges and midline is not None:
+        m = np.asarray(midline)
+        # Accept (N,2) or (2,N); normalize to (N,2) (x,y)
+        if m.ndim != 2:
+            raise ValueError("midline must be 2D array")
+        if m.shape[1] == 2:
+            mid_x, mid_y = m[:,0], m[:,1]
+        elif m.shape[0] == 2:
+            mid_x, mid_y = m[0], m[1]
+        else:
+            raise ValueError("midline must be (N,2) or (2,N)")
+
+        height, width = image_crop.shape[:2]
+        normal_length = int(np.ceil(np.hypot(height, width)))
+
+        # Intersect each midline normal with each edge polyline (in crop coords)
+        edge1_x, edge1_y = normal_intersections_bruteforce(
+            mid_x, mid_y, track_e1[:,0], track_e1[:,1], normal_length)
+        edge2_x, edge2_y = normal_intersections_bruteforce(
+            mid_x, mid_y, track_e2[:,0], track_e2[:,1], normal_length)
+
+        # keep both unclipped (for geometry) and clipped (for mask/debug)
+        normal_edges = [[edge1_x.copy(), edge1_y.copy()],
+                        [edge2_x.copy(), edge2_y.copy()]]
+
+        e1x = np.clip(edge1_x, 0, width-1)
+        e1y = np.clip(edge1_y, 0, height-1)
+        e2x = np.clip(edge2_x, 0, width-1)
+        e2y = np.clip(edge2_y, 0, height-1)
+
+        normal_edges_clipped = [[e1x, e1y], [e2x, e2y]]
+
+    return {
+        "geodesic_edges": [track_e1, track_e2],
+        "normal_edge_points": normal_edges,
+        "normal_edge_points_clipped": normal_edges_clipped,
     }
 
 import numpy as np
