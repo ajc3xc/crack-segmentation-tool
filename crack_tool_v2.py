@@ -2042,19 +2042,19 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             if valid.size == 0:
                 print(f"[DEBUG normals] seg{si}: 0 finite points")
                 continue
-            step = max(1, valid.size // 80)  # ~up to 80 normals/seg
+            step = max(1, valid.size // 60)  # ~up to 80 normals/seg
             idx = valid[::step]
             print(f"[DEBUG normals] seg{si}: mid={len(S)}  n1_finite={v1.size}  n2_finite={v2.size}  drawing={idx.size}")
             if idx.size:
                 # show lines
                 for i in idx:
                     ax.plot([S[i,0], n1[i,0]], [S[i,1], n1[i,1]],
-                            color='cyan', lw=0.8, alpha=0.6,
+                            color='cyan', lw=0.4, alpha=0.6,
                             label=None if normals1_done else 'Normals Edge1')
                     normals1_done = True
 
                     ax.plot([S[i,0], n2[i,0]], [S[i,1], n2[i,1]],
-                            color='magenta', lw=0.8, alpha=0.6,
+                            color='magenta', lw=0.4, alpha=0.6,
                             label=None if normals2_done else 'Normals Edge2')
                     normals2_done = True
                 # also quiver for direction clarity
@@ -2068,7 +2068,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         ax.axis('equal')
         ax.legend()
         plt.tight_layout()
-        plt.savefig("debug_combined_zoom.png")
+        plt.savefig("debug_combined_zoom.png", dpi=300)
         plt.close()
 
         # ---------------- pack ----------------
