@@ -1774,44 +1774,43 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         
     def _build_combined_crack(self, member_ids, pad=10):
         """
-        Combined crack builder with:
-        • endpoint stitching of touching midlines
-        • trimming of smaller disjoint midlines inside a buffer of longer ones
-        • robust mask creation (fallback ribbon when geodesic polygon is tiny)
-        • clean plotting: only 4 legend entries; normals every 5; thin lines; Y flipped
+        Combined crack builder:
+        - stitches endpoints, trims overlaps
+        - computes geodesic edges + normals
+        - builds mask with correct (x,y) order
+        - DEBUG: draws clearly visible normals + prints counts/samples
         """
         import numpy as np, cv2
         import matplotlib.pyplot as plt
         from shapely.geometry import LineString, MultiLineString
+        from shapely.ops import unary_union
 
         ann = self.annotation.setdefault("annotations", {})
         atomic = ann.setdefault("atomic_cracks", {})
 
         H, W = self.original_image.shape[:2]
 
-        # ---------- helpers ----------
+        # ---------------- helpers ----------------
         def full_mask_from_atomic(crack):
             mc = crack.get("mask_crop"); bb = crack.get("mask_bbox")
             if mc is not None and bb is not None:
                 crop = np.array(mc, dtype=np.uint8)
-                x, y, w, h = map(int, bb)
+                x, y, w, h = map(int, bb)                    # bbox = [x,y,w,h]
                 x2, y2 = min(x+w, W), min(y+h, H)
                 w_eff, h_eff = max(0, x2-x), max(0, y2-y)
                 if h_eff > 0 and w_eff > 0:
                     crop = (crop > 0).astype(np.uint8)[:h_eff, :w_eff]
                     m = np.zeros((H, W), dtype=np.uint8)
-                    m[y:y+h_eff, x:x+w_eff] = crop
+                    m[y:y+h_eff, x:x+w_eff] = crop          # rows=y, cols=x
                     return m
             return np.zeros((H, W), dtype=np.uint8)
 
         def ls_coords(ls: LineString):
-            return np.asarray(ls.coords, dtype=float)  # Nx2 (x,y)
+            return np.asarray(ls.coords, dtype=float)        # (N,2) (x,y)
 
-        def near(a, b, eps):
-            return abs(a[0]-b[0]) <= eps and abs(a[1]-b[1]) <= eps
+        def near(a, b, eps): return abs(a[0]-b[0]) <= eps and abs(a[1]-b[1]) <= eps
 
         def stitch_lines(lines_xy, eps=2.0):
-            """Join polylines whose endpoints touch within eps (returns list of Nx2 arrays)."""
             unused = [l.copy() for l in lines_xy if l.shape[0] >= 2]
             stitched = []
             while unused:
@@ -1822,23 +1821,15 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                     for i, cand in enumerate(unused):
                         a0, a1 = cur[0], cur[-1]
                         b0, b1 = cand[0].tolist(), cand[-1].tolist()
-                        if near(a1, b0, eps):
-                            cur.extend(cand[1:].tolist()); unused.pop(i); changed=True; break
-                        if near(a1, b1, eps):
-                            cur.extend(cand[-2::-1].tolist()); unused.pop(i); changed=True; break
-                        if near(a0, b1, eps):
-                            cur = cand[:-1].tolist() + cur; unused.pop(i); changed=True; break
-                        if near(a0, b0, eps):
-                            cur = cand[1:][::-1].tolist() + cur; unused.pop(i); changed=True; break
-                # dedup; open loop if closed
+                        if near(a1, b0, eps): cur.extend(cand[1:].tolist()); unused.pop(i); changed=True; break
+                        if near(a1, b1, eps): cur.extend(cand[-2::-1].tolist()); unused.pop(i); changed=True; break
+                        if near(a0, b1, eps): cur = cand[:-1].tolist()+cur; unused.pop(i); changed=True; break
+                        if near(a0, b0, eps): cur = cand[1:][::-1].tolist()+cur; unused.pop(i); changed=True; break
                 dedup = [cur[0]]
                 for p in cur[1:]:
-                    if not near(p, dedup[-1], 1e-6):
-                        dedup.append(p)
-                if len(dedup) >= 2 and near(dedup[0], dedup[-1], eps):
-                    dedup = dedup[:-1]
-                if len(dedup) >= 2:
-                    stitched.append(np.asarray(dedup, dtype=float))
+                    if not near(p, dedup[-1], 1e-6): dedup.append(p)
+                if len(dedup) >= 2 and near(dedup[0], dedup[-1], eps): dedup = dedup[:-1]
+                if len(dedup) >= 2: stitched.append(np.asarray(dedup, dtype=float))
             return stitched
 
         def split_lines(geom):
@@ -1848,11 +1839,10 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             return []
 
         def trim_smaller_by_larger(lines_xy, prune_radius):
-            """Carve away parts of smaller lines falling inside a buffer of larger ones."""
             items = [(LineString(l), float(LineString(l).length)) for l in lines_xy if len(l) >= 2]
             items = [(ls, ln) for (ls, ln) in items if not ls.is_empty and ln > 1e-6]
             if not items: return []
-            items.sort(key=lambda t: t[1], reverse=True)  # longest first
+            items.sort(key=lambda t: t[1], reverse=True)
             kept = [items[0][0]]
             for ls, _ln in items[1:]:
                 trimmed = ls
@@ -1862,47 +1852,39 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                     trimmed = trimmed.difference(buf)
                 if not trimmed.is_empty:
                     for piece in split_lines(trimmed):
-                        if piece.length > 1e-6:
-                            kept.append(piece)
+                        if piece.length > 1e-6: kept.append(piece)
             out = []
             for g in kept:
                 arr = ls_coords(g)
-                if arr.shape[0] >= 2:
-                    out.append(arr)
+                if arr.shape[0] >= 2: out.append(arr)
             return out
 
         def shoelace_area(xs, ys):
             return 0.5 * abs(np.dot(xs, np.roll(ys, -1)) - np.dot(ys, np.roll(xs, -1)))
 
         def ribbon_mask_from_midline(S_xy, thickness_px=4):
-            """Fallback mask: draw a thick polyline along the midline."""
             mask = np.zeros((H, W), dtype=np.uint8)
             pts = np.round(S_xy).astype(np.int32).reshape(-1, 1, 2)  # (x,y)
             cv2.polylines(mask, [pts], isClosed=False, color=255, thickness=thickness_px, lineType=cv2.LINE_AA)
             return mask
 
         def align_edge_to_midline_direction(S_xy, E_xy):
-            """Reverse E if its endpoints better match S reversed (keeps consistent direction)."""
-            d_forward = np.linalg.norm(E_xy[0]-S_xy[0]) + np.linalg.norm(E_xy[-1]-S_xy[-1])
-            d_reverse = np.linalg.norm(E_xy[0]-S_xy[-1]) + np.linalg.norm(E_xy[-1]-S_xy[0])
-            if d_reverse < d_forward:
-                return E_xy[::-1], True
-            return E_xy, False
+            d_f = np.linalg.norm(E_xy[0]-S_xy[0]) + np.linalg.norm(E_xy[-1]-S_xy[-1])
+            d_r = np.linalg.norm(E_xy[0]-S_xy[-1]) + np.linalg.norm(E_xy[-1]-S_xy[0])
+            return (E_xy[::-1] if d_r < d_f else E_xy)
 
         def side_sign_at_start(S_xy, P_xy):
-            """Signed side of P wrt S tangent near start. Positive -> left of S(0->1)."""
             if len(S_xy) < 2: return 0.0
             t = S_xy[1] - S_xy[0]
             v = P_xy[0] - S_xy[0]
             return t[0]*v[1] - t[1]*v[0]
 
-        # ---------- gather masks + raw midlines ----------
+        # ---------------- collect ----------------
         union_mask_existing = np.zeros((H, W), dtype=np.uint8)
         raw_lines = []
         for mid in member_ids:
             crack = atomic.get(mid)
-            if not crack:
-                continue
+            if not crack: continue
             union_mask_existing |= full_mask_from_atomic(crack)
             ml = crack.get("midline", []) or []
             if len(ml) >= 2:
@@ -1911,7 +1893,6 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 except Exception as e:
                     print(f"[DEBUG midline parse error] {e}")
 
-        # Fallback if only masks exist
         if not raw_lines:
             if np.any(union_mask_existing):
                 ys, xs = np.where(union_mask_existing > 0)
@@ -1930,15 +1911,15 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 }
             return None
 
-        # ---------- stitch endpoints & trim overlaps ----------
-        stitched_lines = stitch_lines(raw_lines, eps=2.0)
+        # ---------------- stitch + trim ----------------
+        stitched = stitch_lines(raw_lines, eps=2.0)
         try:
             prune_radius = max(3, int(self.window_half_size_box.value() * 0.5))
         except Exception:
             prune_radius = 8
-        trimmed_lines = trim_smaller_by_larger(stitched_lines, prune_radius=prune_radius) or stitched_lines
+        segs = trim_smaller_by_larger(stitched, prune_radius=prune_radius) or stitched
 
-        # ---------- per-polyline tracking ----------
+        # ---------------- tracking params ----------------
         color_idx = 0 if self.edge_track_color_box.currentText() == 'R' else \
                     1 if self.edge_track_color_box.currentText() == 'B' else 2
         mu = self.mu_box.value(); l = self.l_box.value(); p = self.p_box.value()
@@ -1947,8 +1928,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         norm1_segs, norm2_segs = [], []
         union_mask = np.zeros((H, W), dtype=np.uint8)
 
-        for S in trimmed_lines:
-            # bbox for crop
+        # ---------------- per-segment ----------------
+        for S in segs:
             x0 = max(0, int(np.floor(S[:,0].min()) - pad))
             x1 = min(W, int(np.ceil(S[:,0].max()) + pad))
             y0 = max(0, int(np.floor(S[:,1].min()) - pad))
@@ -1956,7 +1937,6 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             if x1 - x0 < 2 or y1 - y0 < 2:
                 continue
 
-            # midline in crop coords as [y,x]
             self.active_bbox = [x0, y0, x1, y1]
             self.pts = [np.array([S[0,0], S[0,1]]), np.array([S[-1,0], S[-1,1]])]
             self.end_points = self.pts
@@ -1964,159 +1944,153 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             if getattr(self, "skip_current_segment", False):
                 continue
 
+            # pipeline uses [y;x]; we also build (x,y) for normals
             cx = S[:,0] - x0; cy = S[:,1] - y0
-            self.track = np.vstack([cy, cx])  # (2,N) as [y, x]
+            self.track = np.vstack([cy, cx])
             self.current_source = "manual_poly"
             self.pts_crop = [np.array(self.pts[0]) - np.array([x0, y0]),
                             np.array(self.pts[1]) - np.array([x0, y0])]
             down = self.downsample_factor_box.value()
             self.pts_crop_down = [p / down for p in self.pts_crop]
-
             self.edge_mask()
-            midline_yx_crop = np.vstack([self.adjusted_track[0], self.adjusted_track[1]])
+
+            midline_xy_crop = np.column_stack([self.adjusted_track[1], self.adjusted_track[0]])  # (N,2) (x,y)
 
             res = ct.segmentation.edges_tracking(
                 self.image_crop[:, :, color_idx],
                 self.pts_crop,
                 self.edge_mask1_crop, self.edge_mask2_crop,
-                midline=midline_yx_crop, mu=mu, l=l, p=p,
+                midline=midline_xy_crop, mu=mu, l=l, p=p,
                 return_normal_edges=True
             )
 
-            track_e1, track_e2 = res["geodesic_edges"]                           # (N,2) in (x,y) crop coords
-            normals = res.get("normal_edge_points") or res.get("normal_edge_points_clipped")
-
-            # back to full-image coords (x,y)
-            e1 = np.column_stack([track_e1[:,0] + x0, track_e1[:,1] + y0])
-            e2 = np.column_stack([track_e2[:,0] + x0, track_e2[:,1] + y0])
-
-            # keep edges aligned with midline direction and on opposite sides
-            e1, _ = align_edge_to_midline_direction(S, e1)
-            e2, _ = align_edge_to_midline_direction(S, e2)
-            s1 = side_sign_at_start(S, e1); s2 = side_sign_at_start(S, e2)
-            if s1 * s2 >= 0 and abs(s2) > abs(s1):
-                e1, e2 = e2, e1  # ensure opposite sides
-
-            edge1_segs.append(e1)
-            edge2_segs.append(e2)
-
-            # normals (already in crop coords; move to full coords)
+            track_e1, track_e2 = res["geodesic_edges"]
+            normals = res.get("normal_edge_points")  # unclipped, crop coords
             if normals is not None:
                 (e1x, e1y), (e2x, e2y) = normals
-                n1_full = np.column_stack([np.asarray(e1x) + x0, np.asarray(e1y) + y0])
-                n2_full = np.column_stack([np.asarray(e2x) + x0, np.asarray(e2y) + y0])
-                norm1_segs.append(n1_full)
-                norm2_segs.append(n2_full)
-
-            # polygon mask from e1 reversed + e2 (x then y)
-            ex = np.concatenate((e1[:,0][::-1], e2[:,0]))
-            ey = np.concatenate((e1[:,1][::-1], e2[:,1]))
-            ex = np.clip(ex, 0, W-1); ey = np.clip(ey, 0, H-1)
-            poly_area = shoelace_area(ex, ey)
-
-            if poly_area > 0.5:
-                # create_mask expects (image, x, y)
-                mask_seg = ct.segmentation.create_mask(self.original_image, ex, ey).astype(np.uint8)
+                n1_full = np.column_stack([e1x + x0, e1y + y0])
+                n2_full = np.column_stack([e2x + x0, e2y + y0])
             else:
-                thick = max(3, int(prune_radius * 0.5))
-                mask_seg = ribbon_mask_from_midline(S, thickness_px=thick)
+                n1_full = np.empty((0,2)); n2_full = np.empty((0,2))
 
+            e1_full = np.column_stack([track_e1[:,0] + x0, track_e1[:,1] + y0])
+            e2_full = np.column_stack([track_e2[:,0] + x0, track_e2[:,1] + y0])
+
+            e1_full = align_edge_to_midline_direction(S, e1_full)
+            e2_full = align_edge_to_midline_direction(S, e2_full)
+
+            # ensure opposite sides (swap if needed)
+            s1 = side_sign_at_start(S, e1_full)
+            s2 = side_sign_at_start(S, e2_full)
+            if s1 * s2 >= 0 and abs(s2) > abs(s1):
+                e1_full, e2_full = e2_full, e1_full
+                n1_full, n2_full = n2_full, n1_full
+
+            edge1_segs.append(e1_full)
+            edge2_segs.append(e2_full)
+            norm1_segs.append(n1_full)
+            norm2_segs.append(n2_full)
+
+            # polygon mask (x then y)
+            ex = np.concatenate((e1_full[:,0][::-1], e2_full[:,0]))
+            ey = np.concatenate((e1_full[:,1][::-1], e2_full[:,1]))
+            exc, eyc = np.clip(ex, 0, W-1), np.clip(ey, 0, H-1)
+            area = shoelace_area(exc, eyc)
+            if area > 0.5:
+                mask_seg = ct.segmentation.create_mask(self.original_image, exc, eyc).astype(np.uint8)
+            else:
+                mask_seg = ribbon_mask_from_midline(S, thickness_px=max(3, prune_radius//2))
             union_mask |= (mask_seg > 0).astype(np.uint8)
 
-        # ---------- final crop ----------
+        # ---------------- final crop ----------------
         if np.any(union_mask):
             ys, xs = np.where(union_mask > 0)
-            y0, y1 = int(ys.min()), int(ys.max()+1)
-            x0, x1 = int(xs.min()), int(xs.max()+1)
-            crop = union_mask[y0:y1, x0:x1].astype(np.uint8)
-            crop_h, crop_w = crop.shape
+            Y0, Y1 = int(ys.min()), int(ys.max()+1)
+            X0, X1 = int(xs.min()), int(xs.max()+1)
+            crop = union_mask[Y0:Y1, X0:X1].astype(np.uint8)  # (h,w)
+            h, w = crop.shape
         else:
-            x0 = y0 = 0
-            crop_h = crop_w = 1
-            crop = np.zeros((crop_h, crop_w), np.uint8)
+            X0 = Y0 = 0; w = h = 1
+            crop = np.zeros((h, w), np.uint8)
 
-        print(f"[DEBUG combine] stitched={len(stitched_lines)} trimmed={len(trimmed_lines)} "
+        print(f"[DEBUG combine] stitched={len(stitched)} trimmed={len(segs)} "
             f"edge1_segs={len(edge1_segs)} edge2_segs={len(edge2_segs)} "
-            f"final_crop=({crop_w}x{crop_h}) nonzero={int(crop.sum())}")
+            f"final_crop=({w}x{h}) nonzero={int(crop.sum())}")
 
-        # ---------- debug plot ----------
+        # ---------------- DEBUG PLOT (make normals visible) ----------------
         fig, ax = plt.subplots(figsize=(12, 8))
         ax.imshow(self.original_image)
         ax.set_title("Combined crack segments with edges + normals (full image)")
 
-        lw = 0.9
-        lw_n = 0.25
-        alpha_n = 0.2
+        midline_done = edge1_done = edge2_done = normals1_done = normals2_done = False
 
-        midline_done = edge1_done = edge2_done = normals_done = False
-
-        # midline + edges
-        for S in trimmed_lines:
-            ax.plot(S[:,0], S[:,1], 'g-', linewidth=lw,
-                    label=None if midline_done else 'Midline'); midline_done = True
+        for S in segs:
+            ax.plot(S[:,0], S[:,1], 'g-', lw=1.2, label=None if midline_done else 'Midline'); midline_done = True
         for e in edge1_segs:
-            ax.plot(e[:,0], e[:,1], 'r-', linewidth=lw,
-                    label=None if edge1_done else 'Edge 1'); edge1_done = True
+            ax.plot(e[:,0], e[:,1], 'r-', lw=1.2, label=None if edge1_done else 'Edge 1'); edge1_done = True
         for e in edge2_segs:
-            ax.plot(e[:,0], e[:,1], 'b-', linewidth=lw,
-                    label=None if edge2_done else 'Edge 2'); edge2_done = True
+            ax.plot(e[:,0], e[:,1], 'b-', lw=1.2, label=None if edge2_done else 'Edge 2'); edge2_done = True
 
-        # normals: subsample + filter outliers
-        for S, n1, n2 in zip(trimmed_lines, norm1_segs, norm2_segs):
-            if len(S) == 0: 
+        # normals: adaptive density, thicker + brighter, NaN-safe
+        for si, (S, n1, n2) in enumerate(zip(segs, norm1_segs, norm2_segs)):
+            if len(n1) == 0 or len(n2) == 0: 
+                print(f"[DEBUG normals] seg{si}: NONE")
                 continue
-            k = min(len(S), len(n1), len(n2))
-            step = max(5, k // 50)  # draw at most ~50 normals
-            widths = np.hypot(n1[:k,0]-S[:k,0], n1[:k,1]-S[:k,1])
-            median_w = np.median(widths[~np.isnan(widths)]) if np.any(~np.isnan(widths)) else 0
-            max_allowed = 2.5 * median_w if median_w > 0 else np.inf
+            v1 = np.where(np.isfinite(n1).all(axis=1))[0]
+            v2 = np.where(np.isfinite(n2).all(axis=1))[0]
+            valid = np.intersect1d(v1, v2)
+            if valid.size == 0:
+                print(f"[DEBUG normals] seg{si}: 0 finite points")
+                continue
+            step = max(1, valid.size // 80)  # ~up to 80 normals/seg
+            idx = valid[::step]
+            print(f"[DEBUG normals] seg{si}: mid={len(S)}  n1_finite={v1.size}  n2_finite={v2.size}  drawing={idx.size}")
+            if idx.size:
+                # show lines
+                for i in idx:
+                    ax.plot([S[i,0], n1[i,0]], [S[i,1], n1[i,1]],
+                            color='cyan', lw=0.8, alpha=0.6,
+                            label=None if normals1_done else 'Normals Edge1')
+                    normals1_done = True
 
-            for i in range(0, k, step):
-                if widths[i] > max_allowed:
-                    continue  # skip outlier
-                ax.plot([S[i,0], n1[i,0]], [S[i,1], n1[i,1]],
-                        color='cyan', linewidth=lw_n, alpha=alpha_n,
-                        label=None if normals_done else 'Normals')
-                normals_done = True
-                ax.plot([S[i,0], n2[i,0]], [S[i,1], n2[i,1]],
-                        color='magenta', linewidth=lw_n, alpha=alpha_n)
+                    ax.plot([S[i,0], n2[i,0]], [S[i,1], n2[i,1]],
+                            color='magenta', lw=0.8, alpha=0.6,
+                            label=None if normals2_done else 'Normals Edge2')
+                    normals2_done = True
+                # also quiver for direction clarity
+                ax.quiver(S[idx,0], S[idx,1], n1[idx,0]-S[idx,0], n1[idx,1]-S[idx,1],
+                        angles='xy', scale_units='xy', scale=1, width=0.002, alpha=0.6, color='cyan')
+                ax.quiver(S[idx,0], S[idx,1], n2[idx,0]-S[idx,0], n2[idx,1]-S[idx,1],
+                        angles='xy', scale_units='xy', scale=1, width=0.002, alpha=0.6, color='magenta')
 
         ax.set_xlim(0, W)
-        ax.set_ylim(H, 0)
+        ax.set_ylim(H, 0)  # flip Y to image convention
         ax.axis('equal')
-
-        handles, labels = ax.get_legend_handles_labels()
-        uniq = {}
-        for hdl, lbl in zip(handles, labels):
-            if lbl not in uniq:
-                uniq[lbl] = hdl
-        ax.legend(list(uniq.values()), list(uniq.keys()))
-
+        ax.legend()
         plt.tight_layout()
         plt.savefig("debug_combined_zoom.png")
         plt.close()
 
-        # ---------- pack result ----------
+        # ---------------- pack ----------------
         def _flatten(seg_list):
             out = []
             for i, arr in enumerate(seg_list):
                 out.extend([[float(x), float(y)] for x, y in arr])
-                if i < len(seg_list) - 1:
-                    out.append([None, None])
+                if i < len(seg_list) - 1: out.append([None, None])
             return out
 
         combined = {
             "source": "combined",
             "members": sorted(member_ids, key=lambda s: int(s)),
-            "midline_segments": [ [[float(x), float(y)] for (x,y) in s] for s in trimmed_lines ],
-            "midline": _flatten(trimmed_lines),
+            "midline_segments": [ [[float(x), float(y)] for (x,y) in s] for s in segs ],
+            "midline": _flatten(segs),
             "geodesic_edges": {"edge1": _flatten(edge1_segs), "edge2": _flatten(edge2_segs)},
             "normal_edge_points": {"edge1": _flatten(norm1_segs), "edge2": _flatten(norm2_segs)},
             "mask_crop": crop.tolist(),
-            "mask_bbox": [int(x0), int(y0), int(crop_w), int(crop_h)]  # (x, y, w, h)
+            "mask_bbox": [int(X0), int(Y0), int(w), int(h)],   # [x,y,w,h]
         }
         return combined
-        
+            
     def combine_segments(self):
         """
         Combine multiple cracks (atomic or already-combined) into a new combined crack.
