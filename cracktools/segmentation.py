@@ -12,87 +12,6 @@ from agd import LinearParallel as lp
 from agd import AutomaticDifferentiation as ad
 norm_infinity = ad.Optimization.norm_infinity
 import scipy.ndimage
-
-'''def edge_masks(image_gray, track, window_half_size=40):
-
-    edge_mask = np.zeros_like(image_gray, dtype=float)
-    center_line_length = 3
-    img_h, img_w = image_gray.shape
-    n_skipped = 0
-
-    for i in range(track.shape[1] - 1):
-        start_row = float(track[0, i])  # row (y)
-        start_col = float(track[1, i])  # col (x)
-
-        if i < track.shape[1] - center_line_length:
-            end_row = float(track[0, i + center_line_length])
-            end_col = float(track[1, i + center_line_length])
-            a = False
-        else:
-            end_row = float(track[0, i - center_line_length])
-            end_col = float(track[1, i - center_line_length])
-            a = True
-
-        if start_col == end_col and start_row == end_row:
-            n_skipped += 1
-            continue
-
-        ddx, ddy, _ = cracktools.tracking.tang_len(start_col, start_row, end_col, end_row)
-        if a:
-            ddx = -ddx
-            ddy = -ddy
-
-        # Correct window computation: rows (Y), cols (X)
-        half_win_r = int(min(window_half_size, start_row, img_h - start_row - 1))
-        half_win_c = int(min(window_half_size, start_col, img_w - start_col - 1))
-        half_win_r = max(1, half_win_r)
-        half_win_c = max(1, half_win_c)
-
-        r1 = int(round(start_row - half_win_r))
-        r2 = int(round(start_row + half_win_r))
-        c1 = int(round(start_col - half_win_c))
-        c2 = int(round(start_col + half_win_c))
-
-        if r1 < 0 or r2 > img_h or c1 < 0 or c2 > img_w:
-            print(f"Skipping i={i}: window out of bounds ({r1}:{r2},{c1}:{c2}) in image of shape {image_gray.shape}")
-            continue
-
-        window = image_gray[r1:r2, c1:c2]
-        if window.shape[0] < 3 or window.shape[1] < 3:
-            print(f"Skipping i={i}: window too small ({window.shape})")
-            continue
-
-        try:
-            angle = np.arctan2(ddx, ddy) * 57.3
-            window_rotate = scipy.ndimage.rotate(window, angle, reshape=False)
-            sobel = scipy.ndimage.gaussian_filter(window_rotate / 255.0, 1, order=(1, 0), mode='reflect')
-            sobel_rotate = scipy.ndimage.rotate(sobel, -angle, reshape=False)
-        except Exception as e:
-            print(f"Skipping i={i}: sobel rotation failed — {e}")
-            continue
-
-        m = max(1, int(min(half_win_r, half_win_c) / 5))
-        sobel_rotate[:m, :] = 0
-        sobel_rotate[-m:, :] = 0
-        sobel_rotate[:, :m] = 0
-        sobel_rotate[:, -m:] = 0
-
-        # Insert into the correct position in edge_mask
-        mask_r1 = r1
-        mask_r2 = r1 + sobel_rotate.shape[0]
-        mask_c1 = c1
-        mask_c2 = c1 + sobel_rotate.shape[1]
-
-        if mask_r1 < 0 or mask_r2 > img_h or mask_c1 < 0 or mask_c2 > img_w:
-            print(f"Skip insertion i={i}: mask indices out of bounds ({mask_r1}:{mask_r2},{mask_c1}:{mask_c2})")
-            continue
-
-        edge_mask[mask_r1:mask_r2, mask_c1:mask_c2] += sobel_rotate
-
-    print(f"Skipped {n_skipped} zero-length segments.")
-    edge_mask1 = edge_mask - np.min(edge_mask)
-    edge_mask2 = -edge_mask1 - np.min(-edge_mask1)
-    return edge_mask1, edge_mask2'''
     
 def edge_masks(image_gray, track, window_half_size=40):
     import numpy as np
@@ -182,7 +101,7 @@ from shapely.geometry import LineString, Point
 
 ###################################################################################
 # Normal Projection Edge Correspondence, by Adam Camerer
-def compute_tangent_normals(x, y):
+'''def compute_tangent_normals(x, y):
     dx = np.gradient(x)
     dy = np.gradient(y)
     norm = np.sqrt(dx**2 + dy**2) + 1e-10
@@ -227,6 +146,71 @@ def normal_intersections_bruteforce(mid_x, mid_y, edge_x, edge_y, normal_length)
                 rx[i], ry[i] = nearest_on_edge(mx, my)
         else:
             rx[i], ry[i] = nearest_on_edge(mx, my)
+    return rx, ry'''
+    
+###################################################################################
+# Normal Projection Edge Correspondence, by Adam Camerer
+def compute_tangent_normals(x, y):
+    dx = np.gradient(x)
+    dy = np.gradient(y)
+    norm = np.sqrt(dx**2 + dy**2) + 1e-10
+    tangent = np.stack([dx / norm, dy / norm], axis=1)
+    normal = np.stack([-dy / norm, dx / norm], axis=1)
+    return tangent, normal
+
+from shapely.geometry import LineString, Point, MultiPoint, GeometryCollection
+
+def normal_intersections_bruteforce(mid_x, mid_y, edge_x, edge_y, normal_length):
+    """
+    Intersect each midline normal with the edge polyline.
+    Adds a distance guard so 'nearest_on_edge' can't teleport far away.
+    """
+    _, normal = compute_tangent_normals(mid_x, mid_y)
+    edge_line = LineString(np.column_stack([edge_x, edge_y]))
+    n = len(mid_x)
+    rx = np.full(n, np.nan, float)
+    ry = np.full(n, np.nan, float)
+
+    # distance cap (~12% of crop diagonal by default); prevents long "spikes"
+    max_dist = max(10.0, 0.12 * float(normal_length))
+
+    for i in range(n):
+        mx, my = float(mid_x[i]), float(mid_y[i])
+        if not np.isfinite(mx) or not np.isfinite(my): 
+            continue
+        nx, ny = normal[i]
+        a = (mx - normal_length*nx, my - normal_length*ny)
+        b = (mx + normal_length*nx, my + normal_length*ny)
+        inter = edge_line.intersection(LineString([a, b]))
+
+        def nearest_on_edge(px, py):
+            t = edge_line.project(Point(px, py))
+            p = edge_line.interpolate(t)
+            return p.x, p.y
+
+        def accept_or_nan(px, py):
+            d = np.hypot(px - mx, py - my)
+            if d <= max_dist:
+                return px, py
+            return np.nan, np.nan
+
+        if inter.is_empty:
+            nx_, ny_ = nearest_on_edge(mx, my)
+            rx[i], ry[i] = accept_or_nan(nx_, ny_)
+        elif isinstance(inter, Point):
+            rx[i], ry[i] = accept_or_nan(inter.x, inter.y)
+        elif isinstance(inter, (MultiPoint, GeometryCollection)):
+            pts = [g for g in getattr(inter, 'geoms', []) if isinstance(g, Point)]
+            if pts:
+                j = np.argmin([np.hypot(p.x - mx, p.y - my) for p in pts])
+                rx[i], ry[i] = accept_or_nan(pts[j].x, pts[j].y)
+            else:
+                nx_, ny_ = nearest_on_edge(mx, my)
+                rx[i], ry[i] = accept_or_nan(nx_, ny_)
+        else:
+            nx_, ny_ = nearest_on_edge(mx, my)
+            rx[i], ry[i] = accept_or_nan(nx_, ny_)
+
     return rx, ry
 
 def edges_tracking(
