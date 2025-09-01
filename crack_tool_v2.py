@@ -2112,8 +2112,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         
     def _build_combined_crack(self, member_ids, pad=10):
         """
-        Combined crack builder (greedy chains + dominant trimming):
-        - chain polylines by endpoint proximity (snapping)
+        Combined crack builder (user-endpoint chaining + dominant trimming):
+        - chain polylines by explicit user endpoints (user_points/user_connections)
         - pick longest chain as dominant, carve others by its buffer
         - keep only true outside-branch remnants (endpoint+midpoint outside, len guard)
         - compute geodesic edges + normals per kept piece
@@ -2147,36 +2147,6 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         def ls_coords(ls: LineString):
             return np.asarray(ls.coords, dtype=float)        # (N,2) (x,y)
-
-        def near(a, b, eps): return abs(a[0]-b[0]) <= eps and abs(a[1]-b[1]) <= eps
-
-        def stitch_lines(lines_xy, eps=2.0):
-            """
-            Greedy endpoint chaining, preserves interior samples.
-            """
-            unused = [l.copy() for l in lines_xy if l is not None and len(l) >= 2]
-            stitched = []
-            while unused:
-                cur = unused.pop(0).tolist()
-                changed = True
-                while changed:
-                    changed = False
-                    for i, cand in enumerate(unused):
-                        a0, a1 = cur[0], cur[-1]
-                        b0, b1 = cand[0].tolist(), cand[-1].tolist()
-                        if near(a1, b0, eps): cur.extend(cand[1:].tolist()); unused.pop(i); changed=True; break
-                        if near(a1, b1, eps): cur.extend(cand[-2::-1].tolist()); unused.pop(i); changed=True; break
-                        if near(a0, b1, eps): cur = cand[:-1].tolist()+cur; unused.pop(i); changed=True; break
-                        if near(a0, b0, eps): cur = cand[1:][::-1].tolist()+cur; unused.pop(i); changed=True; break
-                # dedup near-duplicates
-                dedup = [cur[0]]
-                for p in cur[1:]:
-                    if not near(p, dedup[-1], 1e-6): dedup.append(p)
-                if len(dedup) >= 2 and near(dedup[0], dedup[-1], eps):
-                    dedup = dedup[:-1]
-                if len(dedup) >= 2:
-                    stitched.append(np.asarray(dedup, dtype=float))
-            return stitched
 
         def split_lines(geom):
             if geom.is_empty: return []
@@ -2239,54 +2209,150 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 segs.append(arr[start:])
             return segs if segs else [arr]
 
-        def snap_endpoints(lines_list, tol):
-            """Snap first/last vertices across all lines to shared cluster centers within tol."""
-            if not lines_list: return lines_list
-            ends = []
-            for L in lines_list:
-                if L is None or len(L) < 2: continue
-                ends.append(tuple(L[0])); ends.append(tuple(L[-1]))
-            clusters = []  # list of [sumx, sumy, count]
-            centers = []
-            for (x,y) in ends:
-                hit = -1
-                for j,(cx,cy) in enumerate(centers):
-                    if np.hypot(x-cx, y-cy) <= tol:
-                        hit = j; break
-                if hit < 0:
-                    clusters.append([x,y,1]); centers.append((x,y))
-                else:
-                    clusters[hit][0] += x; clusters[hit][1] += y; clusters[hit][2] += 1
-                    centers[hit] = (clusters[hit][0]/clusters[hit][2], clusters[hit][1]/clusters[hit][2])
-            # snap
-            snapped = []
-            for L in lines_list:
-                if L is None or len(L) < 2: 
-                    snapped.append(L); continue
-                S = L.copy()
-                for idx in (0, -1):
-                    x,y = S[idx]
-                    k = int(np.argmin([np.hypot(x-cx, y-cy) for (cx,cy) in centers]))
-                    if np.hypot(x-centers[k][0], y-centers[k][1]) <= tol:
-                        S[idx] = centers[k]
-                snapped.append(S)
-            return snapped
+        # ---------- NEW: chain using explicit user endpoints (graph + greedy longest path) ----------
+        def _endpoints_from_crack(crack):
+            """Return the set of endpoint coordinates (as tuples) explicitly used by this atomic crack."""
+            ups = crack.get("user_points", []) or []
+            ucs = crack.get("user_connections", []) or []
+            ends = set()
+            for conn in ucs:
+                for idx in conn:
+                    if 0 <= idx < len(ups):
+                        pt = ups[idx]
+                        # use exact user-defined coordinates (float tuples)
+                        ends.add((float(pt[0]), float(pt[1])))
+            return ends
+
+        def stitch_lines_by_user(member_ids, atomic):
+            """
+            Build chains from atomic midlines using *explicit* shared endpoints defined by
+            user_points/user_connections (no distance heuristic).
+            Returns a list of polylines: main chained path(s) first (greedy longest),
+            plus any leftover branch segments.
+            """
+            # collect midlines
+            mid2arr = {}
+            mid2ends = {}
+            for mid in member_ids:
+                crack = atomic.get(mid)
+                if not crack: 
+                    continue
+                ml = crack.get("midline", []) or []
+                if len(ml) < 2:
+                    continue
+                arr = np.array([[float(x), float(y)] for (x,y) in ml], dtype=float)
+                mid2arr[mid] = arr
+                mid2ends[mid] = _endpoints_from_crack(crack)
+
+            if not mid2arr:
+                return []
+
+            # build endpoint -> mids map
+            end_to_mids = {}
+            for mid, ends in mid2ends.items():
+                for e in ends:
+                    end_to_mids.setdefault(e, set()).add(mid)
+
+            # adjacency by shared endpoint
+            adj = {mid: set() for mid in mid2arr}
+            for mids in end_to_mids.values():
+                if len(mids) >= 2:
+                    mids = list(mids)
+                    for i in range(len(mids)):
+                        for j in range(i+1, len(mids)):
+                            a, b = mids[i], mids[j]
+                            adj[a].add(b); adj[b].add(a)
+
+            # connected components
+            comps = []
+            seen = set()
+            for mid in adj:
+                if mid in seen: 
+                    continue
+                stack = [mid]
+                comp = []
+                seen.add(mid)
+                while stack:
+                    u = stack.pop()
+                    comp.append(u)
+                    for v in adj[u]:
+                        if v not in seen:
+                            seen.add(v); stack.append(v)
+                comps.append(comp)
+
+            # helper to get endpoints of an array as tuples
+            def ends_of(arr):
+                return (tuple(arr[0]), tuple(arr[-1]))
+
+            # build greedy longest chain per component; leftovers as separate
+            stitched = []
+            for comp in comps:
+                # sort by segment length, descending
+                comp_sorted = sorted(comp, key=lambda m: linestring_length(mid2arr[m]), reverse=True)
+                used = set()
+
+                # try to make a single long chain inside the component
+                if comp_sorted:
+                    # pick a start: prefer a 'leaf' (endpoint used by only one mid in this comp), else longest
+                    leaf_candidates = []
+                    for m in comp_sorted:
+                        e0, e1 = list(mid2ends.get(m, []))[:2] if len(mid2ends.get(m, [])) >= 2 else (None, None)
+                        deg0 = len(end_to_mids.get(e0, [])) if e0 is not None else 0
+                        deg1 = len(end_to_mids.get(e1, [])) if e1 is not None else 0
+                        if deg0 == 1 or deg1 == 1:
+                            leaf_candidates.append(m)
+                    start_mid = leaf_candidates[0] if leaf_candidates else comp_sorted[0]
+
+                    cur = mid2arr[start_mid].copy()
+                    used.add(start_mid)
+
+                    extended = True
+                    while extended:
+                        extended = False
+                        end_pt = tuple(cur[-1])
+                        # find all unused mids that share this exact endpoint
+                        cands = []
+                        for m in comp_sorted:
+                            if m in used: 
+                                continue
+                            arr2 = mid2arr[m]
+                            e0, e1 = ends_of(arr2)
+                            if e0 == end_pt or e1 == end_pt:
+                                cands.append((m, arr2))
+                        if cands:
+                            # pick the longest extension
+                            m_best, arr2 = max(cands, key=lambda t: linestring_length(t[1]))
+                            if tuple(arr2[0]) == end_pt:
+                                cur = np.vstack([cur, arr2[1:]])
+                            else:  # arr2[-1] == end_pt
+                                cur = np.vstack([cur, arr2[-2::-1]])
+                            used.add(m_best)
+                            extended = True
+
+                    stitched.append(cur)
+
+                # add leftovers (branches) in this component
+                for m in comp_sorted:
+                    if m not in used:
+                        stitched.append(mid2arr[m])
+
+            # final dedup of identical consecutive vertices
+            stitched = [finite_xy(s) for s in stitched if s is not None and len(s) >= 2]
+            return stitched
 
         # ---------------- collect ----------------
         union_mask_existing = np.zeros((H, W), dtype=np.uint8)
-        raw_lines = []
+        any_mid = False
         for mid in member_ids:
             crack = atomic.get(mid)
-            if not crack: continue
+            if not crack: 
+                continue
             union_mask_existing |= full_mask_from_atomic(crack)
             ml = crack.get("midline", []) or []
             if len(ml) >= 2:
-                try:
-                    raw_lines.append(ls_coords(LineString([(float(p[0]), float(p[1])) for p in ml if p is not None])))
-                except Exception as e:
-                    print(f"[DEBUG midline parse error] {e}")
+                any_mid = True
 
-        if not raw_lines:
+        if not any_mid:
             if np.any(union_mask_existing):
                 ys, xs = np.where(union_mask_existing > 0)
                 y0, y1 = int(ys.min()), int(ys.max()+1)
@@ -2306,8 +2372,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 }
             return None
 
-        # ---------------- chain + dominant carve ----------------
-        stitched = stitch_lines(raw_lines, eps=2.0)
+        # ---------------- chain (by user endpoints) + dominant carve ----------------
+        stitched = stitch_lines_by_user(member_ids, atomic)
 
         # derive geometry scales from UI
         try:
@@ -2318,10 +2384,6 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         overlap_px   = max(6, int(w_half * 0.6))              # dominant buffer (how aggressively we carve)
         min_keep_len = max(8.0, 0.6 * w_half)                 # discard tiny outside stubs
         max_plot_jump = max(25.0, 1.2 * w_half)               # split teleports when plotting
-        snap_tol = max(3.0, 0.15 * w_half)                    # endpoint snapping
-
-        # snap endpoints so "same" ends really coincide
-        stitched = snap_endpoints(stitched, tol=snap_tol)
 
         # sort chained polylines by length (desc)
         stitched = [finite_xy(s) for s in stitched]
