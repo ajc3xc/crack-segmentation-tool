@@ -101,7 +101,7 @@ from shapely.geometry import LineString, Point
 
 ###################################################################################
 # Normal Projection Edge Correspondence, by Adam Camerer
-'''def compute_tangent_normals(x, y):
+def compute_tangent_normals(x, y):
     dx = np.gradient(x)
     dy = np.gradient(y)
     norm = np.sqrt(dx**2 + dy**2) + 1e-10
@@ -110,7 +110,7 @@ from shapely.geometry import LineString, Point
     return tangent, normal
 
 from shapely.geometry import LineString, Point, MultiPoint, GeometryCollection
-
+'''
 def normal_intersections_bruteforce(mid_x, mid_y, edge_x, edge_y, normal_length):
     _, normal = compute_tangent_normals(mid_x, mid_y)
     edge_line = LineString(np.column_stack([edge_x, edge_y]))
@@ -147,10 +147,73 @@ def normal_intersections_bruteforce(mid_x, mid_y, edge_x, edge_y, normal_length)
         else:
             rx[i], ry[i] = nearest_on_edge(mx, my)
     return rx, ry'''
+
+'''def normal_intersections_bruteforce(mid_x, mid_y, edge_x, edge_y, normal_length):
+    """
+    Intersect each midline normal with the edge polyline.
+    Safer version:
+      - only accept intersections within max_dist
+      - fallback projects locally (nearest edge *segment*), not whole line
+      - avoids "teleporting" across sparse edges
+    """
+    _, normal = compute_tangent_normals(mid_x, mid_y)
+    edge_coords = np.column_stack([edge_x, edge_y])
+    edge_line = LineString(edge_coords)
+
+    n = len(mid_x)
+    rx = np.full(n, np.nan, float)
+    ry = np.full(n, np.nan, float)
+
+    max_dist = max(10.0, 0.12 * float(normal_length))
+
+    for i in range(n):
+        mx, my = float(mid_x[i]), float(mid_y[i])
+        if not np.isfinite(mx) or not np.isfinite(my):
+            continue
+        nx, ny = normal[i]
+
+        # Build normal ray
+        a = (mx - normal_length*nx, my - normal_length*ny)
+        b = (mx + normal_length*nx, my + normal_length*ny)
+        ray = LineString([a, b])
+        inter = edge_line.intersection(ray)
+
+        def accept(px, py):
+            d = np.hypot(px - mx, py - my)
+            return (px, py) if d <= max_dist else (np.nan, np.nan)
+
+        if isinstance(inter, Point):
+            rx[i], ry[i] = accept(inter.x, inter.y)
+        elif isinstance(inter, (MultiPoint, GeometryCollection)):
+            pts = [g for g in getattr(inter, "geoms", []) if isinstance(g, Point)]
+            if pts:
+                j = np.argmin([np.hypot(p.x - mx, p.y - my) for p in pts])
+                rx[i], ry[i] = accept(pts[j].x, pts[j].y)
+        else:
+            # fallback: find nearest *segment* instead of whole polyline
+            dists = np.hypot(edge_coords[:,0] - mx, edge_coords[:,1] - my)
+            j = np.argmin(dists)
+            if 0 < j < len(edge_coords)-1:
+                seg = LineString([edge_coords[j-1], edge_coords[j+1]])
+            elif j > 0:
+                seg = LineString([edge_coords[j-1], edge_coords[j]])
+            else:
+                seg = LineString([edge_coords[j], edge_coords[j+1]])
+            proj = seg.interpolate(seg.project(Point(mx, my)))
+            rx[i], ry[i] = accept(proj.x, proj.y)
+
+    return rx, ry'''
     
 ###################################################################################
-# Normal Projection Edge Correspondence, by Adam Camerer
-def compute_tangent_normals(x, y):
+from shapely.geometry import LineString, Point, MultiPoint
+import numpy as np
+from scipy.signal import savgol_filter
+
+def compute_smooth_tangent_normals(x, y, window=7, poly=2):
+    """Smoothed tangent + normal from midline coords."""
+    if len(x) > window:
+        x = savgol_filter(x, window, poly)
+        y = savgol_filter(y, window, poly)
     dx = np.gradient(x)
     dy = np.gradient(y)
     norm = np.sqrt(dx**2 + dy**2) + 1e-10
@@ -158,61 +221,60 @@ def compute_tangent_normals(x, y):
     normal = np.stack([-dy / norm, dx / norm], axis=1)
     return tangent, normal
 
-from shapely.geometry import LineString, Point, MultiPoint, GeometryCollection
-
-def normal_intersections_bruteforce(mid_x, mid_y, edge_x, edge_y, normal_length):
+def find_normal_pair(mid_x, mid_y, edge1, edge2, max_dist_ratio=0.12):
     """
-    Intersect each midline normal with the edge polyline.
-    Adds a distance guard so 'nearest_on_edge' can't teleport far away.
+    Cast a perpendicular at each midline point, intersect with edge1+edge2.
+    Ensures both sides are found (nearest intersection each side).
     """
-    _, normal = compute_tangent_normals(mid_x, mid_y)
-    edge_line = LineString(np.column_stack([edge_x, edge_y]))
-    n = len(mid_x)
-    rx = np.full(n, np.nan, float)
-    ry = np.full(n, np.nan, float)
+    _, normals = compute_smooth_tangent_normals(mid_x, mid_y)
+    line1 = LineString(edge1)
+    line2 = LineString(edge2)
 
-    # distance cap (~12% of crop diagonal by default); prevents long "spikes"
-    max_dist = max(10.0, 0.12 * float(normal_length))
+    diag = np.hypot(
+        max(edge1[:,0].max(), edge2[:,0].max()) - min(edge1[:,0].min(), edge2[:,0].min()),
+        max(edge1[:,1].max(), edge2[:,1].max()) - min(edge1[:,1].min(), edge2[:,1].min())
+    )
+    normal_length = int(np.ceil(diag))
+    max_dist = max(10.0, max_dist_ratio * normal_length)
 
-    for i in range(n):
-        mx, my = float(mid_x[i]), float(mid_y[i])
-        if not np.isfinite(mx) or not np.isfinite(my): 
-            continue
-        nx, ny = normal[i]
+    e1x = np.full(len(mid_x), np.nan)
+    e1y = np.full(len(mid_x), np.nan)
+    e2x = np.full(len(mid_x), np.nan)
+    e2y = np.full(len(mid_x), np.nan)
+
+    for i, (mx, my) in enumerate(zip(mid_x, mid_y)):
+        nx, ny = normals[i]
         a = (mx - normal_length*nx, my - normal_length*ny)
         b = (mx + normal_length*nx, my + normal_length*ny)
-        inter = edge_line.intersection(LineString([a, b]))
+        ray = LineString([a, b])
 
-        def nearest_on_edge(px, py):
-            t = edge_line.project(Point(px, py))
-            p = edge_line.interpolate(t)
-            return p.x, p.y
+        def nearest_intersection(line):
+            inter = line.intersection(ray)
+            pts = []
+            if isinstance(inter, Point):
+                pts = [inter]
+            elif isinstance(inter, MultiPoint):
+                pts = list(inter.geoms)
+            if not pts:
+                return None
+            # closest to (mx,my)
+            dists = [np.hypot(p.x - mx, p.y - my) for p in pts]
+            j = int(np.argmin(dists))
+            if dists[j] > max_dist:
+                return None
+            return pts[j].x, pts[j].y
 
-        def accept_or_nan(px, py):
-            d = np.hypot(px - mx, py - my)
-            if d <= max_dist:
-                return px, py
-            return np.nan, np.nan
+        p1 = nearest_intersection(line1)
+        p2 = nearest_intersection(line2)
 
-        if inter.is_empty:
-            nx_, ny_ = nearest_on_edge(mx, my)
-            rx[i], ry[i] = accept_or_nan(nx_, ny_)
-        elif isinstance(inter, Point):
-            rx[i], ry[i] = accept_or_nan(inter.x, inter.y)
-        elif isinstance(inter, (MultiPoint, GeometryCollection)):
-            pts = [g for g in getattr(inter, 'geoms', []) if isinstance(g, Point)]
-            if pts:
-                j = np.argmin([np.hypot(p.x - mx, p.y - my) for p in pts])
-                rx[i], ry[i] = accept_or_nan(pts[j].x, pts[j].y)
-            else:
-                nx_, ny_ = nearest_on_edge(mx, my)
-                rx[i], ry[i] = accept_or_nan(nx_, ny_)
-        else:
-            nx_, ny_ = nearest_on_edge(mx, my)
-            rx[i], ry[i] = accept_or_nan(nx_, ny_)
+        if p1 and p2:
+            e1x[i], e1y[i] = p1
+            e2x[i], e2y[i] = p2
+        # else: leave NaNs → avoids bent escape lines
 
-    return rx, ry
+    return e1x, e1y, e2x, e2y
 
+###################################################################################
 def edges_tracking(
     image_crop, pts_cropp,
     edge_mask1_cropp, edge_mask2_cropp,
@@ -227,6 +289,8 @@ def edges_tracking(
         "normal_edge_points_clipped": same but clipped to image bounds
       }
     """
+    import time, os, random
+
     # seeds/tips come in crop coords as (x,y) in your code; hfmm wants (y,x)
     seeds = np.array([*pts_cropp[0][::-1]])
     tips  = np.array([*pts_cropp[1][::-1]])
@@ -282,7 +346,6 @@ def edges_tracking(
 
     if return_normal_edges and midline is not None:
         m = np.asarray(midline)
-        # Accept (N,2) or (2,N); normalize to (N,2) (x,y)
         if m.ndim != 2:
             raise ValueError("midline must be 2D array")
         if m.shape[1] == 2:
@@ -292,25 +355,47 @@ def edges_tracking(
         else:
             raise ValueError("midline must be (N,2) or (2,N)")
 
-        height, width = image_crop.shape[:2]
-        normal_length = int(np.ceil(np.hypot(height, width)))
+        # paired normals
+        e1x, e1y, e2x, e2y = find_normal_pair(mid_x, mid_y, track_e1, track_e2)
 
-        # Intersect each midline normal with each edge polyline (in crop coords)
-        edge1_x, edge1_y = normal_intersections_bruteforce(
-            mid_x, mid_y, track_e1[:,0], track_e1[:,1], normal_length)
-        edge2_x, edge2_y = normal_intersections_bruteforce(
-            mid_x, mid_y, track_e2[:,0], track_e2[:,1], normal_length)
+        normal_edges = [[e1x.copy(), e1y.copy()],
+                        [e2x.copy(), e2y.copy()]]
 
-        # keep both unclipped (for geometry) and clipped (for mask/debug)
-        normal_edges = [[edge1_x.copy(), edge1_y.copy()],
-                        [edge2_x.copy(), edge2_y.copy()]]
+        e1x_clip = np.clip(e1x, 0, image_crop.shape[1]-1)
+        e1y_clip = np.clip(e1y, 0, image_crop.shape[0]-1)
+        e2x_clip = np.clip(e2x, 0, image_crop.shape[1]-1)
+        e2y_clip = np.clip(e2y, 0, image_crop.shape[0]-1)
 
-        e1x = np.clip(edge1_x, 0, width-1)
-        e1y = np.clip(edge1_y, 0, height-1)
-        e2x = np.clip(edge2_x, 0, width-1)
-        e2y = np.clip(edge2_y, 0, height-1)
+        normal_edges_clipped = [[e1x_clip, e1y_clip], [e2x_clip, e2y_clip]]
 
-        normal_edges_clipped = [[e1x, e1y], [e2x, e2y]]
+        # ---------------- DEBUG PLOT ----------------
+        '''fig, ax = plt.subplots(figsize=(10,6))
+        ax.imshow(image_crop, cmap='gray')
+        ax.plot(mid_x, mid_y, 'g-', lw=1, label="midline")
+        ax.plot(track_e1[:,0], track_e1[:,1], 'r-', lw=1, label="edge1")
+        ax.plot(track_e2[:,0], track_e2[:,1], 'b-', lw=1, label="edge2")
+
+        step = max(1, len(mid_x)//40)
+        for i in range(0, len(mid_x), step):
+            if np.isfinite(e1x[i]) and np.isfinite(e2x[i]):
+                ax.plot([mid_x[i], e1x[i]], [mid_y[i], e1y[i]],
+                        color='cyan', lw=0.8, alpha=0.7)
+                ax.plot([mid_x[i], e2x[i]], [mid_y[i], e2y[i]],
+                        color='magenta', lw=0.8, alpha=0.7)
+                ax.plot(e1x[i], e1y[i], 'co', ms=2)
+                ax.plot(e2x[i], e2y[i], 'mo', ms=2)
+
+        ax.set_title("Debug Normals vs Geodesic Edges")
+        ax.legend()
+        plt.tight_layout()
+
+        # make filename unique with timestamp + random suffix
+        ts = int(time.time()*1000)
+        fname = f"debug_normals_{ts}.png"
+
+        plt.savefig(fname, dpi=200)
+        plt.close()
+        print(f"[DEBUG] normals plotted to {os.path.abspath(fname)}")'''
 
     return {
         "geodesic_edges": [track_e1, track_e2],
