@@ -20,6 +20,7 @@ import os
 from skimage.segmentation import mark_boundaries
 import os
 from PyQt5.QtWidgets import QListWidgetItem
+from shapely import geometry, ops
 
 from crackutils import *
 from helpers.crackhelpers import *
@@ -659,87 +660,69 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
     def draw_segment(self):
         try:
             image_size = self.select_image_size.value()
-            x,y = ct.tools.Draw().counturs(self.image[:,:,::-1],image_size)
+            x, y = ct.tools.Draw().counturs(self.image[:, :, ::-1], image_size)
             if len(x) == 0:
                 return
-            x = np.concatenate([x,np.array(x[0]).reshape(1)])
-            y = np.concatenate([y,np.array(y[0]).reshape(1)])
+            x = np.concatenate([x, np.array(x[0]).reshape(1)])
+            y = np.concatenate([y, np.array(y[0]).reshape(1)])
             self.manuall_x = np.array(x)
             self.manuall_y = np.array(y)
 
-            pts = np.array([x,y]).transpose(1,0).reshape((-1,1,2)).astype(np.int32)
-            im = self.image.astype(np.uint8)
+            pts = np.array([x, y]).transpose(1, 0).reshape((-1, 1, 2)).astype(np.int32)
+
+            # base image
+            im = self.image.astype(np.uint8).copy()
+
+            # --- Overlay all crack masks (atomic + combined) like combine_segments ---
+            ann = self.annotation.setdefault("annotations", {})
+            atomic = ann.setdefault("atomic_cracks", {})
+            combined = ann.setdefault("combined_cracks", {})
+
+            H, W = im.shape[:2]
+
+            def reconstruct_full_mask(crack):
+                mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
+                if mc is None or bb is None or not len(mc):
+                    return np.zeros((H, W), np.uint8)
+                crop = np.array(mc, dtype=np.uint8)
+                x0, y0, w, h = [int(v) for v in bb]
+                x1, y1 = min(x0 + w, W), min(y0 + h, H)
+                mask = np.zeros((H, W), np.uint8)
+                mask[y0:y1, x0:x1] = crop[:y1-y0, :x1-x0]
+                return (mask > 0).astype(np.uint8)
+
+            # Overlay all cracks in red
+            overlay = np.zeros_like(im)
+            for crack in list(atomic.values()) + list(combined.values()):
+                mask = reconstruct_full_mask(crack)
+                if np.any(mask):
+                    overlay[mask.astype(bool)] = (255, 0, 0)
+            im = cv2.addWeighted(im, 1, overlay, 0.4, 0)
+
+            # Draw current manual polyline in green
             im = cv2.polylines(im, [pts], False, (0, 255, 0), 1)
 
-            qimage = QImage(im, im.shape[1], im.shape[0], 
+            # Show in Qt
+            qimage = QImage(im, im.shape[1], im.shape[0],
                             im.strides[0], QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.manual_segment_screen.width(), self.manual_segment_screen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+            scaled_pixmap = pixmap.scaled(
+                self.manual_segment_screen.width(),
+                self.manual_segment_screen.height(),
+                Qt.KeepAspectRatio,
+                Qt.FastTransformation
+            )
             self.manual_segment_screen.setPixmap(scaled_pixmap)
+
         except Exception as e:
+            import traceback; traceback.print_exc()
             error(e)
-          
+                   
     # in select_save_end_points
     def select_save_end_points(self):
         self.select_end_points_manmidlines()
         self.save_annotation()
         self.change_image()
-
-    def save_manual_segment(self):
-        """
-        Save the currently drawn manual polygon as a new atomic crack (compact mask_crop + mask_bbox).
-        After saving, automatically attempt to attach this atomic to the biggest overlapping existing atomic.
-        """
-        try:
-            if not hasattr(self, "manuall_x") or not hasattr(self, "manuall_y"):
-                error("No manual polygon to save.")
-                return
-            if len(self.manuall_x) < 3 or len(self.manuall_y) < 3:
-                error("Manual polygon is too small or not closed.")
-                return
-
-            mask_full = ct.segmentation.create_mask(self.image, self.manuall_y, self.manuall_x).astype(np.uint8)
-            if not np.any(mask_full):
-                error("Manual polygon produced an empty mask.")
-                return
-
-            H, W = mask_full.shape[:2]
-            ys, xs = np.where(mask_full > 0)
-            y0, y1 = int(ys.min()), int(ys.max() + 1)
-            x0, x1 = int(xs.min()), int(xs.max() + 1)
-            crop = mask_full[y0:y1, x0:x1].astype(np.uint8)
-
-            ann = self.annotation.setdefault("annotations", {})
-            ac = ann.setdefault("atomic_cracks", {})
-
-            ids = []
-            for k in ac.keys():
-                try: ids.append(int(k))
-                except: pass
-            new_id = str(max(ids) + 1 if ids else 0)
-
-            ac[new_id] = {
-                "source": "manual_poly",
-                "midline": [],                  # no midline now
-                "geodesic_edges": {},           # no edges now
-                "normal_edge_points": None,
-                "mask_crop": crop.tolist(),
-                "mask_bbox": [int(x0), int(y0), int(x1 - x0), int(y1 - y0)],
-                "user_points": [],
-                "user_connections": []
-            }
-
-            self.save_annotation()
-
-            # --- NEW: try to attach to the biggest overlapping atomic crack
-            self.try_attach_manual_to_existing(new_id, min_overlap_pixels=5)
-
-            # Cleanup
-            if hasattr(self, "manuall_x"): del self.manuall_x
-            if hasattr(self, "manuall_y"): del self.manuall_y
-
-        except Exception as e:
-            error(e)
                     
     def edge_tracking(self):
         try:
@@ -850,8 +833,147 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             error(e)
             self.edge_tracks_full_screen_button.setStyleSheet("background-color : red")
             self.save_current_segment_button.setStyleSheet("background-color : red")
-   
-    # --- optional: moved verbatim (does not touch Qt) ---
+
+    from shapely import geometry, ops
+    import numpy as np, cv2, os, matplotlib.pyplot as plt
+
+    def save_manual_segment(self):
+        """
+        Save the drawn manual polyline:
+        - If overlapping an atomic crack → union its edges, update mask.
+        If that atomic belongs to a combined crack → rebuild combined via _build_combined_crack.
+        - Else → create a new atomic crack.
+        Always updates mask_crop/mask_bbox and saves a debug plot for atomic-only case.
+        """
+        try:
+            if not hasattr(self, "manuall_x") or not hasattr(self, "manuall_y"):
+                error("No manual polyline to save.")
+                return
+            if len(self.manuall_x) < 2 or len(self.manuall_y) < 2:
+                error("Manual polyline too short.")
+                return
+
+            poly = np.column_stack([self.manuall_x, self.manuall_y]).astype(float)
+            manual_line = geometry.LineString(poly)
+
+            ann = self.annotation.setdefault("annotations", {})
+            atomic = ann.setdefault("atomic_cracks", {})
+            combined = ann.setdefault("combined_cracks", {})
+
+            H, W = self.original_image.shape[:2]
+
+            # --- Try to attach to atomic cracks
+            target_id, target_crack = None, None
+            for cid, crack in atomic.items():
+                edges = crack.get("geodesic_edges", {})
+                if not edges:
+                    continue
+                parts = []
+                for key in ["edge1", "edge2"]:
+                    arr = np.array(edges.get(key, []), float)
+                    if arr.ndim == 2 and len(arr) > 1:
+                        parts.append(geometry.LineString(arr))
+                if not parts:
+                    continue
+                merged = ops.linemerge(geometry.MultiLineString(parts))
+                if merged.buffer(3).intersects(manual_line):  # 3px tolerance
+                    target_id, target_crack = cid, crack
+                    break
+
+            if target_crack is not None:
+                # --- Union edges
+                new_edges = {}
+                for key in ["edge1", "edge2"]:
+                    arr = np.array(target_crack["geodesic_edges"].get(key, []), float)
+                    if arr.ndim == 2 and len(arr) > 1:
+                        ls_old = geometry.LineString(arr)
+                        merged = ops.linemerge(ls_old.union(manual_line))
+                        if isinstance(merged, geometry.LineString):
+                            coords = np.array(merged.coords)
+                        else:
+                            coords = np.vstack([np.array(ls.coords) for ls in merged.geoms])
+                        new_edges[key] = coords.tolist()
+                    else:
+                        new_edges[key] = poly.tolist()
+                target_crack["geodesic_edges"] = new_edges
+                target_crack["normal_edge_points"] = None  # defer normals
+
+                # --- Update mask from edges (filled polygon like _build_combined_crack)
+                e1 = np.array(new_edges.get("edge1", []), float)
+                e2 = np.array(new_edges.get("edge2", []), float)
+                mask = np.zeros((H, W), np.uint8)
+                if len(e1) > 1 and len(e2) > 1:
+                    ex = np.concatenate((e1[:,0][::-1], e2[:,0]))
+                    ey = np.concatenate((e1[:,1][::-1], e2[:,1]))
+                    poly_pts = np.stack([ex, ey], axis=1).astype(np.int32)
+                    cv2.fillPoly(mask, [poly_pts], 255)
+
+                ys, xs = np.where(mask > 0)
+                if len(xs) and len(ys):
+                    x0, x1 = xs.min(), xs.max()+1
+                    y0, y1 = ys.min(), ys.max()+1
+                    crop = mask[y0:y1, x0:x1]
+                    target_crack["mask_crop"] = crop.tolist()
+                    target_crack["mask_bbox"] = [int(x0), int(y0), int(x1-x0), int(y1-y0)]
+
+                print(f"[INFO] Manual polyline merged into atomic crack {target_id}")
+
+                # --- If atomic is in a combined crack → rebuild it
+                rebuilt = False
+                for cmb_id, cmb in combined.items():
+                    members = cmb.get("members", [])
+                    if target_id in members:
+                        combined[cmb_id] = self._build_combined_crack(members)
+                        print(f"[INFO] Rebuilt combined crack {cmb_id}")
+                        rebuilt = True
+                        break
+
+                # --- If not in a combined crack → save debug plot for this atomic
+                if not rebuilt:
+                    save_dir = os.path.join(self.save_folder, "debug_outputs")
+                    os.makedirs(save_dir, exist_ok=True)
+                    base_name = os.path.splitext(os.path.basename(self.name))[0]
+                    fname = os.path.join(save_dir, f"{base_name}_atomic_{target_id}_debug.png")
+
+                    fig, ax = plt.subplots(figsize=(10, 6))
+                    ax.imshow(self.original_image)
+                    for key, arr in new_edges.items():
+                        arr = np.array(arr, float)
+                        if arr.ndim == 2 and len(arr) > 1:
+                            ax.plot(arr[:,0], arr[:,1],
+                                    'r-' if key=="edge1" else 'b-', lw=0.7)
+                    ax.set_title(f"Updated atomic crack {target_id}")
+                    ax.set_xlim(0, W)
+                    ax.set_ylim(H, 0)
+                    plt.tight_layout()
+                    plt.savefig(fname, dpi=100)
+                    plt.close()
+
+            else:
+                # --- Create new atomic
+                ids = [int(k) for k in atomic.keys() if str(k).isdigit()]
+                new_id = str(max(ids)+1 if ids else 0)
+                atomic[new_id] = {
+                    "source": "manual_poly",
+                    "midline": poly.tolist(),
+                    "geodesic_edges": {"edge1": poly.tolist(), "edge2": []},
+                    "normal_edge_points": None,
+                    "mask_crop": [],
+                    "mask_bbox": [],
+                    "user_points": [],
+                    "user_connections": []
+                }
+                print(f"[INFO] Created new manual atomic crack {new_id}")
+
+            self.save_annotation()
+
+            if hasattr(self, "manuall_x"): del self.manuall_x
+            if hasattr(self, "manuall_y"): del self.manuall_y
+
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            error(e)
+            
     def save_current_segment(self):
         try:
             xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
@@ -912,7 +1034,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             print(f"[DEBUG] atomic_cracks keys now: {list(atomic_cracks.keys())}")
 
             # ---- NEW DEBUG VISUALIZATION (full-image overlay) ----
-            import matplotlib.pyplot as plt
+            '''import matplotlib.pyplot as plt
             fig, ax = plt.subplots(figsize=(12,8))
             ax.imshow(self.original_image)
             ax.plot([p[0] for p in midline_coords], [p[1] for p in midline_coords],
@@ -924,7 +1046,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                         lw=1, label=f"Saved {edge}")
             ax.legend()
             ax.set_title(f"DEBUG: Saved crack {self.current_crack_id} (full-image overlay)")
-            plt.show()
+            plt.show()'''
             # ------------------------------------------------------
 
             self.use_masks = True
@@ -1831,44 +1953,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             X0=Y0=0; w=h=1
             crop = np.zeros((h,w), np.uint8)
 
-        # ---------------- DEBUG PLOT ----------------
-        '''save_dir = os.path.join(self.save_folder, "debug_outputs")
-        os.makedirs(save_dir, exist_ok=True)
-        base_name = os.path.splitext(os.path.basename(self.name))[0]
-        fname = os.path.join(save_dir, f"{base_name}_combined_debug.png")
-
-        fig, ax = plt.subplots(figsize=(12, 8))
-        ax.imshow(self.original_image)
-        ax.set_title("Combined crack segments with edges + normals (full image)")
-
-        for S in segs:
-            for segp in split_on_teleports(S, max_step=max_plot_jump):
-                ax.plot(segp[:,0], segp[:,1], 'g-', lw=.6)
-        for e in edge1_segs:
-            for segp in split_on_teleports(e, max_step=max_plot_jump):
-                ax.plot(segp[:,0], segp[:,1], 'r-', lw=.3)
-        for e in edge2_segs:
-            for segp in split_on_teleports(e, max_step=max_plot_jump):
-                ax.plot(segp[:,0], segp[:,1], 'b-', lw=.3)
-
-        # normals: plot directly as returned by edges_tracking
-        for n1, n2 in zip(norm1_segs, norm2_segs):
-            if len(n1) == 0 or len(n2) == 0:
-                continue
-            step = max(1, min(len(n1), len(n2)) // 70)
-            for i in range(0, min(len(n1), len(n2)), step):
-                if np.isfinite(n1[i]).all() and np.isfinite(n2[i]).all():
-                    ax.plot([n1[i,0], n2[i,0]], [n1[i,1], n2[i,1]],
-                            color='cyan', lw=0.4, alpha=0.5)
-
-        ax.set_xlim(0, W)
-        ax.set_ylim(H, 0)
-        ax.axis('equal')
-        plt.tight_layout()
-        plt.legend()
-        plt.savefig(fname, dpi=400)
-        plt.close()'''
-        
+        # ---------------- DEBUG PLOT ----------------        
         save_dir = os.path.join(self.save_folder, "debug_outputs")
         os.makedirs(save_dir, exist_ok=True)
         base_name = os.path.splitext(os.path.basename(self.name))[0]
@@ -1941,7 +2026,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         for n1, n2 in zip(norm1_segs, norm2_segs):
             if len(n1) == 0 or len(n2) == 0:
                 continue
-            step = max(1, min(len(n1), len(n2)) // 70)
+            step = 50
             for i in range(0, min(len(n1), len(n2)), step):
                 if np.isfinite(n1[i]).all() and np.isfinite(n2[i]).all():
                     ax.plot([n1[i,0], n2[i,0]], [n1[i,1], n2[i,1]],

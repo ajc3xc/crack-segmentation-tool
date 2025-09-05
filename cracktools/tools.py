@@ -159,7 +159,7 @@ def int2(a):
     return (int(np.round(a)))
 
 class Draw():
-    def counturs(self,image,scale,move_x = 0, move_y = 0):
+    '''def counturs(self,image,scale,move_x = 0, move_y = 0):
         """
         image : array
             Image to drow on
@@ -210,8 +210,102 @@ class Draw():
         flat_x = np.array(flat_x) - 0.5
         flat_y = np.array(flat_y)- 0.5
 
-        return flat_x,flat_y
-        
+        return flat_x,flat_y'''
+
+    def counturs(self, image, scale, move_x=0, move_y=0):
+        """
+        Interactive contour drawing:
+        - Green polylines drawn with mouse
+        - Red overlay for atomic + combined masks
+        - Scroll wheel zoom
+        - Right click undo
+        - ESC or 'X' closes window
+        """
+        self.image = image
+        self.image_countur = self.image.copy()
+
+        self.scale = scale
+        self.drawing = False
+
+        self.t = 1
+        self.p = 0.1
+        self.pt1_x, self.pt1_y = None, None
+        self.counturs_x, self.counturs_y = [], []
+        self.countur_x, self.countur_y = [], []
+        self.image2 = image.copy()
+        self.dx = self.dy = 0
+        self.dx1 = self.dy1 = 0
+        self.dx2 = self.dy2 = 1
+        self.scale2 = self.scale2x = self.scale2y = 1
+
+        H, W = self.image.shape[:2]
+
+        cv2.namedWindow('draw counturs', cv2.WINDOW_NORMAL)
+        cv2.moveWindow('draw counturs', move_x, move_y)
+        cv2.setMouseCallback('draw counturs', self.line_drawing)
+
+        def reconstruct_full_mask(crack, H, W):
+            mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
+            if mc is None or bb is None or not len(mc):
+                return np.zeros((H, W), np.uint8)
+            crop = np.array(mc, dtype=np.uint8)
+            x0, y0, w, h = [int(v) for v in bb]
+            x1, y1 = min(x0 + w, W), min(y0 + h, H)
+            mask = np.zeros((H, W), np.uint8)
+            mask[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
+            return (mask > 0).astype(np.uint8)
+
+        while True:
+            # Start fresh from original
+            display = self.image.copy()
+            if display.ndim == 2:
+                display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
+
+            # Overlay masks (red)
+            try:
+                ann = self.parent().annotation.get("annotations", {})
+                atomic = ann.get("atomic_cracks", {})
+                combined = ann.get("combined_cracks", {})
+
+                overlay = np.zeros_like(display, dtype=np.uint8)
+                for crack in list(atomic.values()) + list(combined.values()):
+                    mask = reconstruct_full_mask(crack, H, W)
+                    if np.any(mask):
+                        overlay[mask.astype(bool)] = (0, 0, 255)
+                display = cv2.addWeighted(display, 1.0, overlay, 0.5, 0)
+            except Exception:
+                pass
+
+            # Draw user strokes (green)
+            display = redrow_lines(display, self.counturs_x, self.counturs_y,
+                                1, np.mean([self.scale2x, self.scale2y]))
+
+            # Crop + zoom
+            view = display[self.dy1:H - self.dy2, self.dx1:W - self.dx2]
+            if view.size == 0:
+                view = display
+            self.image_countur = cv2.resize(
+                view,
+                [int2(view.shape[1] / self.scale / self.scale2x),
+                int2(view.shape[0] / self.scale / self.scale2y)],
+                interpolation=cv2.INTER_NEAREST
+            )
+
+            # Show
+            cv2.imshow('draw counturs', self.image_countur)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:  # ESC
+                break
+            if cv2.getWindowProperty('draw counturs', cv2.WND_PROP_VISIBLE) < 1:
+                break
+
+        cv2.destroyAllWindows()
+
+        flat_x = [item for sublist in self.counturs_x for item in sublist]
+        flat_y = [item for sublist in self.counturs_y for item in sublist]
+
+        return np.array(flat_x) - 0.5, np.array(flat_y) - 0.5
         
     def line_drawing(self,event,x,y,flags,param):
 
