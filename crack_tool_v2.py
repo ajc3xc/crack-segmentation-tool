@@ -660,7 +660,12 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
     def draw_segment(self):
         try:
             image_size = self.select_image_size.value()
-            x, y = ct.tools.Draw().counturs(self.image[:, :, ::-1], image_size)
+            #x, y = ct.tools.Draw().counturs(self.image[:, :, ::-1], image_size)
+            x, y = ct.tools.Draw().counturs(
+                self.image[:, :, ::-1],
+                image_size,
+                annotations=self.annotation.get("annotations", {})
+            )
             if len(x) == 0:
                 return
             x = np.concatenate([x, np.array(x[0]).reshape(1)])

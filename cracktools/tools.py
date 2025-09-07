@@ -158,66 +158,13 @@ def drow_mask_lines(img,counturs_x,counturs_y,color,t=1):
 def int2(a):
     return (int(np.round(a)))
 
-class Draw():
-    '''def counturs(self,image,scale,move_x = 0, move_y = 0):
-        """
-        image : array
-            Image to drow on
-        scale : int,float
-            defins size of display window    
-        """
-        self.image = image
-        self.image_countur = self.image.copy()
-        
-        self.scale = scale
-        self.drawing = False
-        
-        self.t = 1
-        self.p = 0.1
-        self.pt1_x , self.pt1_y = None , None
-        self.counturs_x = []
-        self.counturs_y = []
-        self.countur_x = []
-        self.countur_y = []
-        self.image2 = image.copy()
-        self.dx = 0
-        self.dy = 0
-        self.dx1 = 0
-        self.dx2 = 1
-        self.dy1 = 0
-        self.dy2 = 1
-        self.scale2 = 1   
-        self.scale2x = 1
-        self.scale2y = 1
-    
-        
-        cv2.namedWindow('draw counturs')
-        cv2.moveWindow('draw counturs', move_x, move_y)
-        cv2.setMouseCallback('draw counturs',self.line_drawing)
-
-        self.image_countur = cv2.resize(self.image_countur,[int2(self.image_countur.shape[1]/scale),
-                                                            int2(self.image_countur.shape[0]/scale)],
-                                        interpolation = cv2.INTER_NEAREST)
-        while(1):
-            cv2.imshow('draw counturs',self.image_countur)
-            if cv2.waitKey(1) & 0xFF == 27:
-                break
-        cv2.destroyAllWindows()
-
-        flat_x = [item for sublist in self.counturs_x for item in sublist]
-        flat_y = [item for sublist in self.counturs_y for item in sublist]
-
-        flat_x = np.array(flat_x) - 0.5
-        flat_y = np.array(flat_y)- 0.5
-
-        return flat_x,flat_y'''
-
-    def counturs(self, image, scale, move_x=0, move_y=0):
+class Draw():  
+    '''def counturs(self, image, scale, move_x=0, move_y=0, annotations=None):
         """
         Interactive contour drawing:
         - Green polylines drawn with mouse
         - Red overlay for atomic + combined masks
-        - Scroll wheel zoom
+        - Scroll wheel zoom (clamped)
         - Right click undo
         - ESC or 'X' closes window
         """
@@ -256,138 +203,298 @@ class Draw():
             return (mask > 0).astype(np.uint8)
 
         while True:
-            # Start fresh from original
-            display = self.image.copy()
-            if display.ndim == 2:
-                display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
+            # start with current buffer (self.image2 includes live strokes)
+            display = self.image2.copy()
 
-            # Overlay masks (red)
+            # overlay masks (red)
             try:
-                ann = self.parent().annotation.get("annotations", {})
-                atomic = ann.get("atomic_cracks", {})
-                combined = ann.get("combined_cracks", {})
-
-                overlay = np.zeros_like(display, dtype=np.uint8)
-                for crack in list(atomic.values()) + list(combined.values()):
-                    mask = reconstruct_full_mask(crack, H, W)
-                    if np.any(mask):
-                        overlay[mask.astype(bool)] = (0, 0, 255)
-                display = cv2.addWeighted(display, 1.0, overlay, 0.5, 0)
+                if annotations is not None:
+                    atomic = annotations.get("atomic_cracks", {})
+                    combined = annotations.get("combined_cracks", {})
+                    overlay = np.zeros_like(display, dtype=np.uint8)
+                    for crack in list(atomic.values()) + list(combined.values()):
+                        mask = reconstruct_full_mask(crack, H, W)
+                        if np.any(mask):
+                            overlay[mask.astype(bool)] = (0, 0, 255)
+                    display = cv2.addWeighted(display, 1.0, overlay, 0.5, 0)
             except Exception:
                 pass
 
-            # Draw user strokes (green)
+            # redraw committed strokes
             display = redrow_lines(display, self.counturs_x, self.counturs_y,
                                 1, np.mean([self.scale2x, self.scale2y]))
 
-            # Crop + zoom
-            view = display[self.dy1:H - self.dy2, self.dx1:W - self.dx2]
-            if view.size == 0:
+            # zoom view
+            x1 = max(0, self.dx1)
+            x2 = min(W - self.dx2, W)
+            y1 = max(0, self.dy1)
+            y2 = min(H - self.dy2, H)
+            if x2 <= x1 or y2 <= y1:
                 view = display
-            self.image_countur = cv2.resize(
-                view,
-                [int2(view.shape[1] / self.scale / self.scale2x),
-                int2(view.shape[0] / self.scale / self.scale2y)],
-                interpolation=cv2.INTER_NEAREST
-            )
+            else:
+                view = display[y1:y2, x1:x2]
 
-            # Show
+            zoom_factor_x = max(0.25, min(4.0, 1.0 / self.scale2x))
+            zoom_factor_y = max(0.25, min(4.0, 1.0 / self.scale2y))
+            new_w = max(1, int(view.shape[1] / self.scale * zoom_factor_x))
+            new_h = max(1, int(view.shape[0] / self.scale * zoom_factor_y))
+
+            self.image_countur = cv2.resize(view, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
             cv2.imshow('draw counturs', self.image_countur)
 
             key = cv2.waitKey(1) & 0xFF
-            if key == 27:  # ESC
-                break
-            if cv2.getWindowProperty('draw counturs', cv2.WND_PROP_VISIBLE) < 1:
+            if key == 27 or cv2.getWindowProperty('draw counturs', cv2.WND_PROP_VISIBLE) < 1:
                 break
 
         cv2.destroyAllWindows()
 
         flat_x = [item for sublist in self.counturs_x for item in sublist]
         flat_y = [item for sublist in self.counturs_y for item in sublist]
-
         return np.array(flat_x) - 0.5, np.array(flat_y) - 0.5
-        
-    def line_drawing(self,event,x,y,flags,param):
 
-        if event==cv2.EVENT_LBUTTONDOWN:
-            self.drawing=True
-            
-            self.pt1_x,self.pt1_y=self.dx1+x*self.scale*self.scale2x,self.dy1+y*self.scale*self.scale2y
-            self.countur_x = []
-            self.countur_y = []
+    def line_drawing(self, event, x, y, flags, param):
+        H, W = self.image.shape[:2]
+
+        # Convert screen coords (x,y) to absolute image coords
+        abs_x = int2(self.dx1 + x * self.scale * self.scale2x)
+        abs_y = int2(self.dy1 + y * self.scale * self.scale2y)
+
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self.drawing = True
+            self.pt1_x, self.pt1_y = abs_x, abs_y
+            self.countur_x, self.countur_y = [self.pt1_x], [self.pt1_y]
+
+        elif event == cv2.EVENT_MOUSEMOVE and self.drawing:
+            # Save current absolute point
+            self.pt1_x, self.pt1_y = abs_x, abs_y
             self.countur_x.append(self.pt1_x)
             self.countur_y.append(self.pt1_y)
-            self.image2 = redrow_lines(self.image,self.counturs_x,self.counturs_y,1,np.mean([self.scale2x,self.scale2y]))
-            if len(self.counturs_x)>0:
-                cv2.line(self.image_countur,(int2((self.counturs_x[-1][-1]-self.dx1)/self.scale/self.scale2x),
-                                             int2((self.counturs_y[-1][-1]-self.dy1)/self.scale/self.scale2y)),
-                        (int2(x),int2(y)),color=(0,255,0),thickness=self.t)
 
+            # Draw temp line on a copy for smooth feedback
+            temp = self.image2.copy()
+            cv2.line(
+                temp,
+                (self.countur_x[-2], self.countur_y[-2]),
+                (self.countur_x[-1], self.countur_y[-1]),
+                color=(0, 255, 0),
+                thickness=2   # thicker lines
+            )
 
-        elif event==cv2.EVENT_MOUSEMOVE:
-            if self.drawing==True:
-                cv2.line(self.image_countur,(int2((self.pt1_x-self.dx1)/self.scale/self.scale2x),
-                                             int2((self.pt1_y-self.dy1)/self.scale/self.scale2y)),(int2(x),int2(y)),
-                        color=(0,255,0),thickness=self.t)
-                self.pt1_x,self.pt1_y=self.dx1+x*self.scale*self.scale2x,self.dy1+y*self.scale*self.scale2y
-                self.countur_x.append(self.pt1_x)
-                self.countur_y.append(self.pt1_y)
-        elif event==cv2.EVENT_LBUTTONUP:
-            self.drawing=False
-            cv2.line(self.image_countur,(int2((self.pt1_x-self.dx1)/self.scale/self.scale2x),
-                                         int2((self.pt1_y-self.dy1)/self.scale/self.scale2y)),
-                     (int2(x),int2(y)),color=(0,255,0),thickness=self.t)
+            # Crop + zoom view
+            view = temp[self.dy1:H - self.dy2, self.dx1:W - self.dx2, :]
+            self.image_countur = cv2.resize(
+                view,
+                (int2(W / self.scale / self.scale2x),
+                int2(H / self.scale / self.scale2y)),
+                interpolation=cv2.INTER_NEAREST
+            )
+
+        elif event == cv2.EVENT_LBUTTONUP:
+            self.drawing = False
             self.counturs_x.append(self.countur_x)
             self.counturs_y.append(self.countur_y)
-            self.image2 = redrow_lines(self.image,self.counturs_x,self.counturs_y,1,np.mean([self.scale2x,self.scale2y]))
 
-        elif event==cv2.EVENT_RBUTTONDOWN:
-            if self.drawing==False and len(self.counturs_x)>0:
-                self.counturs_x.remove(self.counturs_x[-1])
-                self.counturs_y.remove(self.counturs_y[-1])
-                self.image2 = redrow_lines(self.image,self.counturs_x,self.counturs_y,1,1)
-                self.image_countur = cv2.resize(self.image2[self.dy1:-self.dy2,self.dx1:-self.dx2,:],
-                                                [int2(self.image.shape[1]/self.scale/self.scale2),
-                                                 int2(self.image.shape[0]/self.scale/self.scale2)],
-                            interpolation = cv2.INTER_NEAREST)
+            # Commit stroke into self.image2
+            for i in range(len(self.countur_x) - 1):
+                cv2.line(
+                    self.image2,
+                    (self.countur_x[i], self.countur_y[i]),
+                    (self.countur_x[i + 1], self.countur_y[i + 1]),
+                    color=(0, 255, 0),
+                    thickness=2   # thicker lines
+                )
 
-        elif event==cv2.EVENT_MOUSEWHEEL and flags>0:
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            if not self.drawing and len(self.counturs_x) > 0:
+                self.counturs_x.pop()
+                self.counturs_y.pop()
+                # Rebuild self.image2 from original + committed strokes
+                self.image2 = self.image.copy()
+                self.image2 = redrow_lines(self.image2, self.counturs_x, self.counturs_y, 2, 1)
 
-            rx,ry = x/self.image_countur.shape[1],y/self.image_countur.shape[0]
+        elif event == cv2.EVENT_MOUSEWHEEL:
+            # keep your zoom handling code here
+            # Zoom logic: crop around cursor like bounding_box()
+            H, W = self.image.shape[:2]
+            rx, ry = x / self.image_countur.shape[1], y / self.image_countur.shape[0]
 
-            ddx = (self.image.shape[1]-(self.dx1+self.dx2))*self.p
-            self.dx1 = np.max([int2(self.dx1+ddx*rx),0])
-            self.dx2 = np.max([int2(self.dx2+ddx*(1-rx)),1])
+            if flags > 0:  # zoom in
+                ddx = (W - (self.dx1 + self.dx2)) * self.p
+                self.dx1 = max(int2(self.dx1 + ddx * rx), 0)
+                self.dx2 = max(int2(self.dx2 + ddx * (1 - rx)), 1)
+                ddy = (H - (self.dy1 + self.dy2)) * self.p
+                self.dy1 = max(int2(self.dy1 + ddy * ry), 0)
+                self.dy2 = max(int2(self.dy2 + ddy * (1 - ry)), 1)
+            else:  # zoom out
+                ddx = (W - (self.dx1 + self.dx2)) * self.p
+                self.dx1 = max(int2(self.dx1 - ddx * rx), 0)
+                self.dx2 = max(int2(self.dx2 - ddx * (1 - rx)), 1)
+                ddy = (H - (self.dy1 + self.dy2)) * self.p
+                self.dy1 = max(int2(self.dy1 - ddy * ry), 0)
+                self.dy2 = max(int2(self.dy2 - ddy * (1 - ry)), 1)
 
-            ddy = (self.image.shape[0]-(self.dy1+self.dy2))*self.p
-            self.dy1 = np.max([int2(self.dy1+ddy*ry),0])
-            self.dy2 = np.max([int2(self.dy2+ddy*(1-ry)),1])
+            # update effective scales
+            self.scale2x = 1 - (self.dx1 + self.dx2) / W
+            self.scale2y = 1 - (self.dy1 + self.dy2) / H
 
-            self.scale2x = 1-(self.dx1+self.dx2)/self.image.shape[1]
-            self.scale2y = 1-(self.dy1+self.dy2)/self.image.shape[0]
-    #         image2 = redrow_lines(image,counturs_x,counturs_y,t,scale*scale2x)
-            self.image_countur = self.image2[self.dy1:-self.dy2,self.dx1:-self.dx2,:]
-            self.image_countur = cv2.resize(self.image_countur,[int2(self.image_countur.shape[1]/self.scale/self.scale2x),
-                                                    int2(self.image_countur.shape[0]/self.scale/self.scale2y)],
-                                                    interpolation = cv2.INTER_NEAREST)
-        elif event==cv2.EVENT_MOUSEWHEEL:
-            rx,ry = x/self.image_countur.shape[1],y/self.image_countur.shape[0]
+            # crop and resize new view
+            view = self.image2[self.dy1:H - self.dy2, self.dx1:W - self.dx2, :]
+            self.image_countur = cv2.resize(
+                view,
+                (int2(W / self.scale / self.scale2x),
+                int2(H / self.scale / self.scale2y)),
+                interpolation=cv2.INTER_NEAREST
+            )'''
+            
+    def counturs(self, image, scale, move_x=0, move_y=0, annotations=None):
+        """
+        Interactive contour drawing:
+        - Green polylines drawn with mouse
+        - Red overlay for atomic + combined masks
+        - Scroll wheel zoom (clamped)
+        - Right click undo
+        - ESC or 'X' closes window
+        """
+        self.image = image
+        self.image_countur = self.image.copy()
 
-            ddx = (self.image.shape[1]-(self.dx1+self.dx2))*self.p
-            self.dx1 = np.max([int2(self.dx1-ddx*rx),0])
-            self.dx2 = np.max([int2(self.dx2-ddx*(1-rx)),1])
+        self.scale = scale
+        self.drawing = False
 
-            ddy = (self.image.shape[0]-(self.dy1+self.dy2))*self.p
-            self.dy1 = np.max([int2(self.dy1-ddy*ry),0])
-            self.dy2 = np.max([int2(self.dy2-ddy*(1-ry)),1])
+        self.t = 2   # thicker
+        self.p = 0.1
+        self.pt1_x, self.pt1_y = None, None
+        self.counturs_x, self.counturs_y = [], []
+        self.countur_x, self.countur_y = [], []
+        self.image2 = image.copy()
+        self.dx = self.dy = 0
+        self.dx1 = self.dy1 = 0
+        self.dx2 = self.dy2 = 1
+        self.scale2 = self.scale2x = self.scale2y = 1
 
-            self.scale2x = 1-(self.dx1+self.dx2)/self.image.shape[1]
-            self.scale2y = 1-(self.dy1+self.dy2)/self.image.shape[0]
-    #         image2 = redrow_lines(image,counturs_x,counturs_y,t,scale*scale2x)
-            self.image_countur = self.image2[self.dy1:-self.dy2,self.dx1:-self.dx2,:]
-            self.image_countur = cv2.resize(self.image_countur,[int2(self.image_countur.shape[1]/self.scale/self.scale2x),
-                                                    int2(self.image_countur.shape[0]/self.scale/self.scale2y)],
-                                                    interpolation = cv2.INTER_NEAREST)
+        H, W = self.image.shape[:2]
+
+        cv2.namedWindow('draw counturs', cv2.WINDOW_NORMAL)
+        cv2.moveWindow('draw counturs', move_x, move_y)
+        cv2.setMouseCallback('draw counturs', self.line_drawing)
+
+        def reconstruct_full_mask(crack, H, W):
+            mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
+            if mc is None or bb is None or not len(mc):
+                return np.zeros((H, W), np.uint8)
+            crop = np.array(mc, dtype=np.uint8)
+            x0, y0, w, h = [int(v) for v in bb]
+            x1, y1 = min(x0 + w, W), min(y0 + h, H)
+            mask = np.zeros((H, W), np.uint8)
+            mask[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
+            return (mask > 0).astype(np.uint8)
+
+        while True:
+            # start with committed strokes
+            display = self.image2.copy()
+
+            # overlay masks (red)
+            try:
+                if annotations is not None:
+                    atomic = annotations.get("atomic_cracks", {})
+                    combined = annotations.get("combined_cracks", {})
+                    overlay = np.zeros_like(display, dtype=np.uint8)
+                    for crack in list(atomic.values()) + list(combined.values()):
+                        mask = reconstruct_full_mask(crack, H, W)
+                        if np.any(mask):
+                            overlay[mask.astype(bool)] = (0, 0, 255)
+                    display = cv2.addWeighted(display, 1.0, overlay, 0.5, 0)
+            except Exception:
+                pass
+
+            # redraw committed strokes
+            display = redrow_lines(display, self.counturs_x, self.counturs_y,
+                                self.t, np.mean([self.scale2x, self.scale2y]))
+
+            # crop to zoom window
+            x1 = max(0, self.dx1)
+            x2 = min(W - self.dx2, W)
+            y1 = max(0, self.dy1)
+            y2 = min(H - self.dy2, H)
+            if x2 <= x1 or y2 <= y1:
+                view = display
+            else:
+                view = display[y1:y2, x1:x2]
+
+            # resize to window
+            new_w = int2(view.shape[1] / self.scale / self.scale2x)
+            new_h = int2(view.shape[0] / self.scale / self.scale2y)
+            self.image_countur = cv2.resize(view, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+
+            cv2.imshow('draw counturs', self.image_countur)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27 or cv2.getWindowProperty('draw counturs', cv2.WND_PROP_VISIBLE) < 1:
+                break
+
+        cv2.destroyAllWindows()
+
+        flat_x = [item for sublist in self.counturs_x for item in sublist]
+        flat_y = [item for sublist in self.counturs_y for item in sublist]
+        return np.array(flat_x) - 0.5, np.array(flat_y) - 0.5
+
+
+    def line_drawing(self, event, x, y, flags, param):
+        H, W = self.image.shape[:2]
+
+        # map display coords back to absolute image coords
+        abs_x = int2(self.dx1 + x * (W - self.dx1 - self.dx2) / self.image_countur.shape[1])
+        abs_y = int2(self.dy1 + y * (H - self.dy1 - self.dy2) / self.image_countur.shape[0])
+
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self.drawing = True
+            self.pt1_x, self.pt1_y = abs_x, abs_y
+            self.countur_x, self.countur_y = [self.pt1_x], [self.pt1_y]
+
+        elif event == cv2.EVENT_MOUSEMOVE and self.drawing:
+            self.pt1_x, self.pt1_y = abs_x, abs_y
+            self.countur_x.append(self.pt1_x)
+            self.countur_y.append(self.pt1_y)
+
+            # temp copy for live feedback
+            temp = self.image2.copy()
+            cv2.line(temp, (self.countur_x[-2], self.countur_y[-2]),
+                    (self.countur_x[-1], self.countur_y[-1]),
+                    (0, 255, 0), self.t)
+
+            self.image2 = temp  # update buffer so loop shows live stroke
+
+        elif event == cv2.EVENT_LBUTTONUP:
+            self.drawing = False
+            self.counturs_x.append(self.countur_x)
+            self.counturs_y.append(self.countur_y)
+
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            if not self.drawing and len(self.counturs_x) > 0:
+                self.counturs_x.pop()
+                self.counturs_y.pop()
+                self.image2 = redrow_lines(self.image.copy(), self.counturs_x, self.counturs_y, self.t, 1)
+
+        elif event == cv2.EVENT_MOUSEWHEEL:
+            # same zoom logic as before
+            rx, ry = x / self.image_countur.shape[1], y / self.image_countur.shape[0]
+            if flags > 0:  # zoom in
+                ddx = (W - (self.dx1 + self.dx2)) * self.p
+                self.dx1 = max(int2(self.dx1 + ddx * rx), 0)
+                self.dx2 = max(int2(self.dx2 + ddx * (1 - rx)), 1)
+                ddy = (H - (self.dy1 + self.dy2)) * self.p
+                self.dy1 = max(int2(self.dy1 + ddy * ry), 0)
+                self.dy2 = max(int2(self.dy2 + ddy * (1 - ry)), 1)
+            else:  # zoom out
+                ddx = (W - (self.dx1 + self.dx2)) * self.p
+                self.dx1 = max(int2(self.dx1 - ddx * rx), 0)
+                self.dx2 = max(int2(self.dx2 - ddx * (1 - rx)), 1)
+                ddy = (H - (self.dy1 + self.dy2)) * self.p
+                self.dy1 = max(int2(self.dy1 - ddy * ry), 0)
+                self.dy2 = max(int2(self.dy2 - ddy * (1 - ry)), 1)
+
+            self.scale2x = 1 - (self.dx1 + self.dx2) / W
+            self.scale2y = 1 - (self.dy1 + self.dy2) / H
             
     def points(self,image,scale,t = 5,move_x = 0, move_y = 0):
         """
@@ -649,38 +756,6 @@ class Draw():
             self.image_countur = cv2.resize(self.image_countur,[int2(self.image_countur.shape[1]/self.scale/self.scale2x),
                                                     int2(self.image_countur.shape[0]/self.scale/self.scale2y)],
                                                     interpolation = cv2.INTER_NEAREST)
-            
-#     def show_image(self,image,scale):
-#         """
-#         image : array
-#             Image to drow on
-#         scale : int,float
-#             defins size of display window    
-#         """
-#         self.image = image
-#         self.image_countur = self.image.copy()
-#         self.scale = scale
-    
-        
-#         cv2.namedWindow('image')
-
-#         self.image_countur = cv2.resize(self.image_countur,[int2(self.image_countur.shape[1]/scale),
-#                                                             int2(self.image_countur.shape[0]/scale)],
-#                                         interpolation = cv2.INTER_NEAREST)
-#         while(1):
-#             cv2.imshow('image',self.image_countur)
-#             if cv2.waitKey(1) & 0xFF == 27:
-#                 break
-                
-#         cv2.destroyAllWindows()
-
-# #         flat_x = [item for sublist in self.counturs_x for item in sublist]
-# #         flat_y = [item for sublist in self.counturs_y for item in sublist]
-
-# #         flat_x = np.array(flat_x) - 0.5
-# #         flat_y = np.array(flat_y)- 0.5
-            
-            
             
 
 def image_crop(image,start_point,end_point,pts,sides1 = 10,sides2 = 10):
