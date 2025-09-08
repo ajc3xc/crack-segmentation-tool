@@ -705,7 +705,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             im = cv2.addWeighted(im, 1, overlay, 0.4, 0)
 
             # Draw current manual polyline in green
-            im = cv2.polylines(im, [pts], False, (0, 255, 0), 1)
+            im = cv2.polylines(im, [pts], False, (0, 255, 0), 2)
 
             # Show in Qt
             qimage = QImage(im, im.shape[1], im.shape[0],
