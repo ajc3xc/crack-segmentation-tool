@@ -348,35 +348,27 @@ class Draw():
             
     def counturs(self, image, scale, move_x=0, move_y=0, annotations=None):
         """
-        Interactive contour drawing:
-        - Green polylines drawn with mouse
+        Interactive contour drawing (smooth incremental feedback):
+        - Green polylines drawn continuously with mouse
         - Red overlay for atomic + combined masks
-        - Scroll wheel zoom (clamped)
         - Right click undo
         - ESC or 'X' closes window
         """
         self.image = image
-        self.image_countur = self.image.copy()
-
         self.scale = scale
         self.drawing = False
+        self.t = 2  # line thickness
 
-        self.t = 2   # thicker
-        self.p = 0.1
-        self.pt1_x, self.pt1_y = None, None
+        # track strokes
         self.counturs_x, self.counturs_y = [], []
         self.countur_x, self.countur_y = [], []
-        self.image2 = image.copy()
-        self.dx = self.dy = 0
-        self.dx1 = self.dy1 = 0
-        self.dx2 = self.dy2 = 1
-        self.scale2 = self.scale2x = self.scale2y = 1
 
         H, W = self.image.shape[:2]
 
-        cv2.namedWindow('draw counturs', cv2.WINDOW_NORMAL)
-        cv2.moveWindow('draw counturs', move_x, move_y)
-        cv2.setMouseCallback('draw counturs', self.line_drawing)
+        # --- Base layer (original + masks) ---
+        base = self.image.copy()
+        if base.ndim == 2:
+            base = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
 
         def reconstruct_full_mask(crack, H, W):
             mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
@@ -389,44 +381,77 @@ class Draw():
             mask[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
             return (mask > 0).astype(np.uint8)
 
+        try:
+            if annotations is not None:
+                atomic = annotations.get("atomic_cracks", {})
+                combined = annotations.get("combined_cracks", {})
+                overlay = np.zeros_like(base, dtype=np.uint8)
+                for crack in list(atomic.values()) + list(combined.values()):
+                    mask = reconstruct_full_mask(crack, H, W)
+                    if np.any(mask):
+                        overlay[mask.astype(bool)] = (0, 0, 255)
+                base = cv2.addWeighted(base, 1.0, overlay, 0.5, 0)
+        except Exception:
+            pass
+
+        # committed layer (all finished strokes)
+        committed = base.copy()
+
+        # live stroke points (while drawing)
+        live_points = []
+
+        cv2.namedWindow('draw counturs', cv2.WINDOW_NORMAL)
+        cv2.moveWindow('draw counturs', move_x, move_y)
+
+        def redraw_committed():
+            nonlocal committed
+            committed = base.copy()
+            committed = redrow_lines(
+                committed, self.counturs_x, self.counturs_y,
+                self.t, 1
+            )
+
+        def on_mouse(event, x, y, flags, param):
+            nonlocal live_points
+            if event == cv2.EVENT_LBUTTONDOWN:
+                self.drawing = True
+                self.countur_x, self.countur_y = [x], [y]
+                live_points = [(x, y)]
+
+            elif event == cv2.EVENT_MOUSEMOVE and self.drawing:
+                self.countur_x.append(x)
+                self.countur_y.append(y)
+                live_points.append((x, y))
+
+            elif event == cv2.EVENT_LBUTTONUP:
+                self.drawing = False
+                self.countur_x.append(x)
+                self.countur_y.append(y)
+                self.counturs_x.append(self.countur_x)
+                self.counturs_y.append(self.countur_y)
+                redraw_committed()
+                live_points = []
+
+            elif event == cv2.EVENT_RBUTTONDOWN:
+                if not self.drawing and len(self.counturs_x) > 0:
+                    self.counturs_x.pop()
+                    self.counturs_y.pop()
+                    redraw_committed()
+                    live_points = []
+
+        cv2.setMouseCallback('draw counturs', on_mouse)
+
         while True:
             # start with committed strokes
-            display = self.image2.copy()
+            display = committed.copy()
 
-            # overlay masks (red)
-            try:
-                if annotations is not None:
-                    atomic = annotations.get("atomic_cracks", {})
-                    combined = annotations.get("combined_cracks", {})
-                    overlay = np.zeros_like(display, dtype=np.uint8)
-                    for crack in list(atomic.values()) + list(combined.values()):
-                        mask = reconstruct_full_mask(crack, H, W)
-                        if np.any(mask):
-                            overlay[mask.astype(bool)] = (0, 0, 255)
-                    display = cv2.addWeighted(display, 1.0, overlay, 0.5, 0)
-            except Exception:
-                pass
+            # overlay current live stroke if drawing
+            if self.drawing and len(live_points) > 1:
+                for i in range(1, len(live_points)):
+                    cv2.line(display, live_points[i - 1], live_points[i],
+                            (0, 255, 0), self.t)
 
-            # redraw committed strokes
-            display = redrow_lines(display, self.counturs_x, self.counturs_y,
-                                self.t, np.mean([self.scale2x, self.scale2y]))
-
-            # crop to zoom window
-            x1 = max(0, self.dx1)
-            x2 = min(W - self.dx2, W)
-            y1 = max(0, self.dy1)
-            y2 = min(H - self.dy2, H)
-            if x2 <= x1 or y2 <= y1:
-                view = display
-            else:
-                view = display[y1:y2, x1:x2]
-
-            # resize to window
-            new_w = int2(view.shape[1] / self.scale / self.scale2x)
-            new_h = int2(view.shape[0] / self.scale / self.scale2y)
-            self.image_countur = cv2.resize(view, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
-
-            cv2.imshow('draw counturs', self.image_countur)
+            cv2.imshow('draw counturs', display)
 
             key = cv2.waitKey(1) & 0xFF
             if key == 27 or cv2.getWindowProperty('draw counturs', cv2.WND_PROP_VISIBLE) < 1:
@@ -438,11 +463,10 @@ class Draw():
         flat_y = [item for sublist in self.counturs_y for item in sublist]
         return np.array(flat_x) - 0.5, np.array(flat_y) - 0.5
 
-
     def line_drawing(self, event, x, y, flags, param):
         H, W = self.image.shape[:2]
 
-        # map display coords back to absolute image coords
+        # map back to absolute coords
         abs_x = int2(self.dx1 + x * (W - self.dx1 - self.dx2) / self.image_countur.shape[1])
         abs_y = int2(self.dy1 + y * (H - self.dy1 - self.dy2) / self.image_countur.shape[0])
 
@@ -456,18 +480,17 @@ class Draw():
             self.countur_x.append(self.pt1_x)
             self.countur_y.append(self.pt1_y)
 
-            # temp copy for live feedback
-            temp = self.image2.copy()
-            cv2.line(temp, (self.countur_x[-2], self.countur_y[-2]),
-                    (self.countur_x[-1], self.countur_y[-1]),
-                    (0, 255, 0), self.t)
-
-            self.image2 = temp  # update buffer so loop shows live stroke
-
         elif event == cv2.EVENT_LBUTTONUP:
             self.drawing = False
             self.counturs_x.append(self.countur_x)
             self.counturs_y.append(self.countur_y)
+
+            # commit stroke
+            for i in range(len(self.countur_x) - 1):
+                cv2.line(self.image2,
+                        (self.countur_x[i], self.countur_y[i]),
+                        (self.countur_x[i + 1], self.countur_y[i + 1]),
+                        (0, 255, 0), self.t)
 
         elif event == cv2.EVENT_RBUTTONDOWN:
             if not self.drawing and len(self.counturs_x) > 0:
@@ -476,7 +499,6 @@ class Draw():
                 self.image2 = redrow_lines(self.image.copy(), self.counturs_x, self.counturs_y, self.t, 1)
 
         elif event == cv2.EVENT_MOUSEWHEEL:
-            # same zoom logic as before
             rx, ry = x / self.image_countur.shape[1], y / self.image_countur.shape[0]
             if flags > 0:  # zoom in
                 ddx = (W - (self.dx1 + self.dx2)) * self.p
