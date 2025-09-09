@@ -77,7 +77,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         self.track_full_screen_button.clicked.connect(self.track_full_screen)
         self.edge_tracks_full_screen_button.clicked.connect(self.edge_tracks_full_screen)
         self.draw_segment_button.clicked.connect(lambda: self.draw_segment('add'))
-        self.erase_segment_button.clicked.connect(lambda: self.draw_segment('erase'))
+        self.erase_segment_button.clicked.connect(self.erase_segment)
+        self.reset_segment_button.clicked.connect(self.reset_canvas)
         self.save_manuall_segment_button.clicked.connect(self.save_manual_segment)
         self.manual_segment_full_screen_button.clicked.connect(self.manual_segment_full_screen)
         self.combine_segments_button.clicked.connect(self.combine_segments)
@@ -98,7 +99,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         self.edge_tracks_full_screen_button.setStyleSheet("background-color : red")
         self.save_current_segment_button.setStyleSheet("background-color : red")
         self.draw_segment_button.setStyleSheet("background-color : red")
-        self.erase_segment_button.setStyleSheet("background-color : red")
+        self.erase_segment_button.setStyleSheet("background-color : orange")
+        self.reset_segment_button.setStyleSheet("background-color : lightblue")
         self.show_os_button.setStyleSheet("background-color : red")
         #self.mask_pipeline_button.setStyleSheet("background-color : red")
     
@@ -786,6 +788,35 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
     def erase_segment(self):
         """Convenience wrapper for erase mode."""
         return self.draw_segment('erase')
+    
+    def reset_canvas(self):
+        """Clear pending manual segments and reset the preview canvas."""
+        try:
+            # Clear stored manual loop state
+            self.manuall_x = []
+            self.manuall_y = []
+            self.pending_mode = None
+
+            # Clear preview mask by redrawing base image
+            H, W = self.image.shape[:2]
+            im = self.image.astype(np.uint8).copy()
+
+            qimage = QImage(im, im.shape[1], im.shape[0],
+                            im.strides[0], QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimage)
+            scaled = pixmap.scaled(
+                self.manual_segment_screen.width(),
+                self.manual_segment_screen.height(),
+                Qt.KeepAspectRatio,
+                Qt.FastTransformation
+            )
+            self.manual_segment_screen.setPixmap(scaled)
+
+            print("[INFO] Canvas reset complete.")
+
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            error(e)
                  
     # in select_save_end_points
     def select_save_end_points(self):
