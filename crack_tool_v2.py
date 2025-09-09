@@ -76,7 +76,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         self.update_track_display_button.clicked.connect(self.update_track_display)
         self.track_full_screen_button.clicked.connect(self.track_full_screen)
         self.edge_tracks_full_screen_button.clicked.connect(self.edge_tracks_full_screen)
-        self.draw_segment_button.clicked.connect(self.draw_segment)
+        self.draw_segment_button.clicked.connect(lambda: self.draw_segment(mode='add'))
+        self.draw_segment_button.clicked.connect(lambda: self.draw_segment(mode='erase'))
         self.save_manuall_segment_button.clicked.connect(self.save_manual_segment)
         self.manual_segment_full_screen_button.clicked.connect(self.manual_segment_full_screen)
         self.combine_segments_button.clicked.connect(self.combine_segments)
@@ -97,6 +98,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         self.edge_tracks_full_screen_button.setStyleSheet("background-color : red")
         self.save_current_segment_button.setStyleSheet("background-color : red")
         self.draw_segment_button.setStyleSheet("background-color : red")
+        self.erase_segment_button.setStyleSheet("background-color : red")
         self.show_os_button.setStyleSheet("background-color : red")
         #self.mask_pipeline_button.setStyleSheet("background-color : red")
     
@@ -657,33 +659,78 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         except Exception as e:
             error(e)
         
-    def draw_segment(self):
+    def clear_pending_segment(self):
+        """
+        Clear any unsaved manual segment (used when overwriting).
+        """
+        if hasattr(self, "manuall_x"):
+            del self.manuall_x
+        if hasattr(self, "manuall_y"):
+            del self.manuall_y
+        if hasattr(self, "pending_mode"):
+            del self.pending_mode
+
+        # Clear the preview in the Qt widget too
+        if hasattr(self, "manual_segment_screen"):
+            from PyQt5.QtGui import QPixmap
+            self.manual_segment_screen.setPixmap(QPixmap())
+    
+    def draw_segment(self, mode='add'):
+        print(mode)
         try:
+            # --- Handle unsaved previous strokes ---
+            if hasattr(self, "manuall_x") and len(getattr(self, "manuall_x", [])) > 0:
+                from PyQt5.QtWidgets import QMessageBox
+                msg = QMessageBox()
+                msg.setIcon(QMessageBox.Warning)
+                msg.setText("You already have an unsaved manual segment.\n"
+                            "Continuing will overwrite it. Proceed?")
+                msg.setWindowTitle("Overwrite Segment")
+                msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                ret = msg.exec_()
+                if ret == QMessageBox.No:
+                    return
+                else:
+                    self.clear_pending_segment()
+
             image_size = self.select_image_size.value()
-            #x, y = ct.tools.Draw().counturs(self.image[:, :, ::-1], image_size)
             x, y = ct.tools.Draw().counturs(
                 self.image[:, :, ::-1],
                 image_size,
-                annotations=self.annotation.get("annotations", {})
+                annotations=self.annotation.get("annotations", {}),
+                mode=mode
             )
-            if len(x) == 0:
+            if len(x) < 3:
+                return  # not enough points
+
+            coords = np.column_stack([x, y]).astype(np.int32)
+            contour = coords.reshape((-1, 1, 2))
+
+            # --- Extract closed loops only ---
+            mask = np.zeros((self.image.shape[0], self.image.shape[1]), np.uint8)
+            cv2.polylines(mask, [contour], isClosed=False, color=255, thickness=1)
+            loops, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            min_area = 30  # px^2 threshold
+            valid_loops = [loop for loop in loops if cv2.contourArea(loop) > min_area]
+
+            if not valid_loops:
+                print("[INFO] No closed loops detected; nothing will be previewed.")
                 return
-            x = np.concatenate([x, np.array(x[0]).reshape(1)])
-            y = np.concatenate([y, np.array(y[0]).reshape(1)])
-            self.manuall_x = np.array(x)
-            self.manuall_y = np.array(y)
 
-            pts = np.array([x, y]).transpose(1, 0).reshape((-1, 1, 2)).astype(np.int32)
+            # Save points of first loop for later
+            biggest = max(valid_loops, key=cv2.contourArea)
+            self.manuall_x = biggest[:, 0, 0]
+            self.manuall_y = biggest[:, 0, 1]
+            self.pending_mode = mode
 
-            # base image
+            H, W = self.image.shape[:2]
             im = self.image.astype(np.uint8).copy()
 
-            # --- Overlay all crack masks (atomic + combined) like combine_segments ---
+            # --- Existing cracks in red ---
             ann = self.annotation.setdefault("annotations", {})
             atomic = ann.setdefault("atomic_cracks", {})
             combined = ann.setdefault("combined_cracks", {})
-
-            H, W = im.shape[:2]
 
             def reconstruct_full_mask(crack):
                 mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
@@ -696,33 +743,46 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 mask[y0:y1, x0:x1] = crop[:y1-y0, :x1-x0]
                 return (mask > 0).astype(np.uint8)
 
-            # Overlay all cracks in red
-            overlay = np.zeros_like(im)
+            red = np.zeros_like(im)
             for crack in list(atomic.values()) + list(combined.values()):
-                mask = reconstruct_full_mask(crack)
-                if np.any(mask):
-                    overlay[mask.astype(bool)] = (255, 0, 0)
-            im = cv2.addWeighted(im, 1, overlay, 0.4, 0)
+                m = reconstruct_full_mask(crack)
+                if np.any(m):
+                    red[m.astype(bool)] = (255, 0, 0)
+            im = cv2.addWeighted(im, 1, red, 0.35, 0)
 
-            # Draw current manual polyline in green
-            im = cv2.polylines(im, [pts], False, (0, 255, 0), 2)
+            # --- Fill valid loops only ---
+            preview_mask = np.zeros((H, W), np.uint8)
+            cv2.fillPoly(preview_mask, valid_loops, 255)
 
-            # Show in Qt
+            # OpenCV uses BGR order:
+            #   add   → green
+            #   erase → blue
+            fill_color = (0, 255, 0) if mode == 'add' else (0, 255, 0)
+            print(mode, fill_color)
+
+            overlay = np.zeros_like(im)
+            overlay[preview_mask > 0] = fill_color
+            im = cv2.addWeighted(im, 1, overlay, 0.5, 0)
+
+            # --- Show in Qt ---
             qimage = QImage(im, im.shape[1], im.shape[0],
                             im.strides[0], QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(
+            scaled = pixmap.scaled(
                 self.manual_segment_screen.width(),
                 self.manual_segment_screen.height(),
-                Qt.KeepAspectRatio,
-                Qt.FastTransformation
+                Qt.KeepAspectRatio, Qt.FastTransformation
             )
-            self.manual_segment_screen.setPixmap(scaled_pixmap)
+            self.manual_segment_screen.setPixmap(scaled)
 
         except Exception as e:
             import traceback; traceback.print_exc()
             error(e)
-                   
+
+    def erase_segment(self):
+        """Convenience wrapper for erase mode."""
+        return self.draw_segment(mode='erase')
+                 
     # in select_save_end_points
     def select_save_end_points(self):
         self.select_end_points_manmidlines()

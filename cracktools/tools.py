@@ -70,7 +70,7 @@ def points(img1,scalar):
     contur_points = scalar*contur_points
     return contur_points
 
-def redrow_lines(img,counturs_x,counturs_y,t,scale):
+'''def redrow_lines(img,counturs_x,counturs_y,t,scale):
     flat_x = [item for sublist in counturs_x for item in sublist]
     flat_y = [item for sublist in counturs_y for item in sublist]
     img2 = img.copy()
@@ -80,7 +80,37 @@ def redrow_lines(img,counturs_x,counturs_y,t,scale):
         y1 = int2(flat_y[i]-0.5)
         y2 = int2(flat_y[i+1]-0.5)
         img2 = cv2.line(img2,(x1,y1),(x2,y2),color=(0,255,0),thickness=int2(np.ceil(t*scale)))
-    return (img2)
+    return (img2)'''
+    
+def redrow_lines(img, counturs_x, counturs_y, t, scale, color=(0, 255, 0)):
+    """
+    Redraw contour lines on an image.
+
+    Parameters
+    ----------
+    img : np.ndarray
+        The image to draw on
+    counturs_x, counturs_y : list[list[float]]
+        List of contour x and y coordinates
+    t : int
+        Thickness factor
+    scale : float
+        Scaling factor for thickness
+    color : tuple(int,int,int), optional
+        BGR color for lines (default green)
+    """
+    flat_x = [item for sublist in counturs_x for item in sublist]
+    flat_y = [item for sublist in counturs_y for item in sublist]
+    img2 = img.copy()
+    for i in range(len(flat_x) - 1):
+        x1 = int2(flat_x[i] - 0.5)
+        x2 = int2(flat_x[i + 1] - 0.5)
+        y1 = int2(flat_y[i] - 0.5)
+        y2 = int2(flat_y[i + 1] - 0.5)
+        img2 = cv2.line(img2, (x1, y1), (x2, y2),
+                        color=color,
+                        thickness=int2(np.ceil(t * scale)))
+    return img2
 
 def redrow_points(img,pts,t,scale):
     img2 = img.copy()
@@ -159,7 +189,7 @@ def int2(a):
     return (int(np.round(a)))
 
 class Draw():
-    def counturs(self, image, scale, move_x=0, move_y=0, annotations=None):
+    def counturs(self, image, scale, move_x=0, move_y=0, annotations=None, mode="add"):
         """
         Interactive contour drawing:
         - Green polylines drawn continuously with mouse
@@ -219,6 +249,7 @@ class Draw():
         live_points = []
 
         cv2.namedWindow('draw counturs', cv2.WINDOW_NORMAL)
+        cv2.resizeWindow('draw counturs', 1200, 800)  # make window large by default
         cv2.moveWindow('draw counturs', move_x, move_y)
 
         def redraw_committed():
@@ -281,16 +312,18 @@ class Draw():
         cv2.setMouseCallback('draw counturs', on_mouse)
 
         while True:
-            # start with committed strokes
             display = committed.copy()
 
-            # overlay live stroke
+            # overlay live stroke (bright green while drawing)
             if self.drawing and len(live_points) > 1:
                 for i in range(1, len(live_points)):
                     cv2.line(display,
                             (int2(live_points[i - 1][0]), int2(live_points[i - 1][1])),
                             (int2(live_points[i][0]), int2(live_points[i][1])),
                             (0, 255, 0), self.t)
+            else:
+                # show darker green for completed strokes
+                display = redrow_lines(display, self.counturs_x, self.counturs_y, self.t, 1, color=(0, 200, 0))
 
             # crop to zoom region
             x1 = max(0, self.dx1)
@@ -302,7 +335,6 @@ class Draw():
             else:
                 view = display[y1:y2, x1:x2]
 
-            # resize to window
             new_w = int2(view.shape[1] / self.scale / self.scale2x)
             new_h = int2(view.shape[0] / self.scale / self.scale2y)
             self.image_countur = cv2.resize(view, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
@@ -319,6 +351,47 @@ class Draw():
         flat_y = [item for sublist in self.counturs_y for item in sublist]
         return np.array(flat_x) - 0.5, np.array(flat_y) - 0.5
 
+    def clear_pending_segment(self):
+        """Discard the currently drawn (but unsaved) polygon and clear the preview."""
+        if hasattr(self, "manuall_x"): del self.manuall_x
+        if hasattr(self, "manuall_y"): del self.manuall_y
+        if hasattr(self, "pending_mode"): del self.pending_mode
+
+        # Repaint the preview with only existing cracks (red)
+        try:
+            im = self.image.astype(np.uint8).copy()
+            H, W = im.shape[:2]
+            ann = self.annotation.get("annotations", {})
+            atomic = (ann or {}).get("atomic_cracks", {})
+            combined = (ann or {}).get("combined_cracks", {})
+
+            def reconstruct_full_mask(crack):
+                mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
+                if mc is None or bb is None or not len(mc):
+                    return np.zeros((H, W), np.uint8)
+                crop = np.array(mc, dtype=np.uint8)
+                x0, y0, w, h = [int(v) for v in bb]
+                x1, y1 = min(x0 + w, W), min(y0 + h, H)
+                mask = np.zeros((H, W), np.uint8)
+                mask[y0:y1, x0:x1] = crop[:y1-y0, :x1-x0]
+                return (mask > 0).astype(np.uint8)
+
+            red = np.zeros_like(im)
+            for crack in list(atomic.values()) + list(combined.values()):
+                m = reconstruct_full_mask(crack)
+                if np.any(m):
+                    red[m.astype(bool)] = (255, 0, 0)
+            im = cv2.addWeighted(im, 1, red, 0.35, 0)
+
+            qimage = QImage(im, im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimage)
+            scaled = pixmap.scaled(self.manual_segment_screen.width(),
+                                self.manual_segment_screen.height(),
+                                Qt.KeepAspectRatio, Qt.FastTransformation)
+            self.manual_segment_screen.setPixmap(scaled)
+        except:
+            pass
+    
     def line_drawing(self, event, x, y, flags, param):
         H, W = self.image.shape[:2]
 
