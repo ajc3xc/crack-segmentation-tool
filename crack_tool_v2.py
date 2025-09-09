@@ -968,17 +968,20 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
     def save_manual_segment(self):
         """
-        Save the drawn manual polyline:
-        - If overlapping an atomic crack → union its edges, update mask.
-        If that atomic belongs to a combined crack → rebuild combined via _build_combined_crack.
-        - Else → create a new atomic crack.
+        Save or erase the drawn manual polyline:
+        - If mode == "add":
+            If overlapping an atomic crack → union its edges, update mask.
+            If that atomic belongs to a combined crack → rebuild combined via _build_combined_crack.
+            Else → create a new atomic crack.
+        - If mode == "erase":
+            Subtract mask from overlapping cracks; delete cracks fully erased.
         Always updates mask_crop/mask_bbox and refreshes the screen.
         """
         try:
             print("[DEBUG] save_manual_segment called.")
 
             if not hasattr(self, "manuall_x") or not hasattr(self, "manuall_y"):
-                error("No manual polyline to save.")
+                error("No manual polyline to save/erase.")
                 return
             if len(self.manuall_x) < 2 or len(self.manuall_y) < 2:
                 error("Manual polyline too short.")
@@ -994,6 +997,72 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             print(f"[DEBUG] Current atomic count: {len(atomic)}, combined count: {len(combined)}")
 
             H, W = self.original_image.shape[:2]
+            mode = getattr(self, "pending_mode", "add")
+
+            # ============================================================
+            # ERASE MODE
+            # ============================================================
+            if mode == "erase":
+                print("[INFO] Erasing manual segment.")
+                erase_mask = np.zeros((H, W), np.uint8)
+                poly_pts = poly.astype(np.int32).reshape((-1, 1, 2))
+                cv2.fillPoly(erase_mask, [poly_pts], 255)
+
+                to_delete = []
+                for cid, crack in list(atomic.items()):
+                    # inline reconstruction (same as in draw_existing_cracks)
+                    mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
+                    if mc is None or bb is None or not len(mc):
+                        full_mask = np.zeros((H, W), np.uint8)
+                    else:
+                        crop = np.array(mc, dtype=np.uint8)
+                        x0, y0, w, h = [int(v) for v in bb]
+                        x1, y1 = min(x0 + w, W), min(y0 + h, H)
+                        full_mask = np.zeros((H, W), np.uint8)
+                        full_mask[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
+                        full_mask = (full_mask > 0).astype(np.uint8)
+                    new_mask = cv2.bitwise_and(full_mask, cv2.bitwise_not(erase_mask))
+
+                    if np.any(new_mask):
+                        ys, xs = np.where(new_mask > 0)
+                        x0, x1 = xs.min(), xs.max()+1
+                        y0, y1 = ys.min(), ys.max()+1
+                        crop = new_mask[y0:y1, x0:x1]
+                        crack["mask_crop"] = crop.tolist()
+                        crack["mask_bbox"] = [int(x0), int(y0), int(x1-x0), int(y1-y0)]
+                        print(f"[INFO] Updated crack {cid} after erase, new bbox={crack['mask_bbox']}")
+                    else:
+                        to_delete.append(cid)
+
+                for cid in to_delete:
+                    del atomic[cid]
+                    print(f"[INFO] Fully erased crack {cid}")
+
+                self.save_annotation()
+                print("[DEBUG] Annotation saved (erase).")
+
+                # refresh canvas
+                im = self.image.astype(np.uint8).copy()
+                im = self.draw_existing_cracks(im)
+                qimage = QImage(im, im.shape[1], im.shape[0],
+                                im.strides[0], QImage.Format_RGB888)
+                pixmap = QPixmap.fromImage(qimage)
+                scaled = pixmap.scaled(
+                    self.manual_segment_screen.width(),
+                    self.manual_segment_screen.height(),
+                    Qt.KeepAspectRatio,
+                    Qt.FastTransformation
+                )
+                self.manual_segment_screen.setPixmap(scaled)
+
+                # cleanup
+                if hasattr(self, "manuall_x"): del self.manuall_x
+                if hasattr(self, "manuall_y"): del self.manuall_y
+                return
+
+            # ============================================================
+            # ADD MODE (default)
+            # ============================================================
 
             # --- Try to attach to atomic cracks
             target_id, target_crack = None, None
@@ -1046,6 +1115,11 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                     poly_pts = np.stack([ex, ey], axis=1).astype(np.int32)
                     cv2.fillPoly(mask, [poly_pts], 255)
                     print(f"[DEBUG] Mask filled for crack {target_id}, poly size={poly_pts.shape}")
+                else:
+                    # Fallback: fill directly from manual poly
+                    poly_pts = poly.astype(np.int32).reshape((-1, 1, 2))
+                    cv2.fillPoly(mask, [poly_pts], 255)
+                    print(f"[DEBUG] Fallback fill used for crack {target_id}")
 
                 ys, xs = np.where(mask > 0)
                 if len(xs) and len(ys):
@@ -1118,12 +1192,11 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
             # --- Persist changes
             self.save_annotation()
-            print("[DEBUG] Annotation saved.")
+            print("[DEBUG] Annotation saved (add).")
 
-            # --- Refresh preview canvas with cracks + saved segment
+            # --- Refresh preview canvas
             im = self.image.astype(np.uint8).copy()
             im = self.draw_existing_cracks(im)
-
             qimage = QImage(im, im.shape[1], im.shape[0],
                             im.strides[0], QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qimage)
