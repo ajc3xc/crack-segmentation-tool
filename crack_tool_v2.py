@@ -674,8 +674,12 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         if hasattr(self, "manual_segment_screen"):
             from PyQt5.QtGui import QPixmap
             self.manual_segment_screen.setPixmap(QPixmap())
-    
+
     def draw_segment(self, mode):
+        from shapely.geometry import Polygon, MultiPolygon
+        from shapely.ops import unary_union
+        import matplotlib.pyplot as plt
+
         print(mode)
         try:
             # --- Handle unsaved previous strokes ---
@@ -704,65 +708,64 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 return  # not enough points
 
             coords = np.column_stack([x, y]).astype(np.int32)
-            contour = coords.reshape((-1, 1, 2))
 
-            # --- Extract closed loops only ---
-            mask = np.zeros((self.image.shape[0], self.image.shape[1]), np.uint8)
-            cv2.polylines(mask, [contour], isClosed=False, color=255, thickness=1)
-            loops, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            tol = 20       # closure distance in px
+            min_gap = 10   # min separation in indices
+            polys = []
 
-            min_area = 30  # px^2 threshold
-            valid_loops = [loop for loop in loops if cv2.contourArea(loop) > min_area]
+            # --- Find ALL closures ---
+            for i in range(len(coords) - min_gap):
+                for j in range(i + min_gap, len(coords)):
+                    d = np.linalg.norm(coords[i] - coords[j])
+                    if d < tol:
+                        loop_coords = coords[i:j+1]
+                        if len(loop_coords) >= 3:
+                            poly = Polygon(loop_coords)
+                            if not poly.is_valid:
+                                poly = poly.buffer(0)
+                            if not poly.is_empty and poly.area > 30:
+                                polys.append(poly)
 
-            if not valid_loops:
-                print("[INFO] No closed loops detected; nothing will be previewed.")
+            print(f"[DEBUG] Loops found: {len(polys)}")
+
+            if not polys:
+                print("[INFO] No closed loop detected in stroke.")
                 return
 
-            # Save points of first loop for later
+            # --- Merge overlapping polygons ---
+            merged = unary_union(polys)
+
+            # always get a list of polygons back
+            if isinstance(merged, Polygon):
+                merged = [merged]
+            elif isinstance(merged, MultiPolygon):
+                merged = list(merged.geoms)
+
+            print(f"[DEBUG] Independent loops after merge: {len(merged)}")
+
+            # --- Convert back to OpenCV contours ---
+            valid_loops = []
+            for poly in merged:
+                coords = np.array(poly.exterior.coords, dtype=np.int32).reshape((-1, 1, 2))
+                valid_loops.append(coords)
+
+            # save first loop coords for later use
             biggest = max(valid_loops, key=cv2.contourArea)
             self.manuall_x = biggest[:, 0, 0]
             self.manuall_y = biggest[:, 0, 1]
             self.pending_mode = mode
 
+            # --- Preview ---
             H, W = self.image.shape[:2]
             im = self.image.astype(np.uint8).copy()
 
-            # --- Existing cracks in red ---
-            ann = self.annotation.setdefault("annotations", {})
-            atomic = ann.setdefault("atomic_cracks", {})
-            combined = ann.setdefault("combined_cracks", {})
-
-            def reconstruct_full_mask(crack):
-                mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
-                if mc is None or bb is None or not len(mc):
-                    return np.zeros((H, W), np.uint8)
-                crop = np.array(mc, dtype=np.uint8)
-                x0, y0, w, h = [int(v) for v in bb]
-                x1, y1 = min(x0 + w, W), min(y0 + h, H)
-                mask = np.zeros((H, W), np.uint8)
-                mask[y0:y1, x0:x1] = crop[:y1-y0, :x1-x0]
-                return (mask > 0).astype(np.uint8)
-
-            red = np.zeros_like(im)
-            for crack in list(atomic.values()) + list(combined.values()):
-                m = reconstruct_full_mask(crack)
-                if np.any(m):
-                    red[m.astype(bool)] = (255, 0, 0)
-            im = cv2.addWeighted(im, 1, red, 0.35, 0)
-
-            # --- Fill valid loops only ---
             preview_mask = np.zeros((H, W), np.uint8)
             cv2.fillPoly(preview_mask, valid_loops, 255)
 
-            # OpenCV uses BGR order:
-            #   add   → green
-            #   erase → orange
-            fill_color = (0, 255, 0) if mode == 'add' else (0, 165, 255)
-            print(mode, fill_color)
-
+            fill_color = (0, 255, 0) if mode == 'add' else (255, 50, 0)
             overlay = np.zeros_like(im)
             overlay[preview_mask > 0] = fill_color
-            im = cv2.addWeighted(im, 1, overlay, 0.5, 0)
+            im = cv2.addWeighted(im, 1, overlay, 0.7, 0)
 
             # --- Show in Qt ---
             qimage = QImage(im, im.shape[1], im.shape[0],
@@ -771,7 +774,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             scaled = pixmap.scaled(
                 self.manual_segment_screen.width(),
                 self.manual_segment_screen.height(),
-                Qt.KeepAspectRatio, Qt.FastTransformation
+                Qt.KeepAspectRatio,
+                Qt.FastTransformation
             )
             self.manual_segment_screen.setPixmap(scaled)
 
