@@ -682,37 +682,36 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             from PyQt5.QtGui import QPixmap
             self.manual_segment_screen.setPixmap(QPixmap())
 
+    def draw_existing_cracks(self, im):
+        """Overlay existing cracks (atomic + combined) in red onto a copy of the image."""
+        H, W = im.shape[:2]
+        ann = self.annotation.setdefault("annotations", {})
+        atomic = ann.setdefault("atomic_cracks", {})
+        combined = ann.setdefault("combined_cracks", {})
+
+        def reconstruct_full_mask(crack):
+            mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
+            if mc is None or bb is None or not len(mc):
+                return np.zeros((H, W), np.uint8)
+            crop = np.array(mc, dtype=np.uint8)
+            x0, y0, w, h = [int(v) for v in bb]
+            x1, y1 = min(x0 + w, W), min(y0 + h, H)
+            mask = np.zeros((H, W), np.uint8)
+            mask[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
+            return (mask > 0).astype(np.uint8)
+
+        red = np.zeros_like(im)
+        for crack in list(atomic.values()) + list(combined.values()):
+            m = reconstruct_full_mask(crack)
+            if np.any(m):
+                red[m.astype(bool)] = (255, 0, 0)
+
+        return cv2.addWeighted(im, 1, red, 0.35, 0)
+    
     def draw_segment(self, mode):
         from shapely.geometry import Polygon, MultiPolygon
         from shapely.ops import unary_union
         import matplotlib.pyplot as plt
-        
-        def draw_existing_cracks(im):
-                """Overlay existing cracks (atomic + combined) in red onto a copy of the image."""
-                H, W = im.shape[:2]
-                ann = self.annotation.setdefault("annotations", {})
-                atomic = ann.setdefault("atomic_cracks", {})
-                combined = ann.setdefault("combined_cracks", {})
-
-                def reconstruct_full_mask(crack):
-                    mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
-                    if mc is None or bb is None or not len(mc):
-                        return np.zeros((H, W), np.uint8)
-                    crop = np.array(mc, dtype=np.uint8)
-                    x0, y0, w, h = [int(v) for v in bb]
-                    x1, y1 = min(x0 + w, W), min(y0 + h, H)
-                    mask = np.zeros((H, W), np.uint8)
-                    mask[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
-                    return (mask > 0).astype(np.uint8)
-
-                red = np.zeros_like(im)
-                for crack in list(atomic.values()) + list(combined.values()):
-                    m = reconstruct_full_mask(crack)
-                    if np.any(m):
-                        red[m.astype(bool)] = (255, 0, 0)
-
-                return cv2.addWeighted(im, 1, red, 0.35, 0)
-
         print(mode)
         try:
             # --- Handle unsaved previous strokes ---
@@ -792,7 +791,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             H, W = self.image.shape[:2]
             im = self.image.astype(np.uint8).copy()
             
-            im = draw_existing_cracks(im)
+            im = self.draw_existing_cracks(im)
 
             preview_mask = np.zeros((H, W), np.uint8)
             cv2.fillPoly(preview_mask, valid_loops, 255)
