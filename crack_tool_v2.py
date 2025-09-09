@@ -970,7 +970,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         """
         Save or erase the drawn manual polyline:
         - If mode == "add":
-            If overlapping an atomic crack → union its edges, update mask.
+            If overlapping an atomic crack → union its mask with the drawn mask.
             If that atomic belongs to a combined crack → rebuild combined via _build_combined_crack.
             Else → create a new atomic crack.
         - If mode == "erase":
@@ -1010,7 +1010,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
                 to_delete = []
                 for cid, crack in list(atomic.items()):
-                    # inline reconstruction (same as in draw_existing_cracks)
+                    # reconstruct old mask
                     mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
                     if mc is None or bb is None or not len(mc):
                         full_mask = np.zeros((H, W), np.uint8)
@@ -1021,6 +1021,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                         full_mask = np.zeros((H, W), np.uint8)
                         full_mask[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
                         full_mask = (full_mask > 0).astype(np.uint8)
+
                     new_mask = cv2.bitwise_and(full_mask, cv2.bitwise_not(erase_mask))
 
                     if np.any(new_mask):
@@ -1067,60 +1068,48 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             # --- Try to attach to atomic cracks
             target_id, target_crack = None, None
             for cid, crack in atomic.items():
-                edges = crack.get("geodesic_edges", {})
-                if not edges:
+                mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
+                if mc is None or bb is None or not len(mc):
                     continue
-                parts = []
-                for key in ["edge1", "edge2"]:
-                    arr = np.array(edges.get(key, []), float)
-                    if arr.ndim == 2 and len(arr) > 1:
-                        parts.append(geometry.LineString(arr))
-                if not parts:
-                    continue
-                merged = ops.linemerge(geometry.MultiLineString(parts))
-                if merged.buffer(3).intersects(manual_line):  # 3px tolerance
+                crop = np.array(mc, dtype=np.uint8)
+                x0, y0, w, h = [int(v) for v in bb]
+                x1, y1 = min(x0 + w, W), min(y0 + h, H)
+                old_mask = np.zeros((H, W), np.uint8)
+                old_mask[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
+
+                # check overlap with drawn poly
+                new_mask = np.zeros((H, W), np.uint8)
+                poly_pts = poly.astype(np.int32).reshape((-1, 1, 2))
+                cv2.fillPoly(new_mask, [poly_pts], 255)
+
+                if np.any(cv2.bitwise_and(old_mask, new_mask)):
                     target_id, target_crack = cid, crack
-                    print(f"[DEBUG] Manual intersects atomic crack {cid}")
+                    print(f"[DEBUG] Manual overlaps atomic crack {cid}")
                     break
 
             if target_crack is not None:
-                print(f"[INFO] Merging manual into atomic crack {target_id}")
+                print(f"[INFO] Unioning manual mask into atomic crack {target_id}")
 
-                new_edges = {}
-                for key in ["edge1", "edge2"]:
-                    arr = np.array(target_crack["geodesic_edges"].get(key, []), float)
-                    if arr.ndim == 2 and len(arr) > 1:
-                        ls_old = geometry.LineString(arr)
-                        merged = ops.linemerge(ls_old.union(manual_line))
-                        if isinstance(merged, geometry.LineString):
-                            coords = np.array(merged.coords)
-                        else:
-                            coords = np.vstack([np.array(ls.coords) for ls in merged.geoms])
-                        new_edges[key] = coords.tolist()
-                        print(f"[DEBUG] Updated {key} with {len(coords)} points.")
-                    else:
-                        new_edges[key] = poly.tolist()
-                        print(f"[DEBUG] Replaced empty {key} with manual poly.")
+                # build new drawn mask
+                new_mask = np.zeros((H, W), np.uint8)
+                poly_pts = poly.astype(np.int32).reshape((-1, 1, 2))
+                cv2.fillPoly(new_mask, [poly_pts], 255)
 
-                target_crack["geodesic_edges"] = new_edges
-                target_crack["normal_edge_points"] = None
-
-                # --- Update mask
-                e1 = np.array(new_edges.get("edge1", []), float)
-                e2 = np.array(new_edges.get("edge2", []), float)
-                mask = np.zeros((H, W), np.uint8)
-                if len(e1) > 1 and len(e2) > 1:
-                    ex = np.concatenate((e1[:, 0][::-1], e2[:, 0]))
-                    ey = np.concatenate((e1[:, 1][::-1], e2[:, 1]))
-                    poly_pts = np.stack([ex, ey], axis=1).astype(np.int32)
-                    cv2.fillPoly(mask, [poly_pts], 255)
-                    print(f"[DEBUG] Mask filled for crack {target_id}, poly size={poly_pts.shape}")
+                # reconstruct old full mask
+                mc, bb = target_crack.get("mask_crop"), target_crack.get("mask_bbox")
+                if mc is None or bb is None or not len(mc):
+                    old_mask = np.zeros((H, W), np.uint8)
                 else:
-                    # Fallback: fill directly from manual poly
-                    poly_pts = poly.astype(np.int32).reshape((-1, 1, 2))
-                    cv2.fillPoly(mask, [poly_pts], 255)
-                    print(f"[DEBUG] Fallback fill used for crack {target_id}")
+                    crop = np.array(mc, dtype=np.uint8)
+                    x0, y0, w, h = [int(v) for v in bb]
+                    x1, y1 = min(x0 + w, W), min(y0 + h, H)
+                    old_mask = np.zeros((H, W), np.uint8)
+                    old_mask[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
 
+                # union
+                mask = cv2.bitwise_or(old_mask, new_mask)
+
+                # save back
                 ys, xs = np.where(mask > 0)
                 if len(xs) and len(ys):
                     x0, x1 = xs.min(), xs.max()+1
@@ -1128,38 +1117,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                     crop = mask[y0:y1, x0:x1]
                     target_crack["mask_crop"] = crop.tolist()
                     target_crack["mask_bbox"] = [int(x0), int(y0), int(x1-x0), int(y1-y0)]
-                    print(f"[DEBUG] Updated mask bbox: {target_crack['mask_bbox']}")
-
-                # --- Combined crack check
-                rebuilt = False
-                for cmb_id, cmb in combined.items():
-                    members = cmb.get("members", [])
-                    if target_id in members:
-                        combined[cmb_id] = self._build_combined_crack(members)
-                        print(f"[INFO] Rebuilt combined crack {cmb_id}")
-                        rebuilt = True
-                        break
-
-                if not rebuilt:
-                    save_dir = os.path.join(self.save_folder, "debug_outputs")
-                    os.makedirs(save_dir, exist_ok=True)
-                    base_name = os.path.splitext(os.path.basename(self.name))[0]
-                    fname = os.path.join(save_dir, f"{base_name}_atomic_{target_id}_debug.png")
-
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    ax.imshow(self.original_image)
-                    for key, arr in new_edges.items():
-                        arr = np.array(arr, float)
-                        if arr.ndim == 2 and len(arr) > 1:
-                            ax.plot(arr[:, 0], arr[:, 1],
-                                    'r-' if key == "edge1" else 'b-', lw=0.7)
-                    ax.set_title(f"Updated atomic crack {target_id}")
-                    ax.set_xlim(0, W)
-                    ax.set_ylim(H, 0)
-                    plt.tight_layout()
-                    plt.savefig(fname, dpi=100)
-                    plt.close()
-                    print(f"[DEBUG] Saved atomic debug plot to {fname}")
+                    print(f"[DEBUG] Unioned mask saved for crack {target_id}, bbox={target_crack['mask_bbox']}")
 
             else:
                 # --- Create new atomic
