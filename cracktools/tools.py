@@ -91,7 +91,7 @@ def redrow_lines(img, counturs_x, counturs_y, t, scale, color=(0, 255, 0)):
     img : np.ndarray
         The image to draw on
     counturs_x, counturs_y : list[list[float]]
-        List of contour x and y coordinates
+        List of contour x and y coordinates (each sublist is one stroke)
     t : int
         Thickness factor
     scale : float
@@ -99,17 +99,18 @@ def redrow_lines(img, counturs_x, counturs_y, t, scale, color=(0, 255, 0)):
     color : tuple(int,int,int), optional
         BGR color for lines (default green)
     """
-    flat_x = [item for sublist in counturs_x for item in sublist]
-    flat_y = [item for sublist in counturs_y for item in sublist]
     img2 = img.copy()
-    for i in range(len(flat_x) - 1):
-        x1 = int2(flat_x[i] - 0.5)
-        x2 = int2(flat_x[i + 1] - 0.5)
-        y1 = int2(flat_y[i] - 0.5)
-        y2 = int2(flat_y[i + 1] - 0.5)
-        img2 = cv2.line(img2, (x1, y1), (x2, y2),
-                        color=color,
-                        thickness=int2(np.ceil(t * scale)))
+    for cx, cy in zip(counturs_x, counturs_y):  # each stroke
+        for i in range(len(cx) - 1):
+            x1, y1 = int2(np.round(cx[i])),   int2(np.round(cy[i]))
+            x2, y2 = int2(np.round(cx[i+1])), int2(np.round(cy[i+1]))
+            img2 = cv2.line(
+                img2,
+                (x1, y1),
+                (x2, y2),
+                color=color,
+                thickness=int2(np.ceil(t * scale))
+            )
     return img2
 
 def redrow_points(img,pts,t,scale):
@@ -291,6 +292,9 @@ class Draw():
                 self.counturs_y.append(self.countur_y)
                 redraw_committed()
                 live_points = []
+                
+                # 🔑 reset current stroke so next stroke starts fresh
+                self.countur_x, self.countur_y = [], []
 
             elif event == cv2.EVENT_RBUTTONDOWN:
                 if not self.drawing and len(self.counturs_x) > 0:
