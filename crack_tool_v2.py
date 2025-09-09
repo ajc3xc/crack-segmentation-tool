@@ -41,6 +41,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         self.clear_segmentation_button.clicked.connect(self.clear_segmentation)
         self.clear_combined_cracks_button.clicked.connect(self.clear_combined_cracks)
         self.files_list.itemSelectionChanged.connect(self.name_selected)
+        self.combine_segments_button.clicked.connect(self.combine_segments)
 
         self.select_points_button.clicked.connect(self.select_save_end_points)
         self.update_image_crop_button.clicked.connect(self.update_image_crop)
@@ -76,12 +77,13 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         self.update_track_display_button.clicked.connect(self.update_track_display)
         self.track_full_screen_button.clicked.connect(self.track_full_screen)
         self.edge_tracks_full_screen_button.clicked.connect(self.edge_tracks_full_screen)
+        
+        #Add segment manually tab
         self.draw_segment_button.clicked.connect(lambda: self.draw_segment('add'))
         self.erase_segment_button.clicked.connect(self.erase_segment)
         self.reset_segment_button.clicked.connect(self.reset_canvas)
         self.save_manuall_segment_button.clicked.connect(self.save_manual_segment)
         self.manual_segment_full_screen_button.clicked.connect(self.manual_segment_full_screen)
-        self.combine_segments_button.clicked.connect(self.combine_segments)
 
         self.n = -1
         self.saved = False
@@ -101,7 +103,10 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         self.draw_segment_button.setStyleSheet("background-color : red")
         self.erase_segment_button.setStyleSheet("background-color : orange")
         self.reset_segment_button.setStyleSheet("background-color : lightblue")
+        self.save_manuall_segment_button.setStyleSheet("background-color : lightgreen")
+        
         self.show_os_button.setStyleSheet("background-color : red")
+        
         #self.mask_pipeline_button.setStyleSheet("background-color : red")
     
     def select_end_points_manmidlines(self):
@@ -681,6 +686,32 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         from shapely.geometry import Polygon, MultiPolygon
         from shapely.ops import unary_union
         import matplotlib.pyplot as plt
+        
+        def draw_existing_cracks(im):
+                """Overlay existing cracks (atomic + combined) in red onto a copy of the image."""
+                H, W = im.shape[:2]
+                ann = self.annotation.setdefault("annotations", {})
+                atomic = ann.setdefault("atomic_cracks", {})
+                combined = ann.setdefault("combined_cracks", {})
+
+                def reconstruct_full_mask(crack):
+                    mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
+                    if mc is None or bb is None or not len(mc):
+                        return np.zeros((H, W), np.uint8)
+                    crop = np.array(mc, dtype=np.uint8)
+                    x0, y0, w, h = [int(v) for v in bb]
+                    x1, y1 = min(x0 + w, W), min(y0 + h, H)
+                    mask = np.zeros((H, W), np.uint8)
+                    mask[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
+                    return (mask > 0).astype(np.uint8)
+
+                red = np.zeros_like(im)
+                for crack in list(atomic.values()) + list(combined.values()):
+                    m = reconstruct_full_mask(crack)
+                    if np.any(m):
+                        red[m.astype(bool)] = (255, 0, 0)
+
+                return cv2.addWeighted(im, 1, red, 0.35, 0)
 
         print(mode)
         try:
@@ -756,10 +787,12 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             self.manuall_x = biggest[:, 0, 0]
             self.manuall_y = biggest[:, 0, 1]
             self.pending_mode = mode
-
+            
             # --- Preview ---
             H, W = self.image.shape[:2]
             im = self.image.astype(np.uint8).copy()
+            
+            im = draw_existing_cracks(im)
 
             preview_mask = np.zeros((H, W), np.uint8)
             cv2.fillPoly(preview_mask, valid_loops, 255)
@@ -792,14 +825,12 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
     def reset_canvas(self):
         """Clear pending manual segments and reset the preview canvas."""
         try:
-            # Clear stored manual loop state
             self.manuall_x = []
             self.manuall_y = []
             self.pending_mode = None
 
-            # Clear preview mask by redrawing base image
-            H, W = self.image.shape[:2]
             im = self.image.astype(np.uint8).copy()
+            im = self.draw_existing_cracks(im)  # <--- cracks back in
 
             qimage = QImage(im, im.shape[1], im.shape[0],
                             im.strides[0], QImage.Format_RGB888)
@@ -813,7 +844,6 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             self.manual_segment_screen.setPixmap(scaled)
 
             print("[INFO] Canvas reset complete.")
-
         except Exception as e:
             import traceback; traceback.print_exc()
             error(e)
