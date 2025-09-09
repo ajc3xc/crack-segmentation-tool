@@ -40,7 +40,7 @@ def scale_image(image):
 ###################################
 
 ##### choose points on image ##################
-pts = []
+'''pts = []
 def put_points(img1):
     # mouse callback function
     def line_drawing(event,x,y,flags,param):
@@ -60,7 +60,7 @@ def put_points(img1):
             break
     cv2.destroyAllWindows()
     
-    return (np.array(pts))
+    return (np.array(pts))'''
 
 def points(img1,scalar):
     global pts
@@ -252,10 +252,19 @@ class Draw():
         cv2.resizeWindow('draw counturs', 1200, 800)  # make window large by default
         cv2.moveWindow('draw counturs', move_x, move_y)
 
+        if mode=='add':
+                #green
+                active_draw_color = (0,255,0) #green
+                done_draw_color = (0,200,0)
+        else:
+                #blue
+                active_draw_color = (0, 165, 255)   # bright orange
+                done_draw_color   = (0, 140, 255)   # darker orange
+        
         def redraw_committed():
             nonlocal committed
             committed = base.copy()
-            committed = redrow_lines(committed, self.counturs_x, self.counturs_y, self.t, 1)
+            committed = redrow_lines(committed, self.counturs_x, self.counturs_y, self.t, 1, color=done_draw_color)
 
         def on_mouse(event, x, y, flags, param):
             nonlocal live_points
@@ -315,15 +324,16 @@ class Draw():
             display = committed.copy()
 
             # overlay live stroke (bright green while drawing)
+                
             if self.drawing and len(live_points) > 1:
                 for i in range(1, len(live_points)):
                     cv2.line(display,
                             (int2(live_points[i - 1][0]), int2(live_points[i - 1][1])),
                             (int2(live_points[i][0]), int2(live_points[i][1])),
-                            (0, 255, 0), self.t)
+                            active_draw_color, self.t)
             else:
                 # show darker green for completed strokes
-                display = redrow_lines(display, self.counturs_x, self.counturs_y, self.t, 1, color=(0, 200, 0))
+                display = redrow_lines(display, self.counturs_x, self.counturs_y, self.t, 1, color=done_draw_color)
 
             # crop to zoom region
             x1 = max(0, self.dx1)
@@ -392,7 +402,7 @@ class Draw():
         except:
             pass
     
-    def line_drawing(self, event, x, y, flags, param):
+    '''def line_drawing(self, event, x, y, flags, param):
         H, W = self.image.shape[:2]
 
         # map back to absolute coords
@@ -445,7 +455,7 @@ class Draw():
                 self.dy2 = max(int2(self.dy2 - ddy * (1 - ry)), 1)
 
             self.scale2x = 1 - (self.dx1 + self.dx2) / W
-            self.scale2y = 1 - (self.dy1 + self.dy2) / H
+            self.scale2y = 1 - (self.dy1 + self.dy2) / H'''
             
     def points(self,image,scale,t = 5,move_x = 0, move_y = 0):
         """

@@ -756,8 +756,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
             # OpenCV uses BGR order:
             #   add   → green
-            #   erase → blue
-            fill_color = (0, 255, 0) if mode == 'add' else (0, 0, 255)
+            #   erase → orange
+            fill_color = (0, 255, 0) if mode == 'add' else (0, 165, 255)
             print(mode, fill_color)
 
             overlay = np.zeros_like(im)
