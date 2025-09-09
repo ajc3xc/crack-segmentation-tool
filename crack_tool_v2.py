@@ -972,9 +972,11 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         - If overlapping an atomic crack → union its edges, update mask.
         If that atomic belongs to a combined crack → rebuild combined via _build_combined_crack.
         - Else → create a new atomic crack.
-        Always updates mask_crop/mask_bbox and saves a debug plot for atomic-only case.
+        Always updates mask_crop/mask_bbox and refreshes the screen.
         """
         try:
+            print("[DEBUG] save_manual_segment called.")
+
             if not hasattr(self, "manuall_x") or not hasattr(self, "manuall_y"):
                 error("No manual polyline to save.")
                 return
@@ -984,10 +986,12 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
             poly = np.column_stack([self.manuall_x, self.manuall_y]).astype(float)
             manual_line = geometry.LineString(poly)
+            print(f"[DEBUG] Manual line length: {manual_line.length:.2f}, #points={len(poly)}")
 
             ann = self.annotation.setdefault("annotations", {})
             atomic = ann.setdefault("atomic_cracks", {})
             combined = ann.setdefault("combined_cracks", {})
+            print(f"[DEBUG] Current atomic count: {len(atomic)}, combined count: {len(combined)}")
 
             H, W = self.original_image.shape[:2]
 
@@ -1007,10 +1011,12 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 merged = ops.linemerge(geometry.MultiLineString(parts))
                 if merged.buffer(3).intersects(manual_line):  # 3px tolerance
                     target_id, target_crack = cid, crack
+                    print(f"[DEBUG] Manual intersects atomic crack {cid}")
                     break
 
             if target_crack is not None:
-                # --- Union edges
+                print(f"[INFO] Merging manual into atomic crack {target_id}")
+
                 new_edges = {}
                 for key in ["edge1", "edge2"]:
                     arr = np.array(target_crack["geodesic_edges"].get(key, []), float)
@@ -1022,20 +1028,24 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                         else:
                             coords = np.vstack([np.array(ls.coords) for ls in merged.geoms])
                         new_edges[key] = coords.tolist()
+                        print(f"[DEBUG] Updated {key} with {len(coords)} points.")
                     else:
                         new_edges[key] = poly.tolist()
-                target_crack["geodesic_edges"] = new_edges
-                target_crack["normal_edge_points"] = None  # defer normals
+                        print(f"[DEBUG] Replaced empty {key} with manual poly.")
 
-                # --- Update mask from edges (filled polygon like _build_combined_crack)
+                target_crack["geodesic_edges"] = new_edges
+                target_crack["normal_edge_points"] = None
+
+                # --- Update mask
                 e1 = np.array(new_edges.get("edge1", []), float)
                 e2 = np.array(new_edges.get("edge2", []), float)
                 mask = np.zeros((H, W), np.uint8)
                 if len(e1) > 1 and len(e2) > 1:
-                    ex = np.concatenate((e1[:,0][::-1], e2[:,0]))
-                    ey = np.concatenate((e1[:,1][::-1], e2[:,1]))
+                    ex = np.concatenate((e1[:, 0][::-1], e2[:, 0]))
+                    ey = np.concatenate((e1[:, 1][::-1], e2[:, 1]))
                     poly_pts = np.stack([ex, ey], axis=1).astype(np.int32)
                     cv2.fillPoly(mask, [poly_pts], 255)
+                    print(f"[DEBUG] Mask filled for crack {target_id}, poly size={poly_pts.shape}")
 
                 ys, xs = np.where(mask > 0)
                 if len(xs) and len(ys):
@@ -1044,10 +1054,9 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                     crop = mask[y0:y1, x0:x1]
                     target_crack["mask_crop"] = crop.tolist()
                     target_crack["mask_bbox"] = [int(x0), int(y0), int(x1-x0), int(y1-y0)]
+                    print(f"[DEBUG] Updated mask bbox: {target_crack['mask_bbox']}")
 
-                print(f"[INFO] Manual polyline merged into atomic crack {target_id}")
-
-                # --- If atomic is in a combined crack → rebuild it
+                # --- Combined crack check
                 rebuilt = False
                 for cmb_id, cmb in combined.items():
                     members = cmb.get("members", [])
@@ -1057,7 +1066,6 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                         rebuilt = True
                         break
 
-                # --- If not in a combined crack → save debug plot for this atomic
                 if not rebuilt:
                     save_dir = os.path.join(self.save_folder, "debug_outputs")
                     os.makedirs(save_dir, exist_ok=True)
@@ -1069,14 +1077,15 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                     for key, arr in new_edges.items():
                         arr = np.array(arr, float)
                         if arr.ndim == 2 and len(arr) > 1:
-                            ax.plot(arr[:,0], arr[:,1],
-                                    'r-' if key=="edge1" else 'b-', lw=0.7)
+                            ax.plot(arr[:, 0], arr[:, 1],
+                                    'r-' if key == "edge1" else 'b-', lw=0.7)
                     ax.set_title(f"Updated atomic crack {target_id}")
                     ax.set_xlim(0, W)
                     ax.set_ylim(H, 0)
                     plt.tight_layout()
                     plt.savefig(fname, dpi=100)
                     plt.close()
+                    print(f"[DEBUG] Saved atomic debug plot to {fname}")
 
             else:
                 # --- Create new atomic
@@ -1094,7 +1103,38 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 }
                 print(f"[INFO] Created new manual atomic crack {new_id}")
 
+                # --- Fill mask for new crack
+                mask = np.zeros((H, W), np.uint8)
+                poly_pts = poly.astype(np.int32).reshape((-1, 1, 2))
+                cv2.fillPoly(mask, [poly_pts], 255)
+                ys, xs = np.where(mask > 0)
+                if len(xs) and len(ys):
+                    x0, x1 = xs.min(), xs.max()+1
+                    y0, y1 = ys.min(), ys.max()+1
+                    crop = mask[y0:y1, x0:x1]
+                    atomic[new_id]["mask_crop"] = crop.tolist()
+                    atomic[new_id]["mask_bbox"] = [int(x0), int(y0), int(x1-x0), int(y1-y0)]
+                    print(f"[DEBUG] Saved mask for new crack {new_id}, bbox={atomic[new_id]['mask_bbox']}")
+
+            # --- Persist changes
             self.save_annotation()
+            print("[DEBUG] Annotation saved.")
+
+            # --- Refresh preview canvas with cracks + saved segment
+            im = self.image.astype(np.uint8).copy()
+            im = self.draw_existing_cracks(im)
+
+            qimage = QImage(im, im.shape[1], im.shape[0],
+                            im.strides[0], QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimage)
+            scaled = pixmap.scaled(
+                self.manual_segment_screen.width(),
+                self.manual_segment_screen.height(),
+                Qt.KeepAspectRatio,
+                Qt.FastTransformation
+            )
+            self.manual_segment_screen.setPixmap(scaled)
+            print("[DEBUG] Screen updated with saved manual segment.")
 
             if hasattr(self, "manuall_x"): del self.manuall_x
             if hasattr(self, "manuall_y"): del self.manuall_y
@@ -1102,7 +1142,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         except Exception as e:
             import traceback; traceback.print_exc()
             error(e)
-            
+
     def save_current_segment(self):
         try:
             xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
