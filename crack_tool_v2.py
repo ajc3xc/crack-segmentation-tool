@@ -76,8 +76,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         self.update_track_display_button.clicked.connect(self.update_track_display)
         self.track_full_screen_button.clicked.connect(self.track_full_screen)
         self.edge_tracks_full_screen_button.clicked.connect(self.edge_tracks_full_screen)
-        self.draw_segment_button.clicked.connect(lambda: self.draw_segment(mode='add'))
-        self.draw_segment_button.clicked.connect(lambda: self.draw_segment(mode='erase'))
+        self.draw_segment_button.clicked.connect(lambda: self.draw_segment('add'))
+        self.erase_segment_button.clicked.connect(lambda: self.draw_segment('erase'))
         self.save_manuall_segment_button.clicked.connect(self.save_manual_segment)
         self.manual_segment_full_screen_button.clicked.connect(self.manual_segment_full_screen)
         self.combine_segments_button.clicked.connect(self.combine_segments)
@@ -675,7 +675,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             from PyQt5.QtGui import QPixmap
             self.manual_segment_screen.setPixmap(QPixmap())
     
-    def draw_segment(self, mode='add'):
+    def draw_segment(self, mode):
         print(mode)
         try:
             # --- Handle unsaved previous strokes ---
@@ -757,7 +757,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             # OpenCV uses BGR order:
             #   add   → green
             #   erase → blue
-            fill_color = (0, 255, 0) if mode == 'add' else (0, 255, 0)
+            fill_color = (0, 255, 0) if mode == 'add' else (0, 0, 255)
             print(mode, fill_color)
 
             overlay = np.zeros_like(im)
@@ -781,7 +781,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
     def erase_segment(self):
         """Convenience wrapper for erase mode."""
-        return self.draw_segment(mode='erase')
+        return self.draw_segment('erase')
                  
     # in select_save_end_points
     def select_save_end_points(self):
