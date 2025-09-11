@@ -206,71 +206,219 @@ def normal_intersections_bruteforce(mid_x, mid_y, edge_x, edge_y, normal_length)
     
 ###################################################################################
 from shapely.geometry import LineString, Point, MultiPoint
+from shapely.ops import nearest_points
 import numpy as np
 from scipy.signal import savgol_filter
 
 def compute_smooth_tangent_normals(x, y, window=7, poly=2):
-    """Smoothed tangent + normal from midline coords."""
-    if len(x) > window:
-        x = savgol_filter(x, window, poly)
-        y = savgol_filter(y, window, poly)
-    dx = np.gradient(x)
-    dy = np.gradient(y)
-    norm = np.sqrt(dx**2 + dy**2) + 1e-10
-    tangent = np.stack([dx / norm, dy / norm], axis=1)
-    normal = np.stack([-dy / norm, dx / norm], axis=1)
+    """
+    Compute C^0-smoothed tangents/normals along a polyline:
+      - Optional Savitzky–Golay smoothing of coordinates (auto-odd window).
+      - Derivatives w.r.t. arc-length (not index) for stable directions.
+      - Enforce normal direction continuity (no frame-to-frame flips).
+    Returns:
+      tangent: (N,2) unit vectors (dx/ds, dy/ds)
+      normal : (N,2) unit vectors, 90° CCW from tangent with sign continuity
+    """
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+    n = len(x)
+
+    if n < 3:
+        # trivial fallback
+        dx = np.gradient(x)
+        dy = np.gradient(y)
+        norm = np.hypot(dx, dy) + 1e-12
+        tan = np.stack([dx / norm, dy / norm], axis=1)
+        nor = np.stack([-tan[:,1], tan[:,0]], axis=1)
+        return tan, nor
+
+    # --- optional smoothing (auto-odd window clipped to [3, n- (1 - n%2)])
+    if window is not None and window > 2:
+        win = int(window)
+        if win % 2 == 0:
+            win += 1
+        win = max(3, min(win, n - (1 - n % 2)))
+        if win >= 3 and win <= n:
+            try:
+                x = savgol_filter(x, win, poly, mode="interp")
+                y = savgol_filter(y, win, poly, mode="interp")
+            except Exception:
+                pass  # keep raw if SG fails
+
+    # --- arc-length parameter
+    ds = np.hypot(np.diff(x), np.diff(y))
+    s = np.empty(n, float)
+    s[0] = 0.0
+    s[1:] = np.cumsum(ds)
+
+    # numerical gradient w.r.t. arc-length (stable even for clustered samples)
+    dx_ds = np.gradient(x, s, edge_order=2)
+    dy_ds = np.gradient(y, s, edge_order=2)
+
+    mag = np.hypot(dx_ds, dy_ds) + 1e-12
+    tangent = np.stack([dx_ds / mag, dy_ds / mag], axis=1)
+    normal = np.stack([-tangent[:,1], tangent[:,0]], axis=1)
+
+    # --- enforce sign continuity on normals
+    # if dot(n_i, n_{i-1}) < 0, flip current normal
+    for i in range(1, n):
+        if np.dot(normal[i], normal[i-1]) < 0:
+            normal[i] = -normal[i]
+
     return tangent, normal
 
-def find_normal_pair(mid_x, mid_y, edge1, edge2, max_dist_ratio=0.12):
+
+def find_normal_pair(
+    mid_x, mid_y, edge1, edge2,
+    max_dist_ratio=0.18,     # fraction of bbox diagonal accepted as hit distance
+    min_max_dist=12.0,       # absolute minimum acceptance distance (px)
+    length_scale=1.5         # how long the normal ray is (× bbox diagonal)
+):
     """
-    Cast a perpendicular at each midline point, intersect with edge1+edge2.
-    Ensures both sides are found (nearest intersection each side).
+    For each midline point, cast two HALF-RAYS along ± normal direction.
+    Intersect with edge1/edge2 polylines and select the nearest hit on each side.
+    Map the two hits to (edge1, edge2) by whichever edge the hit is closer to.
+
+    Returns (e1x, e1y, e2x, e2y) each (N,) with NaNs where a stable pair wasn't found.
     """
+    mid_x = np.asarray(mid_x, float)
+    mid_y = np.asarray(mid_y, float)
+    e1 = np.asarray(edge1, float)
+    e2 = np.asarray(edge2, float)
+
+    # guard
+    if len(mid_x) == 0 or e1.ndim != 2 or e2.ndim != 2 or len(e1) < 2 or len(e2) < 2:
+        n = len(mid_x)
+        return (np.full(n, np.nan),) * 4
+
+    # robust normals
     _, normals = compute_smooth_tangent_normals(mid_x, mid_y)
-    line1 = LineString(edge1)
-    line2 = LineString(edge2)
 
-    diag = np.hypot(
-        max(edge1[:,0].max(), edge2[:,0].max()) - min(edge1[:,0].min(), edge2[:,0].min()),
-        max(edge1[:,1].max(), edge2[:,1].max()) - min(edge1[:,1].min(), edge2[:,1].min())
-    )
-    normal_length = int(np.ceil(diag))
-    max_dist = max(10.0, max_dist_ratio * normal_length)
+    # bbox diagonal for scale
+    xmin = min(e1[:,0].min(), e2[:,0].min(), mid_x.min())
+    xmax = max(e1[:,0].max(), e2[:,0].max(), mid_x.max())
+    ymin = min(e1[:,1].min(), e2[:,1].min(), mid_y.min())
+    ymax = max(e1[:,1].max(), e2[:,1].max(), mid_y.max())
+    diag = np.hypot(xmax - xmin, ymax - ymin)
+    ray_len = max(32.0, float(length_scale) * float(diag))
+    max_dist = max(min_max_dist, float(max_dist_ratio) * float(diag))
 
-    e1x = np.full(len(mid_x), np.nan)
-    e1y = np.full(len(mid_x), np.nan)
-    e2x = np.full(len(mid_x), np.nan)
-    e2y = np.full(len(mid_x), np.nan)
+    line1 = LineString(e1)
+    line2 = LineString(e2)
+
+    # outputs
+    N = len(mid_x)
+    e1x = np.full(N, np.nan)
+    e1y = np.full(N, np.nan)
+    e2x = np.full(N, np.nan)
+    e2y = np.full(N, np.nan)
+
+    # utility
+    def _collect_points(geom):
+        if geom.is_empty:
+            return []
+        if isinstance(geom, Point):
+            return [(geom.x, geom.y)]
+        if isinstance(geom, MultiPoint):
+            return [(g.x, g.y) for g in geom.geoms]
+        # If collinear overlap (LineString), take endpoints as candidates
+        if isinstance(geom, LineString):
+            coords = np.asarray(geom.coords, float)
+            return [tuple(coords[0]), tuple(coords[-1])]
+        return []
 
     for i, (mx, my) in enumerate(zip(mid_x, mid_y)):
         nx, ny = normals[i]
-        a = (mx - normal_length*nx, my - normal_length*ny)
-        b = (mx + normal_length*nx, my + normal_length*ny)
-        ray = LineString([a, b])
+        if not np.isfinite(nx) or not np.isfinite(ny):
+            continue
 
-        def nearest_intersection(line):
-            inter = line.intersection(ray)
-            pts = []
-            if isinstance(inter, Point):
-                pts = [inter]
-            elif isinstance(inter, MultiPoint):
-                pts = list(inter.geoms)
-            if not pts:
-                return None
-            # closest to (mx,my)
-            dists = [np.hypot(p.x - mx, p.y - my) for p in pts]
-            j = int(np.argmin(dists))
-            if dists[j] > max_dist:
-                return None
-            return pts[j].x, pts[j].y
+        # full infinite line (we'll filter to half-rays by dot sign)
+        A = (mx - ray_len * nx, my - ray_len * ny)
+        B = (mx + ray_len * nx, my + ray_len * ny)
+        ray_line = LineString([A, B])
 
-        p1 = nearest_intersection(line1)
-        p2 = nearest_intersection(line2)
+        # intersect with each edge
+        inter1 = _collect_points(line1.intersection(ray_line))
+        inter2 = _collect_points(line2.intersection(ray_line))
 
-        if p1 and p2:
-            e1x[i], e1y[i] = p1
-            e2x[i], e2y[i] = p2
-        # else: leave NaNs → avoids bent escape lines
+        # side sign (+normal or -normal)
+        def _signed_hits(points, side_sign):
+            hits = []
+            for (px, py) in points:
+                vx, vy = (px - mx), (py - my)
+                sign = np.sign(vx * nx + vy * ny)
+                if side_sign > 0 and sign <= 0:
+                    continue
+                if side_sign < 0 and sign >= 0:
+                    continue
+                d = np.hypot(vx, vy)
+                hits.append(((px, py), d))
+            # nearest first
+            hits.sort(key=lambda t: t[1])
+            return hits
+
+        plus_hits = _signed_hits(inter1 + inter2, side_sign=+1)
+        minus_hits = _signed_hits(inter1 + inter2, side_sign=-1)
+
+        def _pick_closest_edge(point):
+            """Return ('edge1' or 'edge2', (px,py), dist_to_mid)."""
+            (px, py) = point
+            d1 = line1.distance(Point(px, py))
+            d2 = line2.distance(Point(px, py))
+            return ('edge1', (px, py)) if d1 <= d2 else ('edge2', (px, py))
+
+        # choose nearest valid on each side within max_dist
+        cand_plus  = next(((p, d) for (p, d) in plus_hits  if d <= max_dist), None)
+        cand_minus = next(((p, d) for (p, d) in minus_hits if d <= max_dist), None)
+
+        # fallbacks if a side missed: use nearest_points constrained by side sign
+        def _fallback(side_sign):
+            np1 = nearest_points(line1, Point(mx, my))[0]
+            np2 = nearest_points(line2, Point(mx, my))[0]
+            cands = []
+            for (px, py) in [(np1.x, np1.y), (np2.x, np2.y)]:
+                vx, vy = (px - mx), (py - my)
+                if np.sign(vx * nx + vy * ny) == np.sign(side_sign):
+                    cands.append(((px, py), np.hypot(vx, vy)))
+            if cands:
+                cands.sort(key=lambda t: t[1])
+                return cands[0]
+            return None
+
+        if cand_plus is None:
+            cand_plus = _fallback(+1)
+        if cand_minus is None:
+            cand_minus = _fallback(-1)
+
+        if cand_plus is None or cand_minus is None:
+            # not enough info to form a pair here
+            continue
+
+        # map the two hits to edge1/edge2 by proximity to edges
+        side_label_p, p_plus = _pick_closest_edge(cand_plus[0])
+        side_label_m, p_minus = _pick_closest_edge(cand_minus[0])
+
+        # ensure we output one for edge1 and one for edge2
+        # If both map to the same edge, keep the nearer for that edge
+        # and try assigning the other to the other edge if reasonable
+        assign = {}
+        for lbl, pt, dist in [
+            (side_label_p, p_plus, cand_plus[1]),
+            (side_label_m, p_minus, cand_minus[1])
+        ]:
+            if (lbl not in assign) or (dist < assign[lbl][1]):
+                assign[lbl] = (pt, dist)
+
+        # write results
+        if 'edge1' in assign and 'edge2' in assign:
+            (px1, py1), _ = assign['edge1']
+            (px2, py2), _ = assign['edge2']
+            e1x[i], e1y[i] = px1, py1
+            e2x[i], e2y[i] = px2, py2
+        else:
+            # still ambiguous → skip this index to avoid crooked pairs
+            continue
 
     return e1x, e1y, e2x, e2y
 
