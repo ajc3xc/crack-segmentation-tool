@@ -741,7 +741,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
             coords = np.column_stack([x, y]).astype(np.int32)
 
-            tol = 20       # closure distance in px
+            tol = 15       # closure distance in px
             min_gap = 10   # min separation in indices
             polys = []
 
@@ -968,14 +968,17 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
     def save_manual_segment(self):
         """
-        Save or erase the drawn manual polyline:
-        - If mode == "add":
-            If overlapping an atomic crack → union its mask with the drawn mask.
-            If that atomic belongs to a combined crack → rebuild combined via _build_combined_crack.
-            Else → create a new atomic crack.
-        - If mode == "erase":
-            Subtract mask from overlapping cracks; delete cracks fully erased.
-        Always updates mask_crop/mask_bbox and refreshes the screen.
+        Save or erase the drawn manual polyline.
+
+        ADD:
+        - Requires overlap with an existing atomic (so we already have a midline).
+        - Union mask; rebuild geodesic_edges from the unioned mask boundary; recompute normals.
+
+        ERASE:
+        - Subtract from mask; if anything remains, rebuild geodesic_edges from the new mask boundary; recompute normals.
+        - If nothing remains, delete crack.
+
+        Always calls self.change_image() to refresh the main UI.
         """
         try:
             print("[DEBUG] save_manual_segment called.")
@@ -999,6 +1002,60 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             H, W = self.original_image.shape[:2]
             mode = getattr(self, "pending_mode", "add")
 
+            # ---------- helper: rebuild edges+normals from a full-image binary mask ----------
+            def rebuild_edges_from_mask_using_midline(full_mask, crack):
+                """
+                From full_mask (uint8 0/255) build edge1/edge2 by splitting the largest
+                external contour at the two points closest to the midline endpoints.
+                Then recompute normals with ct.segmentation.find_normal_pair.
+                """
+                # 1) largest external contour of mask
+                cnts, _ = cv2.findContours((full_mask > 0).astype(np.uint8),
+                                        cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                if not cnts:
+                    print("[DEBUG] No contours in mask when rebuilding edges.")
+                    return None, None, None
+                cnt = max(cnts, key=cv2.contourArea)           # (N,1,2)
+                ring = cnt[:, 0, :].astype(float)              # (N,2)
+                if ring.shape[0] < 4:
+                    print("[DEBUG] Contour too small to rebuild edges.")
+                    return None, None, None
+                # ensure ring is explicitly closed
+                if not (ring[0] == ring[-1]).all():
+                    ring = np.vstack([ring, ring[0]])
+
+                # 2) need a midline
+                m = np.asarray(crack.get("midline", []), float)
+                if m.ndim != 2 or m.shape[0] < 2 or m.shape[1] != 2:
+                    print("[DEBUG] No valid midline to rebuild edges.")
+                    return None, None, None
+                mid_x, mid_y = m[:, 0], m[:, 1]
+                start = m[0]
+                end   = m[-1]
+
+                # 3) pick the two cut indices on the ring: nearest to midline endpoints
+                d0 = np.sum((ring - start) ** 2, axis=1)
+                d1 = np.sum((ring - end) ** 2, axis=1)
+                i0 = int(np.argmin(d0))
+                i1 = int(np.argmin(d1))
+
+                # 4) split ring into two paths between i0 and i1
+                if i0 <= i1:
+                    path1 = ring[i0:i1 + 1]
+                    path2 = np.vstack([ring[i1:], ring[:i0 + 1]])
+                else:
+                    path1 = np.vstack([ring[i0:], ring[:i1 + 1]])
+                    path2 = ring[i1:i0 + 1]
+
+                e1 = np.array(path1, float)
+                e2 = np.array(path2, float)
+
+                # 5) recompute normals against these edges
+                e1x, e1y, e2x, e2y = ct.segmentation.find_normal_pair(mid_x, mid_y, e1, e2)
+                normal_edges = [[e1x.tolist(), e1y.tolist()], [e2x.tolist(), e2y.tolist()]]
+
+                return e1, e2, normal_edges
+
             # ============================================================
             # ERASE MODE
             # ============================================================
@@ -1010,28 +1067,33 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
                 to_delete = []
                 for cid, crack in list(atomic.items()):
-                    # reconstruct old mask
                     mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
                     if mc is None or bb is None or not len(mc):
-                        full_mask = np.zeros((H, W), np.uint8)
+                        full_old = np.zeros((H, W), np.uint8)
                     else:
                         crop = np.array(mc, dtype=np.uint8)
                         x0, y0, w, h = [int(v) for v in bb]
                         x1, y1 = min(x0 + w, W), min(y0 + h, H)
-                        full_mask = np.zeros((H, W), np.uint8)
-                        full_mask[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
-                        full_mask = (full_mask > 0).astype(np.uint8)
+                        full_old = np.zeros((H, W), np.uint8)
+                        full_old[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
 
-                    new_mask = cv2.bitwise_and(full_mask, cv2.bitwise_not(erase_mask))
+                    full_new = cv2.bitwise_and(full_old, cv2.bitwise_not(erase_mask))
 
-                    if np.any(new_mask):
-                        ys, xs = np.where(new_mask > 0)
-                        x0, x1 = xs.min(), xs.max()+1
-                        y0, y1 = ys.min(), ys.max()+1
-                        crop = new_mask[y0:y1, x0:x1]
+                    if np.any(full_new):
+                        # update crop+bbox
+                        ys, xs = np.where(full_new > 0)
+                        x0, x1 = xs.min(), xs.max() + 1
+                        y0, y1 = ys.min(), ys.max() + 1
+                        crop = full_new[y0:y1, x0:x1]
                         crack["mask_crop"] = crop.tolist()
-                        crack["mask_bbox"] = [int(x0), int(y0), int(x1-x0), int(y1-y0)]
+                        crack["mask_bbox"] = [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
                         print(f"[INFO] Updated crack {cid} after erase, new bbox={crack['mask_bbox']}")
+
+                        # rebuild edges+normals from mask
+                        e1, e2, normals = rebuild_edges_from_mask_using_midline(full_new, crack)
+                        if e1 is not None and e2 is not None:
+                            crack["geodesic_edges"] = {"edge1": e1.tolist(), "edge2": e2.tolist()}
+                            crack["normal_edge_points"] = normals
                     else:
                         to_delete.append(cid)
 
@@ -1042,130 +1104,84 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 self.save_annotation()
                 print("[DEBUG] Annotation saved (erase).")
 
-                # refresh canvas
-                im = self.image.astype(np.uint8).copy()
-                im = self.draw_existing_cracks(im)
-                qimage = QImage(im, im.shape[1], im.shape[0],
-                                im.strides[0], QImage.Format_RGB888)
-                pixmap = QPixmap.fromImage(qimage)
-                scaled = pixmap.scaled(
-                    self.manual_segment_screen.width(),
-                    self.manual_segment_screen.height(),
-                    Qt.KeepAspectRatio,
-                    Qt.FastTransformation
-                )
-                self.manual_segment_screen.setPixmap(scaled)
-
-                # cleanup
-                if hasattr(self, "manuall_x"): del self.manuall_x
-                if hasattr(self, "manuall_y"): del self.manuall_y
-                return
-
             # ============================================================
-            # ADD MODE (default)
+            # ADD MODE
             # ============================================================
+            else:
+                # require overlap with an existing atomic crack
+                target_id, target_crack = None, None
 
-            # --- Try to attach to atomic cracks
-            target_id, target_crack = None, None
-            for cid, crack in atomic.items():
-                mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
-                if mc is None or bb is None or not len(mc):
-                    continue
-                crop = np.array(mc, dtype=np.uint8)
-                x0, y0, w, h = [int(v) for v in bb]
-                x1, y1 = min(x0 + w, W), min(y0 + h, H)
-                old_mask = np.zeros((H, W), np.uint8)
-                old_mask[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
+                # Build poly mask once for overlap test
+                poly_mask = np.zeros((H, W), np.uint8)
+                cv2.fillPoly(poly_mask, [poly.astype(np.int32).reshape((-1, 1, 2))], 255)
 
-                # check overlap with drawn poly
-                new_mask = np.zeros((H, W), np.uint8)
-                poly_pts = poly.astype(np.int32).reshape((-1, 1, 2))
-                cv2.fillPoly(new_mask, [poly_pts], 255)
+                for cid, crack in atomic.items():
+                    mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
+                    if mc is None or bb is None or not len(mc):
+                        continue
+                    crop = np.array(mc, dtype=np.uint8)
+                    x0, y0, w, h = [int(v) for v in bb]
+                    x1, y1 = min(x0 + w, W), min(y0 + h, H)
+                    full_old = np.zeros((H, W), np.uint8)
+                    full_old[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
 
-                if np.any(cv2.bitwise_and(old_mask, new_mask)):
-                    target_id, target_crack = cid, crack
-                    print(f"[DEBUG] Manual overlaps atomic crack {cid}")
-                    break
+                    if np.any(cv2.bitwise_and(full_old, poly_mask)):
+                        target_id, target_crack = cid, crack
+                        print(f"[DEBUG] Manual overlaps atomic crack {cid}")
+                        break
 
-            if target_crack is not None:
-                print(f"[INFO] Unioning manual mask into atomic crack {target_id}")
+                if target_crack is None:
+                    print("[INFO] No intersecting crack found. Skipping add (requires midline).")
+                    # clean up and return
+                    if hasattr(self, "manuall_x"): del self.manuall_x
+                    if hasattr(self, "manuall_y"): del self.manuall_y
+                    return
 
-                # build new drawn mask
-                new_mask = np.zeros((H, W), np.uint8)
-                poly_pts = poly.astype(np.int32).reshape((-1, 1, 2))
-                cv2.fillPoly(new_mask, [poly_pts], 255)
+                print(f"[INFO] Updating atomic crack {target_id} (mask union + edges from boundary).")
 
-                # reconstruct old full mask
+                # 1) union masks
                 mc, bb = target_crack.get("mask_crop"), target_crack.get("mask_bbox")
                 if mc is None or bb is None or not len(mc):
-                    old_mask = np.zeros((H, W), np.uint8)
+                    full_old = np.zeros((H, W), np.uint8)
                 else:
                     crop = np.array(mc, dtype=np.uint8)
                     x0, y0, w, h = [int(v) for v in bb]
                     x1, y1 = min(x0 + w, W), min(y0 + h, H)
-                    old_mask = np.zeros((H, W), np.uint8)
-                    old_mask[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
+                    full_old = np.zeros((H, W), np.uint8)
+                    full_old[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
 
-                # union
-                mask = cv2.bitwise_or(old_mask, new_mask)
+                full_new = cv2.bitwise_or(full_old, poly_mask)
 
-                # save back
-                ys, xs = np.where(mask > 0)
+                # 2) update crop+bbox from union
+                ys, xs = np.where(full_new > 0)
                 if len(xs) and len(ys):
-                    x0, x1 = xs.min(), xs.max()+1
-                    y0, y1 = ys.min(), ys.max()+1
-                    crop = mask[y0:y1, x0:x1]
+                    x0, x1 = xs.min(), xs.max() + 1
+                    y0, y1 = ys.min(), ys.max() + 1
+                    crop = full_new[y0:y1, x0:x1]
                     target_crack["mask_crop"] = crop.tolist()
-                    target_crack["mask_bbox"] = [int(x0), int(y0), int(x1-x0), int(y1-y0)]
-                    print(f"[DEBUG] Unioned mask saved for crack {target_id}, bbox={target_crack['mask_bbox']}")
+                    target_crack["mask_bbox"] = [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
+                    print(f"[DEBUG] Updated mask bbox: {target_crack['mask_bbox']}")
 
-            else:
-                # --- Create new atomic
-                ids = [int(k) for k in atomic.keys() if str(k).isdigit()]
-                new_id = str(max(ids)+1 if ids else 0)
-                atomic[new_id] = {
-                    "source": "manual_poly",
-                    "midline": poly.tolist(),
-                    "geodesic_edges": {"edge1": poly.tolist(), "edge2": []},
-                    "normal_edge_points": None,
-                    "mask_crop": [],
-                    "mask_bbox": [],
-                    "user_points": [],
-                    "user_connections": []
-                }
-                print(f"[INFO] Created new manual atomic crack {new_id}")
+                # 3) rebuild geodesic_edges from the boundary of unioned mask, then normals
+                e1, e2, normals = rebuild_edges_from_mask_using_midline(full_new, target_crack)
+                if e1 is not None and e2 is not None:
+                    target_crack["geodesic_edges"] = {"edge1": e1.tolist(), "edge2": e2.tolist()}
+                    target_crack["normal_edge_points"] = normals
+                    print(f"[DEBUG] Rebuilt geodesic edges from mask boundary for crack {target_id}")
 
-                # --- Fill mask for new crack
-                mask = np.zeros((H, W), np.uint8)
-                poly_pts = poly.astype(np.int32).reshape((-1, 1, 2))
-                cv2.fillPoly(mask, [poly_pts], 255)
-                ys, xs = np.where(mask > 0)
-                if len(xs) and len(ys):
-                    x0, x1 = xs.min(), xs.max()+1
-                    y0, y1 = ys.min(), ys.max()+1
-                    crop = mask[y0:y1, x0:x1]
-                    atomic[new_id]["mask_crop"] = crop.tolist()
-                    atomic[new_id]["mask_bbox"] = [int(x0), int(y0), int(x1-x0), int(y1-y0)]
-                    print(f"[DEBUG] Saved mask for new crack {new_id}, bbox={atomic[new_id]['mask_bbox']}")
+                # 4) update combined, if any
+                for cmb_id, cmb in combined.items():
+                    members = cmb.get("members", [])
+                    if target_id in members:
+                        combined[cmb_id] = self._build_combined_crack(members)
+                        print(f"[INFO] Rebuilt combined crack {cmb_id}")
+                        break
 
-            # --- Persist changes
-            self.save_annotation()
-            print("[DEBUG] Annotation saved (add).")
+                self.save_annotation()
+                print("[DEBUG] Annotation saved (add).")
 
-            # --- Refresh preview canvas
-            im = self.image.astype(np.uint8).copy()
-            im = self.draw_existing_cracks(im)
-            qimage = QImage(im, im.shape[1], im.shape[0],
-                            im.strides[0], QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled = pixmap.scaled(
-                self.manual_segment_screen.width(),
-                self.manual_segment_screen.height(),
-                Qt.KeepAspectRatio,
-                Qt.FastTransformation
-            )
-            self.manual_segment_screen.setPixmap(scaled)
-            print("[DEBUG] Screen updated with saved manual segment.")
+            # Final: single authoritative refresh
+            self.change_image()
 
             if hasattr(self, "manuall_x"): del self.manuall_x
             if hasattr(self, "manuall_y"): del self.manuall_y
