@@ -113,7 +113,7 @@ class CrackAnnotator(QtWidgets.QWidget):
         self.scale = max(0.1, min(10.0, self.scale * f))
         self.update_canvas_size()
 
-    def _commit_midline(self, end_idx):
+    '''def _commit_midline(self, end_idx):
         """Commit the currently drawn polyline to a midline from _start_idx to end_idx."""
         start_idx = self._start_idx
         if start_idx is None or end_idx is None or start_idx == end_idx:
@@ -169,6 +169,55 @@ class CrackAnnotator(QtWidgets.QWidget):
         self._just_committed_midline  = True
 
         # Reset draw state
+        self.polyline.clear()
+        self._is_drawing = False
+        self._start_idx = None
+        self.update()'''
+        
+    def _commit_midline(self, end_idx):
+        start_idx = self._start_idx
+        if start_idx is None or end_idx is None or start_idx == end_idx:
+            return
+
+        key = self._sorted(start_idx, end_idx)
+        if (key in self.midlines) or (key in self.connections) \
+        or (key in self.readonly_connections) or (key in self.readonly_midlines):
+            self.polyline.clear()
+            self._is_drawing = False
+            self._start_idx = None
+            self.update()
+            return
+
+        # Build the polyline in drawn order
+        if len(self.polyline) >= 2:
+            middle = list(self.polyline[1:-1])
+            poly = [tuple(map(float, self.points[start_idx]))] + middle + [tuple(map(float, self.points[end_idx]))]
+        else:
+            poly = [tuple(map(float, self.points[start_idx])),
+                    tuple(map(float, self.points[end_idx]))]
+
+        # --- NEW: bounding box check ---
+        if self.boxes:
+            # assume just one box for now; extend easily if multiple
+            xmin, ymin, xmax, ymax = self.boxes[0]
+            outside = [(x, y) for (x, y) in poly if not (xmin <= x <= xmax and ymin <= y <= ymax)]
+            if outside:
+                print(f"[COMMIT] Segment rejected, {len(outside)} points outside bbox")
+                # optional feedback dialog
+                QtWidgets.QMessageBox.warning(self, "Out of bounds",
+                    "Some segment points are outside the bounding box.\nCommit cancelled.")
+                self.polyline.clear()
+                self._is_drawing = False
+                self._start_idx = None
+                self.update()
+                return
+        # --- END NEW ---
+
+        self.midlines[key] = poly
+        self._last_polyline_start_idx = start_idx
+        self._last_polyline_end_idx   = end_idx
+        self._just_committed_midline  = True
+
         self.polyline.clear()
         self._is_drawing = False
         self._start_idx = None

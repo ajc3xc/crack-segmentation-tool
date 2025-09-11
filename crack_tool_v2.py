@@ -2202,7 +2202,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             crop = np.zeros((h,w), np.uint8)
 
         # ---------------- DEBUG PLOT ----------------        
-        save_dir = os.path.join(self.save_folder, "debug_outputs")
+        '''save_dir = os.path.join(self.save_folder, "debug_outputs")
         os.makedirs(save_dir, exist_ok=True)
         base_name = os.path.splitext(os.path.basename(self.name))[0]
         member_str = "_".join(sorted(member_ids, key=lambda s: int(s)))
@@ -2271,6 +2271,124 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             for segp in split_on_teleports(e, max_step=max_plot_jump):
                 ax.plot(segp[:,0], segp[:,1], 'b-', lw=.6)
 
+        for n1, n2 in zip(norm1_segs, norm2_segs):
+            if len(n1) == 0 or len(n2) == 0:
+                continue
+            step = 50
+            for i in range(0, min(len(n1), len(n2)), step):
+                if np.isfinite(n1[i]).all() and np.isfinite(n2[i]).all():
+                    ax.plot([n1[i,0], n2[i,0]], [n1[i,1], n2[i,1]],
+                            color='cyan', lw=0.4, alpha=0.8)
+
+        ax.set_xlim(0, W)
+        ax.set_ylim(H, 0)
+        ax.axis('equal')
+        plt.tight_layout()
+        plt.savefig(fname, dpi=300)
+        plt.close()'''
+              
+                # ---------------- DEBUG PLOT ----------------        
+        save_dir = os.path.join(self.save_folder, "debug_outputs")
+        os.makedirs(save_dir, exist_ok=True)
+        base_name = os.path.splitext(os.path.basename(self.name))[0]
+        member_str = "_".join(sorted(member_ids, key=lambda s: int(s)))
+        fname = os.path.join(save_dir, f"{base_name}_combined_debug.png")
+
+        fig, ax = plt.subplots(figsize=(12, 8))
+        ax.imshow(self.original_image)
+        ax.set_title("All cracks (atomic + combined) with current merge highlighted")
+
+        ann = self.annotation.get("annotations", {})
+        atomic = ann.get("atomic_cracks", {})
+        combined = ann.get("combined_cracks", {})
+
+        combined_members = {m for cmb in combined.values() for m in cmb.get("members", [])}
+
+        # --- fallback normal generator for cracks without stored normals ---
+        def _fallback_normals(ml, step=50, length=6):
+            from numpy.linalg import norm
+            pts = np.array(ml, float)
+            if len(pts) < 3:
+                return []
+            tang = np.gradient(pts, axis=0)
+            tang /= np.maximum(1e-9, np.linalg.norm(tang, axis=1)[:, None])
+            # rotate 90 deg CCW
+            normvec = np.column_stack([-tang[:, 1], tang[:, 0]])
+            lines = []
+            for i in range(0, len(pts), step):
+                p = pts[i]
+                n = normvec[i]
+                lines.append(([p[0]-length*n[0], p[0]+length*n[0]],
+                              [p[1]-length*n[1], p[1]+length*n[1]]))
+            return lines
+
+        def plot_crack(crack, color_idx=0):
+            ml = crack.get("midline", []) or crack.get("midline_segments", [])
+            if not ml:
+                return
+            if isinstance(ml[0][0], list):  # segments
+                segs_to_plot = [np.array(seg, float) for seg in ml if seg]
+            else:  # flat midline
+                segs_to_plot = [np.array(ml, float)]
+            for S in segs_to_plot:
+                if len(S) < 2: continue
+                for segp in split_on_teleports(S, max_step=max_plot_jump):
+                    ax.plot(segp[:,0], segp[:,1], 'g-', lw=0.6)
+
+            edges = crack.get("geodesic_edges", {})
+            for key, arr in edges.items():
+                arr = np.array(arr, float)
+                if arr.ndim == 2 and len(arr) >= 2:
+                    for segp in split_on_teleports(arr, max_step=max_plot_jump):
+                        ax.plot(segp[:,0], segp[:,1], 'r-' if "edge1" in key else 'b-', lw=0.4)
+
+            normals = crack.get("normal_edge_points", {})
+            if normals:
+                n1 = normals.get("edge1", [])
+                n2 = normals.get("edge2", [])
+                # Handle JSON-style [[xlist],[ylist]] format
+                if isinstance(n1, list) and len(n1) == 2 and isinstance(n1[0], (list, tuple)):
+                    n1 = np.column_stack([n1[0], n1[1]])
+                else:
+                    n1 = np.array(n1, float)
+                if isinstance(n2, list) and len(n2) == 2 and isinstance(n2[0], (list, tuple)):
+                    n2 = np.column_stack([n2[0], n2[1]])
+                else:
+                    n2 = np.array(n2, float)
+
+                if n1.ndim == 2 and n2.ndim == 2 and len(n1) and len(n2):
+                    step = max(1, min(len(n1), len(n2)) // 70)
+                    for i in range(0, min(len(n1), len(n2)), step):
+                        if np.isfinite(n1[i]).all() and np.isfinite(n2[i]).all():
+                            ax.plot([n1[i,0], n2[i,0]],
+                                    [n1[i,1], n2[i,1]],
+                                    color='cyan', lw=0.3, alpha=0.5)
+
+        # --- plot all existing cracks for context ---
+        # Other combined cracks (not this one)
+        for cid, cmb in combined.items():
+            if set(cmb.get("members", [])) == set(member_ids):
+                continue
+            plot_crack(cmb)
+
+        # Atomic cracks that are NOT in *any* combined (skip ones in member_ids or already absorbed)
+        for aid, crack in atomic.items():
+            if aid in member_ids or aid in combined_members:
+                continue
+            plot_crack(crack)
+
+        # --- plot the new combined crack being built ---
+        for S in segs:
+            for segp in split_on_teleports(S, max_step=max_plot_jump):
+                ax.plot(segp[:,0], segp[:,1], 'g-', lw=.8)
+        for e in edge1_segs:
+            for segp in split_on_teleports(e, max_step=max_plot_jump):
+                ax.plot(segp[:,0], segp[:,1], 'r-', lw=.6)
+        for e in edge2_segs:
+            for segp in split_on_teleports(e, max_step=max_plot_jump):
+                ax.plot(segp[:,0], segp[:,1], 'b-', lw=.6)
+
+        # Plot normals for the *current combined*
         for n1, n2 in zip(norm1_segs, norm2_segs):
             if len(n1) == 0 or len(n2) == 0:
                 continue

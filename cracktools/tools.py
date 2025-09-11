@@ -405,61 +405,6 @@ class Draw():
             self.manual_segment_screen.setPixmap(scaled)
         except:
             pass
-    
-    '''def line_drawing(self, event, x, y, flags, param):
-        H, W = self.image.shape[:2]
-
-        # map back to absolute coords
-        abs_x = int2(self.dx1 + x * (W - self.dx1 - self.dx2) / self.image_countur.shape[1])
-        abs_y = int2(self.dy1 + y * (H - self.dy1 - self.dy2) / self.image_countur.shape[0])
-
-        if event == cv2.EVENT_LBUTTONDOWN:
-            self.drawing = True
-            self.pt1_x, self.pt1_y = abs_x, abs_y
-            self.countur_x, self.countur_y = [self.pt1_x], [self.pt1_y]
-
-        elif event == cv2.EVENT_MOUSEMOVE and self.drawing:
-            self.pt1_x, self.pt1_y = abs_x, abs_y
-            self.countur_x.append(self.pt1_x)
-            self.countur_y.append(self.pt1_y)
-
-        elif event == cv2.EVENT_LBUTTONUP:
-            self.drawing = False
-            self.counturs_x.append(self.countur_x)
-            self.counturs_y.append(self.countur_y)
-
-            # commit stroke
-            for i in range(len(self.countur_x) - 1):
-                cv2.line(self.image2,
-                        (self.countur_x[i], self.countur_y[i]),
-                        (self.countur_x[i + 1], self.countur_y[i + 1]),
-                        (0, 255, 0), self.t)
-
-        elif event == cv2.EVENT_RBUTTONDOWN:
-            if not self.drawing and len(self.counturs_x) > 0:
-                self.counturs_x.pop()
-                self.counturs_y.pop()
-                self.image2 = redrow_lines(self.image.copy(), self.counturs_x, self.counturs_y, self.t, 1)
-
-        elif event == cv2.EVENT_MOUSEWHEEL:
-            rx, ry = x / self.image_countur.shape[1], y / self.image_countur.shape[0]
-            if flags > 0:  # zoom in
-                ddx = (W - (self.dx1 + self.dx2)) * self.p
-                self.dx1 = max(int2(self.dx1 + ddx * rx), 0)
-                self.dx2 = max(int2(self.dx2 + ddx * (1 - rx)), 1)
-                ddy = (H - (self.dy1 + self.dy2)) * self.p
-                self.dy1 = max(int2(self.dy1 + ddy * ry), 0)
-                self.dy2 = max(int2(self.dy2 + ddy * (1 - ry)), 1)
-            else:  # zoom out
-                ddx = (W - (self.dx1 + self.dx2)) * self.p
-                self.dx1 = max(int2(self.dx1 - ddx * rx), 0)
-                self.dx2 = max(int2(self.dx2 - ddx * (1 - rx)), 1)
-                ddy = (H - (self.dy1 + self.dy2)) * self.p
-                self.dy1 = max(int2(self.dy1 - ddy * ry), 0)
-                self.dy2 = max(int2(self.dy2 - ddy * (1 - ry)), 1)
-
-            self.scale2x = 1 - (self.dx1 + self.dx2) / W
-            self.scale2y = 1 - (self.dy1 + self.dy2) / H'''
             
     def points(self,image,scale,t = 5,move_x = 0, move_y = 0):
         """
