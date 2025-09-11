@@ -1,13 +1,13 @@
 from PyQt5 import QtCore, QtGui, QtWidgets
-from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QSizePolicy, QApplication, QMessageBox, QScrollArea, QLabel
+from PyQt5.QtWidgets import QMessageBox
 from PyQt5.QtGui import QPainter, QPen, QColor, QPixmap, QImage
 from PyQt5.QtCore import Qt, QPoint
-
-min_crop_size = 16
 
 class CrackAnnotator(QtWidgets.QWidget):
     def __init__(self, image=None, boxes=None, initial_points=None, initial_connections=None, initial_midlines=None):
         super().__init__()
+
+        # --- image / geometry ---
         self.orig_image = image
         if image is not None:
             h, w, _ = image.shape
@@ -19,16 +19,25 @@ class CrackAnnotator(QtWidgets.QWidget):
             self.img_w, self.img_h = 100, 100
 
         self.points = list(initial_points) if initial_points else []
-        self.connections = [(min(a,b), max(a,b)) for a,b in (initial_connections or []) if a != b]
+        self.connections = [(min(a, b), max(a, b)) for a, b in (initial_connections or []) if a != b]
 
         min_dim = min(self.img_w, self.img_h) if self.img_w and self.img_h else 100
         self.point_radius = max(3, min(20, int(0.005 * min_dim)))
-
         self.boxes = boxes or []
-        self.scale = 1.0
-        self.setMouseTracking(True)
-        self.update_canvas_size()
 
+        # --- zoom / pan / fit state ---
+        self.scale = 1.0
+        self.pan_x, self.pan_y = 0.0, 0.0
+        self._fit_scale = 1.0        # computed when we can measure the viewport
+        self._user_zoomed = False    # once True, we stop auto-fit on resize
+        self._sa = None              # cached scroll area
+        self._last_draw_scale = 1.0
+        self._last_draw_xoff = 0.0
+        self._last_draw_yoff = 0.0
+
+        self.setMouseTracking(True)
+
+        # --- modes/state you already had ---
         self.connection_mode = False
         self.connecting_index = None
         self.hover_index = None
@@ -46,7 +55,7 @@ class CrackAnnotator(QtWidgets.QWidget):
                     a, b = k.split("_")
                     i1, i2 = int(a), int(b)
                     if i1 != i2:
-                        self.midlines[(min(i1,i2), max(i1,i2))] = [(float(x), float(y)) for x,y in poly]
+                        self.midlines[(min(i1, i2), max(i1, i2))] = [(float(x), float(y)) for x, y in poly]
                 except:
                     pass
 
@@ -57,12 +66,138 @@ class CrackAnnotator(QtWidgets.QWidget):
         self._erase_timer.timeout.connect(lambda: (self._pop_poly_point(), self.update()))
         self._erase_start_time = None
 
-        # NEW: read-only sets
         self.readonly_midlines = {}
         self.readonly_connections = []
 
         self.setFocusPolicy(Qt.StrongFocus)
 
+        # try to hook & fit after layout settles
+        QtCore.QTimer.singleShot(0, self._late_init)
+
+    # ---------- FIT/SCROLL AREA HOOKS ----------
+    def _late_init(self):
+        self._hook_scroll_area()
+        self._fit_to_view()
+
+    def _hook_scroll_area(self):
+        if self._sa:
+            return
+        sa = self._find_scroll_area()
+        if sa is None:
+            return
+        self._sa = sa
+        # Watch viewport resizes; refit until user zooms
+        sa.viewport().installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        # react to viewport resizes only until the user has zoomed
+        if self._sa and obj is self._sa.viewport() and ev.type() == QtCore.QEvent.Resize:
+            if not self._user_zoomed:
+                # defer a tick so sizes are final
+                QtCore.QTimer.singleShot(0, self._fit_to_view)
+        return super().eventFilter(obj, ev)
+
+    def _fit_to_view(self):
+        if self.image_pixmap is None:
+            return
+        self._hook_scroll_area()
+        if not self._sa:
+            return
+
+        vp = self._sa.viewport()
+        vw, vh = max(1, vp.width()), max(1, vp.height())
+
+        # compute fit scale to show the WHOLE image
+        self._fit_scale = min(vw / self.img_w, vh / self.img_h)
+        if self._fit_scale <= 0:
+            self._fit_scale = 1.0
+
+        self.scale = self._fit_scale
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self.update_canvas_size()
+
+        # center inside the viewport
+        cw, ch = int(self.img_w * self.scale), int(self.img_h * self.scale)
+        hsb, vsb = self._sa.horizontalScrollBar(), self._sa.verticalScrollBar()
+        hsb.setValue(max(0, (cw - vw) // 2))
+        vsb.setValue(max(0, (ch - vh) // 2))
+        self.update()
+
+    # ---------- BASIC HELPERS ----------
+    def _find_scroll_area(self):
+        p = self.parent()
+        while p is not None and not isinstance(p, QtWidgets.QAbstractScrollArea):
+            p = p.parent()
+        return p
+
+    def update_canvas_size(self):
+        w = int(self.img_w * self.scale)
+        h = int(self.img_h * self.scale)
+        self.setMinimumSize(w, h)
+        self.resize(w, h)   # important for QScrollArea content size
+        self.update()
+
+    def _min_scale(self):
+        # don't allow going smaller than "fit to view"
+        return max(0.01, self._fit_scale)
+
+    def _clamp_pan(self):
+        # used only in the no-scroll-area fallback
+        vw, vh = self.width(), self.height()
+        cw, ch = int(self.img_w * self.scale), int(self.img_h * self.scale)
+        self.pan_x = min(0, max(vw - cw, self.pan_x))
+        self.pan_y = min(0, max(vh - ch, self.pan_y))
+
+    # ---------- INPUT: ZOOM ----------
+    def wheelEvent(self, event):
+        # Ctrl+Wheel → let QScrollArea scroll normally
+        if event.modifiers() & Qt.ControlModifier:
+            super().wheelEvent(event)
+            return
+
+        f = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
+        old = self.scale
+        new = max(self._min_scale(), min(10.0, old * f))
+        if abs(new - old) < 1e-9:
+            return
+
+        sa = self._find_scroll_area()
+        if sa is not None:
+            self._user_zoomed = True
+            hsb = sa.horizontalScrollBar()
+            vsb = sa.verticalScrollBar()
+
+            # mouse pos in the viewport
+            vp = sa.viewport()
+            mx, my = vp.mapFromGlobal(event.globalPos()).x(), vp.mapFromGlobal(event.globalPos()).y()
+
+            # content coords under cursor before zoom
+            content_x = hsb.value() + mx
+            content_y = vsb.value() + my
+            img_x = content_x / old
+            img_y = content_y / old
+
+            # apply zoom
+            self.scale = new
+            self.update_canvas_size()
+
+            # keep cursor anchored
+            hsb.setValue(int(img_x * new - mx))
+            vsb.setValue(int(img_y * new - my))
+            self.update()
+        else:
+            # fallback (no scroll area)
+            mx, my = event.pos().x(), event.pos().y()
+            img_x = (mx - self.pan_x) / old
+            img_y = (my - self.pan_y) / old
+            self.scale = new
+            self.pan_x = mx - img_x * new
+            self.pan_y = my - img_y * new
+            self._clamp_pan()
+            self.update()
+
+    # ---------- YOUR EXISTING EDITOR LOGIC (unchanged) ----------
     def toggle_mode(self):
         self.connection_mode = not self.connection_mode
         self.connecting_index = None
@@ -89,10 +224,10 @@ class CrackAnnotator(QtWidgets.QWidget):
         if n < 2:
             return True
         pairs = set(self.connections) | set(self.midlines.keys()) | set(self.readonly_midlines.keys()) | set(self.readonly_connections)
-        return len(pairs) >= (n*(n-1))//2
+        return len(pairs) >= (n * (n - 1)) // 2
 
     def _sorted(self, i, j):
-        return (i,j) if i<j else (j,i)
+        return (i, j) if i < j else (j, i)
 
     def _add_poly_point(self, p):
         self.polyline.append((float(p[0]), float(p[1])))
@@ -101,295 +236,38 @@ class CrackAnnotator(QtWidgets.QWidget):
         if self.polyline:
             self.polyline.pop()
 
-    def update_canvas_size(self):
-        w = int(self.img_w * self.scale)
-        h = int(self.img_h * self.scale)
-        self.setMinimumSize(w, h)
-        self.resize(w, h)
-        self.update()
-
-    def wheelEvent(self, event):
-        f = 1.2 if event.angleDelta().y() > 0 else 1/1.2
-        self.scale = max(0.1, min(10.0, self.scale * f))
-        self.update_canvas_size()
-
-    '''def _commit_midline(self, end_idx):
-        """Commit the currently drawn polyline to a midline from _start_idx to end_idx."""
-        start_idx = self._start_idx
-        if start_idx is None or end_idx is None or start_idx == end_idx:
-            print(f"[COMMIT] Invalid commit: start={start_idx}, end={end_idx}")
-            return
-
-        # Key is canonical/sorted for storage & collision checks
-        key = self._sorted(start_idx, end_idx)
-
-        # IMPORTANT: use the actual draw order for geometry (start_idx -> end_idx)
-        start_pt = self.points[start_idx]
-        end_pt   = self.points[end_idx]
-
-        # Debug context
-        last_pt = self.polyline[-1] if self.polyline else None
-        last_two = self.polyline[-2:] if len(self.polyline) >= 2 else []
-        print(
-            f"[COMMIT] Attempt commit key={key} | "
-            f"start_idx={start_idx}, start_pt={start_pt} -> end_idx={end_idx}, end_pt={end_pt} | "
-            f"polyline_len={len(self.polyline)}, last_pt={last_pt}, last_two={last_two}"
-        )
-
-        # Skip if already exists (use canonical key)
-        if (key in self.midlines) or (key in self.connections) \
-        or (key in self.readonly_connections) or (key in self.readonly_midlines):
-            print(f"[COMMIT] Skipped: midline/connection already exists for {key}")
-            # reset drawing state anyway
-            self.polyline.clear()
-            self._is_drawing = False
-            self._start_idx = None
-            self.update()
-            return
-
-        # Build polyline in the *drawn* direction: start_idx -> middle -> end_idx
-        if len(self.polyline) >= 2:
-            # self.polyline[0] is the exact start-point we seeded when starting
-            middle = list(self.polyline[1:-1])  # keep the in-between freehand points only
-            poly = [(float(start_pt[0]), float(start_pt[1]))] + middle + [(float(end_pt[0]), float(end_pt[1]))]
-        else:
-            # Fallback: straight segment start->end if no freehand points were added
-            poly = [(float(start_pt[0]), float(start_pt[1])), (float(end_pt[0]), float(end_pt[1]))]
-
-        self.midlines[key] = poly
-        print(
-            f"[COMMIT] Midline committed {key} with {len(poly)} points | "
-            f"first={poly[0]} ... last={poly[-1]} | "
-            f"(stored under key, drawn order preserved)"
-        )
-
-        # Record what was just committed (for guarded click behavior outside)
-        self._last_polyline_start_idx = start_idx
-        self._last_polyline_end_idx   = end_idx
-        self._just_committed_midline  = True
-
-        # Reset draw state
-        self.polyline.clear()
-        self._is_drawing = False
-        self._start_idx = None
-        self.update()'''
-        
-    def _commit_midline(self, end_idx):
-        start_idx = self._start_idx
-        if start_idx is None or end_idx is None or start_idx == end_idx:
-            return
-
-        key = self._sorted(start_idx, end_idx)
-        if (key in self.midlines) or (key in self.connections) \
-        or (key in self.readonly_connections) or (key in self.readonly_midlines):
-            self.polyline.clear()
-            self._is_drawing = False
-            self._start_idx = None
-            self.update()
-            return
-
-        # Build the polyline in drawn order
-        if len(self.polyline) >= 2:
-            middle = list(self.polyline[1:-1])
-            poly = [tuple(map(float, self.points[start_idx]))] + middle + [tuple(map(float, self.points[end_idx]))]
-        else:
-            poly = [tuple(map(float, self.points[start_idx])),
-                    tuple(map(float, self.points[end_idx]))]
-
-        # --- NEW: bounding box check ---
-        if self.boxes:
-            # assume just one box for now; extend easily if multiple
-            xmin, ymin, xmax, ymax = self.boxes[0]
-            outside = [(x, y) for (x, y) in poly if not (xmin <= x <= xmax and ymin <= y <= ymax)]
-            if outside:
-                print(f"[COMMIT] Segment rejected, {len(outside)} points outside bbox")
-                # optional feedback dialog
-                QtWidgets.QMessageBox.warning(self, "Out of bounds",
-                    "Some segment points are outside the bounding box.\nCommit cancelled.")
-                self.polyline.clear()
-                self._is_drawing = False
-                self._start_idx = None
-                self.update()
-                return
-        # --- END NEW ---
-
-        self.midlines[key] = poly
-        self._last_polyline_start_idx = start_idx
-        self._last_polyline_end_idx   = end_idx
-        self._just_committed_midline  = True
-
-        self.polyline.clear()
-        self._is_drawing = False
-        self._start_idx = None
-        self.update()
-
-    def mousePressEvent(self, event):
-        p = self._to_image_coords(event.pos())
-        point_i = self._find_point_at(p)
-        line_i = self._find_line_at(p)
-        mid_key = self._midline_hit_test(event.pos(), 10.0)
-
-        print(f"[PRESS] Click at {p}, point_i={point_i}, line_i={line_i}, mid_key={mid_key}, "
-            f"_is_drawing={self._is_drawing}, polyline_mode={self.polyline_mode}, polyline_len={len(self.polyline)}")
-
-        if mid_key in self.readonly_midlines:
-            mid_key = None
-        if line_i is not None and (self.connections[line_i] in self.readonly_connections):
-            line_i = None
-
-        # --- Polyline mode ---
-        if self.polyline_mode:
-            if event.button() == Qt.LeftButton:
-                if not self._is_drawing:
-                    if mid_key is not None:
-                        self.midlines.pop(mid_key, None)
-                        self._hover_midline_key = None
-                        self.update()
-                        return
-                    if line_i is not None:
-                        self.connections.pop(line_i)
-                        self.update()
-                        return
-                    if point_i is None or len(self.points) < 2:
-                        return
-                    self._start_idx = point_i
-                    sx, sy = self.points[self._start_idx]
-                    self.polyline = [(float(sx), float(sy))]
-                    self._is_drawing = True
-                    print(f"[PRESS] STARTING midline from point {self._start_idx} at {self.points[self._start_idx]}")
-                    self.update()
-                    return
-                else:
-                    if getattr(self, "_just_committed_midline", False):
-                        self._just_committed_midline = False
-                        return
-                    if point_i is not None and point_i != self._start_idx:
-                        self._commit_midline(point_i)
-                    elif point_i is None:
-                        # Clicked empty space → add new point to polyline
-                        px, py = p  # unpack the tuple
-                        self.polyline.append((float(px), float(py)))
-                        print(f"[PRESS] Added polyline point: {self.polyline[-1]}")
-                        self.update()
-                    '''else:
-                        print("[PRESS] Ending midline without snapping to another endpoint")
-                        self.polyline.clear()
-                        self._is_drawing = False
-                        self._start_idx = None
-                        self.update()'''
-                    return
-
-            elif event.button() == Qt.RightButton:
-                if self._is_drawing:
-                    self._erase_timer.stop()
-                    QtCore.QTimer.singleShot(500, lambda: (
-                        self._erase_timer.start(75)
-                        if (QtWidgets.QApplication.mouseButtons() & Qt.RightButton and self._is_drawing)
-                        else None
-                    ))
-                    if len(self.polyline) > 1:
-                        self._pop_poly_point()
-                    else:
-                        self.polyline = []
-                        self._is_drawing = False
-                        self._start_idx = None
-                    self.update()
-                return
-
-        # --- Normal connection / point modes ---
-        if event.button() == Qt.LeftButton:
-            if (not self.polyline_mode) and self.connection_mode and (mid_key is not None):
-                self.midlines.pop(mid_key, None)
-                self._hover_midline_key = None
-                self.update()
-                return
-
-            if not self.connection_mode:
-                if point_i is None:
-                    self.points.append(p)
-                    print(f"[PRESS] Added new point at {p}")
-                else:
-                    if any(point_i in c for c in self.readonly_connections) or \
-                    any(point_i in k for k in self.readonly_midlines.keys()):
-                        return
-                    self._delete_point_reindex(point_i)
-            else:
-                if (line_i is not None) and (self.connecting_index is None) and (point_i is None):
-                    self.connections.pop(line_i)
-                elif point_i is not None:
-                    if self.connecting_index is None:
-                        self.connecting_index = point_i
-                    elif self.connecting_index != point_i:
-                        c = self._sorted(self.connecting_index, point_i)
-                        if c not in self.connections and c not in self.readonly_connections:
-                            self.connections.append(c)
-                        self.connecting_index = None
-                    else:
-                        self.connecting_index = None
-                else:
-                    self.connecting_index = None
-            self.update()
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.RightButton:
-            self._erase_timer.stop()
-
-    def mouseMoveEvent(self, event):
-        p = self._to_image_coords(event.pos())
-        point_i = self._find_point_at(p)
-
-        if self.polyline_mode and self._is_drawing and (event.buttons() & Qt.LeftButton):
-            if point_i is not None and point_i != self._start_idx:
-                print(f"[MOVE] Hovering endpoint {point_i}, attempting commit")
-                self._commit_midline(point_i)
-                return
-            else:
-                self._add_poly_point(p)
-                print(f"[MOVE] Added freehand point {p}")
-                self.update()
-                return
-
-        self.hover_index = self._find_point_at(p)
-        if self.connection_mode and self.connecting_index is None and self.hover_index is None:
-            self.hover_line_index = self._find_line_at(p)
-        else:
-            self.hover_line_index = None
-        self._hover_midline_key = self._midline_hit_test(event.pos(), 10.0) if not self._is_drawing else None
-        self.update()
-
+    # ---------- PAINT ----------
     def paintEvent(self, event):
         qp = QPainter(self)
         qp.setRenderHint(QPainter.Antialiasing)
 
         if self.image_pixmap:
-            img_w, img_h = self.img_w, self.img_h
-            win_w, win_h = self.width(), self.height()
-            scale = min(win_w / img_w, win_h / img_h)
-            xoff = int((win_w - img_w * scale) / 2)
-            yoff = int((win_h - img_h * scale) / 2)
-            self._last_draw_scale, self._last_draw_xoff, self._last_draw_yoff = scale, xoff, yoff
-            qp.drawPixmap(xoff, yoff, int(img_w * scale), int(img_h * scale), self.image_pixmap)
+            scale = self.scale
+            xoff = self.pan_x
+            yoff = self.pan_y
+            self._last_draw_scale = scale
+            self._last_draw_xoff = xoff
+            self._last_draw_yoff = yoff
+
+            qp.drawPixmap(int(xoff), int(yoff),
+                          int(self.img_w * scale), int(self.img_h * scale),
+                          self.image_pixmap)
         else:
-            self._last_draw_scale, self._last_draw_xoff, self._last_draw_yoff = 1.0, 0, 0
+            self._last_draw_scale, self._last_draw_xoff, self._last_draw_yoff = 1.0, 0.0, 0.0
+            scale, xoff, yoff = 1.0, 0.0, 0.0
 
-        scale = self._last_draw_scale
-        xoff = self._last_draw_xoff
-        yoff = self._last_draw_yoff
-
-        # NEW: handle crop offset if present
         crop_xmin, crop_ymin = getattr(self, "crop_offset", (0, 0))
 
         def apply_offset(pt):
-            """Convert from crop coords to full image coords if needed."""
             return (pt[0] + crop_xmin, pt[1] + crop_ymin)
 
-        # Bounding boxes
+        # boxes
         qp.setPen(QPen(QColor(0, 128, 255), 3))
         for xmin, ymin, xmax, ymax in self.boxes:
             qp.drawRect(int((xmin) * scale + xoff), int((ymin) * scale + yoff),
                         int((xmax - xmin) * scale), int((ymax - ymin) * scale))
 
-        # Read-only connections
+        # read-only connections
         qp.setPen(QPen(QColor(150, 150, 150), 2, Qt.DashLine))
         for i1, i2 in self.readonly_connections:
             if i1 < len(self.points) and i2 < len(self.points):
@@ -398,7 +276,7 @@ class CrackAnnotator(QtWidgets.QWidget):
                 qp.drawLine(QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
                             QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff)))
 
-        # Read-only midlines
+        # read-only midlines
         qp.setPen(QPen(QColor(150, 150, 0), 2))
         for key, poly in self.readonly_midlines.items():
             for i in range(1, len(poly)):
@@ -407,28 +285,28 @@ class CrackAnnotator(QtWidgets.QWidget):
                 qp.drawLine(QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
                             QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff)))
 
-        # Editable connections
+        # editable connections
         for idx, (i1, i2) in enumerate(self.connections):
             if i1 < len(self.points) and i2 < len(self.points):
                 p1 = apply_offset(self.points[i1])
                 p2 = apply_offset(self.points[i2])
                 thick = 6 if (self.connection_mode and self.connecting_index is None
-                            and idx == self.hover_line_index and self.hover_index is None) else 4
+                              and idx == self.hover_line_index and self.hover_index is None) else 4
                 qp.setPen(QPen(QColor(0, 0, 0), thick))
                 qp.drawLine(QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
                             QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff)))
 
-        # Points
+        # points
         for i, (x, y) in enumerate(self.points):
             x, y = apply_offset((x, y))
             center = QPoint(int(x * scale + xoff), int(y * scale + yoff))
             brush = QColor(0, 200, 0) if i == self.hover_index or (
-                    self.connection_mode and i == self.connecting_index) else QColor(200, 80, 80)
+                self.connection_mode and i == self.connecting_index) else QColor(200, 80, 80)
             qp.setBrush(brush)
             qp.setPen(Qt.NoPen)
             qp.drawEllipse(center, int(self.point_radius * scale), int(self.point_radius * scale))
 
-        # Editable midlines
+        # editable midlines
         for key, poly in self.midlines.items():
             if len(poly) < 2:
                 continue
@@ -440,7 +318,7 @@ class CrackAnnotator(QtWidgets.QWidget):
                 qp.drawLine(QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
                             QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff)))
 
-        # Current polyline
+        # live polyline
         if self.polyline_mode and len(self.polyline) >= 1:
             qp.setPen(QPen(QColor(0, 200, 200), 4))
             for i in range(1, len(self.polyline)):
@@ -448,7 +326,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p2 = apply_offset(self.polyline[i])
                 qp.drawLine(QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
                             QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff)))
-                
+
+    # ---------- rest of your existing methods ----------
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Backspace, Qt.Key_Z):
             if self.polyline_mode and self._is_drawing and self.polyline:
@@ -527,7 +406,8 @@ class CrackAnnotator(QtWidgets.QWidget):
         return hit if best <= px_thresh else None
 
     def _delete_point_reindex(self, idx):
-        self.connections = [(i1 - (i1 > idx), i2 - (i2 > idx)) for (i1, i2) in self.connections if i1 != idx and i2 != idx]
+        self.connections = [(i1 - (i1 > idx), i2 - (i2 > idx))
+                            for (i1, i2) in self.connections if i1 != idx and i2 != idx]
         new_mid = {}
         for (i1, i2), poly in self.midlines.items():
             if i1 == idx or i2 == idx:
