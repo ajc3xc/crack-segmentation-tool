@@ -270,28 +270,25 @@ def compute_smooth_tangent_normals(x, y, window=7, poly=2):
 
 def find_normal_pair(
     mid_x, mid_y, edge1, edge2,
-    max_dist_ratio=0.18,     # fraction of bbox diagonal accepted as hit distance
-    min_max_dist=12.0,       # absolute minimum acceptance distance (px)
-    length_scale=1.5         # how long the normal ray is (× bbox diagonal)
+    max_dist_ratio=0.18,
+    min_max_dist=12.0,
+    length_scale=1.5
 ):
     """
-    For each midline point, cast two HALF-RAYS along ± normal direction.
-    Intersect with edge1/edge2 polylines and select the nearest hit on each side.
-    Map the two hits to (edge1, edge2) by whichever edge the hit is closer to.
-
-    Returns (e1x, e1y, e2x, e2y) each (N,) with NaNs where a stable pair wasn't found.
+    For each midline point, cast normals and intersect edges. 
+    If intersections are missing, fall back to direct projection 
+    onto edge1/edge2 (nearest_points). This ensures normals exist 
+    even if the midline is slightly outside the edge corridor.
     """
     mid_x = np.asarray(mid_x, float)
     mid_y = np.asarray(mid_y, float)
     e1 = np.asarray(edge1, float)
     e2 = np.asarray(edge2, float)
 
-    # guard
     if len(mid_x) == 0 or e1.ndim != 2 or e2.ndim != 2 or len(e1) < 2 or len(e2) < 2:
         n = len(mid_x)
         return (np.full(n, np.nan),) * 4
 
-    # robust normals
     _, normals = compute_smooth_tangent_normals(mid_x, mid_y)
 
     # bbox diagonal for scale
@@ -302,19 +299,16 @@ def find_normal_pair(
     diag = np.hypot(xmax - xmin, ymax - ymin)
     ray_len = max(32.0, float(length_scale) * float(diag))
     max_dist = max(min_max_dist, float(max_dist_ratio) * float(diag))
-    relaxed_dist = 3 * max_dist  # NEW: allow slightly out-of-bounds midline pts
 
     line1 = LineString(e1)
     line2 = LineString(e2)
 
-    # outputs
     N = len(mid_x)
     e1x = np.full(N, np.nan)
     e1y = np.full(N, np.nan)
     e2x = np.full(N, np.nan)
     e2y = np.full(N, np.nan)
 
-    # utility
     def _collect_points(geom):
         if geom.is_empty:
             return []
@@ -322,7 +316,7 @@ def find_normal_pair(
             return [(geom.x, geom.y)]
         if isinstance(geom, MultiPoint):
             return [(g.x, g.y) for g in geom.geoms]
-        if isinstance(geom, LineString):  # collinear overlap
+        if isinstance(geom, LineString):
             coords = np.asarray(geom.coords, float)
             return [tuple(coords[0]), tuple(coords[-1])]
         return []
@@ -332,81 +326,32 @@ def find_normal_pair(
         if not np.isfinite(nx) or not np.isfinite(ny):
             continue
 
-        # full infinite line
         A = (mx - ray_len * nx, my - ray_len * ny)
         B = (mx + ray_len * nx, my + ray_len * ny)
         ray_line = LineString([A, B])
 
-        # raw intersections
         inter1 = _collect_points(line1.intersection(ray_line))
         inter2 = _collect_points(line2.intersection(ray_line))
 
-        def _signed_hits(points, side_sign):
-            hits = []
-            for (px, py) in points:
-                vx, vy = (px - mx), (py - my)
-                sign = np.sign(vx * nx + vy * ny)
-                if side_sign > 0 and sign <= 0:
-                    continue
-                if side_sign < 0 and sign >= 0:
-                    continue
-                d = np.hypot(vx, vy)
-                hits.append(((px, py), d))
-            hits.sort(key=lambda t: t[1])
-            return hits
-
-        plus_hits = _signed_hits(inter1 + inter2, +1)
-        minus_hits = _signed_hits(inter1 + inter2, -1)
-
-        def _pick_closest_edge(point):
-            (px, py) = point
-            d1 = line1.distance(Point(px, py))
-            d2 = line2.distance(Point(px, py))
-            return ('edge1', (px, py)) if d1 <= d2 else ('edge2', (px, py))
-
-        # candidates within normal threshold
-        cand_plus  = next(((p, d) for (p, d) in plus_hits  if d <= max_dist), None)
-        cand_minus = next(((p, d) for (p, d) in minus_hits if d <= max_dist), None)
-
-        # --- NEW relaxed fallback ---
-        def _relaxed(side_sign):
+        # fall back to projection if intersections empty
+        if not inter1:
             np1 = nearest_points(line1, Point(mx, my))[0]
+            inter1 = [(np1.x, np1.y)]
+        if not inter2:
             np2 = nearest_points(line2, Point(mx, my))[0]
-            cands = []
-            for (px, py) in [(np1.x, np1.y), (np2.x, np2.y)]:
-                vx, vy = (px - mx), (py - my)
-                if np.sign(vx * nx + vy * ny) == np.sign(side_sign):
-                    d = np.hypot(vx, vy)
-                    if d <= relaxed_dist:
-                        cands.append(((px, py), d))
-            if cands:
-                cands.sort(key=lambda t: t[1])
-                return cands[0]
-            return None
+            inter2 = [(np2.x, np2.y)]
 
-        if cand_plus is None:
-            cand_plus = _relaxed(+1)
-        if cand_minus is None:
-            cand_minus = _relaxed(-1)
+        # pick nearest from each edge
+        def _nearest(pt_list):
+            dists = [np.hypot(px - mx, py - my) for (px, py) in pt_list]
+            j = int(np.argmin(dists))
+            return pt_list[j], dists[j]
 
-        if cand_plus is None or cand_minus is None:
-            continue
+        (px1, py1), d1 = _nearest(inter1)
+        (px2, py2), d2 = _nearest(inter2)
 
-        # assign each hit to closest edge
-        side_label_p, p_plus = _pick_closest_edge(cand_plus[0])
-        side_label_m, p_minus = _pick_closest_edge(cand_minus[0])
-
-        assign = {}
-        for lbl, pt, dist in [
-            (side_label_p, p_plus, cand_plus[1]),
-            (side_label_m, p_minus, cand_minus[1])
-        ]:
-            if (lbl not in assign) or (dist < assign[lbl][1]):
-                assign[lbl] = (pt, dist)
-
-        if 'edge1' in assign and 'edge2' in assign:
-            (px1, py1), _ = assign['edge1']
-            (px2, py2), _ = assign['edge2']
+        # accept if within relaxed max_dist (here ×3)
+        if d1 <= 3*max_dist and d2 <= 3*max_dist:
             e1x[i], e1y[i] = px1, py1
             e2x[i], e2y[i] = px2, py2
 

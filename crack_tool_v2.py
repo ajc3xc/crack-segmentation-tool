@@ -1069,7 +1069,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 os.makedirs(save_dir, exist_ok=True)
                 base_name = os.path.splitext(os.path.basename(self.name))[0]
                 ts = int(time.time() * 1000)
-                fname = os.path.join(save_dir, f"{base_name}_{crack_type}_{crack_id}_manual_{ts}.png")
+                fname = os.path.join(save_dir, f"{base_name}_{crack_type}_{crack_id}_manual.png")
                 plt.savefig(fname, dpi=250)
                 plt.close(fig)
                 print(f"[DEBUG] Saved debug plot → {fname}")
