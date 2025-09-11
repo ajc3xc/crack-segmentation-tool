@@ -1069,7 +1069,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 os.makedirs(save_dir, exist_ok=True)
                 base_name = os.path.splitext(os.path.basename(self.name))[0]
                 ts = int(time.time() * 1000)
-                fname = os.path.join(save_dir, f"{base_name}_{crack_type}_{crack_id}_{ts}.png")
+                fname = os.path.join(save_dir, f"{base_name}_{crack_type}_{crack_id}_manual_{ts}.png")
                 plt.savefig(fname, dpi=250)
                 plt.close(fig)
                 print(f"[DEBUG] Saved debug plot → {fname}")
@@ -1113,11 +1113,13 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 for cid in to_delete:
                     del atomic[cid]
 
-                for cid in changed:
+                # if exactly one atomic was changed, check its combined membership
+                if len(changed) == 1:
+                    changed_id = changed[0]
                     for cmb_id, cmb in combined.items():
-                        if cid in cmb.get("members", []):
+                        if changed_id in cmb.get("members", []):
                             combined[cmb_id] = self._build_combined_crack(cmb["members"])
-                            # plot just this combined
+                            # build mask for that combined
                             full_mask = np.zeros((H, W), np.uint8)
                             for member_id in cmb["members"]:
                                 mc, bb = atomic[member_id]["mask_crop"], atomic[member_id]["mask_bbox"]
@@ -1125,9 +1127,9 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                                 x0, y0, w, h = [int(v) for v in bb]
                                 x1, y1 = min(x0 + w, W), min(y0 + h, H)
                                 full_mask[y0:y1, x0:x1] |= crop[:y1-y0, :x1-x0]
-                            e1, e2, normals = rebuild_edges_from_mask(full_mask, atomic[cid])
+                            e1, e2, normals = rebuild_edges_from_mask(full_mask, atomic[changed_id])
                             if e1 is not None:
-                                save_debug_plot(cmb_id, "combined", atomic[cid], e1, e2, normals)
+                                save_debug_plot(cmb_id, "combined", atomic[changed_id], e1, e2, normals)
                             break
 
                 self.save_annotation()
@@ -1179,6 +1181,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                     target_crack["normal_edge_points"] = normals
                     save_debug_plot(target_id, "atomic", target_crack, e1, e2, normals)
 
+                # only one combined if any
                 for cmb_id, cmb in combined.items():
                     if target_id in cmb.get("members", []):
                         combined[cmb_id] = self._build_combined_crack(cmb["members"])

@@ -268,7 +268,6 @@ def compute_smooth_tangent_normals(x, y, window=7, poly=2):
 
     return tangent, normal
 
-
 def find_normal_pair(
     mid_x, mid_y, edge1, edge2,
     max_dist_ratio=0.18,     # fraction of bbox diagonal accepted as hit distance
@@ -303,6 +302,7 @@ def find_normal_pair(
     diag = np.hypot(xmax - xmin, ymax - ymin)
     ray_len = max(32.0, float(length_scale) * float(diag))
     max_dist = max(min_max_dist, float(max_dist_ratio) * float(diag))
+    relaxed_dist = 3 * max_dist  # NEW: allow slightly out-of-bounds midline pts
 
     line1 = LineString(e1)
     line2 = LineString(e2)
@@ -322,8 +322,7 @@ def find_normal_pair(
             return [(geom.x, geom.y)]
         if isinstance(geom, MultiPoint):
             return [(g.x, g.y) for g in geom.geoms]
-        # If collinear overlap (LineString), take endpoints as candidates
-        if isinstance(geom, LineString):
+        if isinstance(geom, LineString):  # collinear overlap
             coords = np.asarray(geom.coords, float)
             return [tuple(coords[0]), tuple(coords[-1])]
         return []
@@ -333,16 +332,15 @@ def find_normal_pair(
         if not np.isfinite(nx) or not np.isfinite(ny):
             continue
 
-        # full infinite line (we'll filter to half-rays by dot sign)
+        # full infinite line
         A = (mx - ray_len * nx, my - ray_len * ny)
         B = (mx + ray_len * nx, my + ray_len * ny)
         ray_line = LineString([A, B])
 
-        # intersect with each edge
+        # raw intersections
         inter1 = _collect_points(line1.intersection(ray_line))
         inter2 = _collect_points(line2.intersection(ray_line))
 
-        # side sign (+normal or -normal)
         def _signed_hits(points, side_sign):
             hits = []
             for (px, py) in points:
@@ -354,54 +352,50 @@ def find_normal_pair(
                     continue
                 d = np.hypot(vx, vy)
                 hits.append(((px, py), d))
-            # nearest first
             hits.sort(key=lambda t: t[1])
             return hits
 
-        plus_hits = _signed_hits(inter1 + inter2, side_sign=+1)
-        minus_hits = _signed_hits(inter1 + inter2, side_sign=-1)
+        plus_hits = _signed_hits(inter1 + inter2, +1)
+        minus_hits = _signed_hits(inter1 + inter2, -1)
 
         def _pick_closest_edge(point):
-            """Return ('edge1' or 'edge2', (px,py), dist_to_mid)."""
             (px, py) = point
             d1 = line1.distance(Point(px, py))
             d2 = line2.distance(Point(px, py))
             return ('edge1', (px, py)) if d1 <= d2 else ('edge2', (px, py))
 
-        # choose nearest valid on each side within max_dist
+        # candidates within normal threshold
         cand_plus  = next(((p, d) for (p, d) in plus_hits  if d <= max_dist), None)
         cand_minus = next(((p, d) for (p, d) in minus_hits if d <= max_dist), None)
 
-        # fallbacks if a side missed: use nearest_points constrained by side sign
-        def _fallback(side_sign):
+        # --- NEW relaxed fallback ---
+        def _relaxed(side_sign):
             np1 = nearest_points(line1, Point(mx, my))[0]
             np2 = nearest_points(line2, Point(mx, my))[0]
             cands = []
             for (px, py) in [(np1.x, np1.y), (np2.x, np2.y)]:
                 vx, vy = (px - mx), (py - my)
                 if np.sign(vx * nx + vy * ny) == np.sign(side_sign):
-                    cands.append(((px, py), np.hypot(vx, vy)))
+                    d = np.hypot(vx, vy)
+                    if d <= relaxed_dist:
+                        cands.append(((px, py), d))
             if cands:
                 cands.sort(key=lambda t: t[1])
                 return cands[0]
             return None
 
         if cand_plus is None:
-            cand_plus = _fallback(+1)
+            cand_plus = _relaxed(+1)
         if cand_minus is None:
-            cand_minus = _fallback(-1)
+            cand_minus = _relaxed(-1)
 
         if cand_plus is None or cand_minus is None:
-            # not enough info to form a pair here
             continue
 
-        # map the two hits to edge1/edge2 by proximity to edges
+        # assign each hit to closest edge
         side_label_p, p_plus = _pick_closest_edge(cand_plus[0])
         side_label_m, p_minus = _pick_closest_edge(cand_minus[0])
 
-        # ensure we output one for edge1 and one for edge2
-        # If both map to the same edge, keep the nearer for that edge
-        # and try assigning the other to the other edge if reasonable
         assign = {}
         for lbl, pt, dist in [
             (side_label_p, p_plus, cand_plus[1]),
@@ -410,15 +404,11 @@ def find_normal_pair(
             if (lbl not in assign) or (dist < assign[lbl][1]):
                 assign[lbl] = (pt, dist)
 
-        # write results
         if 'edge1' in assign and 'edge2' in assign:
             (px1, py1), _ = assign['edge1']
             (px2, py2), _ = assign['edge2']
             e1x[i], e1y[i] = px1, py1
             e2x[i], e2y[i] = px2, py2
-        else:
-            # still ambiguous → skip this index to avoid crooked pairs
-            continue
 
     return e1x, e1y, e2x, e2y
 
