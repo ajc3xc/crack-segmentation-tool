@@ -2200,92 +2200,6 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         else:
             X0=Y0=0; w=h=1
             crop = np.zeros((h,w), np.uint8)
-
-        # ---------------- DEBUG PLOT ----------------        
-        '''save_dir = os.path.join(self.save_folder, "debug_outputs")
-        os.makedirs(save_dir, exist_ok=True)
-        base_name = os.path.splitext(os.path.basename(self.name))[0]
-        member_str = "_".join(sorted(member_ids, key=lambda s: int(s)))
-        fname = os.path.join(save_dir, f"{base_name}_combined_debug.png")
-
-        fig, ax = plt.subplots(figsize=(12, 8))
-        ax.imshow(self.original_image)
-        ax.set_title("All cracks (atomic + combined) with current merge highlighted")
-
-        ann = self.annotation.get("annotations", {})
-        atomic = ann.get("atomic_cracks", {})
-        combined = ann.get("combined_cracks", {})
-
-        combined_members = {m for cmb in combined.values() for m in cmb.get("members", [])}
-
-        def plot_crack(crack, color_idx=0):
-            ml = crack.get("midline", []) or crack.get("midline_segments", [])
-            if not ml:
-                return
-            if isinstance(ml[0][0], list):  # segments
-                segs_to_plot = [np.array(seg, float) for seg in ml if seg]
-            else:  # flat midline
-                segs_to_plot = [np.array(ml, float)]
-            for S in segs_to_plot:
-                if len(S) < 2: continue
-                for segp in split_on_teleports(S, max_step=max_plot_jump):
-                    ax.plot(segp[:,0], segp[:,1], 'g-', lw=0.6)
-
-            edges = crack.get("geodesic_edges", {})
-            for key, arr in edges.items():
-                arr = np.array(arr, float)
-                if arr.ndim == 2 and len(arr) >= 2:
-                    for segp in split_on_teleports(arr, max_step=max_plot_jump):
-                        ax.plot(segp[:,0], segp[:,1], 'r-' if "edge1" in key else 'b-', lw=0.4)
-
-            normals = crack.get("normal_edge_points", {})
-            if normals:
-                n1 = np.array(normals.get("edge1", []), float)
-                n2 = np.array(normals.get("edge2", []), float)
-                if n1.ndim == 2 and n2.ndim == 2 and len(n1) and len(n2):
-                    step = max(1, min(len(n1), len(n2)) // 70)
-                    for i in range(0, min(len(n1), len(n2)), step):
-                        if np.isfinite(n1[i]).all() and np.isfinite(n2[i]).all():
-                            ax.plot([n1[i,0], n2[i,0]], [n1[i,1], n2[i,1]],
-                                    color='cyan', lw=0.3, alpha=0.5)
-
-        # --- plot all existing cracks for context ---
-        for cid, cmb in combined.items():
-            if set(cmb.get("members", [])) == set(member_ids):
-                continue
-            plot_crack(cmb)
-
-        for aid, crack in atomic.items():
-            if aid in member_ids or aid in combined_members:
-                continue
-            plot_crack(crack)
-
-        # --- plot the new combined crack being built ---
-        for S in segs:
-            for segp in split_on_teleports(S, max_step=max_plot_jump):
-                ax.plot(segp[:,0], segp[:,1], 'g-', lw=.8)
-        for e in edge1_segs:
-            for segp in split_on_teleports(e, max_step=max_plot_jump):
-                ax.plot(segp[:,0], segp[:,1], 'r-', lw=.6)
-        for e in edge2_segs:
-            for segp in split_on_teleports(e, max_step=max_plot_jump):
-                ax.plot(segp[:,0], segp[:,1], 'b-', lw=.6)
-
-        for n1, n2 in zip(norm1_segs, norm2_segs):
-            if len(n1) == 0 or len(n2) == 0:
-                continue
-            step = 50
-            for i in range(0, min(len(n1), len(n2)), step):
-                if np.isfinite(n1[i]).all() and np.isfinite(n2[i]).all():
-                    ax.plot([n1[i,0], n2[i,0]], [n1[i,1], n2[i,1]],
-                            color='cyan', lw=0.4, alpha=0.8)
-
-        ax.set_xlim(0, W)
-        ax.set_ylim(H, 0)
-        ax.axis('equal')
-        plt.tight_layout()
-        plt.savefig(fname, dpi=300)
-        plt.close()'''
               
                 # ---------------- DEBUG PLOT ----------------        
         save_dir = os.path.join(self.save_folder, "debug_outputs")
@@ -2402,7 +2316,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         ax.set_ylim(H, 0)
         ax.axis('equal')
         plt.tight_layout()
-        plt.savefig(fname, dpi=300)
+        plt.savefig(fname, dpi=250)
         plt.close()
 
         def _flatten(seg_list):
@@ -2862,40 +2776,6 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
                 for cid in to_delete:
                     combined_cracks.pop(cid, None)
-            
-            '''# --- Remap combined crack members after atomic reindex, drop small ones, and rebuild crops ---
-            if combined_cracks:
-                H, W = self.original_image.shape[:2]
-                to_delete = []
-                for cid, combo in list(combined_cracks.items()):
-                    members_old = combo.get("members", [])
-                    # remap to new ids; keep only those still present
-                    members_new = [old_to_new[m] for m in members_old if m in old_to_new]
-                    if len(members_new) < 2:
-                        to_delete.append(cid)
-                        continue
-
-                    combo["members"] = sorted(members_new, key=lambda s: int(s))  # ensure ascending order
-
-                    # rebuild union/crop from remapped members
-                    union_mask = np.zeros((H, W), dtype=np.uint8)
-                    for m_id in members_new:
-                        member_crack = atomic_cracks.get(m_id)
-                        if member_crack is not None:
-                            union_mask |= reconstruct_full_mask_from_crack(member_crack, H, W)
-
-                    if np.any(union_mask):
-                        ys, xs = np.where(union_mask > 0)
-                        y0, y1 = int(ys.min()), int(ys.max() + 1)
-                        x0, x1 = int(xs.min()), int(xs.max() + 1)
-                        crop = union_mask[y0:y1, x0:x1].astype(np.uint8)
-                        combo["mask_crop"] = crop.tolist()
-                        combo["mask_bbox"] = [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
-                    else:
-                        to_delete.append(cid)
-
-                for cid in to_delete:
-                    combined_cracks.pop(cid, None)'''
 
             self.annotation["annotations"]["atomic_cracks"] = atomic_cracks
             self.annotation["annotations"]["combined_cracks"] = combined_cracks
