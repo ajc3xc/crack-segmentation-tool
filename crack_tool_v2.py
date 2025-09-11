@@ -1180,6 +1180,20 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 self.save_annotation()
                 print("[DEBUG] Annotation saved (add).")
 
+            # --- Refresh manual segment preview explicitly
+            im = self.image.astype(np.uint8).copy()
+            im = self.draw_existing_cracks(im)
+            qimage = QImage(im, im.shape[1], im.shape[0],
+                            im.strides[0], QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimage)
+            scaled = pixmap.scaled(
+                self.manual_segment_screen.width(),
+                self.manual_segment_screen.height(),
+                Qt.KeepAspectRatio,
+                Qt.FastTransformation
+            )
+            self.manual_segment_screen.setPixmap(scaled)
+            
             # Final: single authoritative refresh
             self.change_image()
 
