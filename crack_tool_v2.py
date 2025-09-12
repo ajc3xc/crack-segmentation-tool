@@ -1555,6 +1555,43 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         ))
         update_controls_visibility()
 
+        '''def on_done():
+            if annot.polyline_mode and annot._is_drawing:
+                if not confirm_discard():
+                    return
+                annot.set_mode_polyline(False)
+
+            ok, bad = all_points_in_boxes()
+            if not ok:
+                QMessageBox.warning(dlg, "Points outside boxes", "All points must be inside a bounding box.")
+                return
+
+            self.user_points = annot.points
+            self.user_connections = [c for c in annot.connections if c not in annot.readonly_connections]
+
+            self.endpoint_pairs = [
+                (self.user_points[i1], self.user_points[i2])
+                for (i1, i2) in self.user_connections
+            ]
+
+            self.manual_endpoint_pairs = []
+            for (i1, i2), poly in annot.midlines.items():
+                if i1 != i2:  # Final check to prevent self-midline
+                    self.manual_endpoint_pairs.append((self.user_points[i1], self.user_points[i2]))
+
+            self.manual_midlines_tmp = {
+                f"{i1}_{i2}": [[float(x), float(y)] for (x, y) in poly]
+                for (i1, i2), poly in annot.midlines.items() if i1 != i2
+            }
+
+            if hasattr(self, "current_crack_id"):
+                crack_id_str = str(self.current_crack_id)
+                crack_entry = self.annotation.get("annotations", {}).get("atomic_cracks", {}).setdefault(crack_id_str, {})
+                crack_entry["user_points"] = list(self.user_points)
+                crack_entry["user_connections"] = list(self.user_connections)
+
+            dlg.accept()'''
+            
         def on_done():
             if annot.polyline_mode and annot._is_drawing:
                 if not confirm_discard():
@@ -1565,6 +1602,38 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             if not ok:
                 QMessageBox.warning(dlg, "Points outside boxes", "All points must be inside a bounding box.")
                 return
+
+            # Validate midlines are fully inside one bounding box
+            for (i1, i2), poly in annot.midlines.items():
+                if i1 == i2:
+                    continue
+
+                try:
+                    sx, sy = annot.points[i1]
+                    ex, ey = annot.points[i2]
+                except Exception:
+                    continue
+
+                def point_box(x, y):
+                    for bi, (xmin, ymin, xmax, ymax) in enumerate(boxes):
+                        if xmin <= x <= xmax and ymin <= y <= ymax:
+                            return bi
+                    return None
+
+                b1 = point_box(float(sx), float(sy))
+                b2 = point_box(float(ex), float(ey))
+
+                if b1 is None or b2 is None or b1 != b2:
+                    QMessageBox.warning(dlg, "Invalid midline",
+                        "A manual midline crosses or spans multiple boxes. Please fix before continuing.")
+                    return
+
+                xmin, ymin, xmax, ymax = boxes[b1]
+                for (x, y) in poly:
+                    if not (xmin <= float(x) <= xmax and ymin <= float(y) <= ymax):
+                        QMessageBox.warning(dlg, "Invalid midline",
+                            "A manual midline has points outside its box. Please fix before continuing.")
+                        return
 
             self.user_points = annot.points
             self.user_connections = [c for c in annot.connections if c not in annot.readonly_connections]
