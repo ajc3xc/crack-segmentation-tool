@@ -139,8 +139,8 @@ class CrackAnnotator(QtWidgets.QWidget):
         self.update()
 
     def _min_scale(self):
-        # don't allow going smaller than "fit to view"
-        return max(0.01, self._fit_scale)
+    # Don’t allow zoom-out beyond ~90% of fit-to-view
+        return max(0.01, 0.9 * (self._fit_scale or 1.0))
 
     def _clamp_pan(self):
         # used only in the no-scroll-area fallback
@@ -592,3 +592,139 @@ class CrackAnnotator(QtWidgets.QWidget):
         # midline hit-test wants screen coords; that's event.pos()
         self._hover_midline_key = self._midline_hit_test(event.pos(), 10.0) if not self._is_drawing else None
         self.update()
+        
+        
+        
+    def wheelEvent(self, event):
+        # Ctrl+Wheel → let QScrollArea handle scrolling
+        if event.modifiers() & Qt.ControlModifier:
+            super().wheelEvent(event)
+            return
+
+        f = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
+        old = self.scale
+        new = max(self._min_scale(), min(10.0, old * f))
+        if abs(new - old) < 1e-9:
+            return
+
+        # widget coords
+        mx, my = event.pos().x(), event.pos().y()
+        # image coords under cursor before zoom
+        img_x = (mx - self.pan_x) / old
+        img_y = (my - self.pan_y) / old
+
+        self.scale = new
+        self._user_zoomed = True           # <- critical: blocks refit on minor resizes
+
+        # keep cursor anchored
+        self.pan_x = mx - img_x * new
+        self.pan_y = my - img_y * new
+        self.update()
+
+    def toggle_mode(self):
+        self.connection_mode = not self.connection_mode
+        self.connecting_index = None
+        # if user is already off fit scale, lock out refits triggered by layout tweaks
+        if abs(self.scale - self._fit_scale) > 1e-6:
+            self._user_zoomed = True
+        self.update()
+
+    def set_mode_polyline(self, enabled: bool, confirm_cb=None):
+        if not enabled and self._is_drawing:
+            ok_to_discard = True
+            if confirm_cb is not None:
+                ok_to_discard = confirm_cb()
+            if not ok_to_discard:
+                return False
+            self.polyline.clear()
+            self._is_drawing = False
+            self._start_idx = None
+        self.polyline_mode = enabled
+        if enabled:
+            self.connecting_index = None
+
+        if abs(self.scale - self._fit_scale) > 1e-6:
+            self._user_zoomed = True
+
+        self.update()
+        return True
+    
+    def _commit_midline(self, end_idx):
+        start_idx = self._start_idx
+        if start_idx is None or end_idx is None or start_idx == end_idx:
+            return
+
+        key = self._sorted(start_idx, end_idx)
+        if (key in self.midlines) or (key in self.connections) \
+        or (key in self.readonly_connections) or (key in self.readonly_midlines):
+            self.polyline.clear()
+            self._is_drawing = False
+            self._start_idx = None
+            self.update()
+            return
+
+        # Build the polyline in drawn order
+        if len(self.polyline) >= 2:
+            middle = list(self.polyline[1:-1])
+            poly = [tuple(map(float, self.points[start_idx]))] + middle + [tuple(map(float, self.points[end_idx]))]
+        else:
+            poly = [tuple(map(float, self.points[start_idx])),
+                    tuple(map(float, self.points[end_idx]))]
+
+        # --- STRICT: all points must be inside the SAME bounding box (if any exist) ---
+        if self.boxes:
+            def inside_box(poly_pts, box):
+                xmin, ymin, xmax, ymax = box
+                return all(xmin <= x <= xmax and ymin <= y <= ymax for (x, y) in poly_pts)
+
+            ok_single_box = any(inside_box(poly, b) for b in self.boxes)
+            if not ok_single_box:
+                QMessageBox.warning(self, "Out of bounds",
+                    "The midline must lie entirely inside a single bounding box.\nCommit cancelled.")
+                self.polyline.clear()
+                self._is_drawing = False
+                self._start_idx = None
+                self.update()
+                return
+        # --- END STRICT ---
+
+        self.midlines[key] = poly
+        self._last_polyline_start_idx = start_idx
+        self._last_polyline_end_idx   = end_idx
+        self._just_committed_midline  = True
+
+        self.polyline.clear()
+        self._is_drawing = False
+        self._start_idx = None
+        self.update()
+    
+    def add_midline_auto(self, i1, i2, poly):
+        """
+        Add an automatically-computed midline for the pair (i1,i2).
+        `poly` must be a list of (x, y) in IMAGE coordinates.
+        Enforces: unique key, not read-only, and fully inside ONE bounding box.
+        Returns True if added, False otherwise.
+        """
+        if i1 == i2:
+            return False
+        key = self._sorted(i1, i2)
+
+        # duplicates / read-only
+        if (key in self.midlines) or (key in self.connections) \
+        or (key in self.readonly_connections) or (key in self.readonly_midlines):
+            return False
+
+        # single-box guard (if boxes exist)
+        if self.boxes:
+            def inside_box(poly_pts, box):
+                xmin, ymin, xmax, ymax = box
+                return all(xmin <= x <= xmax and ymin <= y <= ymax for (x, y) in poly_pts)
+            if not any(inside_box(poly, b) for b in self.boxes):
+                QMessageBox.warning(self, "Out of bounds",
+                    f"Auto midline for pair {key} is not inside a single bounding box.\nInsertion cancelled.")
+                return False
+
+        # ok — insert
+        self.midlines[key] = [ (float(x), float(y)) for (x,y) in poly ]
+        self.update()
+        return True
