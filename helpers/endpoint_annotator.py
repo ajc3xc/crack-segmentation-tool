@@ -151,51 +151,34 @@ class CrackAnnotator(QtWidgets.QWidget):
 
     # ---------- INPUT: ZOOM ----------
     def wheelEvent(self, event):
-        # Ctrl+Wheel → let QScrollArea scroll normally
+        # Ctrl+Wheel → let QScrollArea handle scrolling
         if event.modifiers() & Qt.ControlModifier:
             super().wheelEvent(event)
             return
 
+        # Zoom factor
         f = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
         old = self.scale
-        new = max(self._min_scale(), min(10.0, old * f))
+        new = max(0.1, min(10.0, old * f))  # allow zoom-out to 0.1
+
         if abs(new - old) < 1e-9:
             return
 
-        sa = self._find_scroll_area()
-        if sa is not None:
-            self._user_zoomed = True
-            hsb = sa.horizontalScrollBar()
-            vsb = sa.verticalScrollBar()
+        # Mouse position in widget coordinates
+        mx, my = event.pos().x(), event.pos().y()
 
-            # mouse pos in the viewport
-            vp = sa.viewport()
-            mx, my = vp.mapFromGlobal(event.globalPos()).x(), vp.mapFromGlobal(event.globalPos()).y()
+        # Image coords under cursor (before zoom)
+        img_x = (mx - self.pan_x) / old
+        img_y = (my - self.pan_y) / old
 
-            # content coords under cursor before zoom
-            content_x = hsb.value() + mx
-            content_y = vsb.value() + my
-            img_x = content_x / old
-            img_y = content_y / old
+        # Apply zoom
+        self.scale = new
 
-            # apply zoom
-            self.scale = new
-            self.update_canvas_size()
+        # Adjust pan so cursor stays anchored
+        self.pan_x = mx - img_x * new
+        self.pan_y = my - img_y * new
 
-            # keep cursor anchored
-            hsb.setValue(int(img_x * new - mx))
-            vsb.setValue(int(img_y * new - my))
-            self.update()
-        else:
-            # fallback (no scroll area)
-            mx, my = event.pos().x(), event.pos().y()
-            img_x = (mx - self.pan_x) / old
-            img_y = (my - self.pan_y) / old
-            self.scale = new
-            self.pan_x = mx - img_x * new
-            self.pan_y = my - img_y * new
-            self._clamp_pan()
-            self.update()
+        self.update()
 
     # ---------- YOUR EXISTING EDITOR LOGIC (unchanged) ----------
     def toggle_mode(self):
@@ -243,18 +226,22 @@ class CrackAnnotator(QtWidgets.QWidget):
 
         if self.image_pixmap:
             scale = self.scale
-            xoff = self.pan_x
-            yoff = self.pan_y
+            xoff  = self.pan_x
+            yoff  = self.pan_y
+
+            # expose transform for hit-testing
             self._last_draw_scale = scale
-            self._last_draw_xoff = xoff
-            self._last_draw_yoff = yoff
+            self._last_draw_xoff  = xoff
+            self._last_draw_yoff  = yoff
 
             qp.drawPixmap(int(xoff), int(yoff),
-                          int(self.img_w * scale), int(self.img_h * scale),
-                          self.image_pixmap)
+                        int(self.img_w * scale), int(self.img_h * scale),
+                        self.image_pixmap)
         else:
             self._last_draw_scale, self._last_draw_xoff, self._last_draw_yoff = 1.0, 0.0, 0.0
             scale, xoff, yoff = 1.0, 0.0, 0.0
+
+        # (leave the rest of your bounding boxes, connections, points, midlines, etc. unchanged)
 
         crop_xmin, crop_ymin = getattr(self, "crop_offset", (0, 0))
 
@@ -344,8 +331,9 @@ class CrackAnnotator(QtWidgets.QWidget):
         super().keyPressEvent(event)
 
     def _to_image_coords(self, pos):
-        return ((pos.x() - self._last_draw_xoff) / self._last_draw_scale,
-                (pos.y() - self._last_draw_yoff) / self._last_draw_scale)
+        # Map from widget coords → image coords (match pan/scale logic in paintEvent)
+        return ((pos.x() - self.pan_x) / self.scale,
+                (pos.y() - self.pan_y) / self.scale)
 
     def _find_point_at(self, pos):
         r2 = (self.point_radius / self.scale) ** 2
