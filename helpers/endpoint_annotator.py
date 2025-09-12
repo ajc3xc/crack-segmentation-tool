@@ -3,7 +3,7 @@ from PyQt5.QtWidgets import QMessageBox
 from PyQt5.QtGui import QPainter, QPen, QColor, QPixmap, QImage
 from PyQt5.QtCore import Qt, QPoint
 
-class CrackAnnotator(QtWidgets.QWidget):
+class CrackAnnotator(QtWidgets.QWidget): 
     def __init__(self, image=None, boxes=None, initial_points=None, initial_connections=None, initial_midlines=None):
         super().__init__()
 
@@ -37,7 +37,7 @@ class CrackAnnotator(QtWidgets.QWidget):
 
         self.setMouseTracking(True)
 
-        # --- modes/state you already had ---
+        # --- modes/state ---
         self.connection_mode = False
         self.connecting_index = None
         self.hover_index = None
@@ -71,7 +71,11 @@ class CrackAnnotator(QtWidgets.QWidget):
 
         self.setFocusPolicy(Qt.StrongFocus)
 
-        # try to hook & fit after layout settles
+        # init crop tracking
+        self._crop_x1, self._crop_y1 = 0, 0
+        self._crop_x2, self._crop_y2 = self.img_w, self.img_h
+
+        # hook & fit after layout settles
         QtCore.QTimer.singleShot(0, self._late_init)
 
     # ---------- FIT/SCROLL AREA HOOKS ----------
@@ -224,98 +228,6 @@ class CrackAnnotator(QtWidgets.QWidget):
     def _pop_poly_point(self):
         if self.polyline:
             self.polyline.pop()
-
-    # ---------- PAINT ----------
-    '''def paintEvent(self, event):
-        qp = QPainter(self)
-        qp.setRenderHint(QPainter.Antialiasing)
-
-        if self.image_pixmap:
-            scale = self.scale
-            xoff  = self.pan_x
-            yoff  = self.pan_y
-
-            # expose transform for hit-testing
-            self._last_draw_scale = scale
-            self._last_draw_xoff  = xoff
-            self._last_draw_yoff  = yoff
-
-            qp.drawPixmap(int(xoff), int(yoff),
-                          int(self.img_w * scale), int(self.img_h * scale),
-                          self.image_pixmap)
-        else:
-            self._last_draw_scale, self._last_draw_xoff, self._last_draw_yoff = 1.0, 0.0, 0.0
-            scale, xoff, yoff = 1.0, 0.0, 0.0
-
-        crop_xmin, crop_ymin = getattr(self, "crop_offset", (0, 0))
-        def apply_offset(pt):
-            return (pt[0] + crop_xmin, pt[1] + crop_ymin)
-
-        # boxes
-        qp.setPen(QPen(QColor(0, 128, 255), 3))
-        for xmin, ymin, xmax, ymax in self.boxes:
-            qp.drawRect(int((xmin) * scale + xoff), int((ymin) * scale + yoff),
-                        int((xmax - xmin) * scale), int((ymax - ymin) * scale))
-
-        # read-only connections
-        qp.setPen(QPen(QColor(150, 150, 150), 2, Qt.DashLine))
-        for i1, i2 in self.readonly_connections:
-            if i1 < len(self.points) and i2 < len(self.points):
-                p1 = apply_offset(self.points[i1])
-                p2 = apply_offset(self.points[i2])
-                qp.drawLine(QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                            QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff)))
-
-        # read-only midlines
-        qp.setPen(QPen(QColor(150, 150, 0), 2))
-        for key, poly in self.readonly_midlines.items():
-            for i in range(1, len(poly)):
-                p1 = apply_offset(poly[i - 1])
-                p2 = apply_offset(poly[i])
-                qp.drawLine(QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                            QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff)))
-
-        # editable connections
-        for idx, (i1, i2) in enumerate(self.connections):
-            if i1 < len(self.points) and i2 < len(self.points):
-                p1 = apply_offset(self.points[i1])
-                p2 = apply_offset(self.points[i2])
-                thick = 6 if (self.connection_mode and self.connecting_index is None
-                              and idx == self.hover_line_index and self.hover_index is None) else 4
-                qp.setPen(QPen(QColor(0, 0, 0), thick))
-                qp.drawLine(QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                            QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff)))
-
-        # points
-        for i, (x, y) in enumerate(self.points):
-            x, y = apply_offset((x, y))
-            center = QPoint(int(x * scale + xoff), int(y * scale + yoff))
-            brush = QColor(0, 200, 0) if i == self.hover_index or (
-                self.connection_mode and i == self.connecting_index) else QColor(200, 80, 80)
-            qp.setBrush(brush)
-            qp.setPen(Qt.NoPen)
-            qp.drawEllipse(center, int(self.point_radius * scale), int(self.point_radius * scale))
-
-        # editable midlines
-        for key, poly in self.midlines.items():
-            if len(poly) < 2:
-                continue
-            thick = 8 if (self.connection_mode and key == self._hover_midline_key) else 4
-            qp.setPen(QPen(QColor(0, 200, 200), thick))
-            for i in range(1, len(poly)):
-                p1 = apply_offset(poly[i - 1])
-                p2 = apply_offset(poly[i])
-                qp.drawLine(QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                            QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff)))
-
-        # live polyline
-        if self.polyline_mode and len(self.polyline) >= 1:
-            qp.setPen(QPen(QColor(0, 200, 200), 4))
-            for i in range(1, len(self.polyline)):
-                p1 = apply_offset(self.polyline[i - 1])
-                p2 = apply_offset(self.polyline[i])
-                qp.drawLine(QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                            QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff)))'''
 
     # ---------- rest of your existing methods ----------
     def keyPressEvent(self, event):
@@ -518,19 +430,19 @@ class CrackAnnotator(QtWidgets.QWidget):
     def mousePressEvent(self, event):
         # image coords under the cursor (using pan/scale)
         img_rect = QtCore.QRect(
-            self._last_draw_xoff,
-            self._last_draw_yoff,
+            int(self._last_draw_xoff),
+            int(self._last_draw_yoff),
             int(self.img_w * self.scale),
             int(self.img_h * self.scale),
         )
         if not img_rect.contains(event.pos()):
             return  # ignore clicks in gray margin
-        
+
         p = self._to_image_coords(event.pos())
         point_i = self._find_point_at(p)
         line_i = self._find_line_at(p)
         mid_key = self._midline_hit_test(event.pos(), 10.0)
-
+        
         print(f"[PRESS] Click at {p}, point_i={point_i}, line_i={line_i}, mid_key={mid_key}, "
               f"_is_drawing={self._is_drawing}, polyline_mode={self.polyline_mode}, polyline_len={len(self.polyline)}")
 
@@ -662,61 +574,6 @@ class CrackAnnotator(QtWidgets.QWidget):
         self._hover_midline_key = self._midline_hit_test(event.pos(), 10.0) if not self._is_drawing else None
         self.update()
 
-    '''def wheelEvent(self, event):
-        sa = self._find_scroll_area()
-
-        # Ctrl+Wheel → zoom (anchored)
-        if event.modifiers() & Qt.ControlModifier:
-            f = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
-            old = self.scale
-            new = max(self._min_scale(), min(10.0, old * f))
-            if abs(new - old) < 1e-9:
-                return
-
-            self._user_zoomed = True
-
-            if sa is not None:
-                hsb = sa.horizontalScrollBar()
-                vsb = sa.verticalScrollBar()
-                vp  = sa.viewport()
-
-                # mouse pos in viewport coords
-                mvp = vp.mapFromGlobal(event.globalPos())
-                mx, my = mvp.x(), mvp.y()
-
-                # content coords under cursor BEFORE zoom
-                content_x = hsb.value() + mx
-                content_y = vsb.value() + my
-                img_x = content_x / max(1e-9, old)
-                img_y = content_y / max(1e-9, old)
-
-                # apply zoom + resize so scrollbars reflect new size
-                self.scale = new
-                self.update_canvas_size()
-
-                # keep cursor anchored
-                hsb.setValue(int(img_x * new - mx))
-                vsb.setValue(int(img_y * new - my))
-            else:
-                # fallback (no scroll area)
-                mx, my = event.pos().x(), event.pos().y()
-                img_x = (mx - self.pan_x) / old
-                img_y = (my - self.pan_y) / old
-                self.scale = new
-                self.pan_x = mx - img_x * new
-                self.pan_y = my - img_y * new
-                self._clamp_pan()
-
-            self.update()
-            return
-
-        # Otherwise → let parent QScrollArea handle normal scrolling
-        if sa:
-            super().wheelEvent(event)
-        else:
-            event.ignore()'''
-
-
     def add_midline_auto(self, i1, i2, poly):
         """
         Add an automatically-computed midline for the pair (i1,i2).
@@ -765,114 +622,6 @@ class CrackAnnotator(QtWidgets.QWidget):
         self.midlines[key] = [(float(x), float(y)) for (x, y) in poly]
         self.update()
         return True
-    
-    '''def wheelEvent(self, event):
-        # Ctrl+Wheel → let QScrollArea handle scrolling
-        if event.modifiers() & Qt.ControlModifier:
-            super().wheelEvent(event)
-            return
-
-        # Zoom factor
-        f = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
-        old = self.scale
-        new = max(0.1, min(10.0, old * f))  # allow zoom-out to 0.1
-
-        if abs(new - old) < 1e-9:
-            return
-
-        # Mouse position in widget coordinates
-        mx, my = event.pos().x(), event.pos().y()
-
-        # Image coords under cursor (before zoom)
-        img_x = (mx - self.pan_x) / old
-        img_y = (my - self.pan_y) / old
-
-        # Apply zoom
-        self.scale = new
-
-        # Adjust pan so cursor stays anchored
-        self.pan_x = mx - img_x * new
-        self.pan_y = my - img_y * new
-
-        self.update()'''
-        
-    '''def wheelEvent(self, event):
-        # Ctrl+Wheel → let QScrollArea handle scrolling
-        if event.modifiers() & Qt.ControlModifier:
-            super().wheelEvent(event)
-            return
-
-        # Plain wheel → zoom
-        f = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
-        old = self.scale
-        new = max(self._min_scale(), min(10.0, old * f))
-        if abs(new - old) < 1e-9:
-            return
-
-        if new <= self._fit_scale:  
-            # Snap back to full-fit when zooming out too far
-            self._fit_to_view()
-            self._user_zoomed = False
-            return
-
-        # Mouse position in widget coordinates
-        mx, my = event.pos().x(), event.pos().y()
-
-        # Image coords under cursor (before zoom)
-        img_x = (mx - self.pan_x) / old
-        img_y = (my - self.pan_y) / old
-
-        # Apply zoom
-        self.scale = new
-        self._user_zoomed = True
-
-        # Adjust pan so cursor stays anchored
-        self.pan_x = mx - img_x * new
-        self.pan_y = my - img_y * new
-
-        self.update_canvas_size()
-        self.update()'''
-        
-    '''def wheelEvent(self, event):
-        sa = self._find_scroll_area()
-
-        # Ctrl+Wheel → let QScrollArea handle scrolling
-        if event.modifiers() & Qt.ControlModifier:
-            super().wheelEvent(event)
-            return
-
-        # Plain wheel → zoom
-        f = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
-        old = self.scale
-
-        # clamp at *fit scale* (not below!)
-        min_zoom = self._fit_scale if self._fit_scale > 0 else 0.1
-        new = max(min_zoom, min(10.0, old * f))
-        if abs(new - old) < 1e-9:
-            return
-
-        # Mouse position in widget coords
-        mx, my = event.pos().x(), event.pos().y()
-
-        # Image coords under cursor (before zoom)
-        img_x = (mx - self.pan_x) / old
-        img_y = (my - self.pan_y) / old
-
-        # Apply zoom
-        self.scale = new
-        self._user_zoomed = True
-
-        # Adjust pan so cursor stays anchored
-        self.pan_x = mx - img_x * new
-        self.pan_y = my - img_y * new
-
-        # If we’re exactly at fit scale, re-center cleanly
-        if abs(self.scale - self._fit_scale) < 1e-6:
-            self._fit_to_view()
-            return
-
-        self.update_canvas_size()
-        self.update()'''
         
     def _validated_set_midline(self, key, poly):
         """Internal helper to enforce bbox rules before saving a midline."""
@@ -897,68 +646,90 @@ class CrackAnnotator(QtWidgets.QWidget):
     def add_midline_auto(self, i1, i2, poly):
         return self._validated_set_midline(self._sorted(i1, i2), poly)
     
+    def _fit_to_view(self):
+        if self.image_pixmap is None:
+            return
+        self._hook_scroll_area()
+        if not self._sa:
+            return
+
+        vp = self._sa.viewport()
+        vw, vh = max(1, vp.width()), max(1, vp.height())
+
+        # scale to fit entire image
+        self._fit_scale = min(vw / self.img_w, vh / self.img_h)
+        if self._fit_scale <= 0:
+            self._fit_scale = 1.0
+
+        self.scale = self._fit_scale
+        sw, sh = int(self.img_w * self.scale), int(self.img_h * self.scale)
+
+        # center the image
+        self.pan_x = (vw - sw) // 2
+        self.pan_y = (vh - sh) // 2
+
+        self._user_zoomed = False
+        self.update_canvas_size()
+        self.update()
+
     def paintEvent(self, event):
         qp = QPainter(self)
         qp.setRenderHint(QPainter.Antialiasing)
 
         if self.image_pixmap:
-            # always draw centered, scaled by self.scale
-            w, h = self.width(), self.height()
             sw = int(self.img_w * self.scale)
             sh = int(self.img_h * self.scale)
-            xoff = (w - sw) // 2
-            yoff = (h - sh) // 2
 
             # expose transform for hit-testing
             self._last_draw_scale = self.scale
-            self._last_draw_xoff  = xoff
-            self._last_draw_yoff  = yoff
+            self._last_draw_xoff = self.pan_x
+            self._last_draw_yoff = self.pan_y
 
-            qp.drawPixmap(xoff, yoff, sw, sh, self.image_pixmap)
+            # draw image at current pan/zoom
+            qp.drawPixmap(int(self.pan_x), int(self.pan_y), sw, sh, self.image_pixmap)
         else:
             self._last_draw_scale, self._last_draw_xoff, self._last_draw_yoff = 1.0, 0.0, 0.0
 
         crop_xmin, crop_ymin = getattr(self, "crop_offset", (0, 0))
         def apply_offset(pt):
             return (pt[0] + crop_xmin, pt[1] + crop_ymin)
+        scale = self._last_draw_scale
+        xoff  = self._last_draw_xoff
+        yoff  = self._last_draw_yoff
 
-        # boxes
+        # --- boxes ---
         qp.setPen(QPen(QColor(0, 128, 255), 3))
         for xmin, ymin, xmax, ymax in self.boxes:
             qp.drawRect(
-                int(xmin * self.scale + self._last_draw_xoff),
-                int(ymin * self.scale + self._last_draw_yoff),
-                int((xmax - xmin) * self.scale),
-                int((ymax - ymin) * self.scale),
+                int(xmin * scale + xoff),
+                int(ymin * scale + yoff),
+                int((xmax - xmin) * scale),
+                int((ymax - ymin) * scale),
             )
 
-        # read-only connections
+        # --- read-only connections ---
         qp.setPen(QPen(QColor(150, 150, 150), 2, Qt.DashLine))
         for i1, i2 in self.readonly_connections:
             if i1 < len(self.points) and i2 < len(self.points):
                 p1 = apply_offset(self.points[i1])
                 p2 = apply_offset(self.points[i2])
                 qp.drawLine(
-                    QPoint(int(p1[0] * self.scale + self._last_draw_xoff),
-                        int(p1[1] * self.scale + self._last_draw_yoff)),
-                    QPoint(int(p2[0] * self.scale + self._last_draw_xoff),
-                        int(p2[1] * self.scale + self._last_draw_yoff))
+                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
-        # read-only midlines
+        # --- read-only midlines ---
         qp.setPen(QPen(QColor(150, 150, 0), 2))
         for key, poly in self.readonly_midlines.items():
             for i in range(1, len(poly)):
                 p1 = apply_offset(poly[i - 1])
                 p2 = apply_offset(poly[i])
                 qp.drawLine(
-                    QPoint(int(p1[0] * self.scale + self._last_draw_xoff),
-                        int(p1[1] * self.scale + self._last_draw_yoff)),
-                    QPoint(int(p2[0] * self.scale + self._last_draw_xoff),
-                        int(p2[1] * self.scale + self._last_draw_yoff))
+                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
-        # editable connections
+        # --- editable connections ---
         for idx, (i1, i2) in enumerate(self.connections):
             if i1 < len(self.points) and i2 < len(self.points):
                 p1 = apply_offset(self.points[i1])
@@ -967,24 +738,21 @@ class CrackAnnotator(QtWidgets.QWidget):
                             and idx == self.hover_line_index and self.hover_index is None) else 4
                 qp.setPen(QPen(QColor(0, 0, 0), thick))
                 qp.drawLine(
-                    QPoint(int(p1[0] * self.scale + self._last_draw_xoff),
-                        int(p1[1] * self.scale + self._last_draw_yoff)),
-                    QPoint(int(p2[0] * self.scale + self._last_draw_xoff),
-                        int(p2[1] * self.scale + self._last_draw_yoff))
+                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
-        # points
+        # --- points ---
         for i, (x, y) in enumerate(self.points):
             x, y = apply_offset((x, y))
-            center = QPoint(int(x * self.scale + self._last_draw_xoff),
-                            int(y * self.scale + self._last_draw_yoff))
+            center = QPoint(int(x * scale + xoff), int(y * scale + yoff))
             brush = QColor(0, 200, 0) if i == self.hover_index or (
                 self.connection_mode and i == self.connecting_index) else QColor(200, 80, 80)
             qp.setBrush(brush)
             qp.setPen(Qt.NoPen)
-            qp.drawEllipse(center, int(self.point_radius * self.scale), int(self.point_radius * self.scale))
+            qp.drawEllipse(center, int(self.point_radius * scale), int(self.point_radius * scale))
 
-        # editable midlines
+        # --- editable midlines ---
         for key, poly in self.midlines.items():
             if len(poly) < 2:
                 continue
@@ -994,81 +762,57 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p1 = apply_offset(poly[i - 1])
                 p2 = apply_offset(poly[i])
                 qp.drawLine(
-                    QPoint(int(p1[0] * self.scale + self._last_draw_xoff),
-                        int(p1[1] * self.scale + self._last_draw_yoff)),
-                    QPoint(int(p2[0] * self.scale + self._last_draw_xoff),
-                        int(p2[1] * self.scale + self._last_draw_yoff))
+                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
-        # live polyline
+        # --- live polyline (manual midline in progress) ---
         if self.polyline_mode and len(self.polyline) >= 1:
             qp.setPen(QPen(QColor(0, 200, 200), 4))
             for i in range(1, len(self.polyline)):
                 p1 = apply_offset(self.polyline[i - 1])
                 p2 = apply_offset(self.polyline[i])
                 qp.drawLine(
-                    QPoint(int(p1[0] * self.scale + self._last_draw_xoff),
-                        int(p1[1] * self.scale + self._last_draw_yoff)),
-                    QPoint(int(p2[0] * self.scale + self._last_draw_xoff),
-                        int(p2[1] * self.scale + self._last_draw_yoff))
+                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
     def _to_image_coords(self, pos):
-        """Map from widget coords → image coords, matching paintEvent offsets."""
-        x = (pos.x() - self._last_draw_xoff) / self._last_draw_scale
-        y = (pos.y() - self._last_draw_yoff) / self._last_draw_scale
-        return (x, y)
+        """Map from widget coords → image coords, matching pan/scale logic."""
+        return ((pos.x() - self.pan_x) / self.scale,
+                (pos.y() - self.pan_y) / self.scale)
 
     def wheelEvent(self, event):
-        sa = self._find_scroll_area()
-
-        # Ctrl+Wheel → let QScrollArea handle scrolling
         if event.modifiers() & Qt.ControlModifier:
             super().wheelEvent(event)
             return
 
-        # Zoom factor
+        # zoom factor
         f = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
         old = self.scale
-        min_zoom = self._fit_scale if self._fit_scale > 0 else 0.1
-        new = max(min_zoom, min(10.0, old * f))
+        new = max(self._min_scale(), min(10.0, old * f))
         if abs(new - old) < 1e-9:
             return
 
+        # --- special case: snapping back when zooming out near fit ---
+        if new <= self._fit_scale * 1.001 and f < 1:  # zooming out
+            self._fit_to_view()
+            return
+
+        # mouse pos in widget coords
+        mx, my = event.pos().x(), event.pos().y()
+
+        # convert to image coords (before zoom)
+        img_x = (mx - self.pan_x) / old
+        img_y = (my - self.pan_y) / old
+
+        # apply zoom
+        self.scale = new
         self._user_zoomed = True
 
-        if sa is not None:
-            # ---- ScrollArea: anchor using scrollbars ----
-            hsb = sa.horizontalScrollBar()
-            vsb = sa.verticalScrollBar()
-            vp  = sa.viewport()
+        # update pan so cursor stays anchored
+        self.pan_x = mx - img_x * new
+        self.pan_y = my - img_y * new
 
-            # mouse pos in viewport coords
-            mvp = vp.mapFromGlobal(event.globalPos())
-            mx, my = mvp.x(), mvp.y()
-
-            # content coords under cursor BEFORE zoom
-            content_x = hsb.value() + mx
-            content_y = vsb.value() + my
-            img_x = content_x / old
-            img_y = content_y / old
-
-            # apply zoom + resize so scrollbars reflect new size
-            self.scale = new
-            self.update_canvas_size()
-
-            # keep cursor anchored
-            hsb.setValue(int(img_x * new - mx))
-            vsb.setValue(int(img_y * new - my))
-
-        else:
-            # ---- Fallback: no scrollarea, use manual pan ----
-            mx, my = event.pos().x(), event.pos().y()
-            img_x = (mx - self.pan_x) / old
-            img_y = (my - self.pan_y) / old
-            self.scale = new
-            self.pan_x = mx - img_x * new
-            self.pan_y = my - img_y * new
-            self._clamp_pan()
-
+        self.update_canvas_size()
         self.update()
