@@ -80,6 +80,10 @@ class CrackAnnotator(QtWidgets.QWidget):
 
         # --- NEW: enable pinch gestures (touchpad, Mac trackpad, etc.) ---
         self.grabGesture(Qt.PinchGesture)
+        
+        self._panning = False      # currently dragging the view?
+        self._pan_last = None      # last mouse position while dragging
+
 
     # ---------- FIT/SCROLL AREA HOOKS ----------
     def _late_init(self):
