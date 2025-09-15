@@ -100,12 +100,21 @@ class CrackAnnotator(QtWidgets.QWidget):
         # Watch viewport resizes; refit until user zooms
         sa.viewport().installEventFilter(self)
 
-    def eventFilter(self, obj, ev):
+    '''def eventFilter(self, obj, ev):
         # react to viewport resizes only until the user has zoomed
         if self._sa and obj is self._sa.viewport() and ev.type() == QtCore.QEvent.Resize:
             if not self._user_zoomed:
                 # defer a tick so sizes are final
                 QtCore.QTimer.singleShot(0, self._fit_to_view)
+        return super().eventFilter(obj, ev)'''
+        
+    def eventFilter(self, obj, ev):
+        if self._sa and obj is self._sa.viewport() and ev.type() == QtCore.QEvent.Resize:
+            if not self._user_zoomed:
+                QtCore.QTimer.singleShot(0, self._fit_to_view)
+            else:
+                # After the user has zoomed, keep it neat on viewport size changes
+                QtCore.QTimer.singleShot(0, self._enforce_bounds)
         return super().eventFilter(obj, ev)
 
     # ---------- BASIC HELPERS ----------
@@ -692,9 +701,25 @@ class CrackAnnotator(QtWidgets.QWidget):
                     QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )'''
 
+    #def _min_scale(self):
+    #    # absolute minimum: fit-to-view (no smaller)
+    #    return max(0.01, self._fit_scale or 1.0)
+    
     def _min_scale(self):
-        # absolute minimum: fit-to-view (no smaller)
-        return max(0.01, self._fit_scale or 1.0)
+        """
+        Minimum zoom so the entire image always fits within the viewport.
+        Prevents shimmying when zoomed all the way out.
+        """
+        if not self._sa or not self.img_w or not self.img_h:
+            return 1.0
+
+        vp = self._sa.viewport()
+        vw, vh = max(1, vp.width()), max(1, vp.height())
+
+        # Fit-to-view scale: image fits both width and height
+        fit_scale = min(vw / float(self.img_w), vh / float(self.img_h))
+        return max(0.01, fit_scale)
+
     
     def _fit_to_view(self):
         if self.image_pixmap is None:
@@ -1036,7 +1061,7 @@ class CrackAnnotator(QtWidgets.QWidget):
 
 
     # ========= bounds clamp for float pan =========
-    def _enforce_bounds(self, margin_frac=0.25):
+    '''def _enforce_bounds(self, margin_frac=0.25):
         """Keep image within viewport-ish bounds, allow some whitespace margin."""
         if not self._sa:
             return
@@ -1059,8 +1084,62 @@ class CrackAnnotator(QtWidgets.QWidget):
         after = (self.pan_x, self.pan_y)
 
         if before != after:
-            print(f"[BOUNDS] pan {before} -> {after}  (vw={vw},vh={vh}, sw={sw:.1f},sh={sh:.1f})")
+            print(f"[BOUNDS] pan {before} -> {after}  (vw={vw},vh={vh}, sw={sw:.1f},sh={sh:.1f})")'''
 
+    def _enforce_bounds(self, margin_frac=None):
+        """
+        Keep image neatly within viewport.
+        - If the scaled image is smaller than the viewport on an axis -> hard center it on that axis.
+        - If larger -> clamp pan on that axis with a small white margin.
+        """
+        if not self._sa:
+            return
+
+        vp = self._sa.viewport()
+        vw, vh = float(vp.width()), float(vp.height())
+        sw, sh = float(self.img_w) * float(self.scale), float(self.img_h) * float(self.scale)
+
+        # configurable margin fraction (portion of viewport allowed as whitespace on each side)
+        if margin_frac is None:
+            margin_frac = getattr(self, "_pan_margin_frac", 0.05)  # default ~8%
+        
+        max_margin = int(min(vw, vh) * margin_frac)
+        max_x_margin = max_margin
+        max_y_margin = max_margin
+
+        prev_pan_x, prev_pan_y = self.pan_x, self.pan_y
+
+        # --- X axis ---
+        if sw <= vw:
+            # Image narrower than viewport: center exactly (no drift, no shimmy)
+            self.pan_x = (vw - sw) * 0.5
+        else:
+            # Image wider than viewport: clamp with margin
+            #max_x_margin = vw * margin_frac
+            min_x = vw - sw - max_x_margin   # far left
+            max_x = max_x_margin             # far right
+            if self.pan_x < min_x:
+                self.pan_x = min_x
+            elif self.pan_x > max_x:
+                self.pan_x = max_x
+
+        # --- Y axis ---
+        if sh <= vh:
+            # Image shorter than viewport: center exactly
+            self.pan_y = (vh - sh) * 0.5
+        else:
+            # Image taller than viewport: clamp with margin
+            #max_y_margin = vh * margin_frac
+            min_y = vh - sh - max_y_margin   # top
+            max_y = max_y_margin             # bottom
+            if self.pan_y < min_y:
+                self.pan_y = min_y
+            elif self.pan_y > max_y:
+                self.pan_y = max_y
+
+        if (prev_pan_x, prev_pan_y) != (self.pan_x, self.pan_y):
+            print(f"[BOUNDS] clamped/centered pan: ({prev_pan_x:.1f},{prev_pan_y:.1f}) -> ({self.pan_x:.1f},{self.pan_y:.1f})  "
+                f"(vw={vw:.0f},vh={vh:.0f}, sw={sw:.0f},sh={sh:.0f}, margin={margin_frac:.2f})")
 
     # ========= precise cursor-anchored zoom (NO scrollbar drift) + deep debug =========
     def _zoom_at(self, pos: QtCore.QPoint, factor: float):
