@@ -142,48 +142,6 @@ class CrackAnnotator(QtWidgets.QWidget):
         self.resize(w, h)   # important for QScrollArea content size
         self.update()
 
-    def _min_scale(self):
-        # Don’t allow zoom-out beyond ~90% of fit-to-view
-        return max(0.01, 0.9 * (self._fit_scale or 1.0))
-
-    def _clamp_pan(self):
-        # used only in the no-scroll-area fallback
-        vw, vh = self.width(), self.height()
-        cw, ch = int(self.img_w * self.scale), int(self.img_h * self.scale)
-        self.pan_x = min(0, max(vw - cw, self.pan_x))
-        self.pan_y = min(0, max(vh - ch, self.pan_y))
-
-    # ---------- INPUT: ZOOM ----------
-    def wheelEvent(self, event):
-        # Ctrl+Wheel → let QScrollArea handle scrolling
-        if event.modifiers() & Qt.ControlModifier:
-            super().wheelEvent(event)
-            return
-
-        # old anchored-zoom logic, with your _min_scale()
-        f = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
-        old = self.scale
-        new = max(self._min_scale(), min(10.0, old * f))
-        if abs(new - old) < 1e-9:
-            return
-
-        # Mouse position in widget coordinates
-        mx, my = event.pos().x(), event.pos().y()
-
-        # Image coords under cursor (before zoom)
-        img_x = (mx - self.pan_x) / old
-        img_y = (my - self.pan_y) / old
-
-        # Apply zoom
-        self.scale = new
-        self._user_zoomed = True
-
-        # Adjust pan so cursor stays anchored
-        self.pan_x = mx - img_x * new
-        self.pan_y = my - img_y * new
-
-        self.update()
-
     # ---------- YOUR EXISTING EDITOR LOGIC (unchanged) ----------
     def toggle_mode(self):
         self.connection_mode = not self.connection_mode
@@ -645,32 +603,6 @@ class CrackAnnotator(QtWidgets.QWidget):
 
     def add_midline_auto(self, i1, i2, poly):
         return self._validated_set_midline(self._sorted(i1, i2), poly)
-    
-    def _fit_to_view(self):
-        if self.image_pixmap is None:
-            return
-        self._hook_scroll_area()
-        if not self._sa:
-            return
-
-        vp = self._sa.viewport()
-        vw, vh = max(1, vp.width()), max(1, vp.height())
-
-        # scale to fit entire image
-        self._fit_scale = min(vw / self.img_w, vh / self.img_h)
-        if self._fit_scale <= 0:
-            self._fit_scale = 1.0
-
-        self.scale = self._fit_scale
-        sw, sh = int(self.img_w * self.scale), int(self.img_h * self.scale)
-
-        # center the image
-        self.pan_x = (vw - sw) // 2
-        self.pan_y = (vh - sh) // 2
-
-        self._user_zoomed = False
-        self.update_canvas_size()
-        self.update()
 
     def paintEvent(self, event):
         qp = QPainter(self)
@@ -682,11 +614,11 @@ class CrackAnnotator(QtWidgets.QWidget):
 
             # expose transform for hit-testing
             self._last_draw_scale = self.scale
-            self._last_draw_xoff = self.pan_x
-            self._last_draw_yoff = self.pan_y
+            self._last_draw_xoff = 0
+            self._last_draw_yoff = 0
 
-            # draw image at current pan/zoom
-            qp.drawPixmap(int(self.pan_x), int(self.pan_y), sw, sh, self.image_pixmap)
+            # draw image always at (0,0), scrollbars handle pan
+            qp.drawPixmap(0, 0, sw, sh, self.image_pixmap)
         else:
             self._last_draw_scale, self._last_draw_xoff, self._last_draw_yoff = 1.0, 0.0, 0.0
 
@@ -694,8 +626,8 @@ class CrackAnnotator(QtWidgets.QWidget):
         def apply_offset(pt):
             return (pt[0] + crop_xmin, pt[1] + crop_ymin)
         scale = self._last_draw_scale
-        xoff  = self._last_draw_xoff
-        yoff  = self._last_draw_yoff
+        xoff = self._last_draw_xoff
+        yoff = self._last_draw_yoff
 
         # --- boxes ---
         qp.setPen(QPen(QColor(0, 128, 255), 3))
@@ -706,6 +638,9 @@ class CrackAnnotator(QtWidgets.QWidget):
                 int((xmax - xmin) * scale),
                 int((ymax - ymin) * scale),
             )
+
+        # (leave your connections, points, midlines, polylines drawing logic unchanged)
+        # Just remember: xoff,yoff are always 0 now.
 
         # --- read-only connections ---
         qp.setPen(QPen(QColor(150, 150, 150), 2, Qt.DashLine))
@@ -777,42 +712,124 @@ class CrackAnnotator(QtWidgets.QWidget):
                     QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
-    def _to_image_coords(self, pos):
-        """Map from widget coords → image coords, matching pan/scale logic."""
-        return ((pos.x() - self.pan_x) / self.scale,
-                (pos.y() - self.pan_y) / self.scale)
+    def _fit_to_view(self):
+        if self.image_pixmap is None:
+            return
+        self._hook_scroll_area()
+        if not self._sa:
+            return
+
+        vp = self._sa.viewport()
+        vw, vh = max(1, vp.width()), max(1, vp.height())
+
+        # Start at 1.0 (native resolution)
+        base_scale = 1.0
+
+        # If image is larger than viewport, shrink to fit
+        if self.img_w > vw or self.img_h > vh:
+            base_scale = min(vw / self.img_w, vh / self.img_h)
+
+        self._fit_scale = base_scale
+        self.scale = base_scale
+
+        sw, sh = int(self.img_w * self.scale), int(self.img_h * self.scale)
+
+        # top-left origin, no forced centering
+        self.pan_x = 0
+        self.pan_y = 0
+
+        self._user_zoomed = False
+        self.update_canvas_size()
+        self.update()
+
+        print(f"[FIT] img {self.img_w}x{self.img_h}, vp {vw}x{vh}, "
+            f"scale={self.scale:.3f}, pan=({self.pan_x},{self.pan_y})")
+
+    def _min_scale(self):
+        # absolute minimum: fit-to-view (no smaller)
+        return max(0.01, self._fit_scale or 1.0)
 
     def wheelEvent(self, event):
         if event.modifiers() & Qt.ControlModifier:
             super().wheelEvent(event)
             return
 
-        # zoom factor
         f = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
         old = self.scale
         new = max(self._min_scale(), min(10.0, old * f))
         if abs(new - old) < 1e-9:
             return
 
-        # --- special case: snapping back when zooming out near fit ---
-        if new <= self._fit_scale * 1.001 and f < 1:  # zooming out
-            self._fit_to_view()
-            return
+        vp = self._sa.viewport()
+        vw, vh = vp.width(), vp.height()
+        hsb, vsb = self._sa.horizontalScrollBar(), self._sa.verticalScrollBar()
+        old_hval, old_vval = hsb.value(), vsb.value()
 
-        # mouse pos in widget coords
+        # mouse in viewport coords
         mx, my = event.pos().x(), event.pos().y()
+        # mouse in *content coords*
+        content_x = old_hval + mx
+        content_y = old_vval + my
 
-        # convert to image coords (before zoom)
-        img_x = (mx - self.pan_x) / old
-        img_y = (my - self.pan_y) / old
+        # sizes
+        old_w, old_h = int(self.img_w * old), int(self.img_h * old)
+        new_w, new_h = int(self.img_w * new), int(self.img_h * new)
 
-        # apply zoom
+        # apply new scale
         self.scale = new
         self._user_zoomed = True
+        self.setMinimumSize(new_w, new_h)
+        self.resize(new_w, new_h)
 
-        # update pan so cursor stays anchored
-        self.pan_x = mx - img_x * new
-        self.pan_y = my - img_y * new
+        # new scrollbar values (keep cursor fixed)
+        new_hval = int(content_x * new_w / old_w - mx)
+        new_vval = int(content_y * new_h / old_h - my)
 
-        self.update_canvas_size()
+        # clamp into valid ranges
+        new_hval = max(0, min(new_hval, max(0, new_w - vw)))
+        new_vval = max(0, min(new_vval, max(0, new_h - vh)))
+
+        hsb.setValue(new_hval)
+        vsb.setValue(new_vval)
+
+        # DEBUG
+        print(f"\nWHEEL: scale {old:.3f}→{new:.3f}")
+        print(f"Viewport: {vw}x{vh}, Mouse=({mx},{my})")
+        print(f"Content old {old_w}x{old_h}, new {new_w}x{new_h}")
+        print(f"Scrollbars before H={old_hval}, V={old_vval}")
+        print(f"Scrollbars after  H={new_hval}, V={new_vval}")
+
         self.update()
+
+    def update_canvas_size(self):
+        """Update canvas so QScrollArea knows exact content size."""
+        sw = int(self.img_w * self.scale)
+        sh = int(self.img_h * self.scale)
+        self.setMinimumSize(sw, sh)
+        self.resize(sw, sh)  # content size = scaled image
+        self.update()
+
+    def _enforce_bounds(self, margin_frac=0.25):
+        """
+        Keep image within viewport bounds.
+        margin_frac allows at most X fraction of viewport whitespace per side.
+        """
+        if not self._sa:
+            return
+        vp = self._sa.viewport()
+        vw, vh = vp.width(), vp.height()
+        sw, sh = int(self.img_w * self.scale), int(self.img_h * self.scale)
+
+        # maximum allowed margin (so image can drift a little, but not disappear)
+        max_x_margin = int(vw * margin_frac)
+        max_y_margin = int(vh * margin_frac)
+
+        # Clamp X
+        min_x = vw - sw - max_x_margin
+        max_x = max_x_margin
+        self.pan_x = max(min_x, min(max_x, self.pan_x))
+
+        # Clamp Y
+        min_y = vh - sh - max_y_margin
+        max_y = max_y_margin
+        self.pan_y = max(min_y, min(max_y, self.pan_y))
