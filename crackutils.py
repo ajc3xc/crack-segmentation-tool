@@ -83,6 +83,9 @@ class CrackUtils:
 
     # --- moved verbatim ---
     def _debug_print_atomic_cracks(self, label):
+        if not hasattr(self, "annotation") or self.annotation is None:
+            error(f"No annotation object when called from {label}")
+            return
         ann = self.annotation.get("annotations", {})
         cracks = ann.get("atomic_cracks", {})
         print(f"\n[DEBUG] {label}: {len(cracks)} cracks currently stored.")
@@ -904,6 +907,10 @@ class CrackUtils:
         import numpy as np
         import matplotlib.pyplot as plt
         from skimage.segmentation import mark_boundaries  # for colored boundaries
+        
+        if not hasattr(self, "image_names") or not self.image_names:
+            error("No images loaded. Please load images before using change_image().")
+            return
 
         self.current_crack_id = None
         self.bb_pts_list = []

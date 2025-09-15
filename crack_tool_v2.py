@@ -1304,9 +1304,12 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             error(e)
     
     def select_end_points_manmidlines(self):
-        self._debug_print_atomic_cracks("select_end_points_manmidlines START")
         if not hasattr(self, "original_image") or self.original_image is None:
             error("No original image found.")
+            return
+        
+        if not hasattr(self, "annotation") or self.annotation is None:
+            error("No annotation data found.")
             return
 
         from PyQt5.QtWidgets import (
@@ -1554,43 +1557,6 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             update_controls_visibility()
         ))
         update_controls_visibility()
-
-        '''def on_done():
-            if annot.polyline_mode and annot._is_drawing:
-                if not confirm_discard():
-                    return
-                annot.set_mode_polyline(False)
-
-            ok, bad = all_points_in_boxes()
-            if not ok:
-                QMessageBox.warning(dlg, "Points outside boxes", "All points must be inside a bounding box.")
-                return
-
-            self.user_points = annot.points
-            self.user_connections = [c for c in annot.connections if c not in annot.readonly_connections]
-
-            self.endpoint_pairs = [
-                (self.user_points[i1], self.user_points[i2])
-                for (i1, i2) in self.user_connections
-            ]
-
-            self.manual_endpoint_pairs = []
-            for (i1, i2), poly in annot.midlines.items():
-                if i1 != i2:  # Final check to prevent self-midline
-                    self.manual_endpoint_pairs.append((self.user_points[i1], self.user_points[i2]))
-
-            self.manual_midlines_tmp = {
-                f"{i1}_{i2}": [[float(x), float(y)] for (x, y) in poly]
-                for (i1, i2), poly in annot.midlines.items() if i1 != i2
-            }
-
-            if hasattr(self, "current_crack_id"):
-                crack_id_str = str(self.current_crack_id)
-                crack_entry = self.annotation.get("annotations", {}).get("atomic_cracks", {}).setdefault(crack_id_str, {})
-                crack_entry["user_points"] = list(self.user_points)
-                crack_entry["user_connections"] = list(self.user_connections)
-
-            dlg.accept()'''
             
         def on_done():
             if annot.polyline_mode and annot._is_drawing:
@@ -1687,12 +1653,12 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         # ---- helpers ---------------------------------------------------------
         def _ensure_ann():
             # make sure base structure exists
-            if not isinstance(self.annotation, dict):
+            if not hasattr(self, "annotation") or not isinstance(self.annotation, dict):
                 self.annotation = {}
             ann = self.annotation.setdefault("annotations", {})
             ann.setdefault("atomic_cracks", {})
             ann.setdefault("combined_cracks", {})
-            # scrub any stray non-numeric keys like "None"
+            # scrub stray non-numeric keys
             bad_keys = [k for k in ann["atomic_cracks"].keys() if not str(k).isdigit()]
             for bk in bad_keys:
                 ann["atomic_cracks"].pop(bk, None)
