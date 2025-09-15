@@ -246,7 +246,7 @@ class CrackAnnotator(QtWidgets.QWidget):
                     hit = key
         return hit if best <= px_thresh else None
 
-    def _delete_point_reindex(self, idx):
+    '''def _delete_point_reindex(self, idx):
         self.connections = [(i1 - (i1 > idx), i2 - (i2 > idx))
                             for (i1, i2) in self.connections if i1 != idx and i2 != idx]
         new_mid = {}
@@ -257,7 +257,7 @@ class CrackAnnotator(QtWidgets.QWidget):
             ni2 = i2 - (i2 > idx)
             new_mid[(min(ni1, ni2), max(ni1, ni2))] = poly
         self.midlines = new_mid
-        self.points.pop(idx)
+        self.points.pop(idx)'''
 
     # ---------- bbox helpers ----------
     def _point_box_index(self, x, y):
@@ -1128,6 +1128,98 @@ class CrackAnnotator(QtWidgets.QWidget):
 
         self.update()
 
+    '''def _zoom_at(self, pos: QtCore.QPoint, factor: float):
+        """Zoom with the anchor fixed under `pos` (widget coords)."""
+        self._hook_scroll_area()
+
+        old = self.scale
+        new = max(self._min_scale(), min(10.0, old * factor))
+        if abs(new - old) < 1e-9:
+            return
+
+        if not self._sa:
+            self.scale = new
+            self._user_zoomed = True
+            self.update_canvas_size()
+            return
+
+        vp = self._sa.viewport()
+        vw, vh = vp.width(), vp.height()
+        hsb, vsb = self._sa.horizontalScrollBar(), self._sa.verticalScrollBar()
+        old_hval, old_vval = hsb.value(), vsb.value()
+
+        mx, my = int(pos.x()), int(pos.y())
+
+        # Anchor pixel BEFORE zoom (in image coords)
+        img_x = (old_hval + mx) / max(old, 1e-9)
+        img_y = (old_vval + my) / max(old, 1e-9)
+
+        # Apply new scale
+        self.scale = new
+        self._user_zoomed = True
+        new_w, new_h = int(self.img_w * new), int(self.img_h * new)
+        self.setMinimumSize(new_w, new_h)
+        self.resize(new_w, new_h)
+
+        # Scroll target (ideal to keep cursor fixed)
+        new_hval = int(img_x * new - mx)
+        new_vval = int(img_y * new - my)
+
+        # Clamp / recenter if smaller than viewport
+        if new_w > vw:
+            new_hval = max(0, min(new_hval, new_w - vw))
+        else:
+            new_hval = (new_w - vw) // 2  # recenter X
+
+        if new_h > vh:
+            new_vval = max(0, min(new_vval, new_h - vh))
+        else:
+            new_vval = (new_h - vh) // 2  # recenter Y
+
+        # Apply scrollbars
+        hsb.setValue(new_hval)
+        vsb.setValue(new_vval)
+
+        # Debug info
+        final_x = img_x * new - hsb.value()
+        final_y = img_y * new - vsb.value()
+
+        print("\n=== _zoom_at DEBUG ===")
+        print(f"factor: {factor:.3f}")
+        print(f"old scale: {old:.3f}, new scale: {new:.3f}")
+        print(f"viewport size: {vw}x{vh}")
+        print(f"image size: {self.img_w}x{self.img_h}")
+        print(f"content size (new): {new_w}x{new_h}")
+        print(f"cursor pos (widget): ({mx},{my})")
+        print(f"scrollbar old: H={old_hval}, V={old_vval}, max=({hsb.maximum()},{vsb.maximum()})")
+        print(f"anchor before zoom (img_x,img_y): ({img_x:.2f},{img_y:.2f})")
+        print(f"scrollbar new: H={hsb.value()}, V={vsb.value()}, max=({hsb.maximum()},{vsb.maximum()})")
+        print(f"anchor after zoom (viewport coords): ({final_x:.2f},{final_y:.2f})")
+        print(f"cursor vs anchor delta: dx={final_x - mx:.2f}, dy={final_y - my:.2f})")
+        print("======================\n")
+
+        self.update()'''
+
+    def _delete_point_reindex(self, idx):
+        """Delete a point and reindex everything cleanly."""
+        self.connections = [(i1 - (i1 > idx), i2 - (i2 > idx))
+                            for (i1, i2) in self.connections if i1 != idx and i2 != idx]
+        new_mid = {}
+        for (i1, i2), poly in self.midlines.items():
+            if i1 == idx or i2 == idx:
+                continue
+            ni1 = i1 - (i1 > idx)
+            ni2 = i2 - (i2 > idx)
+            new_mid[(min(ni1, ni2), max(ni1, ni2))] = poly
+        self.midlines = new_mid
+        self.points.pop(idx)
+
+        # --- FIX hover glitch ---
+        self.hover_index = None
+        self.hover_line_index = None
+        self._hover_midline_key = None
+
+        self.update()
 
     # ========= wheel zoom (uses float zoom_at; blocks default scroll) =========
     def wheelEvent(self, event: QtGui.QWheelEvent):
