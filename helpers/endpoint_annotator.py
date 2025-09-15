@@ -712,6 +712,10 @@ class CrackAnnotator(QtWidgets.QWidget):
                     QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
+    def _min_scale(self):
+        # absolute minimum: fit-to-view (no smaller)
+        return max(0.01, self._fit_scale or 1.0)
+    
     def _fit_to_view(self):
         if self.image_pixmap is None:
             return
@@ -722,19 +726,17 @@ class CrackAnnotator(QtWidgets.QWidget):
         vp = self._sa.viewport()
         vw, vh = max(1, vp.width()), max(1, vp.height())
 
-        # Start at 1.0 (native resolution)
-        base_scale = 1.0
-
-        # If image is larger than viewport, shrink to fit
-        if self.img_w > vw or self.img_h > vh:
+        # start at native res unless both dimensions exceed viewport
+        if self.img_w > vw and self.img_h > vh:
             base_scale = min(vw / self.img_w, vh / self.img_h)
+        else:
+            base_scale = 1.0
 
         self._fit_scale = base_scale
         self.scale = base_scale
 
         sw, sh = int(self.img_w * self.scale), int(self.img_h * self.scale)
 
-        # top-left origin, no forced centering
         self.pan_x = 0
         self.pan_y = 0
 
@@ -745,9 +747,6 @@ class CrackAnnotator(QtWidgets.QWidget):
         print(f"[FIT] img {self.img_w}x{self.img_h}, vp {vw}x{vh}, "
             f"scale={self.scale:.3f}, pan=({self.pan_x},{self.pan_y})")
 
-    def _min_scale(self):
-        # absolute minimum: fit-to-view (no smaller)
-        return max(0.01, self._fit_scale or 1.0)
 
     def wheelEvent(self, event):
         if event.modifiers() & Qt.ControlModifier:
@@ -765,34 +764,28 @@ class CrackAnnotator(QtWidgets.QWidget):
         hsb, vsb = self._sa.horizontalScrollBar(), self._sa.verticalScrollBar()
         old_hval, old_vval = hsb.value(), vsb.value()
 
-        # mouse in viewport coords
         mx, my = event.pos().x(), event.pos().y()
-        # mouse in *content coords*
         content_x = old_hval + mx
         content_y = old_vval + my
 
-        # sizes
         old_w, old_h = int(self.img_w * old), int(self.img_h * old)
         new_w, new_h = int(self.img_w * new), int(self.img_h * new)
 
-        # apply new scale
         self.scale = new
         self._user_zoomed = True
         self.setMinimumSize(new_w, new_h)
         self.resize(new_w, new_h)
 
-        # new scrollbar values (keep cursor fixed)
         new_hval = int(content_x * new_w / old_w - mx)
         new_vval = int(content_y * new_h / old_h - my)
 
-        # clamp into valid ranges
-        new_hval = max(0, min(new_hval, max(0, new_w - vw)))
-        new_vval = max(0, min(new_vval, max(0, new_h - vh)))
+        # clamp only if image bigger than viewport
+        new_hval = max(0, min(new_hval, max(0, new_w - vw))) if new_w > vw else 0
+        new_vval = max(0, min(new_vval, max(0, new_h - vh))) if new_h > vh else 0
 
         hsb.setValue(new_hval)
         vsb.setValue(new_vval)
 
-        # DEBUG
         print(f"\nWHEEL: scale {old:.3f}→{new:.3f}")
         print(f"Viewport: {vw}x{vh}, Mouse=({mx},{my})")
         print(f"Content old {old_w}x{old_h}, new {new_w}x{new_h}")
