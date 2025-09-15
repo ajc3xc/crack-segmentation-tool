@@ -28,9 +28,9 @@ class CrackAnnotator(QtWidgets.QWidget):
         # --- zoom / pan / fit state ---
         self.scale = 1.0
         self.pan_x, self.pan_y = 0.0, 0.0
-        self._fit_scale = 1.0        # computed when we can measure the viewport
-        self._user_zoomed = False    # once True, we stop auto-fit on resize
-        self._sa = None              # cached scroll area
+        self._fit_scale = 1.0
+        self._user_zoomed = False
+        self._sa = None
         self._last_draw_scale = 1.0
         self._last_draw_xoff = 0.0
         self._last_draw_yoff = 0.0
@@ -78,6 +78,9 @@ class CrackAnnotator(QtWidgets.QWidget):
         # hook & fit after layout settles
         QtCore.QTimer.singleShot(0, self._late_init)
 
+        # --- NEW: enable pinch gestures (touchpad, Mac trackpad, etc.) ---
+        self.grabGesture(Qt.PinchGesture)
+
     # ---------- FIT/SCROLL AREA HOOKS ----------
     def _late_init(self):
         self._hook_scroll_area()
@@ -100,33 +103,6 @@ class CrackAnnotator(QtWidgets.QWidget):
                 # defer a tick so sizes are final
                 QtCore.QTimer.singleShot(0, self._fit_to_view)
         return super().eventFilter(obj, ev)
-
-    def _fit_to_view(self):
-        if self.image_pixmap is None:
-            return
-        self._hook_scroll_area()
-        if not self._sa:
-            return
-
-        vp = self._sa.viewport()
-        vw, vh = max(1, vp.width()), max(1, vp.height())
-
-        # compute fit scale to show the WHOLE image
-        self._fit_scale = min(vw / self.img_w, vh / self.img_h)
-        if self._fit_scale <= 0:
-            self._fit_scale = 1.0
-
-        self.scale = self._fit_scale
-        self.pan_x = 0.0
-        self.pan_y = 0.0
-        self.update_canvas_size()
-
-        # center inside the viewport
-        cw, ch = int(self.img_w * self.scale), int(self.img_h * self.scale)
-        hsb, vsb = self._sa.horizontalScrollBar(), self._sa.verticalScrollBar()
-        hsb.setValue(max(0, (cw - vw) // 2))
-        vsb.setValue(max(0, (ch - vh) // 2))
-        self.update()
 
     # ---------- BASIC HELPERS ----------
     def _find_scroll_area(self):
@@ -385,7 +361,7 @@ class CrackAnnotator(QtWidgets.QWidget):
         return True
 
     # ---------- mouse handlers ----------
-    def mousePressEvent(self, event):
+    '''def mousePressEvent(self, event):
         # image coords under the cursor (using pan/scale)
         img_rect = QtCore.QRect(
             int(self._last_draw_xoff),
@@ -530,7 +506,7 @@ class CrackAnnotator(QtWidgets.QWidget):
 
         # midline hit-test wants screen coords; that's event.pos()
         self._hover_midline_key = self._midline_hit_test(event.pos(), 10.0) if not self._is_drawing else None
-        self.update()
+        self.update()'''
 
     def add_midline_auto(self, i1, i2, poly):
         """
@@ -604,7 +580,7 @@ class CrackAnnotator(QtWidgets.QWidget):
     def add_midline_auto(self, i1, i2, poly):
         return self._validated_set_midline(self._sorted(i1, i2), poly)
 
-    def paintEvent(self, event):
+    '''def paintEvent(self, event):
         qp = QPainter(self)
         qp.setRenderHint(QPainter.Antialiasing)
 
@@ -710,7 +686,7 @@ class CrackAnnotator(QtWidgets.QWidget):
                 qp.drawLine(
                     QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
                     QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
-                )
+                )'''
 
     def _min_scale(self):
         # absolute minimum: fit-to-view (no smaller)
@@ -726,19 +702,24 @@ class CrackAnnotator(QtWidgets.QWidget):
         vp = self._sa.viewport()
         vw, vh = max(1, vp.width()), max(1, vp.height())
 
-        # start at native res unless both dimensions exceed viewport
-        if self.img_w > vw and self.img_h > vh:
-            base_scale = min(vw / self.img_w, vh / self.img_h)
-        else:
-            base_scale = 1.0
+        # always start at native resolution
+        base_scale = 1.0
 
         self._fit_scale = base_scale
         self.scale = base_scale
 
         sw, sh = int(self.img_w * self.scale), int(self.img_h * self.scale)
 
-        self.pan_x = 0
-        self.pan_y = 0
+        # center if smaller than viewport, else align to top-left
+        if sw < vw:
+            self.pan_x = (vw - sw) // 2
+        else:
+            self.pan_x = 0
+
+        if sh < vh:
+            self.pan_y = (vh - sh) // 2
+        else:
+            self.pan_y = 0
 
         self._user_zoomed = False
         self.update_canvas_size()
@@ -747,54 +728,7 @@ class CrackAnnotator(QtWidgets.QWidget):
         print(f"[FIT] img {self.img_w}x{self.img_h}, vp {vw}x{vh}, "
             f"scale={self.scale:.3f}, pan=({self.pan_x},{self.pan_y})")
 
-
-    def wheelEvent(self, event):
-        if event.modifiers() & Qt.ControlModifier:
-            super().wheelEvent(event)
-            return
-
-        f = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
-        old = self.scale
-        new = max(self._min_scale(), min(10.0, old * f))
-        if abs(new - old) < 1e-9:
-            return
-
-        vp = self._sa.viewport()
-        vw, vh = vp.width(), vp.height()
-        hsb, vsb = self._sa.horizontalScrollBar(), self._sa.verticalScrollBar()
-        old_hval, old_vval = hsb.value(), vsb.value()
-
-        mx, my = event.pos().x(), event.pos().y()
-        content_x = old_hval + mx
-        content_y = old_vval + my
-
-        old_w, old_h = int(self.img_w * old), int(self.img_h * old)
-        new_w, new_h = int(self.img_w * new), int(self.img_h * new)
-
-        self.scale = new
-        self._user_zoomed = True
-        self.setMinimumSize(new_w, new_h)
-        self.resize(new_w, new_h)
-
-        new_hval = int(content_x * new_w / old_w - mx)
-        new_vval = int(content_y * new_h / old_h - my)
-
-        # clamp only if image bigger than viewport
-        new_hval = max(0, min(new_hval, max(0, new_w - vw))) if new_w > vw else 0
-        new_vval = max(0, min(new_vval, max(0, new_h - vh))) if new_h > vh else 0
-
-        hsb.setValue(new_hval)
-        vsb.setValue(new_vval)
-
-        print(f"\nWHEEL: scale {old:.3f}→{new:.3f}")
-        print(f"Viewport: {vw}x{vh}, Mouse=({mx},{my})")
-        print(f"Content old {old_w}x{old_h}, new {new_w}x{new_h}")
-        print(f"Scrollbars before H={old_hval}, V={old_vval}")
-        print(f"Scrollbars after  H={new_hval}, V={new_vval}")
-
-        self.update()
-
-    def update_canvas_size(self):
+    '''def update_canvas_size(self):
         """Update canvas so QScrollArea knows exact content size."""
         sw = int(self.img_w * self.scale)
         sh = int(self.img_h * self.scale)
@@ -826,3 +760,574 @@ class CrackAnnotator(QtWidgets.QWidget):
         min_y = vh - sh - max_y_margin
         max_y = max_y_margin
         self.pan_y = max(min_y, min(max_y, self.pan_y))
+    
+    def event(self, ev):
+        if ev.type() == QtCore.QEvent.Gesture:
+            return self.gestureEvent(ev)
+        return super().event(ev)
+
+    def gestureEvent(self, ev: QtWidgets.QGestureEvent):
+        pinch = ev.gesture(Qt.PinchGesture)
+        if pinch:
+            scale_change = pinch.scaleFactor()
+            if abs(scale_change - 1.0) > 1e-3:
+                center = pinch.centerPoint().toPoint()
+                self._zoom_at(center, scale_change)
+        return True
+
+    def _zoom_at(self, pos: QtCore.QPoint, factor: float):
+        self._hook_scroll_area()
+
+        old = self.scale
+        new = max(self._min_scale(), min(10.0, old * factor))
+        if abs(new - old) < 1e-9:
+            return
+
+        if not self._sa:
+            self.scale = new
+            self._user_zoomed = True
+            self.update_canvas_size()
+            return
+
+        vp = self._sa.viewport()
+        vw, vh = vp.width(), vp.height()
+        hsb, vsb = self._sa.horizontalScrollBar(), self._sa.verticalScrollBar()
+        old_hval, old_vval = hsb.value(), vsb.value()
+
+        mx, my = int(pos.x()), int(pos.y())
+
+        # Anchor pixel BEFORE zoom
+        img_x = (old_hval + mx) / max(old, 1e-9)
+        img_y = (old_vval + my) / max(old, 1e-9)
+
+        # Apply new scale
+        self.scale = new
+        self._user_zoomed = True
+        new_w, new_h = int(self.img_w * new), int(self.img_h * new)
+        self.setMinimumSize(new_w, new_h)
+        self.resize(new_w, new_h)
+
+        # Scroll target (ideal)
+        new_hval = int(img_x * new - mx)
+        new_vval = int(img_y * new - my)
+
+        # Clamp
+        if new_w > vw:
+            new_hval = max(0, min(new_hval, new_w - vw))
+        else:
+            new_hval = (new_w - vw) // 2
+
+        if new_h > vh:
+            new_vval = max(0, min(new_vval, new_h - vh))
+        else:
+            new_vval = (new_h - vh) // 2
+
+        # Apply
+        hsb.setValue(new_hval)
+        vsb.setValue(new_vval)
+
+        # Debug: compute where that anchor ended up
+        final_x = img_x * new - hsb.value()
+        final_y = img_y * new - vsb.value()
+
+        print("\n=== _zoom_at DEBUG ===")
+        print(f"factor: {factor:.3f}")
+        print(f"old scale: {old:.3f}, new scale: {new:.3f}")
+        print(f"viewport size: {vw}x{vh}")
+        print(f"image size: {self.img_w}x{self.img_h}")
+        print(f"content size (new): {new_w}x{new_h}")
+        print(f"cursor pos (widget): ({mx},{my})")
+        print(f"scrollbar old: H={old_hval}, V={old_vval}, max=({hsb.maximum()},{vsb.maximum()})")
+        print(f"anchor before zoom (img_x,img_y): ({img_x:.2f},{img_y:.2f})")
+        print(f"scrollbar new: H={hsb.value()}, V={vsb.value()}, max=({hsb.maximum()},{vsb.maximum()})")
+        print(f"anchor after zoom (viewport coords): ({final_x:.2f},{final_y:.2f})")
+        print(f"cursor vs anchor delta: dx={final_x - mx:.2f}, dy={final_y - my:.2f})")
+        print("======================\n")
+
+        self.update()
+   
+    def wheelEvent(self, event: QtGui.QWheelEvent):
+        # Let Ctrl+Wheel pass through for default scroll behavior if desired
+        if event.modifiers() & Qt.ControlModifier:
+            super().wheelEvent(event)
+            return
+
+        # Touchpads sometimes send pixelDelta instead of angleDelta
+        delta = event.angleDelta().y()
+        if delta == 0 and not event.pixelDelta().isNull():
+            delta = event.pixelDelta().y()
+        if delta == 0:
+            return  # no useful delta
+
+        factor = 1.2 if delta > 0 else 1 / 1.2
+        self._zoom_at(event.pos(), factor)
+        event.accept()
+
+    def event(self, ev):
+        if ev.type() == QtCore.QEvent.Gesture:
+            return self.gestureEvent(ev)
+        return super().event(ev)
+
+    def gestureEvent(self, ev: QtWidgets.QGestureEvent):
+        pinch = ev.gesture(Qt.PinchGesture)
+        if pinch:
+            scale_change = pinch.scaleFactor()
+            if abs(scale_change - 1.0) > 1e-3:
+                center = pinch.centerPoint().toPoint()
+                self._zoom_at(center, scale_change)
+        return True'''
+
+
+    # ========= paintEvent (draw with float pan_x/pan_y) =========
+    def paintEvent(self, event):
+        qp = QPainter(self)
+        qp.setRenderHint(QPainter.Antialiasing)
+
+        # scaled image size
+        sw = int(self.img_w * self.scale)
+        sh = int(self.img_h * self.scale)
+
+        # expose transform for hit-testing & overlays
+        self._last_draw_scale = self.scale
+        self._last_draw_xoff = float(self.pan_x)
+        self._last_draw_yoff = float(self.pan_y)
+
+        if self.image_pixmap:
+            # draw the image at floating pan offset (cast to int for painting)
+            qp.drawPixmap(int(self.pan_x), int(self.pan_y), sw, sh, self.image_pixmap)
+
+        # convenient locals for overlay transforms
+        scale = self._last_draw_scale
+        xoff  = self._last_draw_xoff
+        yoff  = self._last_draw_yoff
+
+        crop_xmin, crop_ymin = getattr(self, "crop_offset", (0, 0))
+        def apply_offset(pt):
+            return (pt[0] + crop_xmin, pt[1] + crop_ymin)
+
+        # --- boxes ---
+        qp.setPen(QPen(QColor(0, 128, 255), 3))
+        for xmin, ymin, xmax, ymax in self.boxes:
+            qp.drawRect(
+                int(xmin * scale + xoff),
+                int(ymin * scale + yoff),
+                int((xmax - xmin) * scale),
+                int((ymax - ymin) * scale),
+            )
+
+        # --- read-only connections ---
+        qp.setPen(QPen(QColor(150, 150, 150), 2, Qt.DashLine))
+        for i1, i2 in self.readonly_connections:
+            if i1 < len(self.points) and i2 < len(self.points):
+                p1 = apply_offset(self.points[i1])
+                p2 = apply_offset(self.points[i2])
+                qp.drawLine(
+                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                )
+
+        # --- read-only midlines ---
+        qp.setPen(QPen(QColor(150, 150, 0), 2))
+        for key, poly in self.readonly_midlines.items():
+            for i in range(1, len(poly)):
+                p1 = apply_offset(poly[i - 1])
+                p2 = apply_offset(poly[i])
+                qp.drawLine(
+                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                )
+
+        # --- editable connections ---
+        for idx, (i1, i2) in enumerate(self.connections):
+            if i1 < len(self.points) and i2 < len(self.points):
+                p1 = apply_offset(self.points[i1])
+                p2 = apply_offset(self.points[i2])
+                thick = 6 if (self.connection_mode and self.connecting_index is None
+                            and idx == self.hover_line_index and self.hover_index is None) else 4
+                qp.setPen(QPen(QColor(0, 0, 0), thick))
+                qp.drawLine(
+                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                )
+
+        # --- points ---
+        for i, (x, y) in enumerate(self.points):
+            x, y = apply_offset((x, y))
+            center = QPoint(int(x * scale + xoff), int(y * scale + yoff))
+            brush = QColor(0, 200, 0) if i == self.hover_index or (
+                self.connection_mode and i == self.connecting_index) else QColor(200, 80, 80)
+            qp.setBrush(brush)
+            qp.setPen(Qt.NoPen)
+            qp.drawEllipse(center, int(self.point_radius * scale), int(self.point_radius * scale))
+
+        # --- editable midlines ---
+        qp.setPen(QPen(QColor(0, 200, 200), 4))
+        for key, poly in self.midlines.items():
+            if len(poly) < 2:
+                continue
+            thick = 8 if (self.connection_mode and key == self._hover_midline_key) else 4
+            qp.setPen(QPen(QColor(0, 200, 200), thick))
+            for i in range(1, len(poly)):
+                p1 = apply_offset(poly[i - 1])
+                p2 = apply_offset(poly[i])
+                qp.drawLine(
+                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                )
+
+        # --- live polyline (manual midline in progress) ---
+        if self.polyline_mode and len(self.polyline) >= 1:
+            qp.setPen(QPen(QColor(0, 200, 200), 4))
+            for i in range(1, len(self.polyline)):
+                p1 = apply_offset(self.polyline[i - 1])
+                p2 = apply_offset(self.polyline[i])
+                qp.drawLine(
+                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                )
+
+
+    # ========= fit-to-view (center using float pan; keep widget = viewport size) =========
+    def _fit_to_view(self):
+        if self.image_pixmap is None:
+            return
+        self._hook_scroll_area()
+        if not self._sa:
+            return
+
+        vp = self._sa.viewport()
+        vw, vh = max(1, vp.width()), max(1, vp.height())
+
+        # Start at native resolution (you can change to fit image: min(vw/img_w, vh/img_h))
+        base_scale = 1.0
+        self._fit_scale = base_scale
+        self.scale = base_scale
+
+        sw, sh = int(self.img_w * self.scale), int(self.img_h * self.scale)
+
+        # center image in viewport (float pan)
+        self.pan_x = (vw - sw) / 2.0
+        self.pan_y = (vh - sh) / 2.0
+
+        self._user_zoomed = False
+        self.update_canvas_size()
+        self.update()
+
+        print(f"[FIT] img {self.img_w}x{self.img_h}, vp {vw}x{vh}, "
+            f"scale={self.scale:.3f}, pan=({self.pan_x:.1f},{self.pan_y:.1f})")
+
+
+    # ========= keep widget the size of the viewport (no scrollbars) =========
+    def update_canvas_size(self):
+        """Keep content size equal to viewport; all pan/zoom is float-rendered."""
+        if self._sa:
+            vp = self._sa.viewport()
+            w, h = max(1, vp.width()), max(1, vp.height())
+        else:
+            # fallback before SA is known
+            w = h = 1
+        self.setMinimumSize(w, h)
+        self.resize(w, h)
+        self.update()
+
+
+    # ========= bounds clamp for float pan =========
+    def _enforce_bounds(self, margin_frac=0.25):
+        """Keep image within viewport-ish bounds, allow some whitespace margin."""
+        if not self._sa:
+            return
+        vp = self._sa.viewport()
+        vw, vh = vp.width(), vp.height()
+        sw, sh = float(self.img_w * self.scale), float(self.img_h * self.scale)
+
+        max_x_margin = vw * margin_frac
+        max_y_margin = vh * margin_frac
+
+        # The image top-left (pan_x, pan_y) is allowed to drift within these margins
+        min_x = vw - sw - max_x_margin
+        max_x = max_x_margin
+        min_y = vh - sh - max_y_margin
+        max_y = max_y_margin
+
+        before = (self.pan_x, self.pan_y)
+        self.pan_x = max(min_x, min(max_x, self.pan_x))
+        self.pan_y = max(min_y, min(max_y, self.pan_y))
+        after = (self.pan_x, self.pan_y)
+
+        if before != after:
+            print(f"[BOUNDS] pan {before} -> {after}  (vw={vw},vh={vh}, sw={sw:.1f},sh={sh:.1f})")
+
+
+    # ========= precise cursor-anchored zoom (NO scrollbar drift) + deep debug =========
+    def _zoom_at(self, pos: QtCore.QPoint, factor: float):
+        """Zoom with the anchor fixed under `pos` (widget coords), using float pan."""
+        self._hook_scroll_area()
+
+        old = float(self.scale)
+        new = float(max(self._min_scale(), min(10.0, old * float(factor))))
+        if abs(new - old) < 1e-9:
+            print("[ZOOM] Skipped (new≈old)")
+            return
+
+        if not self._sa:
+            self.scale = new
+            self._user_zoomed = True
+            self.update_canvas_size()
+            print("[ZOOM] No scroll area yet. scale set to", new)
+            return
+
+        vp = self._sa.viewport()
+        vw, vh = vp.width(), vp.height()
+
+        mx, my = float(pos.x()), float(pos.y())
+
+        # --- Anchor in image coords BEFORE zoom (using current pan/scale) ---
+        img_x = (mx - self.pan_x) / max(old, 1e-9)
+        img_y = (my - self.pan_y) / max(old, 1e-9)
+
+        # --- Apply new scale ---
+        self.scale = new
+        self._user_zoomed = True
+
+        # --- Adjust pan so that the same image pixel stays under the cursor ---
+        # mx = pan_x + img_x * new  => pan_x = mx - img_x * new
+        new_pan_x = mx - img_x * new
+        new_pan_y = my - img_y * new
+
+        # Debug before clamping
+        before_pan = (self.pan_x, self.pan_y)
+        unclamped_pan = (new_pan_x, new_pan_y)
+
+        self.pan_x, self.pan_y = new_pan_x, new_pan_y
+
+        # Clamp pan so the image doesn't disappear
+        self._enforce_bounds()
+
+        # Where does the anchor end up after clamping?
+        final_x = img_x * self.scale + self.pan_x
+        final_y = img_y * self.scale + self.pan_y
+
+        # Sizes for debug
+        sw, sh = int(self.img_w * self.scale), int(self.img_h * self.scale)
+
+        print("\n=== _zoom_at DEBUG (float pan/zoom) ===")
+        print(f"factor: {float(factor):.3f}")
+        print(f"scale: {old:.3f} -> {self.scale:.3f}")
+        print(f"viewport: {vw}x{vh}")
+        print(f"image: {self.img_w}x{self.img_h}  scaled: {sw}x{sh}")
+        print(f"cursor (widget): ({mx:.1f},{my:.1f})")
+        print(f"pan before: ({before_pan[0]:.2f},{before_pan[1]:.2f})  unclamped: ({unclamped_pan[0]:.2f},{unclamped_pan[1]:.2f})  final: ({self.pan_x:.2f},{self.pan_y:.2f})")
+        print(f"anchor (image coords before): ({img_x:.2f},{img_y:.2f})")
+        print(f"anchor after -> viewport coords: ({final_x:.2f},{final_y:.2f})")
+        print(f"cursor vs anchor delta: dx={final_x - mx:.2f}, dy={final_y - my:.2f}")
+        print("=======================================\n")
+
+        self.update()
+
+
+    # ========= wheel zoom (uses float zoom_at; blocks default scroll) =========
+    def wheelEvent(self, event: QtGui.QWheelEvent):
+        # Let Ctrl+Wheel pass through for default scroll if you ever want it
+        if event.modifiers() & Qt.ControlModifier:
+            super().wheelEvent(event)
+            return
+
+        delta = event.angleDelta().y()
+        if delta == 0 and not event.pixelDelta().isNull():
+            delta = event.pixelDelta().y()
+        if delta == 0:
+            return
+
+        factor = 1.2 if delta > 0 else 1.0 / 1.2
+        self._zoom_at(event.pos(), factor)
+        event.accept()
+
+
+    # ========= gesture routing (accept to prevent scroll area from interfering) =========
+    def event(self, ev: QtCore.QEvent):
+        if ev.type() == QtCore.QEvent.Gesture:
+            ev.accept()   # stop propagation to scrollbars/parent
+            return self.gestureEvent(ev)
+        return super().event(ev)
+
+
+    def gestureEvent(self, ev: QtWidgets.QGestureEvent):
+        pinch = ev.gesture(Qt.PinchGesture)
+        if pinch:
+            if pinch.changeFlags() & QtWidgets.QPinchGesture.ScaleFactorChanged:
+                scale_change = pinch.scaleFactor()
+                if abs(scale_change - 1.0) > 1e-3:
+                    center = pinch.centerPoint().toPoint()
+                    self._zoom_at(center, scale_change)
+            ev.accept()
+            return True
+        return False
+
+
+    # ========= mouse panning (middle button drag) with debug =========
+    def mousePressEvent(self, event):
+        # Only consider the image rect for editing clicks
+        img_rect = QtCore.QRect(
+            int(self._last_draw_xoff),
+            int(self._last_draw_yoff),
+            int(self.img_w * self.scale),
+            int(self.img_h * self.scale),
+        )
+
+        if event.button() == Qt.MiddleButton:
+            self._panning = True
+            self._pan_last = event.pos()
+            self.setCursor(Qt.ClosedHandCursor)
+            print(f"[PAN] start at {self._pan_last}")
+            return
+
+        # ----- EXISTING EDITOR LOGIC (unchanged below) -----
+        if not img_rect.contains(event.pos()):
+            return  # ignore clicks in gray margin
+
+        p = self._to_image_coords(event.pos())
+        point_i = self._find_point_at(p)
+        line_i = self._find_line_at(p)
+        mid_key = self._midline_hit_test(event.pos(), 10.0)
+
+        print(f"[PRESS] Click at {p}, point_i={point_i}, line_i={line_i}, mid_key={mid_key}, "
+            f"_is_drawing={self._is_drawing}, polyline_mode={self.polyline_mode}, polyline_len={len(self.polyline)}")
+
+        if mid_key in self.readonly_midlines:
+            mid_key = None
+        if line_i is not None and (self.connections[line_i] in self.readonly_connections):
+            line_i = None
+
+        # ----- Polyline mode -----
+        if self.polyline_mode:
+            if event.button() == Qt.LeftButton:
+                if not self._is_drawing:
+                    if mid_key is not None:
+                        self.midlines.pop(mid_key, None)
+                        self._hover_midline_key = None
+                        self.update()
+                        return
+                    if line_i is not None:
+                        self.connections.pop(line_i)
+                        self.update()
+                        return
+                    if point_i is None or len(self.points) < 2:
+                        return
+                    self._start_idx = point_i
+                    sx, sy = self.points[self._start_idx]
+                    self.polyline = [(float(sx), float(sy))]
+                    self._is_drawing = True
+                    print(f"[PRESS] START midline from {self._start_idx} at {self.points[self._start_idx]}")
+                    self.update()
+                    return
+                else:
+                    if getattr(self, "_just_committed_midline", False):
+                        self._just_committed_midline = False
+                        return
+                    if point_i is not None and point_i != self._start_idx:
+                        self._commit_midline(point_i)
+                    elif point_i is None:
+                        px, py = p
+                        self.polyline.append((float(px), float(py)))
+                        print(f"[PRESS] Added polyline point: {self.polyline[-1]}")
+                        self.update()
+                    return
+
+            elif event.button() == Qt.RightButton:
+                if self._is_drawing:
+                    self._erase_timer.stop()
+                    QtCore.QTimer.singleShot(500, lambda: (
+                        self._erase_timer.start(75)
+                        if (QtWidgets.QApplication.mouseButtons() & Qt.RightButton and self._is_drawing)
+                        else None
+                    ))
+                    if len(self.polyline) > 1:
+                        self._pop_poly_point()
+                    else:
+                        self.polyline = []
+                        self._is_drawing = False
+                        self._start_idx = None
+                    self.update()
+                return
+
+        # ----- Normal connection / point modes -----
+        if event.button() == Qt.LeftButton:
+            if (not self.polyline_mode) and self.connection_mode and (mid_key is not None):
+                self.midlines.pop(mid_key, None)
+                self._hover_midline_key = None
+                self.update()
+                return
+
+            if not self.connection_mode:
+                if point_i is None:
+                    self.points.append((float(p[0]), float(p[1])))
+                    print(f"[PRESS] Added new point at {p}")
+                else:
+                    if any(point_i in c for c in self.readonly_connections) or \
+                    any(point_i in k for k in self.readonly_midlines.keys()):
+                        return
+                    self._delete_point_reindex(point_i)
+            else:
+                if (line_i is not None) and (self.connecting_index is None) and (point_i is None):
+                    self.connections.pop(line_i)
+                elif point_i is not None:
+                    if self.connecting_index is None:
+                        self.connecting_index = point_i
+                    elif self.connecting_index != point_i:
+                        c = self._sorted(self.connecting_index, point_i)
+                        if c not in self.connections and c not in self.readonly_connections:
+                            self.connections.append(c)
+                        self.connecting_index = None
+                    else:
+                        self.connecting_index = None
+                else:
+                    self.connecting_index = None
+            self.update()
+
+
+    def mouseMoveEvent(self, event):
+        if self._panning and self._pan_last is not None:
+            dx = float(event.pos().x() - self._pan_last.x())
+            dy = float(event.pos().y() - self._pan_last.y())
+            self.pan_x += dx
+            self.pan_y += dy
+            self._pan_last = event.pos()
+            self._enforce_bounds()
+            print(f"[PAN] move dx={dx:.1f}, dy={dy:.1f} -> pan=({self.pan_x:.1f},{self.pan_y:.1f})")
+            self.update()
+            return
+
+        # --- existing hover / drawing logic ---
+        p = self._to_image_coords(event.pos())
+        point_i = self._find_point_at(p)
+
+        if self.polyline_mode and self._is_drawing and (event.buttons() & Qt.LeftButton):
+            if point_i is not None and point_i != self._start_idx:
+                print(f"[MOVE] Hovering endpoint {point_i}, attempting commit")
+                self._commit_midline(point_i)
+                return
+            else:
+                self._add_poly_point(p)
+                self.update()
+                return
+
+        self.hover_index = self._find_point_at(p)
+        if self.connection_mode and self.connecting_index is None and self.hover_index is None:
+            self.hover_line_index = self._find_line_at(p)
+        else:
+            self.hover_line_index = None
+
+        self._hover_midline_key = self._midline_hit_test(event.pos(), 10.0) if not self._is_drawing else None
+        self.update()
+
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MiddleButton and self._panning:
+            self._panning = False
+            self._pan_last = None
+            self.unsetCursor()
+            print("[PAN] end")
+            return
+
+        if event.button() == Qt.RightButton:
+            self._erase_timer.stop()
