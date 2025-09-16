@@ -3,6 +3,8 @@ from PyQt5.QtWidgets import QMessageBox
 from PyQt5.QtGui import QPainter, QPen, QColor, QPixmap, QImage
 from PyQt5.QtCore import Qt, QPoint
 
+# I dare you to waste another week trying to improve the zooming functionality
+
 class CrackAnnotator(QtWidgets.QWidget): 
     def __init__(self, image=None, boxes=None, initial_points=None, initial_connections=None, initial_midlines=None):
         super().__init__()
