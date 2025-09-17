@@ -1129,4 +1129,514 @@ class CrackUtils:
         )
         self.all_segments_display.setPixmap(pixmap_mask)
 
+    def _build_combined_crack(self, member_ids, pad=10):
+        """
+        Combined crack builder (user-endpoint chaining + dominant trimming):
+        - chain polylines by explicit user endpoints (user_points/user_connections)
+        - pick longest chain as dominant, carve others by its buffer
+        - keep only true outside-branch remnants (endpoint+midpoint outside, len guard)
+        - compute geodesic edges + normals per kept piece
+        - build mask (x,y order), save debug plots, and return combined summary
+        """
+        import numpy as np, cv2, os
+        import matplotlib.pyplot as plt
+        from shapely.geometry import LineString, MultiLineString
+        from shapely.ops import unary_union
 
+        ann = self.annotation.setdefault("annotations", {})
+        atomic = ann.setdefault("atomic_cracks", {})
+
+        H, W = self.original_image.shape[:2]
+
+        # ---------------- helpers ----------------
+        def full_mask_from_atomic(crack):
+            mc = crack.get("mask_crop"); bb = crack.get("mask_bbox")
+            if mc is not None and bb is not None:
+                crop = np.array(mc, dtype=np.uint8)
+                x, y, w, h = map(int, bb)
+                x2, y2 = min(x+w, W), min(y+h, H)
+                w_eff, h_eff = max(0, x2-x), max(0, y2-y)
+                if h_eff > 0 and w_eff > 0:
+                    crop = (crop > 0).astype(np.uint8)[:h_eff, :w_eff]
+                    m = np.zeros((H, W), dtype=np.uint8)
+                    m[y:y+h_eff, x:x+w_eff] = crop
+                    return m
+            return np.zeros((H, W), dtype=np.uint8)
+
+        def ls_coords(ls: LineString):
+            return np.asarray(ls.coords, dtype=float)
+
+        def split_lines(geom):
+            if geom.is_empty: return []
+            if isinstance(geom, LineString): return [geom]
+            if isinstance(geom, MultiLineString): return list(geom.geoms)
+            return []
+
+        def shoelace_area(xs, ys):
+            return 0.5 * abs(np.dot(xs, np.roll(ys, -1)) - np.dot(ys, np.roll(xs, -1)))
+
+        def ribbon_mask_from_midline(S_xy, thickness_px=4):
+            mask = np.zeros((H, W), dtype=np.uint8)
+            pts = np.round(S_xy).astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(mask, [pts], isClosed=False, color=255,
+                        thickness=thickness_px, lineType=cv2.LINE_AA)
+            return mask
+
+        def align_edge_to_midline_direction(S_xy, E_xy):
+            d_f = np.linalg.norm(E_xy[0]-S_xy[0]) + np.linalg.norm(E_xy[-1]-S_xy[-1])
+            d_r = np.linalg.norm(E_xy[0]-S_xy[-1]) + np.linalg.norm(E_xy[-1]-S_xy[0])
+            return (E_xy[::-1] if d_r < d_f else E_xy)
+
+        def linestring_length(arr):
+            try:
+                return float(LineString(arr).length)
+            except Exception:
+                return 0.0
+
+        def finite_xy(arr):
+            if arr is None or len(arr) == 0: return np.empty((0,2), float)
+            a = np.asarray(arr, float)
+            ok = np.isfinite(a).all(axis=1)
+            a = a[ok]
+            if len(a) <= 1: return a
+            keep = [0]
+            for i in range(1, len(a)):
+                if not (abs(a[i,0]-a[i-1,0]) < 1e-9 and abs(a[i,1]-a[i-1,1]) < 1e-9):
+                    keep.append(i)
+            return a[keep]
+
+        def split_on_teleports(arr, max_step=50.0):
+            arr = np.asarray(arr, float)
+            if len(arr) < 2: return []
+            d = np.sqrt(np.sum(np.diff(arr, axis=0)**2, axis=1))
+            breaks = np.where(d > max_step)[0]
+            segs, start = [], 0
+            for b in breaks:
+                if b+1 - start >= 2:
+                    segs.append(arr[start:b+1])
+                start = b+1
+            if len(arr) - start >= 2:
+                segs.append(arr[start:])
+            return segs if segs else [arr]
+
+        # --- endpoint-aware stitching ---
+        def _endpoints_from_crack(crack):
+            ups = crack.get("user_points", []) or []
+            ucs = crack.get("user_connections", []) or []
+            ends = set()
+            for conn in ucs:
+                for idx in conn:
+                    if 0 <= idx < len(ups):
+                        pt = ups[idx]
+                        ends.add((float(pt[0]), float(pt[1])))
+            return ends
+
+        def stitch_lines_by_user(member_ids, atomic):
+            mid2arr, mid2ends = {}, {}
+            for mid in member_ids:
+                crack = atomic.get(mid)
+                if not crack: continue
+                ml = crack.get("midline", []) or []
+                if len(ml) < 2: continue
+                arr = np.array([[float(x), float(y)] for (x,y) in ml], dtype=float)
+                mid2arr[mid] = arr
+                mid2ends[mid] = _endpoints_from_crack(crack)
+            if not mid2arr: return []
+
+            end_to_mids = {}
+            for mid, ends in mid2ends.items():
+                for e in ends:
+                    end_to_mids.setdefault(e, set()).add(mid)
+
+            adj = {mid: set() for mid in mid2arr}
+            for mids in end_to_mids.values():
+                mids = list(mids)
+                for i in range(len(mids)):
+                    for j in range(i+1, len(mids)):
+                        adj[mids[i]].add(mids[j])
+                        adj[mids[j]].add(mids[i])
+
+            comps, seen = [], set()
+            for mid in adj:
+                if mid in seen: continue
+                stack, comp = [mid], []
+                seen.add(mid)
+                while stack:
+                    u = stack.pop()
+                    comp.append(u)
+                    for v in adj[u]:
+                        if v not in seen:
+                            seen.add(v); stack.append(v)
+                comps.append(comp)
+
+            stitched = []
+            for comp in comps:
+                comp_sorted = sorted(comp, key=lambda m: linestring_length(mid2arr[m]), reverse=True)
+                used = set()
+                if comp_sorted:
+                    cur = mid2arr[comp_sorted[0]].copy()
+                    used.add(comp_sorted[0])
+                    extended = True
+                    while extended:
+                        extended = False
+                        end_pt = tuple(cur[-1])
+                        for m in comp_sorted:
+                            if m in used: continue
+                            arr2 = mid2arr[m]
+                            if tuple(arr2[0]) == end_pt:
+                                cur = np.vstack([cur, arr2[1:]])
+                                used.add(m); extended = True; break
+                            elif tuple(arr2[-1]) == end_pt:
+                                cur = np.vstack([cur, arr2[-2::-1]])
+                                used.add(m); extended = True; break
+                    stitched.append(cur)
+                for m in comp_sorted:
+                    if m not in used:
+                        stitched.append(mid2arr[m])
+            return [finite_xy(s) for s in stitched if len(s) >= 2]
+
+        # ---------------- collect ----------------
+        union_mask_existing = np.zeros((H, W), dtype=np.uint8)
+        for mid in member_ids:
+            crack = atomic.get(mid)
+            if not crack: continue
+            union_mask_existing |= full_mask_from_atomic(crack)
+
+        try:
+            w_half = int(self.window_half_size_box.value())
+        except Exception:
+            w_half = 15
+        prune_radius = max(3, int(w_half * 0.5))
+        overlap_px   = max(6, int(w_half * 0.6))
+        min_keep_len = max(8.0, 0.6 * w_half)
+        max_plot_jump = max(25.0, 1.2 * w_half)
+
+        stitched = stitch_lines_by_user(member_ids, atomic)
+        stitched.sort(key=linestring_length, reverse=True)
+
+        kept_segs, dom_buffer = [], None
+        for S in stitched:
+            g = LineString(S)
+            if dom_buffer is None:
+                kept_segs.append(S)
+                dom_buffer = g.buffer(overlap_px, cap_style=2, join_style=2)
+            else:
+                remainder = g.difference(dom_buffer)
+                if remainder.is_empty: continue
+                for piece in split_lines(remainder):
+                    if piece.length >= min_keep_len:
+                        kept_segs.append(ls_coords(piece))
+                dom_buffer = unary_union([dom_buffer, g.buffer(overlap_px, cap_style=2, join_style=2)])
+        segs = kept_segs if kept_segs else stitched
+
+        # ---------------- tracking params ----------------
+        color_idx = 0 if self.edge_track_color_box.currentText() == 'R' else \
+                    1 if self.edge_track_color_box.currentText() == 'B' else 2
+        mu = self.mu_box.value(); l = self.l_box.value(); p = self.p_box.value()
+
+        edge1_segs, edge2_segs = [], []
+        norm1_segs, norm2_segs = [], []
+        union_mask = np.zeros((H, W), dtype=np.uint8)
+        widths_all = []
+
+        # ---------------- per segment ----------------
+        for S in segs:
+            if S is None or len(S) < 2: continue
+            x0 = max(0, int(np.floor(S[:,0].min()) - pad))
+            x1 = min(W, int(np.ceil(S[:,0].max()) + pad))
+            y0 = max(0, int(np.floor(S[:,1].min()) - pad))
+            y1 = min(H, int(np.ceil(S[:,1].max()) + pad))
+            if x1-x0 < 2 or y1-y0 < 2: continue
+
+            self.active_bbox = [x0, y0, x1, y1]
+            self.pts = [np.array([S[0,0], S[0,1]]), np.array([S[-1,0], S[-1,1]])]
+            self.end_points = self.pts
+            self.update_image_crop()
+            if getattr(self, "skip_current_segment", False): continue
+
+            cx, cy = S[:,0] - x0, S[:,1] - y0
+            self.track = np.vstack([cy, cx])
+            self.current_source = "manual_poly"
+            self.pts_crop = [np.array(self.pts[0]) - np.array([x0, y0]),
+                            np.array(self.pts[1]) - np.array([x0, y0])]
+            down = self.downsample_factor_box.value()
+            self.pts_crop_down = [p / down for p in self.pts_crop]
+            self.edge_mask()
+
+            midline_xy_crop = np.column_stack([self.adjusted_track[1], self.adjusted_track[0]])
+
+            res = ct.segmentation.edges_tracking(
+                self.image_crop[:, :, color_idx],
+                self.pts_crop,
+                self.edge_mask1_crop, self.edge_mask2_crop,
+                midline=midline_xy_crop, mu=mu, l=l, p=p,
+                return_normal_edges=True
+            )
+
+            track_e1, track_e2 = res["geodesic_edges"]
+            if track_e1 is None or track_e2 is None or len(track_e1)<2 or len(track_e2)<2: continue
+
+            e1_full = finite_xy(np.column_stack([track_e1[:,0]+x0, track_e1[:,1]+y0]))
+            e2_full = finite_xy(np.column_stack([track_e2[:,0]+x0, track_e2[:,1]+y0]))
+            if len(e1_full)<2 or len(e2_full)<2: continue
+
+            e1_full = align_edge_to_midline_direction(S, e1_full)
+            e2_full = align_edge_to_midline_direction(S, e2_full)
+
+            normals = res.get("normal_edge_points")
+            if normals is not None:
+                (e1x, e1y), (e2x, e2y) = normals
+                n1_full = finite_xy(np.column_stack([e1x + x0, e1y + y0]))
+                n2_full = finite_xy(np.column_stack([e2x + x0, e2y + y0]))
+                m = min(len(n1_full), len(n2_full))
+                if m >= 2:
+                    d = np.sqrt(np.sum((n1_full[:m] - n2_full[:m])**2, axis=1))
+                    if d.size: widths_all.append(d[np.isfinite(d)])
+            else:
+                n1_full = np.empty((0,2)); n2_full = np.empty((0,2))
+
+            edge1_segs.append(e1_full)
+            edge2_segs.append(e2_full)
+            norm1_segs.append(n1_full)
+            norm2_segs.append(n2_full)
+
+            ex = np.concatenate((e1_full[:,0][::-1], e2_full[:,0]))
+            ey = np.concatenate((e1_full[:,1][::-1], e2_full[:,1]))
+            exc, eyc = np.clip(ex, 0, W-1), np.clip(ey, 0, H-1)
+            area = shoelace_area(exc, eyc)
+            if area > 0.5:
+                mask_seg = ct.segmentation.create_mask(self.original_image, exc, eyc).astype(np.uint8)
+            else:
+                mask_seg = ribbon_mask_from_midline(S, thickness_px=max(3, prune_radius//2))
+            union_mask |= (mask_seg > 0).astype(np.uint8)
+
+        # ---------------- final crop ----------------
+        if np.any(union_mask):
+            ys, xs = np.where(union_mask>0)
+            Y0, Y1 = int(ys.min()), int(ys.max()+1)
+            X0, X1 = int(xs.min()), int(xs.max()+1)
+            crop = union_mask[Y0:Y1, X0:X1].astype(np.uint8)
+            h, w = crop.shape
+        else:
+            X0=Y0=0; w=h=1
+            crop = np.zeros((h,w), np.uint8)
+              
+                # ---------------- DEBUG PLOT ----------------        
+        save_dir = os.path.join(self.save_folder, "debug_outputs")
+        os.makedirs(save_dir, exist_ok=True)
+        base_name = os.path.splitext(os.path.basename(self.name))[0]
+        member_str = "_".join(sorted(member_ids, key=lambda s: int(s)))
+        fname = os.path.join(save_dir, f"{base_name}_combined_debug.png")
+
+        fig, ax = plt.subplots(figsize=(12, 8))
+        ax.imshow(self.original_image)
+        ax.set_title("All cracks (atomic + combined) with current merge highlighted")
+
+        ann = self.annotation.get("annotations", {})
+        atomic = ann.get("atomic_cracks", {})
+        combined = ann.get("combined_cracks", {})
+
+        combined_members = {m for cmb in combined.values() for m in cmb.get("members", [])}
+
+        # --- fallback normal generator for cracks without stored normals ---
+        def _fallback_normals(ml, step=50, length=6):
+            from numpy.linalg import norm
+            pts = np.array(ml, float)
+            if len(pts) < 3:
+                return []
+            tang = np.gradient(pts, axis=0)
+            tang /= np.maximum(1e-9, np.linalg.norm(tang, axis=1)[:, None])
+            # rotate 90 deg CCW
+            normvec = np.column_stack([-tang[:, 1], tang[:, 0]])
+            lines = []
+            for i in range(0, len(pts), step):
+                p = pts[i]
+                n = normvec[i]
+                lines.append(([p[0]-length*n[0], p[0]+length*n[0]],
+                              [p[1]-length*n[1], p[1]+length*n[1]]))
+            return lines
+
+        def plot_crack(crack, color_idx=0):
+            ml = crack.get("midline", []) or crack.get("midline_segments", [])
+            if not ml:
+                return
+            if isinstance(ml[0][0], list):  # segments
+                segs_to_plot = [np.array(seg, float) for seg in ml if seg]
+            else:  # flat midline
+                segs_to_plot = [np.array(ml, float)]
+            for S in segs_to_plot:
+                if len(S) < 2: continue
+                for segp in split_on_teleports(S, max_step=max_plot_jump):
+                    ax.plot(segp[:,0], segp[:,1], 'g-', lw=0.6)
+
+            edges = crack.get("geodesic_edges", {})
+            for key, arr in edges.items():
+                arr = np.array(arr, float)
+                if arr.ndim == 2 and len(arr) >= 2:
+                    for segp in split_on_teleports(arr, max_step=max_plot_jump):
+                        ax.plot(segp[:,0], segp[:,1], 'r-' if "edge1" in key else 'b-', lw=0.4)
+
+            normals = crack.get("normal_edge_points", {})
+            if normals:
+                n1 = normals.get("edge1", [])
+                n2 = normals.get("edge2", [])
+                # Handle JSON-style [[xlist],[ylist]] format
+                if isinstance(n1, list) and len(n1) == 2 and isinstance(n1[0], (list, tuple)):
+                    n1 = np.column_stack([n1[0], n1[1]])
+                else:
+                    n1 = np.array(n1, float)
+                if isinstance(n2, list) and len(n2) == 2 and isinstance(n2[0], (list, tuple)):
+                    n2 = np.column_stack([n2[0], n2[1]])
+                else:
+                    n2 = np.array(n2, float)
+
+                if n1.ndim == 2 and n2.ndim == 2 and len(n1) and len(n2):
+                    step = max(1, min(len(n1), len(n2)) // 70)
+                    for i in range(0, min(len(n1), len(n2)), step):
+                        if np.isfinite(n1[i]).all() and np.isfinite(n2[i]).all():
+                            ax.plot([n1[i,0], n2[i,0]],
+                                    [n1[i,1], n2[i,1]],
+                                    color='cyan', lw=0.3, alpha=0.5)
+
+        # --- plot all existing cracks for context ---
+        # Other combined cracks (not this one)
+        for cid, cmb in combined.items():
+            if set(cmb.get("members", [])) == set(member_ids):
+                continue
+            plot_crack(cmb)
+
+        # Atomic cracks that are NOT in *any* combined (skip ones in member_ids or already absorbed)
+        for aid, crack in atomic.items():
+            if aid in member_ids or aid in combined_members:
+                continue
+            plot_crack(crack)
+
+        # --- plot the new combined crack being built ---
+        for S in segs:
+            for segp in split_on_teleports(S, max_step=max_plot_jump):
+                ax.plot(segp[:,0], segp[:,1], 'g-', lw=.8)
+        for e in edge1_segs:
+            for segp in split_on_teleports(e, max_step=max_plot_jump):
+                ax.plot(segp[:,0], segp[:,1], 'r-', lw=.6)
+        for e in edge2_segs:
+            for segp in split_on_teleports(e, max_step=max_plot_jump):
+                ax.plot(segp[:,0], segp[:,1], 'b-', lw=.6)
+
+        # Plot normals for the *current combined*
+        for n1, n2 in zip(norm1_segs, norm2_segs):
+            if len(n1) == 0 or len(n2) == 0:
+                continue
+            step = 50
+            for i in range(0, min(len(n1), len(n2)), step):
+                if np.isfinite(n1[i]).all() and np.isfinite(n2[i]).all():
+                    ax.plot([n1[i,0], n2[i,0]], [n1[i,1], n2[i,1]],
+                            color='cyan', lw=0.4, alpha=0.8)
+
+        ax.set_xlim(0, W)
+        ax.set_ylim(H, 0)
+        ax.axis('equal')
+        plt.tight_layout()
+        plt.savefig(fname, dpi=250)
+        plt.close()
+
+        def _flatten(seg_list):
+            out=[]
+            for i, arr in enumerate(seg_list):
+                out.extend([[float(x), float(y)] for x,y in arr])
+                if i<len(seg_list)-1: out.append([None,None])
+            return out
+
+        combined_length = float(sum(linestring_length(s) for s in segs))
+        mean_width = float(np.nanmean(np.concatenate(widths_all))) if widths_all else None
+
+        return {
+            "source": "combined",
+            "members": sorted(member_ids, key=lambda s: int(s)),
+            "midline_segments": [ [[float(x), float(y)] for (x,y) in s] for s in segs ],
+            "midline": _flatten(segs),
+            "geodesic_edges": {"edge1": _flatten(edge1_segs), "edge2": _flatten(edge2_segs)},
+            "normal_edge_points": {"edge1": _flatten(norm1_segs), "edge2": _flatten(norm2_segs)},
+            "mask_crop": crop.tolist(),
+            "mask_bbox": [int(X0), int(Y0), int(w), int(h)],
+            "combined_length": combined_length,
+            "mean_width": mean_width,
+        }
+        
+    def auto_combine_segments(self):
+        """
+        Automatically combine atomic cracks that overlap or share endpoints.
+        Reuses _build_combined_crack for consistency.
+        If an atomic crack already belongs to a combined crack, it will extend that
+        combined crack when new overlaps/branches are detected.
+        """
+        ann = self.annotation.setdefault("annotations", {})
+        atomic = ann.setdefault("atomic_cracks", {})
+        combined = ann.setdefault("combined_cracks", {})
+
+        H, W = self.original_image.shape[:2]
+
+        # --- Helper: same as in combine_segments ---
+        def mask_from_crack(crack):
+            mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
+            if mc is not None and bb is not None:
+                crop = np.array(mc, dtype=np.uint8)
+                x, y, w, h = [int(v) for v in bb]
+                x2, y2 = min(x+w, W), min(y+h, H)
+                w_eff, h_eff = max(0, x2-x), max(0, y2-y)
+                if h_eff > 0 and w_eff > 0:
+                    crop = (crop > 0).astype(np.uint8)[:h_eff, :w_eff]
+                    m = np.zeros((H, W), dtype=np.uint8)
+                    m[y:y+h_eff, x:x+w_eff] = crop
+                    return m
+            full = np.array(crack.get("mask", []), dtype=np.uint8)
+            if full.size == H*W and full.shape == (H,W):
+                return (full > 0).astype(np.uint8)
+            return np.zeros((H,W), dtype=np.uint8)
+
+        def cracks_overlap_or_connect(crackA, crackB):
+            if np.any(mask_from_crack(crackA) & mask_from_crack(crackB)):
+                return True
+            upA = [tuple(pt) for pt in crackA.get("user_points", [])]
+            upB = [tuple(pt) for pt in crackB.get("user_points", [])]
+            return bool(set(upA) & set(upB))
+
+        # --- Build list of "entries": atomic or combined ---
+        # Each atomic should appear only once (if in combined, skip here)
+        seen_atomic = set(m for cmb in combined.values() for m in cmb.get("members", []))
+        entries = [("combined", cid) for cid in combined.keys()]
+        entries.extend(("atomic", aid) for aid in atomic.keys() if aid not in seen_atomic)
+
+        # --- For each atomic not yet combined, check if it connects to an existing combined ---
+        for tpe, cid in list(entries):
+            if tpe != "atomic":
+                continue
+            crack = atomic[cid]
+            # see if it overlaps/attaches to any combined
+            attached_to = None
+            for cmb_id, cmb in combined.items():
+                for m in cmb.get("members", []):
+                    if cracks_overlap_or_connect(crack, atomic.get(m, {})):
+                        attached_to = cmb_id
+                        break
+                if attached_to:
+                    break
+            if attached_to:
+                # extend existing combined by rebuilding with old members + this new one
+                members = set(combined[attached_to]["members"])
+                members.add(cid)
+                combined[attached_to] = self._build_combined_crack(sorted(members, key=lambda s: int(s)))
+                print(f"Extended combined {attached_to} with atomic {cid}")
+            else:
+                # check if it overlaps with other "free" atomics → make a new combined
+                overlaps = [cid]
+                for tpe2, cid2 in entries:
+                    if tpe2 == "atomic" and cid2 != cid:
+                        if cracks_overlap_or_connect(crack, atomic[cid2]):
+                            overlaps.append(cid2)
+                if len(overlaps) > 1:
+                    new_id = str(max([int(k) for k in combined.keys() if k.isdigit()] or [-1]) + 1)
+                    combined[new_id] = self._build_combined_crack(sorted(overlaps, key=lambda s: int(s)))
+                    print(f"Auto-created combined {new_id} from atomics {overlaps}")
+
+        self.save_annotation()
+        self.change_image()
