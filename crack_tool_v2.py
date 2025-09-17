@@ -21,6 +21,7 @@ from skimage.segmentation import mark_boundaries
 import os
 from PyQt5.QtWidgets import QListWidgetItem
 from shapely import geometry, ops
+import pandas as pd
 
 from crackutils import *
 from helpers.crackhelpers import *
@@ -31,6 +32,8 @@ min_crop_size = 16
 class CrackToolsApplication(CrackUtils, Ui_MainWindow):
     def setupUi(self, MainWindow):
         super().setupUi(MainWindow)
+        
+        #Select Image Tab
         self.MainWindow = MainWindow
         self.SelectFolderButton.clicked.connect(self.select_folder)
         self.PreviousImageButton.clicked.connect(self.previous_image)
@@ -42,28 +45,19 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         self.clear_combined_cracks_button.clicked.connect(self.clear_combined_cracks)
         self.files_list.itemSelectionChanged.connect(self.name_selected)
         self.combine_segments_button.clicked.connect(self.combine_segments)
+        self.calculate_metrics_button.clicked.connect(self.run_mask_metrics)
 
+        #Tracking Tab
         self.select_points_button.clicked.connect(self.select_save_end_points)
         self.update_image_crop_button.clicked.connect(self.update_image_crop)
         self.wavelet_button.clicked.connect(self.check_wavelet)
         self.middle_point_button.clicked.connect(self.select_middle_point)
         self.middpoint_update_button.clicked.connect(self.update_midpoint_image)
         self.BatchPipelineButton.clicked.connect(self.batch_run_pipeline)
-
-        # Replace the following individual step connections
         self.update_os_button.clicked.connect(self.update_os)
         self.update_cost_button.clicked.connect(self.update_os_cost)
         self.midline_track_button.clicked.connect(self.midline_tracking)
-        self.edge_mask_button.clicked.connect(self.edge_mask)
-        self.edge_tracks_button.clicked.connect(self.edge_tracking)
         # self.save_current_segment_button.clicked.connect(self.save_current_segment)
-
-        # Hide step-by-step buttons not needed anymore
-        #self.show_os_button.hide()
-        #self.update_cost_button.hide()
-        #self.midline_track_button.hide()
-        #self.edge_mask_button.hide()
-        #self.edge_tracks_button.hide()
         self.save_current_segment_button.hide()
 
         # Repurpose the OS button for full pipeline
@@ -74,6 +68,9 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         self.update_os_button.setText("Run Pipeline")
         self.update_os_button.clicked.connect(self.run_pipeline)
 
+        #Segmentation Tab
+        self.edge_mask_button.clicked.connect(self.edge_mask)
+        self.edge_tracks_button.clicked.connect(self.edge_tracking)
         self.update_track_display_button.clicked.connect(self.update_track_display)
         self.track_full_screen_button.clicked.connect(self.track_full_screen)
         self.edge_tracks_full_screen_button.clicked.connect(self.edge_tracks_full_screen)
@@ -2389,6 +2386,75 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             self.change_image()
         else:
             self.change_image()
+
+    def run_mask_metrics(self):
+        def compute_mask_metrics(gt_mask, pred_mask):
+            """Return IoU, precision, recall, F1 for two binary masks."""
+            gt = gt_mask.astype(bool)
+            pr = pred_mask.astype(bool)
+            tp = np.logical_and(gt, pr).sum()
+            fp = np.logical_and(~gt, pr).sum()
+            fn = np.logical_and(gt, ~pr).sum()
+            tn = np.logical_and(~gt, ~pr).sum()
+
+            precision = tp / (tp + fp + 1e-9)
+            recall    = tp / (tp + fn + 1e-9)
+            f1        = 2 * precision * recall / (precision + recall + 1e-9)
+            iou       = tp / (tp + fp + fn + 1e-9)
+            return {"precision": precision, "recall": recall, "f1": f1, "iou": iou,
+                    "tp": tp, "fp": fp, "fn": fn, "tn": tn}
+    
+        def save_mask_comparison_plot(gt_mask, pred_mask, out_path):
+            """
+            Visual overlay:
+            - White = intersection (correctly predicted crack)
+            - Red   = crack in GT only (missed)
+            - Blue  = crack in pred only (false positive)
+            - Black = background
+            """
+            gt = gt_mask.astype(bool)
+            pr = pred_mask.astype(bool)
+            iou = np.logical_and(gt, pr)
+            oou = np.logical_and(gt, ~pr)
+            cou = np.logical_and(~gt, pr)
+
+            vis = np.zeros((*gt.shape, 3), dtype=np.uint8)
+            vis[iou] = [255, 255, 255]   # white
+            vis[oou] = [255, 0, 0]       # red
+            vis[cou] = [0, 0, 255]       # blue
+
+            plt.imsave(out_path, vis)
+
+        """Compute metrics for current image and save CSV + debug plot."""
+        if self.current_mask is None:
+            print("⚠️ No ground truth mask loaded.")
+            return
+
+        ann = self.annotation.get("annotations", {})
+        H, W = self.image.shape[:2]
+        pred_mask = build_combined_mask(ann.get("atomic_cracks", {}), H, W)
+
+        metrics = compute_mask_metrics(self.current_mask, pred_mask)
+
+        # save CSV row
+        base_name = os.path.splitext(os.path.basename(self.name))[0]
+        metrics_dir = os.path.join(self.save_folder, "metrics")
+        os.makedirs(metrics_dir, exist_ok=True)
+        csv_path = os.path.join(metrics_dir, "mask_metrics.csv")
+
+        row = {"image": base_name, **metrics}
+        if os.path.exists(csv_path):
+            df = pd.read_csv(csv_path)
+            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        else:
+            df = pd.DataFrame([row])
+        df.to_csv(csv_path, index=False)
+
+        # save visualization
+        vis_path = os.path.join(metrics_dir, base_name + "_iou_overlay.png")
+        save_mask_comparison_plot(self.current_mask, pred_mask, vis_path)
+
+        print(f"✅ Metrics saved to {csv_path}, overlay at {vis_path}")
 
 if __name__ == "__main__":
     import sys
