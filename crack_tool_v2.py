@@ -2395,7 +2395,18 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         else:
             self.change_image()
 
-    def run_mask_metrics(self):
+    def run_mask_metrics(self, display=True):
+        # Ensure image and annotation are loaded
+        if not hasattr(self, "image") or self.image is None:
+            print("⚠️ No image loaded — skipping mask metrics.")
+            return
+        if not hasattr(self, "annotation") or not self.annotation:
+            print("⚠️ No annotation loaded — skipping mask metrics.")
+            return
+        if not hasattr(self, "current_mask") or self.current_mask is None:
+            print("⚠️ No ground truth mask available — skipping mask metrics.")
+            return
+        
         def compute_mask_metrics(gt_mask, pred_mask):
             """Return IoU, precision, recall, F1 for two binary masks."""
             gt = gt_mask.astype(bool)
@@ -2411,8 +2422,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             iou       = tp / (tp + fp + fn + 1e-9)
             return {"precision": precision, "recall": recall, "f1": f1, "iou": iou,
                     "tp": tp, "fp": fp, "fn": fn, "tn": tn}
-    
-        def save_mask_comparison_plot(gt_mask, pred_mask, out_path):
+
+        def save_mask_comparison_plot(gt_mask, pred_mask, out_path, show=False):
             """
             Visual overlay:
             - White = intersection (correctly predicted crack)
@@ -2431,7 +2442,14 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             vis[oou] = [255, 0, 0]       # red
             vis[cou] = [0, 0, 255]       # blue
 
-            plt.imsave(out_path, vis)
+            if show:
+                plt.figure(figsize=(8,6))
+                plt.imshow(vis)
+                plt.title("Mask Comparison Overlay")
+                plt.axis("off")
+                plt.show()
+            else:
+                plt.imsave(out_path, vis)
 
         """Compute metrics for current image and save CSV + debug plot."""
         if self.current_mask is None:
@@ -2458,9 +2476,9 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             df = pd.DataFrame([row])
         df.to_csv(csv_path, index=False)
 
-        # save visualization
+        # visualization (show or save depending on flag)
         vis_path = os.path.join(metrics_dir, base_name + "_iou_overlay.png")
-        save_mask_comparison_plot(self.current_mask, pred_mask, vis_path)
+        save_mask_comparison_plot(self.current_mask, pred_mask, vis_path, show=display)
 
         print(f"✅ Metrics saved to {csv_path}, overlay at {vis_path}")
 

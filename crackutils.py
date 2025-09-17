@@ -273,6 +273,7 @@ class CrackUtils:
         if self.use_masks and self.mask_folder:
             self.mask_names = ct.tools.get_files(folder=self.mask_folder, formats=['png','npy'], basename=False)
             self.mask_map = {os.path.splitext(os.path.basename(f))[0]: f for f in self.mask_names}
+            print(f"{len(self.mask_names)} gt masks loaded in with image")
         else:
             self.mask_names = []
             self.mask_map = {}
@@ -1569,6 +1570,13 @@ class CrackUtils:
         If an atomic crack already belongs to a combined crack, it will extend that
         combined crack when new overlaps/branches are detected.
         """
+        if not hasattr(self, "original_image") or self.original_image is None:
+            print("⚠️ No image loaded — skipping auto_combine_segments.")
+            return
+        if not hasattr(self, "annotation") or not self.annotation:
+            print("⚠️ No annotation loaded — skipping auto_combine_segments.")
+            return
+        
         ann = self.annotation.setdefault("annotations", {})
         atomic = ann.setdefault("atomic_cracks", {})
         combined = ann.setdefault("combined_cracks", {})
