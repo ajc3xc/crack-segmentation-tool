@@ -106,7 +106,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         
         #self.mask_pipeline_button.setStyleSheet("background-color : red")
     
-    def select_end_points_manmidlines(self):
+    '''def select_end_points_manmidlines(self):
         if not hasattr(self, "original_image") or self.original_image is None:
             error("No original image found.")
             return
@@ -332,7 +332,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         print(f"Endpoint pairs: {self.endpoint_pairs}")
         print(f"Manual endpoint pairs: {getattr(self, 'manual_endpoint_pairs', [])}")
         print(f"Midlines saved: {len(self.manual_midlines_tmp)}")
-        self.update_image_crop_button.setStyleSheet("background-color: lightblue")
+        self.update_image_crop_button.setStyleSheet("background-color: lightblue")'''
          
     def update_image_crop(self):
         try:
@@ -1511,11 +1511,13 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                     if xmin <= x <= xmax and ymin <= y <= ymax:
                         return True
                 return False
+
             readonly_point_idxs = set()
             for (i1, i2) in annot.readonly_connections:
                 readonly_point_idxs.update([i1, i2])
             for (i1, i2) in annot.readonly_midlines.keys():
                 readonly_point_idxs.update([i1, i2])
+
             bad = [
                 pt for idx, pt in enumerate(annot.points)
                 if idx not in readonly_point_idxs and not in_any(pt)
@@ -1563,7 +1565,13 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
             ok, bad = all_points_in_boxes()
             if not ok:
-                QMessageBox.warning(dlg, "Points outside boxes", "All points must be inside a bounding box.")
+                # Format the bad points as a readable string
+                bad_str = "\n".join([f"({x:.1f}, {y:.1f})" for (x, y) in bad])
+                QMessageBox.warning(
+                    dlg,
+                    "Points outside boxes",
+                    f"The following points are outside all bounding boxes:\n{bad_str}"
+                )
                 return
 
             # Validate midlines are fully inside one bounding box
