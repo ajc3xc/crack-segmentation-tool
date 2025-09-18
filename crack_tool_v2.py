@@ -2247,7 +2247,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         # Use your existing tangent/normal routine (already in your codebase)
         # If it's in segmentation.py, import it; otherwise keep a local fallback.
         try:
-            from segmentation import compute_smooth_tangent_normals
+            from cracktools.segmentation import compute_smooth_tangent_normals
         except Exception:
             # Fallback (minimal)
             def compute_smooth_tangent_normals(x, y, window=7, poly=2):
@@ -2328,16 +2328,43 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 widths_mask[i] = abs(t_left - t_right)
 
         return e1x, e1y, e2x, e2y, widths_mask
-        
+    
+    @staticmethod
+    def plot_mask_normals(midline, e1x, e1y, e2x, e2y, mask,
+                        ctype="atomic", cid="?", step=20,
+                        show=True, out_path=None):
+        plt.figure(figsize=(6,6))
+
+        # bounding box around crack + normals
+        xs = np.concatenate([midline[:,0], e1x[np.isfinite(e1x)], e2x[np.isfinite(e2x)]])
+        ys = np.concatenate([midline[:,1], e1y[np.isfinite(e1y)], e2y[np.isfinite(e2y)]])
+        xmin, xmax = xs.min(), xs.max()
+        ymin, ymax = ys.min(), ys.max()
+        pad_x, pad_y = mask.shape[1]//50, mask.shape[0]//50
+        xmin, xmax = max(0, xmin-pad_x), min(mask.shape[1], xmax+pad_x)
+        ymin, ymax = max(0, ymin-pad_y), min(mask.shape[0], ymax+pad_y)
+
+        plt.imshow(mask[int(ymin):int(ymax), int(xmin):int(xmax)], cmap="gray", alpha=0.8,
+                extent=[xmin, xmax, ymax, ymin])
+
+        plt.plot(midline[:,0], midline[:,1], 'g-', lw=1.0, label="midline")
+        for i in range(0, len(midline), step):
+            if np.isfinite(e1x[i]) and np.isfinite(e2x[i]):
+                plt.plot([e1x[i], e2x[i]], [e1y[i], e2y[i]], color="cyan", lw=0.6, alpha=0.8)
+        plt.title(f"Mask normals — {ctype} {cid}")
+        plt.axis("equal"); plt.legend(); plt.tight_layout()
+
+        if show: plt.show()
+        elif out_path:
+            plt.savefig(out_path, dpi=200); plt.close()
+  
     def run_mask_metrics(self, display=True):
         """
         1) Mask IoU/F1/precision/recall for current image.
-        2) Per-crack width/normal validation: compare mask-derived widths vs saved geodesic normals.
-        Works on both atomic and combined cracks.
-        Saves CSVs + quicklook images under <save_folder>/metrics.
+        2) Per-crack width/normal validation: compare GT mask-derived widths vs saved geodesic normals.
+        Only evaluates combined cracks and atomics not part of any combined.
         """
-        import os, numpy as np, pandas as pd, matplotlib.pyplot as plt
-        import cv2
+        import os, numpy as np, pandas as pd, matplotlib.pyplot as plt, cv2
 
         # ---- guards
         if not hasattr(self, "image") or self.image is None:
@@ -2347,9 +2374,10 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         if not hasattr(self, "current_mask") or self.current_mask is None:
             print("⚠️ No ground truth mask available — skipping mask metrics."); return
 
-        # ---- 1) image-level mask metrics
         ann = self.annotation.get("annotations", {})
         H, W = self.image.shape[:2]
+
+        # ---- 1) image-level mask metrics
         pred_mask = build_combined_mask(ann.get("atomic_cracks", {}), H, W)
         metrics = self.compute_mask_metrics(self.current_mask, pred_mask)
 
@@ -2369,28 +2397,36 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         vis_path = os.path.join(metrics_dir, base_name + "_iou_overlay.png")
         self.save_mask_comparison_plot(self.current_mask, pred_mask, vis_path, show=display)
 
-        # ---- 2) per-crack midline width/normal validation (atomic + combined)
+        # ---- 2) per-crack midline width/normal validation
         width_csv_path = os.path.join(metrics_dir, "width_metrics.csv")
         width_rows = []
 
-        all_cracks = []
         atomic = ann.get("atomic_cracks", {}) or {}
         combined = ann.get("combined_cracks", {}) or {}
-        for cid, crack in atomic.items():
-            all_cracks.append(("atomic", cid, crack))
-        for cid, crack in combined.items():
-            all_cracks.append(("combined", cid, crack))
+
+        # skip atomics already absorbed in combined
+        atomics_in_combined = {m for cmb in combined.values() for m in cmb.get("members", [])}
+        all_cracks = [( "atomic", cid, crack) for cid, crack in atomic.items() if cid not in atomics_in_combined]
+        all_cracks += [( "combined", cid, crack) for cid, crack in combined.items()]
 
         for ctype, cid, crack in all_cracks:
             midline = np.asarray(crack.get("midline", []), float)
             if midline.ndim != 2 or midline.shape[1] != 2 or len(midline) < 3:
                 continue  # nothing to evaluate
 
-            crack_mask = self._reconstruct_full_mask(crack, H, W)
+            crack_mask = self.current_mask  # <-- GT mask only
 
             # mask-based normals/widths
             e1x_m, e1y_m, e2x_m, e2y_m, w_mask = self.normals_from_mask_for_midline(
                 midline, crack_mask, max_radius=50, step=1.0
+            )
+
+            # plot zoomed-in normals
+            debug_normals_path = os.path.join(metrics_dir, f"{base_name}_{ctype}{cid}_mask_normals.png")
+            self.plot_mask_normals(
+                midline, e1x_m, e1y_m, e2x_m, e2y_m,
+                crack_mask, ctype=ctype, cid=cid, step=20,
+                show=display, out_path=debug_normals_path
             )
 
             # edge-tracking normals
@@ -2410,9 +2446,6 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                         if np.all(np.isfinite(e1[i])) and np.all(np.isfinite(e2[i])):
                             w_edge[i] = np.hypot(e1[i,0] - e2[i,0], e1[i,1] - e2[i,1])
                     w_mask = w_mask[:m]
-                    e1x_m, e1y_m, e2x_m, e2y_m = e1x_m[:m], e1y_m[:m], e2x_m[:m], e2y_m[:m]
-                else:
-                    w_edge = None
 
             if w_edge is not None:
                 valid = np.isfinite(w_mask) & np.isfinite(w_edge)
@@ -2437,37 +2470,6 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                         "width_diff_rmse": rmse,
                         "width_corr": corr
                     })
-
-                    # overlay: difference-colored normals
-                    dmax = np.max(np.abs(diff)) if np.any(np.isfinite(diff)) else 1.0
-                    norm_diff = np.zeros_like(diff) if dmax == 0 else (diff / dmax)
-                    canvas = np.zeros((H, W, 3), np.uint8)
-                    step_draw = max(1, n_valid // 80)
-                    vi = np.where(valid)[0]
-                    for idx in range(0, len(vi), step_draw):
-                        i0 = vi[idx]
-                        p1 = (int(round(e1x_m[i0])), int(round(e1y_m[i0])))
-                        p2 = (int(round(e2x_m[i0])), int(round(e2y_m[i0])))
-                        if 0 <= p1[0] < W and 0 <= p1[1] < H and 0 <= p2[0] < W and 0 <= p2[1] < H:
-                            v = norm_diff[idx]  # already aligned with vi
-                            if v >= 0:
-                                r,g,b = int(255*v), int(255*(1-v)), int(255*(1-v))
-                            else:
-                                v=-v; r,g,b = int(255*(1-v)), int(255*(1-v)), int(255*v)
-                            cv2.line(canvas, p1, p2, (b,g,r), 1, cv2.LINE_AA)
-                    out_overlay = os.path.join(metrics_dir, f"{base_name}_{ctype}{cid}_width_diff_overlay.png")
-                    cv2.imwrite(out_overlay, canvas)
-
-                    # width vs index plot
-                    out_plot = os.path.join(metrics_dir, f"{base_name}_{ctype}{cid}_width_vs_index.png")
-                    plt.figure(figsize=(8, 3))
-                    plt.plot(np.where(valid)[0], w_mask[valid], label="mask width", linewidth=1.2)
-                    plt.plot(np.where(valid)[0], w_edge[valid], label="edge width", linewidth=1.2)
-                    plt.title(f"Widths — {ctype} {cid}\nMAE={mae:.2f}, RMSE={rmse:.2f}, corr={corr:.2f}")
-                    plt.xlabel("midline index"); plt.ylabel("width (px)")
-                    plt.legend(); plt.tight_layout()
-                    if display: plt.show()
-                    else: plt.savefig(out_plot, dpi=180); plt.close()
 
         if width_rows:
             if os.path.exists(width_csv_path):
