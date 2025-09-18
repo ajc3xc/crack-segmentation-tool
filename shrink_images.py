@@ -57,7 +57,7 @@ def process_file(in_path: Path, out_path: Path, image_for_alignment=None):
             return
 
         h, w = img.shape[:2]
-        new_size = (w // 4, h // 4)
+        new_size = (w // 2, h // 2)
 
         if image_for_alignment is not None:  # mask
             if img.ndim == 3:

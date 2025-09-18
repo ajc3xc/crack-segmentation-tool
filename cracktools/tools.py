@@ -689,12 +689,12 @@ def track_crop_to_full(track_crop,start_point,end_point,sides1,sides2):
     track_y = np.array(track_crop[1]) + y_bound1
     return [track_x.squeeze(),track_y.squeeze()]
 
-def get_files(folder = 'cracktools/crackimages',formats = ['png','jpg'],basename = True):
+from pathlib import Path
+
+def get_files(folder='cracktools/crackimages', formats=['png','jpg'], basename=True):
+    exts = [e.lower() for e in formats]
     files = []
-    for f in formats:
-        for file in glob.glob(folder+"/*."+f):
-            if basename == True:
-                files.append(os.path.basename(file))
-            elif basename == False:
-                files.append(file)
+    for f in Path(folder).glob("*"):
+        if f.suffix.lower().lstrip(".") in exts:
+            files.append(f.name if basename else str(f))
     return files

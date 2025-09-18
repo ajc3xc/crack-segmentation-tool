@@ -928,6 +928,11 @@ class CrackUtils:
         self.current_mask = None
         if getattr(self, "use_masks", False) and hasattr(self, "mask_map"):
             mask_path = self.mask_map.get(base_name)
+
+            print(f"[DEBUG change_image] base_name={base_name}")
+            print(f"[DEBUG change_image] available mask_map keys (first 20): {list(self.mask_map.keys())[:20]}")
+            print(f"[DEBUG change_image] mask_path for {base_name}: {mask_path}")
+
             if mask_path:
                 if mask_path.endswith('.npy'):
                     mask = np.load(mask_path)
@@ -936,6 +941,8 @@ class CrackUtils:
                     mask = cv2.imread(mask_path, 0)
                     mask = (mask > 0).astype(np.uint8) if mask is not None else None
                 self.current_mask = mask
+            else:
+                print(f"[DEBUG change_image] No mask found for {base_name}")
 
         im = self.original_image.copy()
         H, W = im.shape[:2]
