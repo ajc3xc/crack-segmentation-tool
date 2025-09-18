@@ -2223,14 +2223,10 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
     @staticmethod
     def normals_from_mask_for_midline(midline_xy, mask, max_radius=50, step=1.0):
         """
-        For each midline point, walk along the unit normal and find the closest in-mask branch,
-        then return the entry/exit points of that branch along the normal:
-        e1=(x,y) on one side, e2=(x,y) on the other.
-        If no branch is intersected, the entry/exit are NaN.
-
-        Returns:
-        e1x, e1y, e2x, e2y  (np.float arrays, len = midline length)
-        widths_mask         (np.float array of in-mask widths along normal; NaN if missing)
+        Improved:
+        - Always assigns left/right consistently (red=left, blue=right).
+        - Subpixel refinement: endpoints are on the true 0↔1 boundary.
+        - Handles edge cases near crack border more robustly.
         """
         import numpy as np
 
@@ -2244,120 +2240,128 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                     np.full(n, np.nan), np.full(n, np.nan),
                     np.full(n, np.nan))
 
-        # Use your existing tangent/normal routine (already in your codebase)
-        # If it's in segmentation.py, import it; otherwise keep a local fallback.
+        # tangent + normals
         try:
             from cracktools.segmentation import compute_smooth_tangent_normals
         except Exception:
-            # Fallback (minimal)
             def compute_smooth_tangent_normals(x, y, window=7, poly=2):
-                x = np.asarray(x, float); y = np.asarray(y, float)
                 dx = np.gradient(x); dy = np.gradient(y)
                 nrm = np.hypot(dx, dy) + 1e-12
                 tan = np.stack([dx/nrm, dy/nrm], axis=1)
                 nor = np.stack([-tan[:,1], tan[:,0]], axis=1)
                 return tan, nor
-
         tan, nor = compute_smooth_tangent_normals(midline_xy[:,0], midline_xy[:,1])
 
-        # allocate outputs
+        # allocate
         N = len(midline_xy)
         e1x = np.full(N, np.nan); e1y = np.full(N, np.nan)
         e2x = np.full(N, np.nan); e2y = np.full(N, np.nan)
         widths_mask = np.full(N, np.nan)
 
-        # signed positions to sample along normal; centered at 0
-        # step is in (pixel) units since nor is unit-length
         ts = np.arange(-max_radius, max_radius + step, step, dtype=float)
 
-        def _in_bounds(px, py):
-            return (0 <= px < W) and (0 <= py < H)
+        def subpixel_refine(p0, p1, val0, val1):
+            val0 = float(val0); val1 = float(val1)
+            if val0 == val1:
+                return p0
+            denom = (val1 - val0)
+            if abs(denom) < 1e-6:
+                return p0
+            alpha = (0.5 - val0) / denom
+            alpha = np.clip(alpha, 0.0, 1.0)  # keep inside segment
+            return p0 + alpha * (p1 - p0)
 
         for i, (p, nvec) in enumerate(zip(midline_xy, nor)):
             if not np.all(np.isfinite(p)) or not np.all(np.isfinite(nvec)):
                 continue
-            # sample points along normal
+
             xs = p[0] + ts * nvec[0]
             ys = p[1] + ts * nvec[1]
             xi = np.clip(np.round(xs).astype(int), 0, W-1)
             yi = np.clip(np.round(ys).astype(int), 0, H-1)
-            vals = mask_bool[yi, xi].astype(np.uint8)  # 0/1
+            vals = mask_bool[yi, xi].astype(np.uint8)
 
-            # find all 1-runs (connected segments where vals==1)
             if vals.max() == 0:
-                continue  # no branch crossed → leave NaNs
+                continue
 
-            # indices where vals==1
-            one_idx = np.where(vals == 1)[0]
-            # split into contiguous runs
-            runs = []
-            start = one_idx[0]
-            prev = start
-            for k in one_idx[1:]:
-                if k == prev + 1:
-                    prev = k
-                else:
-                    runs.append((start, prev))
-                    start = k; prev = k
-            runs.append((start, prev))
+            # find transitions
+            diffs = np.diff(vals)
+            crossings = np.where(diffs != 0)[0]
+            if len(crossings) < 2:
+                continue
 
-            # choose the run whose center is closest to t=0 (closest branch to midline)
-            def run_center(run):
-                a, b = run
-                return (ts[a] + ts[b]) * 0.5
+            # choose outermost crossing pair enclosing t=0
+            left_idx = max([c for c in crossings if ts[c] < 0], default=None)
+            right_idx = min([c for c in crossings if ts[c] > 0], default=None)
+            if left_idx is None or right_idx is None:
+                continue
 
-            run = min(runs, key=lambda r: abs(run_center(r)))
+            # refine crossing positions
+            p_left = subpixel_refine(
+                np.array([xs[left_idx], ys[left_idx]]),
+                np.array([xs[left_idx+1], ys[left_idx+1]]),
+                vals[left_idx], vals[left_idx+1])
+            p_right = subpixel_refine(
+                np.array([xs[right_idx], ys[right_idx]]),
+                np.array([xs[right_idx+1], ys[right_idx+1]]),
+                vals[right_idx], vals[right_idx+1])
 
-            a, b = run  # inclusive indices within ts
-            # convert run endpoints (ts[a], ts[b]) to 2D points
-            t_left  = ts[a]
-            t_right = ts[b]
-
-            # entry/exit points in image coords
-            p_left  = (p[0] + t_left  * nvec[0], p[1] + t_left  * nvec[1])
-            p_right = (p[0] + t_right * nvec[0], p[1] + t_right * nvec[1])
-
-            # assign consistently: e1 = "negative side", e2 = "positive side"
-            if t_left <= t_right:
-                e1x[i], e1y[i] = p_left
-                e2x[i], e2y[i] = p_right
-                widths_mask[i] = abs(t_right - t_left)  # since step is in pixels, this is pixel width
-            else:
-                e1x[i], e1y[i] = p_right
-                e2x[i], e2y[i] = p_left
-                widths_mask[i] = abs(t_left - t_right)
+            e1x[i], e1y[i] = p_left
+            e2x[i], e2y[i] = p_right
+            widths_mask[i] = np.hypot(p_right[0]-p_left[0], p_right[1]-p_left[1])
 
         return e1x, e1y, e2x, e2y, widths_mask
-    
+
+
     @staticmethod
     def plot_mask_normals(midline, e1x, e1y, e2x, e2y, mask,
-                        ctype="atomic", cid="?", step=20,
-                        show=True, out_path=None):
-        plt.figure(figsize=(6,6))
+                        spacing_px=20, show=True, out_path=None, crack_label=""):
+        """
+        Plot mask-based normals at fixed physical spacing (pixels).
+        spacing_px: spacing along arc length, not index.
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
 
-        # bounding box around crack + normals
-        xs = np.concatenate([midline[:,0], e1x[np.isfinite(e1x)], e2x[np.isfinite(e2x)]])
-        ys = np.concatenate([midline[:,1], e1y[np.isfinite(e1y)], e2y[np.isfinite(e2y)]])
-        xmin, xmax = xs.min(), xs.max()
-        ymin, ymax = ys.min(), ys.max()
-        pad_x, pad_y = mask.shape[1]//50, mask.shape[0]//50
-        xmin, xmax = max(0, xmin-pad_x), min(mask.shape[1], xmax+pad_x)
-        ymin, ymax = max(0, ymin-pad_y), min(mask.shape[0], ymax+pad_y)
+        H, W = mask.shape
+        plt.figure(figsize=(8, 8))
+        plt.imshow(mask, cmap="gray", alpha=0.8)
 
-        plt.imshow(mask[int(ymin):int(ymax), int(xmin):int(xmax)], cmap="gray", alpha=0.8,
-                extent=[xmin, xmax, ymax, ymin])
+        if midline is not None and len(midline) > 1:
+            # remove consecutive duplicates
+            diffs = np.diff(midline, axis=0)
+            keep = np.any(diffs != 0, axis=1)
+            midline = np.vstack([midline[0], midline[1:][keep]])
 
-        plt.plot(midline[:,0], midline[:,1], 'g-', lw=1.0, label="midline")
-        for i in range(0, len(midline), step):
-            if np.isfinite(e1x[i]) and np.isfinite(e2x[i]):
-                plt.plot([e1x[i], e2x[i]], [e1y[i], e2y[i]], color="cyan", lw=0.6, alpha=0.8)
-        plt.title(f"Mask normals — {ctype} {cid}")
+            plt.plot(midline[:,0], midline[:,1], 'g-', lw=1.0, label="midline")
+
+            # arc length
+            if len(midline) > 1:
+                diffs = np.diff(midline, axis=0)
+                seglens = np.hypot(diffs[:,0], diffs[:,1])
+                cumlen = np.insert(np.cumsum(seglens), 0, 0.0)
+
+                if cumlen[-1] > 0:  # only if midline has length
+                    sample_pos = np.arange(0, cumlen[-1], spacing_px)
+                    sample_idx = np.searchsorted(cumlen, sample_pos)
+
+                    for i in sample_idx:
+                        if i >= len(midline): 
+                            continue
+                        if np.isfinite(e1x[i]) and np.isfinite(e2x[i]):
+                            plt.plot([e1x[i], e2x[i]], [e1y[i], e2y[i]],
+                                    color="cyan", lw=0.5, alpha=0.8)
+                            plt.scatter([e1x[i], e2x[i]], [e1y[i], e2y[i]],
+                                        c=["red", "blue"], s=8, marker="o", alpha=0.4)
+
+        plt.title(f"Mask normals — {crack_label}")
         plt.axis("equal"); plt.legend(); plt.tight_layout()
 
-        if show: plt.show()
+        if show:
+            plt.show()
         elif out_path:
             plt.savefig(out_path, dpi=200); plt.close()
-  
+
     def run_mask_metrics(self, display=True):
         """
         1) Mask IoU/F1/precision/recall for current image.
@@ -2424,9 +2428,9 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             # plot zoomed-in normals
             debug_normals_path = os.path.join(metrics_dir, f"{base_name}_{ctype}{cid}_mask_normals.png")
             self.plot_mask_normals(
-                midline, e1x_m, e1y_m, e2x_m, e2y_m,
-                crack_mask, ctype=ctype, cid=cid, step=20,
-                show=display, out_path=debug_normals_path
+                midline, e1x_m, e1y_m, e2x_m, e2y_m, crack_mask,
+                spacing_px=20, show=True,
+                crack_label=f"{ctype} {cid}"
             )
 
             # edge-tracking normals

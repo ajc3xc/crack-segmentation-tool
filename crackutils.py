@@ -8,6 +8,7 @@ from PyQt5.QtCore import Qt
 min_crop_size = 16
 
 #This class is basically is all of the utility / save and load or unimportant functions that aren't directly accessible via a ui button or aren't important
+#that way the 'main' / work in progress code can be more easily accessed and modified
 class CrackUtils:
     """
     UI-agnostic helpers you can call from your main app.
