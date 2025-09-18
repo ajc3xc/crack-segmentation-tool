@@ -2395,77 +2395,315 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         else:
             self.change_image()
 
-    def run_mask_metrics(self, display=True):
-        # Ensure image and annotation are loaded
-        if not hasattr(self, "image") or self.image is None:
-            print("⚠️ No image loaded — skipping mask metrics.")
-            return
-        if not hasattr(self, "annotation") or not self.annotation:
-            print("⚠️ No annotation loaded — skipping mask metrics.")
-            return
-        if not hasattr(self, "current_mask") or self.current_mask is None:
-            print("⚠️ No ground truth mask available — skipping mask metrics.")
-            return
+    # ---- local helpers
+    @staticmethod
+    def compute_mask_metrics(gt_mask, pred_mask):
+        gt = gt_mask.astype(bool); pr = pred_mask.astype(bool)
+        tp = np.logical_and(gt, pr).sum()
+        fp = np.logical_and(~gt, pr).sum()
+        fn = np.logical_and(gt, ~pr).sum()
+        tn = np.logical_and(~gt, ~pr).sum()
+        precision = tp / (tp + fp + 1e-9)
+        recall    = tp / (tp + fn + 1e-9)
+        f1        = 2 * precision * recall / (precision + recall + 1e-9)
+        iou       = tp / (tp + fp + fn + 1e-9)
+        return {"precision": precision, "recall": recall, "f1": f1, "iou": iou,
+                "tp": int(tp), "fp": int(fp), "fn": int(fn), "tn": int(tn)}
 
-        def compute_mask_metrics(gt_mask, pred_mask):
-            gt = gt_mask.astype(bool)
-            pr = pred_mask.astype(bool)
-            tp = np.logical_and(gt, pr).sum()
-            fp = np.logical_and(~gt, pr).sum()
-            fn = np.logical_and(gt, ~pr).sum()
-            tn = np.logical_and(~gt, ~pr).sum()
-            precision = tp / (tp + fp + 1e-9)
-            recall    = tp / (tp + fn + 1e-9)
-            f1        = 2 * precision * recall / (precision + recall + 1e-9)
-            iou       = tp / (tp + fp + fn + 1e-9)
-            return {"precision": precision, "recall": recall, "f1": f1, "iou": iou,
-                    "tp": tp, "fp": fp, "fn": fn, "tn": tn}
+    @staticmethod
+    def save_mask_comparison_plot(gt_mask, pred_mask, out_path, show=False):
+        gt = gt_mask.astype(bool)
+        pr = pred_mask.astype(bool)
+        iou = np.logical_and(gt, pr)   # intersection
+        oou = np.logical_and(gt, ~pr)  # missed crack
+        cou = np.logical_and(~gt, pr)  # false positive
+        vis = np.zeros((*gt.shape, 3), dtype=np.uint8)
+        vis[iou] = [255, 255, 255]
+        vis[oou] = [255,   0,   0]
+        vis[cou] = [  0,   0, 255]
+        if show:
+            plt.figure(figsize=(8, 6))
+            plt.imshow(vis); plt.title("Mask Comparison Overlay"); plt.axis("off"); plt.show()
+        else:
+            plt.imsave(out_path, vis)
 
-        def save_mask_comparison_plot(gt_mask, pred_mask, out_path, show=False):
-            gt = gt_mask.astype(bool)
-            pr = pred_mask.astype(bool)
-            iou = np.logical_and(gt, pr)   # intersection
-            oou = np.logical_and(gt, ~pr)  # missed crack
-            cou = np.logical_and(~gt, pr)  # false positive
+    @staticmethod
+    def _reconstruct_full_mask(crack, H, W):
+        try:
+            return reconstruct_full_mask_from_crack(crack, H, W)
+        except Exception:
+            mc = crack.get("mask_crop"); bb = crack.get("mask_bbox")
+            if mc is not None and bb is not None:
+                crop = np.array(mc, dtype=np.uint8)
+                x, y, w, h = [int(v) for v in bb]
+                x2, y2 = min(x+w, W), min(y+h, H)
+                w_eff, h_eff = max(0, x2-x), max(0, y2-y)
+                if h_eff > 0 and w_eff > 0:
+                    crop = (crop > 0).astype(np.uint8)[:h_eff, :w_eff]
+                    m = np.zeros((H, W), dtype=np.uint8)
+                    m[y:y+h_eff, x:x+w_eff] = crop
+                    return m
+            full = np.array(crack.get("mask", []), dtype=np.uint8)
+            if full.size == H*W and full.shape == (H, W):
+                return (full > 0).astype(np.uint8)
+            return np.zeros((H, W), dtype=np.uint8)
+        
+    @staticmethod
+    def normals_from_mask_for_midline(midline_xy, mask, max_radius=50, step=1.0):
+        """
+        For each midline point, walk along the unit normal and find the closest in-mask branch,
+        then return the entry/exit points of that branch along the normal:
+        e1=(x,y) on one side, e2=(x,y) on the other.
+        If no branch is intersected, the entry/exit are NaN.
 
-            vis = np.zeros((*gt.shape, 3), dtype=np.uint8)
-            vis[iou] = [255, 255, 255]   # white
-            vis[oou] = [255, 0, 0]       # red
-            vis[cou] = [0, 0, 255]       # blue
+        Returns:
+        e1x, e1y, e2x, e2y  (np.float arrays, len = midline length)
+        widths_mask         (np.float array of in-mask widths along normal; NaN if missing)
+        """
+        import numpy as np
 
-            if show:
-                plt.figure(figsize=(8, 6))
-                plt.imshow(vis)
-                plt.title("Mask Comparison Overlay")
-                plt.axis("off")
-                plt.show()
+        H, W = mask.shape
+        mask_bool = mask.astype(bool)
+
+        midline_xy = np.asarray(midline_xy, float)
+        if midline_xy.ndim != 2 or midline_xy.shape[1] != 2 or len(midline_xy) < 2:
+            n = len(midline_xy) if midline_xy.ndim > 0 else 0
+            return (np.full(n, np.nan), np.full(n, np.nan),
+                    np.full(n, np.nan), np.full(n, np.nan),
+                    np.full(n, np.nan))
+
+        # Use your existing tangent/normal routine (already in your codebase)
+        # If it's in segmentation.py, import it; otherwise keep a local fallback.
+        try:
+            from segmentation import compute_smooth_tangent_normals
+        except Exception:
+            # Fallback (minimal)
+            def compute_smooth_tangent_normals(x, y, window=7, poly=2):
+                x = np.asarray(x, float); y = np.asarray(y, float)
+                dx = np.gradient(x); dy = np.gradient(y)
+                nrm = np.hypot(dx, dy) + 1e-12
+                tan = np.stack([dx/nrm, dy/nrm], axis=1)
+                nor = np.stack([-tan[:,1], tan[:,0]], axis=1)
+                return tan, nor
+
+        tan, nor = compute_smooth_tangent_normals(midline_xy[:,0], midline_xy[:,1])
+
+        # allocate outputs
+        N = len(midline_xy)
+        e1x = np.full(N, np.nan); e1y = np.full(N, np.nan)
+        e2x = np.full(N, np.nan); e2y = np.full(N, np.nan)
+        widths_mask = np.full(N, np.nan)
+
+        # signed positions to sample along normal; centered at 0
+        # step is in (pixel) units since nor is unit-length
+        ts = np.arange(-max_radius, max_radius + step, step, dtype=float)
+
+        def _in_bounds(px, py):
+            return (0 <= px < W) and (0 <= py < H)
+
+        for i, (p, nvec) in enumerate(zip(midline_xy, nor)):
+            if not np.all(np.isfinite(p)) or not np.all(np.isfinite(nvec)):
+                continue
+            # sample points along normal
+            xs = p[0] + ts * nvec[0]
+            ys = p[1] + ts * nvec[1]
+            xi = np.clip(np.round(xs).astype(int), 0, W-1)
+            yi = np.clip(np.round(ys).astype(int), 0, H-1)
+            vals = mask_bool[yi, xi].astype(np.uint8)  # 0/1
+
+            # find all 1-runs (connected segments where vals==1)
+            if vals.max() == 0:
+                continue  # no branch crossed → leave NaNs
+
+            # indices where vals==1
+            one_idx = np.where(vals == 1)[0]
+            # split into contiguous runs
+            runs = []
+            start = one_idx[0]
+            prev = start
+            for k in one_idx[1:]:
+                if k == prev + 1:
+                    prev = k
+                else:
+                    runs.append((start, prev))
+                    start = k; prev = k
+            runs.append((start, prev))
+
+            # choose the run whose center is closest to t=0 (closest branch to midline)
+            def run_center(run):
+                a, b = run
+                return (ts[a] + ts[b]) * 0.5
+
+            run = min(runs, key=lambda r: abs(run_center(r)))
+
+            a, b = run  # inclusive indices within ts
+            # convert run endpoints (ts[a], ts[b]) to 2D points
+            t_left  = ts[a]
+            t_right = ts[b]
+
+            # entry/exit points in image coords
+            p_left  = (p[0] + t_left  * nvec[0], p[1] + t_left  * nvec[1])
+            p_right = (p[0] + t_right * nvec[0], p[1] + t_right * nvec[1])
+
+            # assign consistently: e1 = "negative side", e2 = "positive side"
+            if t_left <= t_right:
+                e1x[i], e1y[i] = p_left
+                e2x[i], e2y[i] = p_right
+                widths_mask[i] = abs(t_right - t_left)  # since step is in pixels, this is pixel width
             else:
-                plt.imsave(out_path, vis)
+                e1x[i], e1y[i] = p_right
+                e2x[i], e2y[i] = p_left
+                widths_mask[i] = abs(t_left - t_right)
 
-        # --- Compute & save ---
+        return e1x, e1y, e2x, e2y, widths_mask
+        
+    def run_mask_metrics(self, display=True):
+        """
+        1) Mask IoU/F1/precision/recall for current image.
+        2) Per-crack width/normal validation: compare mask-derived widths vs saved geodesic normals.
+        Works on both atomic and combined cracks.
+        Saves CSVs + quicklook images under <save_folder>/metrics.
+        """
+        import os, numpy as np, pandas as pd, matplotlib.pyplot as plt
+        import cv2
+
+        # ---- guards
+        if not hasattr(self, "image") or self.image is None:
+            print("⚠️ No image loaded — skipping mask metrics."); return
+        if not hasattr(self, "annotation") or not self.annotation:
+            print("⚠️ No annotation loaded — skipping mask metrics."); return
+        if not hasattr(self, "current_mask") or self.current_mask is None:
+            print("⚠️ No ground truth mask available — skipping mask metrics."); return
+
+        # ---- 1) image-level mask metrics
         ann = self.annotation.get("annotations", {})
         H, W = self.image.shape[:2]
         pred_mask = build_combined_mask(ann.get("atomic_cracks", {}), H, W)
-        metrics = compute_mask_metrics(self.current_mask, pred_mask)
+        metrics = self.compute_mask_metrics(self.current_mask, pred_mask)
 
         base_name = os.path.splitext(os.path.basename(self.name))[0]
         metrics_dir = os.path.join(self.save_folder, "metrics")
         os.makedirs(metrics_dir, exist_ok=True)
-        csv_path = os.path.join(metrics_dir, "mask_metrics.csv")
 
+        mask_csv_path = os.path.join(metrics_dir, "mask_metrics.csv")
         row = {"image": base_name, **metrics}
-        if os.path.exists(csv_path):
-            df = pd.read_csv(csv_path)
+        if os.path.exists(mask_csv_path):
+            df = pd.read_csv(mask_csv_path)
             df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
         else:
             df = pd.DataFrame([row])
-        df.to_csv(csv_path, index=False)
+        df.to_csv(mask_csv_path, index=False)
 
         vis_path = os.path.join(metrics_dir, base_name + "_iou_overlay.png")
-        print(display)
-        save_mask_comparison_plot(self.current_mask, pred_mask, vis_path, show=display)
+        self.save_mask_comparison_plot(self.current_mask, pred_mask, vis_path, show=display)
 
-        print(f"✅ Metrics saved to {csv_path}, overlay at {vis_path}")
+        # ---- 2) per-crack midline width/normal validation (atomic + combined)
+        width_csv_path = os.path.join(metrics_dir, "width_metrics.csv")
+        width_rows = []
+
+        all_cracks = []
+        atomic = ann.get("atomic_cracks", {}) or {}
+        combined = ann.get("combined_cracks", {}) or {}
+        for cid, crack in atomic.items():
+            all_cracks.append(("atomic", cid, crack))
+        for cid, crack in combined.items():
+            all_cracks.append(("combined", cid, crack))
+
+        for ctype, cid, crack in all_cracks:
+            midline = np.asarray(crack.get("midline", []), float)
+            if midline.ndim != 2 or midline.shape[1] != 2 or len(midline) < 3:
+                continue  # nothing to evaluate
+
+            crack_mask = self._reconstruct_full_mask(crack, H, W)
+
+            # mask-based normals/widths
+            e1x_m, e1y_m, e2x_m, e2y_m, w_mask = self.normals_from_mask_for_midline(
+                midline, crack_mask, max_radius=50, step=1.0
+            )
+
+            # edge-tracking normals
+            ne = crack.get("normal_edge_points")
+            w_edge = None
+            if ne and isinstance(ne, dict):
+                def _to_array(v):
+                    if isinstance(v, list) and len(v) == 2 and isinstance(v[0], (list, tuple)):
+                        return np.column_stack([v[0], v[1]]).astype(float)
+                    return np.array(v, float)
+                e1 = _to_array(ne.get("edge1", []))
+                e2 = _to_array(ne.get("edge2", []))
+                if e1.ndim == 2 and e2.ndim == 2 and len(e1) and len(e2):
+                    m = min(len(e1), len(e2), len(w_mask))
+                    w_edge = np.full(m, np.nan)
+                    for i in range(m):
+                        if np.all(np.isfinite(e1[i])) and np.all(np.isfinite(e2[i])):
+                            w_edge[i] = np.hypot(e1[i,0] - e2[i,0], e1[i,1] - e2[i,1])
+                    w_mask = w_mask[:m]
+                    e1x_m, e1y_m, e2x_m, e2y_m = e1x_m[:m], e1y_m[:m], e2x_m[:m], e2y_m[:m]
+                else:
+                    w_edge = None
+
+            if w_edge is not None:
+                valid = np.isfinite(w_mask) & np.isfinite(w_edge)
+                n_valid = int(valid.sum())
+                if n_valid >= 3:
+                    diff = w_edge[valid] - w_mask[valid]
+                    mae  = float(np.mean(np.abs(diff)))
+                    rmse = float(np.sqrt(np.mean(diff**2)))
+                    mean_mask = float(np.mean(w_mask[valid]))
+                    mean_edge = float(np.mean(w_edge[valid]))
+                    wmv = w_mask[valid] - w_mask[valid].mean()
+                    wev = w_edge[valid] - w_edge[valid].mean()
+                    denom = (np.sqrt((wmv**2).sum()) * np.sqrt((wev**2).sum()) + 1e-12)
+                    corr = float((wmv * wev).sum() / denom)
+
+                    width_rows.append({
+                        "image": base_name, "crack_type": ctype, "crack_id": cid,
+                        "n_valid": n_valid,
+                        "mask_width_mean": mean_mask,
+                        "edge_width_mean": mean_edge,
+                        "width_diff_mae": mae,
+                        "width_diff_rmse": rmse,
+                        "width_corr": corr
+                    })
+
+                    # overlay: difference-colored normals
+                    dmax = np.max(np.abs(diff)) if np.any(np.isfinite(diff)) else 1.0
+                    norm_diff = np.zeros_like(diff) if dmax == 0 else (diff / dmax)
+                    canvas = np.zeros((H, W, 3), np.uint8)
+                    step_draw = max(1, n_valid // 80)
+                    vi = np.where(valid)[0]
+                    for k_idx, i0 in enumerate(vi[::step_draw]):
+                        p1 = (int(round(e1x_m[i0])), int(round(e1y_m[i0])))
+                        p2 = (int(round(e2x_m[i0])), int(round(e2y_m[i0])))
+                        if 0 <= p1[0] < W and 0 <= p1[1] < H and 0 <= p2[0] < W and 0 <= p2[1] < H:
+                            v = norm_diff[vi[k_idx * step_draw]]
+                            if v >= 0: r,g,b = int(255*v), int(255*(1-v)), int(255*(1-v))
+                            else: v=-v; r,g,b = int(255*(1-v)), int(255*(1-v)), int(255*v)
+                            cv2.line(canvas, p1, p2, (b,g,r), 1, cv2.LINE_AA)
+                    out_overlay = os.path.join(metrics_dir, f"{base_name}_{ctype}{cid}_width_diff_overlay.png")
+                    cv2.imwrite(out_overlay, canvas)
+
+                    # width vs index plot
+                    out_plot = os.path.join(metrics_dir, f"{base_name}_{ctype}{cid}_width_vs_index.png")
+                    plt.figure(figsize=(8, 3))
+                    plt.plot(np.where(valid)[0], w_mask[valid], label="mask width", linewidth=1.2)
+                    plt.plot(np.where(valid)[0], w_edge[valid], label="edge width", linewidth=1.2)
+                    plt.title(f"Widths — {ctype} {cid}\nMAE={mae:.2f}, RMSE={rmse:.2f}, corr={corr:.2f}")
+                    plt.xlabel("midline index"); plt.ylabel("width (px)")
+                    plt.legend(); plt.tight_layout()
+                    if display: plt.show()
+                    else: plt.savefig(out_plot, dpi=180); plt.close()
+
+        if width_rows:
+            if os.path.exists(width_csv_path):
+                dfw = pd.read_csv(width_csv_path)
+                dfw = pd.concat([dfw, pd.DataFrame(width_rows)], ignore_index=True)
+            else:
+                dfw = pd.DataFrame(width_rows)
+            dfw.to_csv(width_csv_path, index=False)
+
+        print(f"✅ Saved metrics → {os.path.join(metrics_dir, 'mask_metrics.csv')}"
+            f"{' and ' + os.path.join(metrics_dir, 'width_metrics.csv') if width_rows else ''}")
 
 if __name__ == "__main__":
     import sys
