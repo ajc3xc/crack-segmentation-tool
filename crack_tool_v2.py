@@ -45,7 +45,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         self.clear_combined_cracks_button.clicked.connect(self.clear_combined_cracks)
         self.files_list.itemSelectionChanged.connect(self.name_selected)
         self.combine_segments_button.clicked.connect(self.combine_segments)
-        self.calculate_metrics_button.clicked.connect(self.run_mask_metrics)
+        self.calculate_metrics_button.clicked.connect(lambda: self.run_mask_metrics(display=True))
 
         #Tracking Tab
         self.select_points_button.clicked.connect(self.select_save_end_points)
@@ -2406,16 +2406,14 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         if not hasattr(self, "current_mask") or self.current_mask is None:
             print("⚠️ No ground truth mask available — skipping mask metrics.")
             return
-        
+
         def compute_mask_metrics(gt_mask, pred_mask):
-            """Return IoU, precision, recall, F1 for two binary masks."""
             gt = gt_mask.astype(bool)
             pr = pred_mask.astype(bool)
             tp = np.logical_and(gt, pr).sum()
             fp = np.logical_and(~gt, pr).sum()
             fn = np.logical_and(gt, ~pr).sum()
             tn = np.logical_and(~gt, ~pr).sum()
-
             precision = tp / (tp + fp + 1e-9)
             recall    = tp / (tp + fn + 1e-9)
             f1        = 2 * precision * recall / (precision + recall + 1e-9)
@@ -2424,18 +2422,11 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                     "tp": tp, "fp": fp, "fn": fn, "tn": tn}
 
         def save_mask_comparison_plot(gt_mask, pred_mask, out_path, show=False):
-            """
-            Visual overlay:
-            - White = intersection (correctly predicted crack)
-            - Red   = crack in GT only (missed)
-            - Blue  = crack in pred only (false positive)
-            - Black = background
-            """
             gt = gt_mask.astype(bool)
             pr = pred_mask.astype(bool)
-            iou = np.logical_and(gt, pr)
-            oou = np.logical_and(gt, ~pr)
-            cou = np.logical_and(~gt, pr)
+            iou = np.logical_and(gt, pr)   # intersection
+            oou = np.logical_and(gt, ~pr)  # missed crack
+            cou = np.logical_and(~gt, pr)  # false positive
 
             vis = np.zeros((*gt.shape, 3), dtype=np.uint8)
             vis[iou] = [255, 255, 255]   # white
@@ -2443,7 +2434,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             vis[cou] = [0, 0, 255]       # blue
 
             if show:
-                plt.figure(figsize=(8,6))
+                plt.figure(figsize=(8, 6))
                 plt.imshow(vis)
                 plt.title("Mask Comparison Overlay")
                 plt.axis("off")
@@ -2451,18 +2442,12 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             else:
                 plt.imsave(out_path, vis)
 
-        """Compute metrics for current image and save CSV + debug plot."""
-        if self.current_mask is None:
-            print("⚠️ No ground truth mask loaded.")
-            return
-
+        # --- Compute & save ---
         ann = self.annotation.get("annotations", {})
         H, W = self.image.shape[:2]
         pred_mask = build_combined_mask(ann.get("atomic_cracks", {}), H, W)
-
         metrics = compute_mask_metrics(self.current_mask, pred_mask)
 
-        # save CSV row
         base_name = os.path.splitext(os.path.basename(self.name))[0]
         metrics_dir = os.path.join(self.save_folder, "metrics")
         os.makedirs(metrics_dir, exist_ok=True)
@@ -2476,8 +2461,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             df = pd.DataFrame([row])
         df.to_csv(csv_path, index=False)
 
-        # visualization (show or save depending on flag)
         vis_path = os.path.join(metrics_dir, base_name + "_iou_overlay.png")
+        print(display)
         save_mask_comparison_plot(self.current_mask, pred_mask, vis_path, show=display)
 
         print(f"✅ Metrics saved to {csv_path}, overlay at {vis_path}")
