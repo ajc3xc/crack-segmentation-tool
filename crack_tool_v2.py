@@ -2359,14 +2359,79 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             plt.show()
         elif out_path:
             plt.savefig(out_path, dpi=200); plt.close()
+            
+    @staticmethod
+    def plot_width_differences(midline, w_mask, w_edge, mask, contours=None,
+                            spacing_px=20, show=True, out_path=None, crack_label=""):
+        """
+        Visualize width differences along the midline:
+        - Background mask (0=black, 255=white)
+        - Midline (green)
+        - Points colored by relative error (red=mask wider, blue=edge wider)
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
 
-    def run_mask_metrics(self, display=True):
+        H, W = mask.shape
+        # force black/white background
+        mask_rgb = np.zeros((H, W, 3), dtype=np.uint8)
+        mask_rgb[mask > 0] = [255, 255, 255]
+
+        plt.figure(figsize=(8, 8))
+        plt.imshow(mask_rgb, origin="upper")
+
+        # plot contours if available
+        if contours:
+            for poly in contours:
+                if poly.geom_type == "Polygon":
+                    x, y = poly.exterior.xy
+                    plt.plot(x, y, color="orange", lw=0.8, alpha=0.7)
+                    for interior in poly.interiors:
+                        xi, yi = interior.xy
+                        plt.plot(xi, yi, color="orange", lw=0.5, alpha=0.5)
+
+        if midline is not None and len(midline) > 1:
+            plt.plot(midline[:, 0], midline[:, 1], 'g-', lw=1.0, label="midline")
+
+        # compute diffs
+        valid = np.isfinite(w_mask) & np.isfinite(w_edge)
+        diffs = w_edge - w_mask
+        diffs = np.where(valid, diffs, np.nan)
+
+        # color map: red (mask larger), blue (edge larger)
+        colors = []
+        for d in diffs:
+            if np.isnan(d):
+                colors.append("gray")
+            elif d > 0:
+                colors.append("blue")   # edge wider
+            else:
+                colors.append("red")    # mask wider
+
+        # sample points along midline
+        N = len(midline)
+        for i in range(0, N, spacing_px):
+            if np.isfinite(diffs[i]):
+                plt.scatter(midline[i, 0], midline[i, 1],
+                            c=colors[i], s=20, marker="o", alpha=0.8)
+
+        plt.title(f"Width comparison — {crack_label}")
+        plt.axis("equal"); plt.legend(); plt.tight_layout()
+
+        if show:
+            plt.show()
+        elif out_path:
+            plt.savefig(out_path, dpi=200)
+            plt.close()
+
+        return diffs
+
+    def run_mask_metrics(self, display=True, save_edges_json=False):
         """
         1) Mask IoU/F1/precision/recall for current image.
-        2) Per-crack width/normal validation: compare GT mask-derived widths vs saved geodesic normals.
-        Only evaluates combined cracks and atomics not part of any combined.
+        2) Delegates crack width/normal comparison to compare_widths_for_cracks().
         """
-        import os, numpy as np, pandas as pd, matplotlib.pyplot as plt, cv2
+        import os, numpy as np, pandas as pd
 
         # ---- guards
         if not hasattr(self, "image") or self.image is None:
@@ -2397,11 +2462,48 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         df.to_csv(mask_csv_path, index=False)
 
         vis_path = os.path.join(metrics_dir, base_name + "_iou_overlay.png")
-        self.save_mask_comparison_plot(self.current_mask, pred_mask, vis_path, show=display)
+        #self.save_mask_comparison_plot(self.current_mask, pred_mask, vis_path, show=display)
 
-        # ---- 2) per-crack midline width/normal validation
-        width_csv_path = os.path.join(metrics_dir, "width_metrics.csv")
+        # ---- 2) per-crack width comparison
+        summary_csv = os.path.join(metrics_dir, "width_metrics.csv")
+        diffs_csv   = os.path.join(metrics_dir, "width_diffs.csv")
+
+        width_rows, diffs_rows = self.compare_widths_for_cracks(
+            ann, self.current_mask, base_name, metrics_dir,
+            display=display
+        )
+
+        # save summary
+        if width_rows:
+            dfw = pd.DataFrame(width_rows)
+            if os.path.exists(summary_csv):
+                dfw_old = pd.read_csv(summary_csv)
+                dfw = pd.concat([dfw_old, dfw], ignore_index=True)
+            dfw.to_csv(summary_csv, index=False)
+
+        # save diffs
+        if diffs_rows:
+            dfd = pd.DataFrame(diffs_rows)
+            if os.path.exists(diffs_csv):
+                dfd_old = pd.read_csv(diffs_csv)
+                dfd = pd.concat([dfd_old, dfd], ignore_index=True)
+            dfd.to_csv(diffs_csv, index=False)
+
+        print(f"✅ Saved metrics → {mask_csv_path}, {summary_csv}, {diffs_csv}")
+
+    @staticmethod
+    def compare_widths_for_cracks(ann, crack_mask, base_name, metrics_dir, display=True):
+        """
+        Compare mask-derived vs edge-tracking widths for all cracks.
+        - Plots midlines color-coded by signed width difference (edge - mask).
+        - Saves summary stats + per-point diffs.
+        """
+        import numpy as np, matplotlib.pyplot as plt, os
+        from matplotlib.collections import LineCollection
+
+        H, W = crack_mask.shape
         width_rows = []
+        diffs_rows = []
 
         atomic = ann.get("atomic_cracks", {}) or {}
         combined = ann.get("combined_cracks", {}) or {}
@@ -2411,28 +2513,22 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         all_cracks = [( "atomic", cid, crack) for cid, crack in atomic.items() if cid not in atomics_in_combined]
         all_cracks += [( "combined", cid, crack) for cid, crack in combined.items()]
 
+        plt.figure(figsize=(10, 8))
+        mask_rgb = np.zeros((H, W, 3), dtype=np.uint8)
+        mask_rgb[crack_mask > 0] = [255, 255, 255]
+        plt.imshow(mask_rgb, alpha=0.7)
+
         for ctype, cid, crack in all_cracks:
             midline = np.asarray(crack.get("midline", []), float)
             if midline.ndim != 2 or midline.shape[1] != 2 or len(midline) < 3:
-                continue  # nothing to evaluate
+                continue
 
-            crack_mask = self.current_mask  # <-- GT mask only
-
-            # mask-based normals/widths
-            (e1x_m, e1y_m, e2x_m, e2y_m, w_mask), contours = self.normals_from_mask_for_midline(
+            # mask-based widths
+            (_, _, _, _, w_mask), _ = CrackToolsApplication.normals_from_mask_for_midline(
                 midline, crack_mask, max_radius=50
             )
 
-            self.plot_mask_normals(
-                midline, e1x_m, e1y_m, e2x_m, e2y_m, crack_mask,
-                contours=contours,
-                spacing_px=20, show=True,
-                crack_label=f"{ctype} {cid}"
-            )
-
-            debug_normals_path = os.path.join(metrics_dir, f"{base_name}_{ctype}{cid}_mask_normals.png")
-
-            # edge-tracking normals
+            # edge-tracking widths
             ne = crack.get("normal_edge_points")
             w_edge = None
             if ne and isinstance(ne, dict):
@@ -2443,47 +2539,77 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 e1 = _to_array(ne.get("edge1", []))
                 e2 = _to_array(ne.get("edge2", []))
                 if e1.ndim == 2 and e2.ndim == 2 and len(e1) and len(e2):
-                    m = min(len(e1), len(e2), len(w_mask))
+                    m = min(len(e1), len(e2), len(w_mask), len(midline))
                     w_edge = np.full(m, np.nan)
                     for i in range(m):
                         if np.all(np.isfinite(e1[i])) and np.all(np.isfinite(e2[i])):
                             w_edge[i] = np.hypot(e1[i,0] - e2[i,0], e1[i,1] - e2[i,1])
+                    # trim everything consistently
                     w_mask = w_mask[:m]
+                    midline = midline[:m]
 
-            if w_edge is not None:
-                valid = np.isfinite(w_mask) & np.isfinite(w_edge)
-                n_valid = int(valid.sum())
-                if n_valid >= 3:
-                    diff = w_edge[valid] - w_mask[valid]
-                    mae  = float(np.mean(np.abs(diff)))
-                    rmse = float(np.sqrt(np.mean(diff**2)))
-                    mean_mask = float(np.mean(w_mask[valid]))
-                    mean_edge = float(np.mean(w_edge[valid]))
-                    wmv = w_mask[valid] - w_mask[valid].mean()
-                    wev = w_edge[valid] - w_edge[valid].mean()
-                    denom = (np.sqrt((wmv**2).sum()) * np.sqrt((wev**2).sum()) + 1e-12)
-                    corr = float((wmv * wev).sum() / denom)
+            if w_edge is None:
+                continue
 
-                    width_rows.append({
-                        "image": base_name, "crack_type": ctype, "crack_id": cid,
-                        "n_valid": n_valid,
-                        "mask_width_mean": mean_mask,
-                        "edge_width_mean": mean_edge,
-                        "width_diff_mae": mae,
-                        "width_diff_rmse": rmse,
-                        "width_corr": corr
-                    })
+            valid = np.isfinite(w_mask) & np.isfinite(w_edge)
+            n_valid = int(valid.sum())
+            if n_valid < 3:
+                continue
 
-        if width_rows:
-            if os.path.exists(width_csv_path):
-                dfw = pd.read_csv(width_csv_path)
-                dfw = pd.concat([dfw, pd.DataFrame(width_rows)], ignore_index=True)
-            else:
-                dfw = pd.DataFrame(width_rows)
-            dfw.to_csv(width_csv_path, index=False)
+            diff = w_edge[valid] - w_mask[valid]
 
-        print(f"✅ Saved metrics → {os.path.join(metrics_dir, 'mask_metrics.csv')}"
-            f"{' and ' + os.path.join(metrics_dir, 'width_metrics.csv') if width_rows else ''}")
+            # --- add stats row
+            width_rows.append({
+                "image": base_name, "crack_type": ctype, "crack_id": cid,
+                "n_valid": n_valid,
+                "mask_width_mean": float(np.mean(w_mask[valid])),
+                "edge_width_mean": float(np.mean(w_edge[valid])),
+                "width_diff_mae": float(np.mean(np.abs(diff))),
+                "width_diff_rmse": float(np.sqrt(np.mean(diff**2))),
+                "width_diff_mean": float(np.mean(diff)),
+                "width_diff_std": float(np.std(diff)),
+                "width_diff_min": float(np.min(diff)),
+                "width_diff_max": float(np.max(diff))
+            })
+
+            # --- add raw diffs
+            for j, idx in enumerate(np.where(valid)[0]):
+                diffs_rows.append({
+                    "image": base_name, "crack_type": ctype, "crack_id": cid,
+                    "point_index": int(idx),
+                    "mid_x": float(midline[idx,0]), "mid_y": float(midline[idx,1]),
+                    "mask_width": float(w_mask[idx]),
+                    "edge_width": float(w_edge[idx]),
+                    "width_diff": float(diff[j])
+                })
+
+            # --- plot midline color-coded
+            coords = midline[valid]
+            if len(coords) > 1:
+                segments = np.stack([coords[:-1], coords[1:]], axis=1)
+
+                # scale centered at 0
+                vmax = np.max(np.abs(diff)) if np.any(np.isfinite(diff)) else 1.0
+                norm = plt.Normalize(vmin=-vmax, vmax=vmax)
+
+                lc = LineCollection(
+                    segments, cmap="coolwarm", norm=norm,
+                    linewidth=3.0, alpha=0.9
+                )
+                lc.set_array(diff[:-1])  # color from diffs
+                plt.gca().add_collection(lc)
+
+                # add colorbar for this crack
+                cbar = plt.colorbar(lc, ax=plt.gca(), shrink=0.7)
+                cbar.set_label("Width difference (edge - mask) [px]")
+
+        plt.title(f"Width diffs — {base_name}")
+        plt.axis("equal"); plt.tight_layout()
+        out_plot = os.path.join(metrics_dir, f"{base_name}_width_diffs.png")
+        if display: plt.show()
+        else: plt.savefig(out_plot, dpi=200); plt.close()
+
+        return width_rows, diffs_rows
 
 if __name__ == "__main__":
     import sys
