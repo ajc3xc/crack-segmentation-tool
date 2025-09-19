@@ -2225,10 +2225,11 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         """
         Pixel-accurate version:
         - Polygonizes the mask into exact pixel-boundary polygons using rasterio.
+        - Shifts coords by -0.5 so edges align with imshow pixel grid.
         - Intersects midline normals with those polygons so endpoints lie exactly on the mask edge.
-        Returns (e1x, e1y, e2x, e2y, widths), plus the raw edge polygons for plotting.
         """
         import numpy as np
+        import shapely
         from shapely.geometry import shape, LineString, Point, MultiPoint
         import rasterio.features
 
@@ -2250,7 +2251,13 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         # polygonize mask -> shapely polygons
         mask_bin = (mask > 0).astype(np.uint8)
-        polygons = [shape(geom) for geom, val in rasterio.features.shapes(mask_bin, mask=mask_bin) if val == 1]
+        polygons = []
+        for geom, val in rasterio.features.shapes(mask_bin, mask=mask_bin):
+            if val == 1:
+                poly = shape(geom)
+                # shift by -0.5 in both x and y
+                poly = shapely.affinity.translate(poly, xoff=-0.5, yoff=-0.5)
+                polygons.append(poly)
         edges = [poly.boundary for poly in polygons]
 
         N = len(midline_xy)
@@ -2306,7 +2313,12 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         H, W = mask.shape
         plt.figure(figsize=(8, 8))
-        plt.imshow(mask, cmap="gray", alpha=0.5)
+
+        # Force 0 = black, 255 = white
+        mask_rgb = np.zeros((H, W, 3), dtype=np.uint8)
+        mask_rgb[mask > 0] = [255, 255, 255]
+
+        plt.imshow(mask_rgb, alpha=1.0)  # alpha=1 for full opaque b/w
 
         # plot polygon contours
         if contours:
@@ -2316,12 +2328,12 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 # in plot_mask_normals when drawing contours
                 if poly.geom_type == "Polygon":
                     x, y = poly.exterior.xy
-                    plt.plot(np.array(x) - 0.5, np.array(y) - 0.5,
-                            color="orange", lw=1.0, alpha=0.8)
+                    plt.plot(np.array(x), np.array(y),
+                            color="orange", lw=1.5, alpha=0.8)
                     for interior in poly.interiors:
                         xi, yi = interior.xy
-                        plt.plot(np.array(xi) - 0.5, np.array(yi) - 0.5,
-                                color="orange", lw=0.5, alpha=0.5)
+                        plt.plot(np.array(xi), np.array(yi),
+                                color="orange", lw=1.5, alpha=0.5)
                 elif poly.geom_type == "MultiPolygon":
                     for sub in poly.geoms:
                         x, y = sub.exterior.xy
