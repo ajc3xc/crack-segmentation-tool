@@ -2221,138 +2221,124 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             return np.zeros((H, W), dtype=np.uint8)
         
     @staticmethod
-    def normals_from_mask_for_midline(midline_xy, mask, max_radius=50, step=1.0):
+    def normals_from_mask_for_midline(midline_xy, mask, max_radius=50):
         """
-        Improved:
-        - Always assigns left/right consistently (red=left, blue=right).
-        - Subpixel refinement: endpoints are on the true 0↔1 boundary.
-        - Handles edge cases near crack border more robustly.
+        Pixel-accurate version:
+        - Polygonizes the mask into exact pixel-boundary polygons using rasterio.
+        - Intersects midline normals with those polygons so endpoints lie exactly on the mask edge.
+        Returns (e1x, e1y, e2x, e2y, widths), plus the raw edge polygons for plotting.
         """
         import numpy as np
+        from shapely.geometry import shape, LineString, Point, MultiPoint
+        import rasterio.features
 
         H, W = mask.shape
-        mask_bool = mask.astype(bool)
-
         midline_xy = np.asarray(midline_xy, float)
         if midline_xy.ndim != 2 or midline_xy.shape[1] != 2 or len(midline_xy) < 2:
             n = len(midline_xy) if midline_xy.ndim > 0 else 0
-            return (np.full(n, np.nan), np.full(n, np.nan),
-                    np.full(n, np.nan), np.full(n, np.nan),
-                    np.full(n, np.nan))
+            return (np.full(n, np.nan),) * 5, []
 
         # tangent + normals
         try:
             from cracktools.segmentation import compute_smooth_tangent_normals
+            _, nor = compute_smooth_tangent_normals(midline_xy[:, 0], midline_xy[:, 1])
         except Exception:
-            def compute_smooth_tangent_normals(x, y, window=7, poly=2):
-                dx = np.gradient(x); dy = np.gradient(y)
-                nrm = np.hypot(dx, dy) + 1e-12
-                tan = np.stack([dx/nrm, dy/nrm], axis=1)
-                nor = np.stack([-tan[:,1], tan[:,0]], axis=1)
-                return tan, nor
-        tan, nor = compute_smooth_tangent_normals(midline_xy[:,0], midline_xy[:,1])
+            dx, dy = np.gradient(midline_xy[:, 0]), np.gradient(midline_xy[:, 1])
+            nrm = np.hypot(dx, dy) + 1e-12
+            tan = np.stack([dx/nrm, dy/nrm], axis=1)
+            nor = np.stack([-tan[:, 1], tan[:, 0]], axis=1)
 
-        # allocate
+        # polygonize mask -> shapely polygons
+        mask_bin = (mask > 0).astype(np.uint8)
+        polygons = [shape(geom) for geom, val in rasterio.features.shapes(mask_bin, mask=mask_bin) if val == 1]
+        edges = [poly.boundary for poly in polygons]
+
         N = len(midline_xy)
         e1x = np.full(N, np.nan); e1y = np.full(N, np.nan)
         e2x = np.full(N, np.nan); e2y = np.full(N, np.nan)
         widths_mask = np.full(N, np.nan)
 
-        ts = np.arange(-max_radius, max_radius + step, step, dtype=float)
-
-        def subpixel_refine(p0, p1, val0, val1):
-            val0 = float(val0); val1 = float(val1)
-            if val0 == val1:
-                return p0
-            denom = (val1 - val0)
-            if abs(denom) < 1e-6:
-                return p0
-            alpha = (0.5 - val0) / denom
-            alpha = np.clip(alpha, 0.0, 1.0)  # keep inside segment
-            return p0 + alpha * (p1 - p0)
-
         for i, (p, nvec) in enumerate(zip(midline_xy, nor)):
             if not np.all(np.isfinite(p)) or not np.all(np.isfinite(nvec)):
                 continue
 
-            xs = p[0] + ts * nvec[0]
-            ys = p[1] + ts * nvec[1]
-            xi = np.clip(np.round(xs).astype(int), 0, W-1)
-            yi = np.clip(np.round(ys).astype(int), 0, H-1)
-            vals = mask_bool[yi, xi].astype(np.uint8)
+            # build long ray
+            A = (p[0] - max_radius * nvec[0], p[1] - max_radius * nvec[1])
+            B = (p[0] + max_radius * nvec[0], p[1] + max_radius * nvec[1])
+            ray = LineString([A, B])
 
-            if vals.max() == 0:
-                continue
+            hits = []
+            for edge in edges:
+                inter = edge.intersection(ray)
+                if inter.is_empty:
+                    continue
+                if isinstance(inter, Point):
+                    hits.append((inter.x, inter.y))
+                elif isinstance(inter, MultiPoint):
+                    for g in inter.geoms:
+                        hits.append((g.x, g.y))
+                elif inter.geom_type == "LineString":
+                    coords = np.asarray(inter.coords, float)
+                    hits.append(tuple(coords[0])); hits.append(tuple(coords[-1]))
 
-            # find transitions
-            diffs = np.diff(vals)
-            crossings = np.where(diffs != 0)[0]
-            if len(crossings) < 2:
-                continue
+            if len(hits) >= 2:
+                dists = [np.dot([hx - p[0], hy - p[1]], nvec) for (hx, hy) in hits]
+                left_pts = [(hx, hy) for (hx, hy), d in zip(hits, dists) if d < 0]
+                right_pts = [(hx, hy) for (hx, hy), d in zip(hits, dists) if d > 0]
+                if left_pts and right_pts:
+                    lp = max(left_pts, key=lambda q: np.dot([q[0]-p[0], q[1]-p[1]], nvec))
+                    rp = min(right_pts, key=lambda q: np.dot([q[0]-p[0], q[1]-p[1]], nvec))
+                    e1x[i], e1y[i] = lp
+                    e2x[i], e2y[i] = rp
+                    widths_mask[i] = np.hypot(rp[0]-lp[0], rp[1]-lp[1])
 
-            # choose outermost crossing pair enclosing t=0
-            left_idx = max([c for c in crossings if ts[c] < 0], default=None)
-            right_idx = min([c for c in crossings if ts[c] > 0], default=None)
-            if left_idx is None or right_idx is None:
-                continue
-
-            # refine crossing positions
-            p_left = subpixel_refine(
-                np.array([xs[left_idx], ys[left_idx]]),
-                np.array([xs[left_idx+1], ys[left_idx+1]]),
-                vals[left_idx], vals[left_idx+1])
-            p_right = subpixel_refine(
-                np.array([xs[right_idx], ys[right_idx]]),
-                np.array([xs[right_idx+1], ys[right_idx+1]]),
-                vals[right_idx], vals[right_idx+1])
-
-            e1x[i], e1y[i] = p_left
-            e2x[i], e2y[i] = p_right
-            widths_mask[i] = np.hypot(p_right[0]-p_left[0], p_right[1]-p_left[1])
-
-        return e1x, e1y, e2x, e2y, widths_mask
-
+        return (e1x, e1y, e2x, e2y, widths_mask), polygons
 
     @staticmethod
-    def plot_mask_normals(midline, e1x, e1y, e2x, e2y, mask,
+    def plot_mask_normals(midline, e1x, e1y, e2x, e2y, mask, contours=None,
                         spacing_px=20, show=True, out_path=None, crack_label=""):
         """
-        Plot mask-based normals at fixed physical spacing (pixels).
-        spacing_px: spacing along arc length, not index.
+        Plot normals + crack contours (polygons) for visualization.
+        - contours: list of Shapely Polygons (from rasterio.features.shapes)
         """
         import matplotlib.pyplot as plt
         import numpy as np
 
         H, W = mask.shape
         plt.figure(figsize=(8, 8))
-        plt.imshow(mask, cmap="gray", alpha=0.8)
+        plt.imshow(mask, cmap="gray", alpha=0.5)
 
+        # plot polygon contours
+        if contours:
+            for poly in contours:
+                if poly.is_empty:
+                    continue
+                # in plot_mask_normals when drawing contours
+                if poly.geom_type == "Polygon":
+                    x, y = poly.exterior.xy
+                    plt.plot(np.array(x) - 0.5, np.array(y) - 0.5,
+                            color="orange", lw=1.0, alpha=0.8)
+                    for interior in poly.interiors:
+                        xi, yi = interior.xy
+                        plt.plot(np.array(xi) - 0.5, np.array(yi) - 0.5,
+                                color="orange", lw=0.5, alpha=0.5)
+                elif poly.geom_type == "MultiPolygon":
+                    for sub in poly.geoms:
+                        x, y = sub.exterior.xy
+                        plt.plot(x, y, color="orange", lw=1.0, alpha=0.8)
+
+        # plot midline
         if midline is not None and len(midline) > 1:
-            # remove consecutive duplicates
-            diffs = np.diff(midline, axis=0)
-            keep = np.any(diffs != 0, axis=1)
-            midline = np.vstack([midline[0], midline[1:][keep]])
-
             plt.plot(midline[:,0], midline[:,1], 'g-', lw=1.0, label="midline")
 
-            # arc length
-            if len(midline) > 1:
-                diffs = np.diff(midline, axis=0)
-                seglens = np.hypot(diffs[:,0], diffs[:,1])
-                cumlen = np.insert(np.cumsum(seglens), 0, 0.0)
-
-                if cumlen[-1] > 0:  # only if midline has length
-                    sample_pos = np.arange(0, cumlen[-1], spacing_px)
-                    sample_idx = np.searchsorted(cumlen, sample_pos)
-
-                    for i in sample_idx:
-                        if i >= len(midline): 
-                            continue
-                        if np.isfinite(e1x[i]) and np.isfinite(e2x[i]):
-                            plt.plot([e1x[i], e2x[i]], [e1y[i], e2y[i]],
-                                    color="cyan", lw=0.5, alpha=0.8)
-                            plt.scatter([e1x[i], e2x[i]], [e1y[i], e2y[i]],
-                                        c=["red", "blue"], s=8, marker="o", alpha=0.4)
+        # plot normals
+        N = len(midline)
+        for i in range(0, N, spacing_px):
+            if np.isfinite(e1x[i]) and np.isfinite(e2x[i]):
+                plt.plot([e1x[i], e2x[i]], [e1y[i], e2y[i]],
+                        color="cyan", lw=0.5, alpha=0.8)
+                plt.scatter([e1x[i], e2x[i]], [e1y[i], e2y[i]],
+                            c=["red","blue"], s=8, marker="o", alpha=0.7)
 
         plt.title(f"Mask normals — {crack_label}")
         plt.axis("equal"); plt.legend(); plt.tight_layout()
@@ -2421,17 +2407,18 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             crack_mask = self.current_mask  # <-- GT mask only
 
             # mask-based normals/widths
-            e1x_m, e1y_m, e2x_m, e2y_m, w_mask = self.normals_from_mask_for_midline(
-                midline, crack_mask, max_radius=50, step=1.0
+            (e1x_m, e1y_m, e2x_m, e2y_m, w_mask), contours = self.normals_from_mask_for_midline(
+                midline, crack_mask, max_radius=50
             )
 
-            # plot zoomed-in normals
-            debug_normals_path = os.path.join(metrics_dir, f"{base_name}_{ctype}{cid}_mask_normals.png")
             self.plot_mask_normals(
                 midline, e1x_m, e1y_m, e2x_m, e2y_m, crack_mask,
+                contours=contours,
                 spacing_px=20, show=True,
                 crack_label=f"{ctype} {cid}"
             )
+
+            debug_normals_path = os.path.join(metrics_dir, f"{base_name}_{ctype}{cid}_mask_normals.png")
 
             # edge-tracking normals
             ne = crack.get("normal_edge_points")

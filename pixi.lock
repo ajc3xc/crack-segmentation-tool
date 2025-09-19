@@ -145,7 +145,12 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/zipp-3.23.0-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/zlib-ng-2.2.4-hbb528cf_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/zstd-1.5.7-hbeecb71_2.conda
+      - pypi: https://files.pythonhosted.org/packages/0b/f7/85273299ab57117850cc0a936c64151171fac4da49bc6fba0dad984a7c5f/affine-2.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5b/2e/dd5a698f3c9559de3310b0bff75e30edec43d3b6758f50206ceee72c8c2b/agd-0.2.16-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/77/06/bb80f5f86020c4551da315d78b3ab75e8228f89f0162f2c3a819e407941a/attrs-25.3.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/e5/48/1549795ba7742c948d2ad169c1c8cdbae65bc450d6cd753d124b17c8cd32/certifi-2025.8.3-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/3d/9a/2abecb28ae875e39c8cad711eb1186d8d14eab564705325e77e4e6ab9ae5/click_plugins-1.1.1.2-py2.py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/73/86/43fa9f15c5b9fb6e82620428827cd3c284aa933431405d1bcf5231ae3d3e/cligj-0.7.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/eb/dd/8220b4787908c4ba14f97f92a09690524184199efabffac537d1afaba314/FastGeodis-1.0.5.tar.gz
       - pypi: https://files.pythonhosted.org/packages/4d/36/2a115987e2d8c300a974597416d9de88f2444426de9571f4b59b2cca3acc/filelock-3.18.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl
@@ -161,6 +166,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/37/97/5d3b222b924fa2ed4c2488925155cd0b03fd5d09ee1cfcf7c553c11c9f66/PyQt5_Qt5-5.15.2-py3-none-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/24/c1/50fc7301aa39a50f451fc1b6b219e778c540a823fe9533a57b4793c859fd/PyQt5_sip-12.17.0-cp311-cp311-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/81/c4/34e93fe5f5429d7570ec1fa436f1986fb1f00c3e0f43a589fe2bbcd22c3f/pytz-2025.2-py2.py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/7e/1f/56462740694de764fde264051224fcbf800dad43cac92a66753153128866/rasterio-1.4.3-cp311-cp311-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/b2/0f/61132e1b4cc9e8ac81723f3fcbe096408f957ceeaffa2b8b949b212aff12/scikit_fmm-2025.6.23-cp311-cp311-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/93/5b/842022c00fbb051083c1c85430f3bb55565b7fd2d775f4f398c0ba8052ce/shapely-2.1.1-cp311-cp311-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl
@@ -189,6 +195,17 @@ packages:
   purls: []
   size: 49468
   timestamp: 1718213032772
+- pypi: https://files.pythonhosted.org/packages/0b/f7/85273299ab57117850cc0a936c64151171fac4da49bc6fba0dad984a7c5f/affine-2.4.0-py3-none-any.whl
+  name: affine
+  version: 2.4.0
+  sha256: 8a3df80e2b2378aef598a83c1392efd47967afec4242021a0b06b4c7cbc61a92
+  requires_dist:
+  - pydocstyle ; extra == 'dev'
+  - flake8 ; extra == 'dev'
+  - coveralls ; extra == 'dev'
+  - pytest>=4.6 ; extra == 'test'
+  - pytest-cov ; extra == 'test'
+  requires_python: '>=3.7'
 - pypi: https://files.pythonhosted.org/packages/5b/2e/dd5a698f3c9559de3310b0bff75e30edec43d3b6758f50206ceee72c8c2b/agd-0.2.16-py3-none-any.whl
   name: agd
   version: 0.2.16
@@ -214,6 +231,52 @@ packages:
   purls: []
   size: 1958151
   timestamp: 1718551737234
+- pypi: https://files.pythonhosted.org/packages/77/06/bb80f5f86020c4551da315d78b3ab75e8228f89f0162f2c3a819e407941a/attrs-25.3.0-py3-none-any.whl
+  name: attrs
+  version: 25.3.0
+  sha256: 427318ce031701fea540783410126f03899a97ffc6f61596ad581ac2e40e3bc3
+  requires_dist:
+  - cloudpickle ; platform_python_implementation == 'CPython' and extra == 'benchmark'
+  - hypothesis ; extra == 'benchmark'
+  - mypy>=1.11.1 ; python_full_version >= '3.10' and platform_python_implementation == 'CPython' and extra == 'benchmark'
+  - pympler ; extra == 'benchmark'
+  - pytest-codspeed ; extra == 'benchmark'
+  - pytest-mypy-plugins ; python_full_version >= '3.10' and platform_python_implementation == 'CPython' and extra == 'benchmark'
+  - pytest-xdist[psutil] ; extra == 'benchmark'
+  - pytest>=4.3.0 ; extra == 'benchmark'
+  - cloudpickle ; platform_python_implementation == 'CPython' and extra == 'cov'
+  - coverage[toml]>=5.3 ; extra == 'cov'
+  - hypothesis ; extra == 'cov'
+  - mypy>=1.11.1 ; python_full_version >= '3.10' and platform_python_implementation == 'CPython' and extra == 'cov'
+  - pympler ; extra == 'cov'
+  - pytest-mypy-plugins ; python_full_version >= '3.10' and platform_python_implementation == 'CPython' and extra == 'cov'
+  - pytest-xdist[psutil] ; extra == 'cov'
+  - pytest>=4.3.0 ; extra == 'cov'
+  - cloudpickle ; platform_python_implementation == 'CPython' and extra == 'dev'
+  - hypothesis ; extra == 'dev'
+  - mypy>=1.11.1 ; python_full_version >= '3.10' and platform_python_implementation == 'CPython' and extra == 'dev'
+  - pre-commit-uv ; extra == 'dev'
+  - pympler ; extra == 'dev'
+  - pytest-mypy-plugins ; python_full_version >= '3.10' and platform_python_implementation == 'CPython' and extra == 'dev'
+  - pytest-xdist[psutil] ; extra == 'dev'
+  - pytest>=4.3.0 ; extra == 'dev'
+  - cogapp ; extra == 'docs'
+  - furo ; extra == 'docs'
+  - myst-parser ; extra == 'docs'
+  - sphinx ; extra == 'docs'
+  - sphinx-notfound-page ; extra == 'docs'
+  - sphinxcontrib-towncrier ; extra == 'docs'
+  - towncrier ; extra == 'docs'
+  - cloudpickle ; platform_python_implementation == 'CPython' and extra == 'tests'
+  - hypothesis ; extra == 'tests'
+  - mypy>=1.11.1 ; python_full_version >= '3.10' and platform_python_implementation == 'CPython' and extra == 'tests'
+  - pympler ; extra == 'tests'
+  - pytest-mypy-plugins ; python_full_version >= '3.10' and platform_python_implementation == 'CPython' and extra == 'tests'
+  - pytest-xdist[psutil] ; extra == 'tests'
+  - pytest>=4.3.0 ; extra == 'tests'
+  - mypy>=1.11.1 ; python_full_version >= '3.10' and platform_python_implementation == 'CPython' and extra == 'tests-mypy'
+  - pytest-mypy-plugins ; python_full_version >= '3.10' and platform_python_implementation == 'CPython' and extra == 'tests-mypy'
+  requires_python: '>=3.8'
 - conda: https://conda.anaconda.org/conda-forge/win-64/blosc-1.21.6-hfd34d9b_1.conda
   sha256: 9303a7a0e03cf118eab3691013f6d6cbd1cbac66efbc70d89b20f5d0145257c0
   md5: 357d7be4146d5fec543bfaa96a8a40de
@@ -315,6 +378,11 @@ packages:
   purls: []
   size: 1524254
   timestamp: 1741555212198
+- pypi: https://files.pythonhosted.org/packages/e5/48/1549795ba7742c948d2ad169c1c8cdbae65bc450d6cd753d124b17c8cd32/certifi-2025.8.3-py3-none-any.whl
+  name: certifi
+  version: 2025.8.3
+  sha256: f6c12493cfb1b06ba2ff328595af9350c65d6644968e5d3a2ffd78699af217a5
+  requires_python: '>=3.7'
 - conda: https://conda.anaconda.org/conda-forge/win-64/charls-2.4.2-h1537add_0.conda
   sha256: e6a3eab3fe65389900f39a78dc3bd86bbc030e2a746addb8b69a997495ca867c
   md5: 0935766a50dfe44315b62ec0046a8779
@@ -340,6 +408,24 @@ packages:
   - pkg:pypi/click?source=hash-mapping
   size: 88117
   timestamp: 1747811467132
+- pypi: https://files.pythonhosted.org/packages/3d/9a/2abecb28ae875e39c8cad711eb1186d8d14eab564705325e77e4e6ab9ae5/click_plugins-1.1.1.2-py2.py3-none-any.whl
+  name: click-plugins
+  version: 1.1.1.2
+  sha256: 008d65743833ffc1f5417bf0e78e8d2c23aab04d9745ba817bd3e71b0feb6aa6
+  requires_dist:
+  - click>=4.0
+  - pytest>=3.6 ; extra == 'dev'
+  - pytest-cov ; extra == 'dev'
+  - wheel ; extra == 'dev'
+  - coveralls ; extra == 'dev'
+- pypi: https://files.pythonhosted.org/packages/73/86/43fa9f15c5b9fb6e82620428827cd3c284aa933431405d1bcf5231ae3d3e/cligj-0.7.2-py3-none-any.whl
+  name: cligj
+  version: 0.7.2
+  sha256: c1ca117dbce1fe20a5809dc96f01e1c2840f6dcc939b3ddbb1111bf330ba82df
+  requires_dist:
+  - click>=4.0
+  - pytest-cov ; extra == 'test'
+  requires_python: '>=2.7,!=3.0.*,!=3.1.*,!=3.2.*,<4'
 - conda: https://conda.anaconda.org/conda-forge/noarch/cloudpickle-3.1.1-pyhd8ed1ab_0.conda
   sha256: 21ecead7268241007bf65691610cd7314da68c1f88113092af690203b5780db5
   md5: 364ba6c9fb03886ac979b482f39ebb92
@@ -1980,6 +2066,50 @@ packages:
   purls: []
   size: 94478713
   timestamp: 1753285797220
+- pypi: https://files.pythonhosted.org/packages/7e/1f/56462740694de764fde264051224fcbf800dad43cac92a66753153128866/rasterio-1.4.3-cp311-cp311-win_amd64.whl
+  name: rasterio
+  version: 1.4.3
+  sha256: 4009f7ce4e0883d8e5b400970daa3f1ca309caac8916d955722ee4486654d452
+  requires_dist:
+  - affine
+  - attrs
+  - certifi
+  - click>=4.0
+  - cligj>=0.5
+  - importlib-metadata ; python_full_version < '3.10'
+  - numpy>=1.24
+  - click-plugins
+  - pyparsing
+  - ghp-import ; extra == 'docs'
+  - numpydoc ; extra == 'docs'
+  - sphinx ; extra == 'docs'
+  - sphinx-click ; extra == 'docs'
+  - sphinx-rtd-theme ; extra == 'docs'
+  - ipython>=2.0 ; extra == 'ipython'
+  - matplotlib ; extra == 'plot'
+  - boto3>=1.2.4 ; extra == 's3'
+  - boto3>=1.2.4 ; extra == 'test'
+  - fsspec ; extra == 'test'
+  - hypothesis ; extra == 'test'
+  - packaging ; extra == 'test'
+  - pytest-cov>=2.2.0 ; extra == 'test'
+  - pytest>=2.8.2 ; extra == 'test'
+  - shapely ; extra == 'test'
+  - pytest>=2.8.2 ; extra == 'all'
+  - pytest-cov>=2.2.0 ; extra == 'all'
+  - numpydoc ; extra == 'all'
+  - matplotlib ; extra == 'all'
+  - hypothesis ; extra == 'all'
+  - shapely ; extra == 'all'
+  - sphinx-rtd-theme ; extra == 'all'
+  - ipython>=2.0 ; extra == 'all'
+  - sphinx ; extra == 'all'
+  - fsspec ; extra == 'all'
+  - boto3>=1.2.4 ; extra == 'all'
+  - ghp-import ; extra == 'all'
+  - packaging ; extra == 'all'
+  - sphinx-click ; extra == 'all'
+  requires_python: '>=3.9'
 - conda: https://conda.anaconda.org/conda-forge/win-64/rav1e-0.7.1-ha073cba_3.conda
   sha256: d19a58b882a0387c7c8efbfce4e67a0df4b19d8da6cf6cec3011b6079e5bc743
   md5: 3bd3626822633688691ed41d661c2b2e
