@@ -2498,7 +2498,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         - Plots midlines color-coded by signed width difference (edge - mask).
         - Saves summary stats + per-point diffs.
         """
-        import numpy as np, matplotlib.pyplot as plt, os
+        import numpy as np, matplotlib.pyplot as plt, os, pandas as pd
         from matplotlib.collections import LineCollection
 
         H, W = crack_mask.shape
@@ -2510,13 +2510,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         # skip atomics already absorbed in combined
         atomics_in_combined = {m for cmb in combined.values() for m in cmb.get("members", [])}
-        all_cracks = [( "atomic", cid, crack) for cid, crack in atomic.items() if cid not in atomics_in_combined]
-        all_cracks += [( "combined", cid, crack) for cid, crack in combined.items()]
-
-        plt.figure(figsize=(10, 8))
-        mask_rgb = np.zeros((H, W, 3), dtype=np.uint8)
-        mask_rgb[crack_mask > 0] = [255, 255, 255]
-        plt.imshow(mask_rgb, alpha=0.7)
+        all_cracks = [("atomic", cid, crack) for cid, crack in atomic.items() if cid not in atomics_in_combined]
+        all_cracks += [("combined", cid, crack) for cid, crack in combined.items()]
 
         for ctype, cid, crack in all_cracks:
             midline = np.asarray(crack.get("midline", []), float)
@@ -2557,6 +2552,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 continue
 
             diff = w_edge[valid] - w_mask[valid]
+            coords = midline[valid]
 
             # --- add stats row
             width_rows.append({
@@ -2572,25 +2568,26 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 "width_diff_max": float(np.max(diff))
             })
 
-            # --- add raw diffs
-            for j, idx in enumerate(np.where(valid)[0]):
-                diffs_rows.append({
-                    "image": base_name, "crack_type": ctype, "crack_id": cid,
-                    "point_index": int(idx),
-                    "mid_x": float(midline[idx,0]), "mid_y": float(midline[idx,1]),
-                    "mask_width": float(w_mask[idx]),
-                    "edge_width": float(w_edge[idx]),
-                    "width_diff": float(diff[j])
-                })
+            # --- save raw diffs
+            diffs_out = os.path.join(metrics_dir, f"{base_name}_{ctype}{cid}_width_diffs.csv")
+            pd.DataFrame({
+                "mid_x": coords[:,0], "mid_y": coords[:,1],
+                "mask_width": w_mask[valid],
+                "edge_width": w_edge[valid],
+                "width_diff": diff
+            }).to_csv(diffs_out, index=False)
 
-            # --- plot midline color-coded
-            coords = midline[valid]
+            # --- plot crack with midline color-coded
             if len(coords) > 1:
                 segments = np.stack([coords[:-1], coords[1:]], axis=1)
-
-                # scale centered at 0
                 vmax = np.max(np.abs(diff)) if np.any(np.isfinite(diff)) else 1.0
                 norm = plt.Normalize(vmin=-vmax, vmax=vmax)
+
+                mask_rgb = np.zeros((H, W, 3), dtype=np.uint8)
+                mask_rgb[crack_mask > 0] = [255, 255, 255]
+
+                plt.figure(figsize=(8, 8))
+                plt.imshow(mask_rgb, origin="upper")
 
                 lc = LineCollection(
                     segments, cmap="coolwarm", norm=norm,
@@ -2599,15 +2596,15 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 lc.set_array(diff[:-1])  # color from diffs
                 plt.gca().add_collection(lc)
 
-                # add colorbar for this crack
                 cbar = plt.colorbar(lc, ax=plt.gca(), shrink=0.7)
                 cbar.set_label("Width difference (edge - mask) [px]")
 
-        plt.title(f"Width diffs — {base_name}")
-        plt.axis("equal"); plt.tight_layout()
-        out_plot = os.path.join(metrics_dir, f"{base_name}_width_diffs.png")
-        if display: plt.show()
-        else: plt.savefig(out_plot, dpi=200); plt.close()
+                plt.title(f"Width diffs — {ctype} {cid}")
+                plt.axis("equal"); plt.tight_layout()
+
+                out_plot = os.path.join(metrics_dir, f"{base_name}_{ctype}{cid}_width_diffs.png")
+                if display: plt.show()
+                else: plt.savefig(out_plot, dpi=200); plt.close()
 
         return width_rows, diffs_rows
 

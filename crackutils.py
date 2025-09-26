@@ -903,6 +903,71 @@ class CrackUtils:
         )
         self.all_segments_display.setPixmap(pixmap_mask)'''
     
+    def _draw_crack(self, im, crack, color_mask=(0,1,1), color_midline=(0,0,255),
+        color_edges=(255,255,0), color_points=(255,0,0)):
+        def _draw_polyline(im, pts, color, thickness=2):
+            """Draw a polyline where NaN rows mark gaps."""
+            pts = np.asarray(pts, dtype=float)
+            if pts.ndim != 2 or pts.shape[1] != 2:
+                return im
+            valid = ~np.isnan(pts).any(axis=1)
+            # split into contiguous chunks without NaNs
+            if not valid.any():
+                return im
+            idx = np.where(~valid)[0]
+            splits = np.split(np.arange(len(pts)), idx)
+            for seg in splits:
+                seg = [i for i in seg if valid[i]]
+                if len(seg) > 1:
+                    for i in range(1, len(seg)):
+                        x1, y1 = pts[seg[i-1]]
+                        x2, y2 = pts[seg[i]]
+                        cv2.line(im,
+                                (int(round(x1)), int(round(y1))),
+                                (int(round(x2)), int(round(y2))),
+                                color, thickness)
+            return im
+
+        """
+        Draw mask, midline, edges, and endpoints for a single crack dict.
+        Returns the updated image and mask array (if any).
+        """
+        H, W = im.shape[:2]
+        mask_out = None
+
+        # --- Mask ---
+        mask_full = reconstruct_full_mask_from_crack(crack, H, W)
+        if np.any(mask_full):
+            im = (mark_boundaries(im/255.0, (mask_full>0).astype(np.uint8),
+                                color=color_mask, background_label=0)*255).astype(np.uint8)
+            mask_out = mask_full
+
+        # --- Geodesic edges ---
+        edges = crack.get("geodesic_edges", {}) or {}
+        for _, edge_pts in edges.items():
+            edge_pts = np.array(edge_pts, dtype=float)
+            if len(edge_pts) > 1:
+                im = _draw_polyline(im, edge_pts, color_edges, 2)
+                
+        # --- Midline ---
+        midline = np.array(crack.get("midline", []), dtype=float)
+        if len(midline) > 1:
+            im = _draw_polyline(im, midline, color_midline, 2)
+
+        # --- Endpoints ---
+        up = crack.get("user_points") or crack.get("all_user_points") or []
+        for p in up:
+            if p is None or len(p) < 2:
+                continue
+            if not np.isfinite(p[0]) or not np.isfinite(p[1]):
+                continue
+            x, y = int(round(p[0])), int(round(p[1]))
+            if 0 <= x < W and 0 <= y < H:
+                endpoint_radius = max(3, int(min(H, W) * 0.0035))
+                cv2.circle(im, (x, y), endpoint_radius, color_points, -1)
+
+        return im, mask_out
+    
     # crackutils.py  --- CrackUtils.change_image (DEBUG PATCHED)
     def change_image(self):
         import os, json, cv2
@@ -971,83 +1036,27 @@ class CrackUtils:
                     else: box_color = (255,0,0)
                     cv2.rectangle(im, tuple(bb_pts[0]), tuple(bb_pts[1]), box_color, 3)
 
+            drawn_atomic = set()
+
+            # ---- Combined cracks ----
+            for crack_id, crack in combined.items():
+                for m in crack.get("members", []):
+                    drawn_atomic.add(m)
+
+                # draw combined with reddish mask, same style for midline/edges/points
+                im, _ = self._draw_crack(im, crack,
+                                        color_mask=(.6, 0.6, 0.6),  # blue
+                                        color_midline=(0,0,255),   # green
+                                        color_edges=(255,255,0),     # yellow edges
+                                        color_points=(255,0,0))      # red-pink endpoints
+
             # ---- Atomic cracks ----
             for crack_id, crack in atomic.items():
-                mask_full = reconstruct_full_mask_from_crack(crack, H, W)
-                if np.any(mask_full):
-                    im = (mark_boundaries(im/255.0, (mask_full>0).astype(np.uint8),
-                                        color=(0.0, 1.0, 1.0), background_label=0)*255).astype(np.uint8)
+                if crack_id in drawn_atomic:
+                    continue  # skip, already represented by combined
+                im, mask_full = self._draw_crack(im, crack)
+                if mask_full is not None:
                     self.mask.append(mask_full)
-
-                midline = np.array(crack.get("midline", []), dtype=float)
-                if len(midline) > 1:
-                    for i in range(1, len(midline)):
-                        pt1 = (int(round(midline[i-1][0])), int(round(midline[i-1][1])))
-                        pt2 = (int(round(midline[i][0])),  int(round(midline[i][1])))
-                        cv2.line(im, pt1, pt2, (0,200,200), 2)
-
-                edges = crack.get("geodesic_edges", {}) or {}
-                for _, edge_pts in edges.items():
-                    edge_pts = np.array(edge_pts, dtype=float)
-                    if len(edge_pts) > 1:
-                        for i in range(1, len(edge_pts)):
-                            pt1 = (int(round(edge_pts[i-1][0])), int(round(edge_pts[i-1][1])))
-                            pt2 = (int(round(edge_pts[i][0])),  int(round(edge_pts[i][1])))
-                            cv2.line(im, pt1, pt2, (255,255,0), 2)
-
-                up = crack.get("user_points", []) or []
-                for p in up:
-                    x, y = int(round(p[0])), int(round(p[1]))
-                    if 0 <= x < W and 0 <= y < H:
-                        endpoint_radius = max(3, int(min(H, W) * 0.0035))
-                        cv2.circle(im, (x, y), endpoint_radius, (255, 0, 255), -1)
-
-            # ---- Combined cracks ----
-            # ---- Combined cracks ----
-            for crack_id, crack in list(combined.items()):
-                members = [m for m in crack.get("members", []) if m in atomic]
-                crack["members"] = members
-                if not members:
-                    continue
-
-                mask_full = reconstruct_full_mask_from_crack(crack, H, W)
-                if np.any(mask_full):
-                    im = (mark_boundaries(im/255.0, (mask_full>0).astype(np.uint8),
-                                        color=(1.0, 0.6, 0.6), background_label=0)*255).astype(np.uint8)
-
-                mc = crack.get("mask_crop"); bb = crack.get("mask_bbox")
-                if mc is not None and bb is not None:
-                    x, y, w, h = map(int, bb)
-                    mask_crop = np.array(mc, dtype=np.uint8)
-
-                    print(f"[DEBUG change_image] placing combined {crack_id}: "
-                        f"bbox(w={w},h={h}), mask_crop.shape={mask_crop.shape}")
-
-                    # Build union of member atomic masks for comparison
-                    union_members = np.zeros((H, W), dtype=np.uint8)
-                    for mid in members:
-                        m = reconstruct_full_mask_from_crack(atomic[mid], H, W)
-                        union_members |= m
-
-                    union_crop = union_members[y:y+h, x:x+w]
-
-                    # Compare shapes
-                    if mask_crop.shape != (h, w):
-                        print(f"  ⚠️ Shape mismatch: expected ({h},{w}), got {mask_crop.shape}")
-                        if mask_crop.shape == (w, h):
-                            print(f"  → fixing by transpose for {crack_id}")
-                            mask_crop = mask_crop.T
-
-                    # Compare content
-                    diff = np.sum(np.abs(mask_crop.astype(int) - union_crop.astype(int)))
-                    print(f"  [DEBUG] combined {crack_id}: pixel diff vs union={diff}")
-
-                    # Place in canvas
-                    mask_canvas = np.zeros((H, W), dtype=np.uint8)
-                    try:
-                        mask_canvas[y:y+h, x:x+w] = mask_crop[:h, :w]
-                    except Exception as e:
-                        print(f"[DEBUG change_image] ERROR placing mask_crop for combined {crack_id}: {e}")
 
                     # --- Debug figure ---
                     '''fig, axes = plt.subplots(1, 4, figsize=(20, 5))
@@ -1557,6 +1566,21 @@ class CrackUtils:
 
         combined_length = float(sum(linestring_length(s) for s in segs))
         mean_width = float(np.nanmean(np.concatenate(widths_all))) if widths_all else None
+        
+        # ---- collect derived endpoints/connections from members ----
+        derived_points = []
+        derived_conns = []
+        for mid in member_ids:
+            crack = atomic.get(mid)
+            if not crack:
+                continue
+            ups = crack.get("user_points", []) or []
+            ucs = crack.get("user_connections", []) or []
+            # offset conn indices so they stay unique across members
+            base = len(derived_points)
+            derived_points.extend(ups)
+            derived_conns.extend([[base+idx for idx in conn] for conn in ucs])
+        print(derived_points, derived_conns)
 
         return {
             "source": "combined",
@@ -1569,6 +1593,9 @@ class CrackUtils:
             "mask_bbox": [int(X0), int(Y0), int(w), int(h)],
             "combined_length": combined_length,
             "mean_width": mean_width,
+            # --- new derived fields ---
+            "all_user_points": derived_points,
+            "all_user_connections": derived_conns,
         }
         
     def auto_combine_segments(self):

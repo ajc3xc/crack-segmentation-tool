@@ -263,20 +263,121 @@ def find_normal_pair(
     return e1x, e1y, e2x, e2y
 
 ###################################################################################
+import numpy as np
+import scipy.ndimage
+from agd import Eikonal
+from agd.Metrics import Riemann
+from shapely.ops import nearest_points
+from shapely.geometry import LineString, Point, MultiPoint
+
+def _run_geodesic(metric_array, seeds, tips, sides, dims, strict=True):
+    """Run geodesic; retry with softened metric if path deviates."""
+    metric = Riemann(metric_array)
+    hfmIn = Eikonal.dictIn({
+        'model': 'Riemann2',
+        'seeds': np.expand_dims(seeds, axis=0),
+        'arrayOrdering': 'RowMajor',
+        'tips': np.expand_dims(tips, axis=0),
+        'metric': metric,
+        'verbosity': 0,
+    })
+    hfmIn.SetRect(sides=sides, dims=dims)
+    hfmOut = hfmIn.Run()
+    track = [g.T for g in hfmOut['geodesics']][0]  # (N,2) (y,x)
+
+    if strict:
+        d_tip = np.linalg.norm(track[-1] - tips[::-1])  # compare (y,x)
+        if d_tip > 10:   # pixels tolerance
+            print(f"[WARN] Geodesic missed tip by {d_tip:.1f}px → retry with softened metric")
+            softened = np.power(metric_array, 0.5)  # flatten penalties
+            return _run_geodesic(softened, seeds, tips, sides, dims, strict=False)
+    return track
+
 def edges_tracking(
+    image_crop, pts_cropp,
+    edge_mask1_cropp, edge_mask2_cropp,
+    midline=None, mu=5, l=2, p=6,
+    return_normal_edges=True
+):
+    """
+    Robust edge tracking: uses normalized masks, safer parameters,
+    and geodesic retry if path deviates.
+    """
+    seeds = np.array([*pts_cropp[0][::-1]])  # (y,x)
+    tips  = np.array([*pts_cropp[1][::-1]])  # (y,x)
+    b = np.array([0, image_crop.shape[0]])
+    c = np.array([0, image_crop.shape[1]])
+    sides = np.array([b, c])
+    dims = np.array([image_crop.shape[0], image_crop.shape[1]])
+
+    DxZ, DyZ = np.gradient(image_crop)
+    a11 = scipy.ndimage.gaussian_filter(mu * DxZ**2, 1)
+    a12 = scipy.ndimage.gaussian_filter(mu * DxZ * DyZ, 1)
+    a21 = scipy.ndimage.gaussian_filter(mu * DxZ * DyZ, 1)
+    a22 = scipy.ndimage.gaussian_filter(mu * DyZ**2, 1)
+    df = np.array([[1 + a11, a12], [a21, 1 + a22]])
+
+    # --- normalize edge masks
+    def norm_mask(m):
+        m = m.astype(float)
+        m = m - m.min()
+        return m / (m.max() + 1e-9)
+
+    em1 = norm_mask(edge_mask1_cropp.squeeze())
+    em2 = norm_mask(edge_mask2_cropp.squeeze())
+
+    metric1 = (1 + em1 * l) ** p * df
+    metric2 = (1 + em2 * l) ** p * df
+
+    # --- geodesics
+    track_e1 = _run_geodesic(metric1, seeds, tips, sides, dims)
+    track_e2 = _run_geodesic(metric2, seeds, tips, sides, dims)
+
+    # convert to (x,y)
+    track_e1 = np.stack([track_e1[:,1], track_e1[:,0]], axis=1)
+    track_e2 = np.stack([track_e2[:,1], track_e2[:,0]], axis=1)
+
+    normal_edges = None
+    normal_edges_clipped = None
+
+    if return_normal_edges and midline is not None:
+        from .segmentation import find_normal_pair  # import your existing function
+        m = np.asarray(midline)
+        if m.ndim == 2 and m.shape[1] == 2:
+            mid_x, mid_y = m[:,0], m[:,1]
+        elif m.ndim == 2 and m.shape[0] == 2:
+            mid_x, mid_y = m[0], m[1]
+        else:
+            raise ValueError("midline must be (N,2) or (2,N)")
+
+        e1x, e1y, e2x, e2y = find_normal_pair(mid_x, mid_y, track_e1, track_e2)
+        normal_edges = [[e1x.copy(), e1y.copy()], [e2x.copy(), e2y.copy()]]
+        e1x_clip = np.clip(e1x, 0, image_crop.shape[1]-1)
+        e1y_clip = np.clip(e1y, 0, image_crop.shape[0]-1)
+        e2x_clip = np.clip(e2x, 0, image_crop.shape[1]-1)
+        e2y_clip = np.clip(e2y, 0, image_crop.shape[0]-1)
+        normal_edges_clipped = [[e1x_clip, e1y_clip], [e2x_clip, e2y_clip]]
+
+    return {
+        "geodesic_edges": [track_e1, track_e2],
+        "normal_edge_points": normal_edges,
+        "normal_edge_points_clipped": normal_edges_clipped,
+    }
+
+"""def edges_tracking(
     image_crop, pts_cropp,
     edge_mask1_cropp, edge_mask2_cropp,
     midline=None, mu=5, l=1, p=12,
     return_normal_edges=True
 ):
-    """
+    '''
     Returns:
       {
         "geodesic_edges": [track_e1, track_e2],          # (N,2) arrays (x, y)
         "normal_edge_points": [ [edge1_x, edge1_y], [edge2_x, edge2_y] ] or None,
         "normal_edge_points_clipped": same but clipped to image bounds
       }
-    """
+    '''
     import time, os, random
 
     # seeds/tips come in crop coords as (x,y) in your code; hfmm wants (y,x)
@@ -389,7 +490,7 @@ def edges_tracking(
         "geodesic_edges": [track_e1, track_e2],
         "normal_edge_points": normal_edges,
         "normal_edge_points_clipped": normal_edges_clipped,
-    }
+    }"""
 
 import numpy as np
 import cv2
