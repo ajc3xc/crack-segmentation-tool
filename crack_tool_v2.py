@@ -2577,11 +2577,19 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 "width_diff": diff
             }).to_csv(diffs_out, index=False)
 
+            from matplotlib.colors import TwoSlopeNorm
+
             # --- plot crack with midline color-coded
             if len(coords) > 1:
                 segments = np.stack([coords[:-1], coords[1:]], axis=1)
-                vmax = np.max(np.abs(diff)) if np.any(np.isfinite(diff)) else 1.0
-                norm = plt.Normalize(vmin=-vmax, vmax=vmax)
+
+                # get actual min/max
+                vmin = np.min(diff)
+                vmax = np.max(diff)
+
+                # symmetric scale around 0 so colors are proportional
+                max_abs = max(abs(vmin), abs(vmax))
+                norm = TwoSlopeNorm(vcenter=0.0, vmin=-max_abs, vmax=max_abs)
 
                 mask_rgb = np.zeros((H, W, 3), dtype=np.uint8)
                 mask_rgb[crack_mask > 0] = [255, 255, 255]
@@ -2596,15 +2604,20 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 lc.set_array(diff[:-1])  # color from diffs
                 plt.gca().add_collection(lc)
 
+                # colorbar with explicit min/max ticks
                 cbar = plt.colorbar(lc, ax=plt.gca(), shrink=0.7)
                 cbar.set_label("Width difference (edge - mask) [px]")
+                cbar.set_ticks([vmin, 0, vmax])
+                cbar.ax.set_yticklabels([f"{vmin:.2f}", "0", f"{vmax:.2f}"])
 
                 plt.title(f"Width diffs — {ctype} {cid}")
                 plt.axis("equal"); plt.tight_layout()
 
                 out_plot = os.path.join(metrics_dir, f"{base_name}_{ctype}{cid}_width_diffs.png")
-                if display: plt.show()
-                else: plt.savefig(out_plot, dpi=200); plt.close()
+                if display: 
+                    plt.show()
+                else: 
+                    plt.savefig(out_plot, dpi=200); plt.close()
 
         return width_rows, diffs_rows
 
