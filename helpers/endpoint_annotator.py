@@ -200,9 +200,11 @@ class CrackAnnotator(QtWidgets.QWidget):
                 (pos.y() - self.pan_y) / self.scale)
 
     def _find_point_at(self, pos):
-        r2 = (self.point_radius / self.scale) ** 2
+        # Keep hitbox radius constant in image space
+        r = self.point_radius
+        r2 = r * r
         for i, (x, y) in enumerate(self.points):
-            if (x - pos[0]) ** 2 + (y - pos[1]) ** 2 <= r2:
+            if (x - pos[0])**2 + (y - pos[1])**2 <= r2:
                 return i
         return None
 
@@ -256,19 +258,6 @@ class CrackAnnotator(QtWidgets.QWidget):
                     best = d
                     hit = key
         return hit if best <= px_thresh else None
-
-    '''def _delete_point_reindex(self, idx):
-        self.connections = [(i1 - (i1 > idx), i2 - (i2 > idx))
-                            for (i1, i2) in self.connections if i1 != idx and i2 != idx]
-        new_mid = {}
-        for (i1, i2), poly in self.midlines.items():
-            if i1 == idx or i2 == idx:
-                continue
-            ni1 = i1 - (i1 > idx)
-            ni2 = i2 - (i2 > idx)
-            new_mid[(min(ni1, ni2), max(ni1, ni2))] = poly
-        self.midlines = new_mid
-        self.points.pop(idx)'''
 
     # ---------- bbox helpers ----------
     def _point_box_index(self, x, y):
