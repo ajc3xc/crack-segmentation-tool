@@ -3,7 +3,17 @@ import scipy.interpolate
 import matplotlib.pyplot as plt
 # import sys
 
-import cupy as cp
+try:
+    import cupy as cp
+    CUPY_AVAILABLE = True
+except ImportError:
+    import numpy as cp
+    CUPY_AVAILABLE = False
+    
+def asnumpy(x):
+    if CUPY_AVAILABLE:
+        return cp.asnumpy(x)
+    return x
 
 def tang_len(start_point_x,start_point_y,end_point_x,end_point_y):
     """Function defines oriantation and direction of line that connects two points"""
@@ -408,12 +418,13 @@ def fast_marching(os_cost,start_point,end_point,g11=1,g22=25,g33=25):
     start_time = time()
     metricLIFOld = ReedsSheppMetricGFOld(gfLIF,dims,g11,g22,g33)
     print(f"ReedsSheppMetricGFOld = {time() - start_time}")
-    import cupy as cp, gc
+    import gc
     gc.collect()
-    mempool = cp.get_default_memory_pool()
-    pinned = cp.get_default_pinned_memory_pool()
-    mempool.free_all_blocks()
-    pinned.free_all_blocks()
+    if CUPY_AVAILABLE:
+        mempool = cp.get_default_memory_pool()
+        pinned = cp.get_default_pinned_memory_pool()
+        mempool.free_all_blocks()
+        pinned.free_all_blocks()
     
     start_time = time()
     metricLIFinclCostOld = IncludeCost(os_cost**2, metricLIFOld)

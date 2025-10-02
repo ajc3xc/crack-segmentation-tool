@@ -7,6 +7,13 @@ from PyQt5.QtCore import Qt
 
 import matplotlib.pyplot as plt
 
+import numpy as np
+from math import hypot, atan2, pi
+from skimage.morphology import skeletonize
+import hashlib
+import time
+
+
 min_crop_size = 16
 
 #This class is basically is all of the utility / save and load or unimportant functions that aren't directly accessible via a ui button or aren't important
@@ -1982,3 +1989,229 @@ class CrackUtils:
                     plt.savefig(out_plot, dpi=200); plt.close()
 
         return width_rows, diffs_rows
+    
+    
+    
+    ###############################################################################################
+    # Midline Metrics
+    ###############################################################################################
+    # ---------- small utils ----------
+    @staticmethod
+    def _finite_xy(arr):
+        if arr is None: return np.empty((0,2), float)
+        a = np.asarray(arr, float)
+        if a.ndim != 2 or a.shape[1] != 2: return np.empty((0,2), float)
+        m = np.all(np.isfinite(a), axis=1)
+        a = a[m]
+        # drop exact duplicates in sequence
+        if len(a) > 1:
+            keep = [0]
+            for i in range(1, len(a)):
+                if not (abs(a[i,0]-a[i-1,0]) < 1e-12 and abs(a[i,1]-a[i-1,1]) < 1e-12):
+                    keep.append(i)
+            a = a[keep]
+        return a
+
+    @staticmethod
+    def _split_nan_none(arr):
+        """Split polyline on [None,None] or NaNs into contiguous segments."""
+        a = np.asarray(arr, float)
+        if a.ndim != 2 or a.shape[1] != 2: return []
+        bad = ~np.isfinite(a).all(axis=1)
+        idx = np.where(bad)[0]
+        pieces, start = [], 0
+        for k in idx:
+            if k - start >= 2:
+                pieces.append(a[start:k])
+            start = k+1
+        if len(a) - start >= 2:
+            pieces.append(a[start:])
+        return pieces
+
+    @staticmethod
+    def _resample_by_arclen(xy, N=200):
+        """Uniform arclength resample (handles multiple segments)."""
+        segs = CrackUtils._split_nan_none(xy) if np.any(~np.isfinite(xy)) else [xy]
+        out = []
+        for s in segs:
+            s = CrackUtils._finite_xy(s)
+            if len(s) < 2: continue
+            d = np.sqrt(((s[1:]-s[:-1])**2).sum(1))
+            L = np.concatenate([[0], np.cumsum(d)])
+            if L[-1] <= 1e-9:
+                continue
+            t = np.linspace(0, L[-1], max(2, int(N * (L[-1]/sum(max(1e-9, CrackUtils._len_seg(CrackUtils._finite_xy(u))) for u in segs)))))
+            xi = np.interp(t, L, s[:,0])
+            yi = np.interp(t, L, s[:,1])
+            out.append(np.column_stack([xi, yi]))
+        if not out:
+            return np.empty((0,2), float)
+        return np.vstack(out)
+
+    @staticmethod
+    def _len_seg(xy):
+        if xy is None or len(xy) < 2: return 0.0
+        return float(np.sqrt(((xy[1:]-xy[:-1])**2).sum(1)).sum())
+
+    @staticmethod
+    def _nn_dists(A, B):
+        """Nearest-neighbor distances from each point in A to set B (naive, robust)."""
+        if len(A)==0 or len(B)==0: 
+            return np.array([], float)
+        # (|A|, 1, 2) - (1, |B|, 2) -> (|A|, |B|)
+        d2 = ((A[:,None,:] - B[None,:,:])**2).sum(2)
+        return np.sqrt(d2.min(1))
+
+    @staticmethod
+    def chamfer_symmetric(A, B):
+        """Mean NN distance both directions."""
+        A = CrackUtils._finite_xy(A); B = CrackUtils._finite_xy(B)
+        return float(np.mean(CrackUtils._nn_dists(A,B))) + float(np.mean(CrackUtils._nn_dists(B,A)))
+
+    @staticmethod
+    def hausdorff_symmetric(A, B):
+        """Max directed NN both ways."""
+        A = CrackUtils._finite_xy(A); B = CrackUtils._finite_xy(B)
+        da = CrackUtils._nn_dists(A, B); db = CrackUtils._nn_dists(B, A)
+        if da.size == 0 or db.size == 0:
+            return float('inf')
+        return float(max(da.max(), db.max()))
+
+    @staticmethod
+    def frechet_discrete(A, B):
+        """Discrete Fréchet distance (Eiter & Mannila DP)."""
+        A = CrackUtils._finite_xy(A); B = CrackUtils._finite_xy(B)
+        if len(A)==0 or len(B)==0: return float('inf')
+        ca = np.full((len(A), len(B)), -1.0, dtype=float)
+        def _c(i,j):
+            if ca[i,j] > -0.5: return ca[i,j]
+            d = np.hypot(A[i,0]-B[j,0], A[i,1]-B[j,1])
+            if i==0 and j==0:
+                ca[i,j] = d
+            elif i==0:
+                ca[i,j] = max(_c(i, j-1), d)
+            elif j==0:
+                ca[i,j] = max(_c(i-1, j), d)
+            else:
+                ca[i,j] = max( min(_c(i-1,j), _c(i-1,j-1), _c(i,j-1)), d )
+            return ca[i,j]
+        return float(_c(len(A)-1, len(B)-1))
+
+    @staticmethod
+    def tangent_angles(xy):
+        xy = CrackUtils._finite_xy(xy)
+        if len(xy) < 2: return np.array([])
+        d = np.gradient(xy, axis=0)
+        ang = np.arctan2(d[:,1], d[:,0])
+        return ang
+
+    @staticmethod
+    def angle_error_degrees(A, B):
+        # resample to same count for angle comparison
+        Ar = CrackUtils._resample_by_arclen(A, N=400)
+        Br = CrackUtils._resample_by_arclen(B, N=len(Ar))
+        if len(Ar)==0 or len(Br)==0: return np.nan
+        aA = CrackUtils.tangent_angles(Ar); aB = CrackUtils.tangent_angles(Br)
+        n = min(len(aA), len(aB))
+        if n == 0: return np.nan
+        da = np.abs(np.unwrap(aA[:n]) - np.unwrap(aB[:n]))
+        da = np.mod(da + pi, 2*pi) - pi
+        return float(np.degrees(np.mean(np.abs(da))))
+
+    @staticmethod
+    def orthogonal_deviation(manual_xy, auto_xy, N=400, robust='median'):
+        """Signed distance from manual to nearest auto, measured along manual normal."""
+        M = CrackUtils._resample_by_arclen(manual_xy, N=N)
+        A = CrackUtils._finite_xy(auto_xy)
+        if len(M)==0 or len(A)==0:
+            return dict(mean=np.nan, median=np.nan, rmse=np.nan, p95=np.nan)
+        # manual normals
+        d = np.gradient(M, axis=0)  # tangents
+        norm = np.column_stack([-d[:,1], d[:,0]])
+        nlen = np.maximum(1e-9, np.sqrt((norm**2).sum(1)))
+        n = norm / nlen[:,None]
+        # nearest auto → signed projection
+        d2 = ((M[:,None,:] - A[None,:,:])**2).sum(2)
+        idx = d2.argmin(1)
+        v = A[idx] - M
+        signed = (v * n).sum(1)
+        absd = np.abs(signed)
+        out = dict(
+            mean=float(np.mean(signed)),
+            median=float(np.median(signed)),
+            rmse=float(np.sqrt(np.mean(absd**2))),
+            p95=float(np.percentile(absd, 95))
+        )
+        return out
+
+    @staticmethod
+    def coverage_at_tau(A, B, tau_px=3.0):
+        A = CrackUtils._finite_xy(A); B = CrackUtils._finite_xy(B)
+        if len(A)==0 or len(B)==0: return dict(A_to_B=0.0, B_to_A=0.0)
+        da = CrackUtils._nn_dists(A,B); db = CrackUtils._nn_dists(B,A)
+        return dict(
+            A_to_B=float(np.mean(da <= tau_px)),
+            B_to_A=float(np.mean(db <= tau_px))
+        )
+
+    @staticmethod
+    def length_ratio(A, B):
+        La = CrackUtils._len_seg(CrackUtils._finite_xy(A)); Lb = CrackUtils._len_seg(CrackUtils._finite_xy(B))
+        if La < 1e-9: return np.nan
+        return float(abs(Lb - La) / La)
+
+    @staticmethod
+    def mask_iou(m1, m2):
+        if m1 is None or m2 is None: return np.nan
+        a = (np.asarray(m1)>0).astype(np.uint8)
+        b = (np.asarray(m2)>0).astype(np.uint8)
+        inter = int((a & b).sum())
+        union = int((a | b).sum())
+        return (inter / union) if union else float('nan')
+
+    @staticmethod
+    def compute_midline_metrics(auto_xy, man_xy, tau=3.0):
+        """Return a dict with all centerline metrics."""
+        return {
+            "chamfer_mean": float(CrackUtils.chamfer_symmetric(man_xy, auto_xy)),
+            "hausdorff": float(CrackUtils.hausdorff_symmetric(man_xy, auto_xy)),
+            "frechet_discrete": float(CrackUtils.frechet_discrete(man_xy, auto_xy)),
+            "orth_dev": CrackUtils.orthogonal_deviation(man_xy, auto_xy, N=400),
+            "angle_err_deg": float(CrackUtils.angle_error_degrees(man_xy, auto_xy)),
+            "length_ratio": float(CrackUtils.length_ratio(man_xy, auto_xy)),
+            "coverage": CrackUtils.coverage_at_tau(man_xy, auto_xy, tau_px=tau)
+        }
+
+    @staticmethod
+    def widths_from_normals(n1_xy, n2_xy):
+        """Take Nx2 arrays; return width vector (min-aligned length)."""
+        n1 = CrackUtils._finite_xy(n1_xy); n2 = CrackUtils._finite_xy(n2_xy)
+        m = min(len(n1), len(n2))
+        if m < 2: return np.array([])
+        d = np.sqrt(((n1[:m] - n2[:m])**2).sum(1))
+        return d[np.isfinite(d)]
+
+    @staticmethod
+    def compare_widths(w_ref, w_pred):
+        if w_ref.size == 0 or w_pred.size == 0: 
+            return dict(MAE=np.nan, RMSE=np.nan, corr=np.nan)
+        m = min(len(w_ref), len(w_pred))
+        wr = w_ref[:m]; wp = w_pred[:m]
+        mae = float(np.mean(np.abs(wr-wp)))
+        rmse = float(np.sqrt(np.mean((wr-wp)**2)))
+        corr = float(np.corrcoef(wr, wp)[0,1]) if m>2 else np.nan
+        return dict(MAE=mae, RMSE=rmse, corr=corr)
+
+    @staticmethod
+    def _auto_cache_key(self):
+        # Include any params that affect auto generation
+        parts = [
+            "v1",
+            f"down={getattr(self, 'downsample_factor_box', None).value() if hasattr(self,'downsample_factor_box') else 'na'}",
+            f"mu={getattr(self,'mu_box',None).value() if hasattr(self,'mu_box') else 'na'}",
+            f"l={getattr(self,'l_box',None).value() if hasattr(self,'l_box') else 'na'}",
+            f"p={getattr(self,'p_box',None).value() if hasattr(self,'p_box') else 'na'}",
+            f"color={getattr(self, 'edge_track_color_box', None).currentText() if hasattr(self,'edge_track_color_box') else 'G'}"
+        ]
+        return "|".join(map(str, parts))
+

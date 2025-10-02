@@ -12,7 +12,17 @@ from skimage.filters import threshold_otsu
 # from skimage import measure
 from time import time
 
+try:
+    import cupy as cp
+    CUPY_AVAILABLE = True
+except ImportError:
+    import numpy as cp
+    CUPY_AVAILABLE = False
 
+def asnumpy(x):
+    if CUPY_AVAILABLE:
+        return cp.asnumpy(x)
+    return x
 
 def ErfSet(size,No,periodicity):
     """ErfSet retuns a set of 2 D error functions.This function is used to \
@@ -579,7 +589,8 @@ def CostFunctionVesselnessFiltering(U,ksi,zeta,sigma_s, method,sigmas_ext = 0, s
     cost = fused_vesselness(lambda1, c, Q, sigma1, sigma2)
     #print(f"Remaining costfunctionvesselnessfiltering: {time() - start_time}")
     
-    return cost.get()
+    #return cost.get()
+    return cost.get() if CUPY_AVAILABLE else cost
 
 def CostFunction(oc,lambdaa, p):
     cost = 1/(1 + lambdaa*(oc)**p)
@@ -593,12 +604,13 @@ def MultiScaleVesselness(U,ksi,zeta,sigmas_s,method,sigmas_ext = 0, sigmaa_ext =
         start_time = time()
         vesselness = CostFunctionVesselnessFiltering(U,ksi,zeta,sigma, method,sigmaa_ext = sigmaa_ext)
         print(f"CostFunctionVesselnessFiltering time: {time() - start_time}")
-        import cupy as cp, gc
+        import gc
         gc.collect()
-        mempool = cp.get_default_memory_pool()
-        pinned = cp.get_default_pinned_memory_pool()
-        mempool.free_all_blocks()
-        pinned.free_all_blocks()
+        if CUPY_AVAILABLE:
+            mempool = cp.get_default_memory_pool()
+            pinned = cp.get_default_pinned_memory_pool()
+            mempool.free_all_blocks()
+            pinned.free_all_blocks()
         start_time = time()
         pad = 5
         vesselness_pad = np.pad(vesselness,pad,mode = 'wrap')

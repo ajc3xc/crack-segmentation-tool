@@ -2205,6 +2205,209 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             dfd.to_csv(diffs_csv, index=False)
 
         print(f"✅ Saved metrics → {mask_csv_path}, {summary_csv}, {diffs_csv}")
+        
+    def generate_auto_variant_for_manual(self, crack_id, cache_key=None):
+        """
+        Build auto midline for the MANUAL atomic crack `crack_id` and cache it as:
+        annotation['annotations']['atomic_cracks'][crack_id]['variants']['auto'][cache_key]
+        Returns the variant dict (or None on failure).
+        """
+        import numpy as np
+        import time  # only used if you later re-add timestamps
+
+        ann = self.annotation.setdefault("annotations", {})
+        atomic = ann.setdefault("atomic_cracks", {})
+        crack = atomic.get(crack_id)
+        if not crack:
+            return None
+
+        src = (crack.get("source") or "").lower()
+        if src.startswith("auto") or src == "combined":
+            return None  # only produce auto variants for MANUAL parents
+
+        # ---- parameter key for this auto run ----
+        cache_key = cache_key or CrackUtils._auto_cache_key(self)
+        variants_root = crack.setdefault("variants", {}).setdefault("auto", {})
+        if cache_key in variants_root:
+            return variants_root[cache_key]  # already cached
+
+        # ---- bbox & endpoints from MANUAL (manual midline is the skeleton) ----
+        bb = crack.get("mask_bbox")
+        if not bb or len(bb) != 4:
+            return None
+        x, y, w, h = map(int, bb)
+        x0, y0 = x, y
+        x1, y1 = x + w, y + h
+
+        # Prefer MANUAL midline endpoints; else fall back to user_points
+        man_ml = CrackUtils._finite_xy(crack.get("midline", []))
+        if len(man_ml) >= 2:
+            p0, p1 = man_ml[0], man_ml[-1]
+        else:
+            up = crack.get("user_points", [])
+            if not up or len(up) < 2:
+                return None
+            p0, p1 = np.array(up[0], float), np.array(up[-1], float)
+
+        # ---- crop & prep tracking using existing machinery ----
+        self.active_bbox = [x0, y0, x1, y1]
+        self.pts = [p0, p1]
+        self.end_points = self.pts
+        self.update_image_crop()  # sets self.image_crop & per-box masks
+
+        # track seed in crop coords (y; x)
+        self.track = np.vstack([[p0[1] - y0, p1[1] - y0],
+                                [p0[0] - x0, p1[0] - x0]])  # (2xN)
+
+        self.current_source = "manual_poly"  # we are deriving auto from a manual parent
+
+        self.pts_crop = [np.array(self.pts[0]) - np.array([x0, y0]),
+                        np.array(self.pts[1]) - np.array([x0, y0])]
+        down = self.downsample_factor_box.value() if hasattr(self, 'downsample_factor_box') else 1
+        self.pts_crop_down = [p / max(1, down) for p in self.pts_crop]
+        self.edge_mask()
+
+        color_idx = 0 if getattr(self, 'edge_track_color_box', None) and self.edge_track_color_box.currentText() == 'R' \
+            else 1 if getattr(self, 'edge_track_color_box', None) and self.edge_track_color_box.currentText() == 'B' else 2
+        mu = self.mu_box.value() if hasattr(self, 'mu_box') else 0.2
+        l  = self.l_box.value()  if hasattr(self, 'l_box')  else 4
+        p  = self.p_box.value()  if hasattr(self, 'p_box')  else 1
+
+        # midline seed: straight line between endpoints in crop coords
+        midline_xy_crop = np.vstack([
+            np.linspace(self.pts_crop[0][0], self.pts_crop[1][0], 200),
+            np.linspace(self.pts_crop[0][1], self.pts_crop[1][1], 200)
+        ]).T  # (N,2) as (x,y)
+
+        # ---- run your edge tracking on the selected color channel ----
+        res = ct.segmentation.edges_tracking(
+            self.image_crop[:, :, color_idx],
+            self.pts_crop,
+            self.edge_mask1_crop, self.edge_mask2_crop,
+            midline=midline_xy_crop,
+            mu=mu, l=l, p=p,
+            return_normal_edges=True
+        )
+
+        e1, e2 = res.get("geodesic_edges", (None, None))
+        if e1 is None or e2 is None or len(e1) < 2 or len(e2) < 2:
+            return None
+
+        # ---- collect outputs in FULL image coords like manual cracks ----
+        if "midline" in res and res["midline"] is not None and len(res["midline"]) >= 2:
+            mid = np.asarray(res["midline"], float)
+        else:
+            mid = midline_xy_crop
+
+        auto_midline_full = np.column_stack([mid[:, 0] + x0, mid[:, 1] + y0])
+        e1_full = np.column_stack([e1[:, 0] + x0, e1[:, 1] + y0])
+        e2_full = np.column_stack([e2[:, 0] + x0, e2[:, 1] + y0])
+
+        normals = res.get("normal_edge_points")
+        if normals is not None and len(normals) == 2:
+            (e1x, e1y), (e2x, e2y) = normals
+            n1_full = np.column_stack([e1x + x0, e1y + y0])
+            n2_full = np.column_stack([e2x + x0, e2y + y0])
+        else:
+            n1_full = np.empty((0, 2)); n2_full = np.empty((0, 2))
+
+        var = {
+            "midline": [[float(xx), float(yy)] for xx, yy in auto_midline_full],
+            "geodesic_edges": {
+                "edge1": [[float(xx), float(yy)] for xx, yy in e1_full],
+                "edge2": [[float(xx), float(yy)] for xx, yy in e2_full]
+            },
+            "normal_edge_points": {
+                "edge1": [[float(xx), float(yy)] for xx, yy in n1_full],
+                "edge2": [[float(xx), float(yy)] for xx, yy in n2_full]
+            },
+            "mask_crop": res.get("mask_crop").tolist() if res.get("mask_crop") is not None else None,
+            "mask_bbox": [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
+        }
+
+        variants_root[cache_key] = var
+        return var
+
+    def run_midline_and_mask_metrics(self, tau_px=3.0):
+        """
+        For each MANUAL atomic crack:
+        - ensure auto subsidiary for the current param key exists
+        - compute Auto-vs-Manual midline metrics (Manual midline is the GT midline)
+        - compute mask/width metrics vs GT mask if available
+        - save back into crack['metrics'] (JSON) and persist the JSON
+        """
+        import os, numpy as np
+
+        ann = self.annotation.setdefault("annotations", {})
+        atomic = ann.setdefault("atomic_cracks", {})
+        base_name = os.path.splitext(os.path.basename(self.name))[0]
+
+        # Optional GT mask (already loaded by change_image via self.current_mask)
+        GT_mask = getattr(self, "current_mask", None)
+
+        # Parameter key for this run
+        desired_key = CrackUtils._auto_cache_key(self)
+
+        updated = 0
+        for cid, crack in atomic.items():
+            src = (crack.get("source") or "").lower()
+            if src in ("combined",) or src.startswith("auto"):
+                continue  # manual-only evaluation
+
+            # ---- ensure auto variant for THIS manual crack and THIS param key ----
+            have_var = crack.get("variants", {}).get("auto", {}).get(desired_key)
+            if have_var is None:
+                var = generate_auto_variant_for_manual(self, cid, cache_key=desired_key)
+                if var is not None:
+                    updated += 1
+                    have_var = var
+
+            # ---- pull geometry (Manual midline is the skeleton/GT midline here) ----
+            man_xy = CrackUtils._finite_xy(crack.get("midline", []))
+            auto_xy = CrackUtils._finite_xy((have_var or {}).get("midline", []))
+
+            metrics = crack.setdefault("metrics", {})
+            # 1) Auto vs Manual midline metrics (ONLY this pair for midline)
+            if len(man_xy) >= 2 and len(auto_xy) >= 2:
+                metrics["auto_vs_manual"] = CrackUtils.compute_midline_metrics(auto_xy, man_xy, tau=tau_px)
+
+                # 2) Width stats Auto vs Manual (if normals on both)
+                n1m = np.asarray(crack.get("normal_edge_points", {}).get("edge1", []), float)
+                n2m = np.asarray(crack.get("normal_edge_points", {}).get("edge2", []), float)
+                n1a = np.asarray((have_var or {}).get("normal_edge_points", {}).get("edge1", []), float)
+                n2a = np.asarray((have_var or {}).get("normal_edge_points", {}).get("edge2", []), float)
+                wm = CrackUtils.widths_from_normals(n1m, n2m)
+                wa = CrackUtils.widths_from_normals(n1a, n2a)
+                metrics["width_auto_vs_manual"] = CrackUtils.compare_widths(wm, wa)
+
+            # 3) Manual/Auto vs GT MASK (if GT mask is available)
+            if GT_mask is not None:
+                H, W = self.original_image.shape[:2]
+
+                # manual mask IoU vs GT
+                man_mask = crack.get("mask_crop")
+                if man_mask is not None and crack.get("mask_bbox"):
+                    x, y, w, h = map(int, crack["mask_bbox"])
+                    full = np.zeros((H, W), np.uint8)
+                    crop = (np.array(man_mask) > 0).astype(np.uint8)
+                    full[y:y+h, x:x+w] = crop[:h, :w]
+                    metrics["mask_iou_manual_vs_gt"] = CrackUtils.mask_iou(full, GT_mask)
+
+                # auto mask IoU vs GT (this param key)
+                if have_var and have_var.get("mask_crop") is not None and have_var.get("mask_bbox") is not None:
+                    x, y, w, h = map(int, have_var["mask_bbox"])
+                    full = np.zeros((H, W), np.uint8)
+                    crop = (np.array(have_var["mask_crop"]) > 0).astype(np.uint8)
+                    full[y:y+h, x:x+w] = crop[:h, :w]
+                    metrics["mask_iou_auto_vs_gt"] = CrackUtils.mask_iou(full, GT_mask)
+
+            # write back
+            atomic[cid] = crack
+
+        # persist to JSON on disk
+        safe_json_dump(self.annotation, self.ann_name)
+        print(f"[metrics] updated {updated} auto variants; metrics saved → {self.ann_name}")
+
 
 if __name__ == "__main__":
     import sys
