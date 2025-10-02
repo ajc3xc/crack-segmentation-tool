@@ -5,6 +5,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt
 
+import matplotlib.pyplot as plt
+
 min_crop_size = 16
 
 #This class is basically is all of the utility / save and load or unimportant functions that aren't directly accessible via a ui button or aren't important
@@ -779,130 +781,7 @@ class CrackUtils:
         except Exception as e:
             error(e)
     
-    # crackutils.py  --- CrackUtils.change_image  (REPLACE WHOLE METHOD)
-    '''def change_image(self):
-        import os, json, cv2
-        import numpy as np
-        from skimage.segmentation import mark_boundaries  # for colored boundaries
-
-        self.current_crack_id = None
-        self.bb_pts_list = []
-        w = self.segment_width_box_2.value()
-
-        self.update_selected_item(os.path.basename(self.image_names[self.n]))
-        self.name = self.image_names[self.n]
-        self.image = cv2.imread(self.name)[:, :, ::-1].astype(np.uint8)
-        self.original_image = self.image.copy()
-        self.filename_label_2.setText(os.path.basename(self.name))
-        base_name = os.path.splitext(os.path.basename(self.name))[0]
-
-        # ---- MASK LOADING (optional external masks) ----
-        self.current_mask = None
-        if getattr(self, "use_masks", False) and hasattr(self, "mask_map"):
-            mask_path = self.mask_map.get(base_name)
-            if mask_path:
-                if mask_path.endswith('.npy'):
-                    mask = np.load(mask_path)
-                    mask = (mask > 0).astype(np.uint8) if mask.max() > 1 else mask.astype(np.uint8)
-                else:
-                    mask = cv2.imread(mask_path, 0)
-                    mask = (mask > 0).astype(np.uint8) if mask is not None else None
-                self.current_mask = mask
-
-        im = self.original_image.copy()
-
-        # -------- Load annotation data --------
-        self.ann_name = os.path.join(self.save_folder, base_name + '.json')
-        self.mask_name_bin = os.path.join(self.save_folder, base_name + '_mask.png')
-        self.mask_name_255 = os.path.join(self.save_folder, base_name + '_mask255.png')
-        self.mask = []               # in-memory rendered masks for this image
-        self.annotation = {}
-
-        H, W = im.shape[:2]
-
-        if os.path.exists(self.ann_name):
-            with open(self.ann_name) as f:
-                self.annotation = json.load(f)
-            ann = self.annotation.get('annotations', {}) or {}
-            atomic = ann.get("atomic_cracks", {}) or {}
-            combined = ann.get("combined_cracks", {}) or {}
-
-            # ---- Bounding boxes ----
-            if 'box' in ann:
-                for key, box_data in ann['box'].items():
-                    bb_pts = np.array(box_data['bounding_box'])
-                    if box_data['class'] == 0: box_color = (0,0,255)
-                    elif box_data['class'] == 1: box_color = (0,255,0)
-                    else: box_color = (255,0,0)
-                    cv2.rectangle(im, tuple(bb_pts[0]), tuple(bb_pts[1]), box_color, 3)
-
-            # ---- Atomic cracks: cyan boundaries, midline (teal), edges (yellow), endpoints (magenta)
-            for crack_id, crack in atomic.items():
-                mask_full = reconstruct_full_mask_from_crack(crack, H, W)
-                if np.any(mask_full):
-                    # cyan-ish boundary
-                    im = (mark_boundaries(im/255.0, (mask_full>0).astype(np.uint8),
-                                        color=(0.0, 1.0, 1.0), background_label=0)*255).astype(np.uint8)
-                    self.mask.append(mask_full)
-
-                midline = np.array(crack.get("midline", []), dtype=float)
-                if len(midline) > 1:
-                    for i in range(1, len(midline)):
-                        pt1 = (int(round(midline[i-1][0])), int(round(midline[i-1][1])))
-                        pt2 = (int(round(midline[i][0])),  int(round(midline[i][1])))
-                        cv2.line(im, pt1, pt2, (0,200,200), 2)
-
-                edges = crack.get("geodesic_edges", {}) or {}
-                for _, edge_pts in edges.items():
-                    edge_pts = np.array(edge_pts, dtype=float)
-                    if len(edge_pts) > 1:
-                        for i in range(1, len(edge_pts)):
-                            pt1 = (int(round(edge_pts[i-1][0])), int(round(edge_pts[i-1][1])))
-                            pt2 = (int(round(edge_pts[i][0])),  int(round(edge_pts[i][1])))
-                            cv2.line(im, pt1, pt2, (255,255,0), 2)
-
-                up = crack.get("user_points", []) or []
-                for p in up:
-                    x, y = int(round(p[0])), int(round(p[1]))
-                    if 0 <= x < W and 0 <= y < H:
-                        endpoint_radius = max(3, int(min(H, W) * 0.0035))
-                        cv2.circle(im, (x, y), endpoint_radius, (255, 0, 255), -1)
-
-            # ---- Combined cracks: light red boundaries (pink)
-            for crack_id, crack in list(combined.items()):
-                members = [m for m in crack.get("members", []) if m in atomic]
-                crack["members"] = members  # keep in sync in memory
-                if not members:
-                    continue  # skip rendering if no members remain
-                mask_full = reconstruct_full_mask_from_crack(crack, H, W)
-                if np.any(mask_full):
-                    im = (mark_boundaries(im/255.0, (mask_full>0).astype(np.uint8),
-                                        color=(1.0, 0.6, 0.6), background_label=0)*255).astype(np.uint8)
-
-        # ---- Render main image to screen ----
-        _, pixmap = numpy_to_qimage_and_scaled_pixmap(
-            im.astype(np.uint8), self.ImageScreen.width(), self.ImageScreen.height(), is_gray=False
-        )
-        self.ImageScreen.setPixmap(pixmap)
-
-        # ---- Update "all segments" preview (right-hand panel) ----
-        ann = self.annotation.get("annotations", {})
-        atomic = ann.get("atomic_cracks", {}) or {}
-        combined = ann.get("combined_cracks", {}) or {}
-
-        full_mask_display = build_combined_mask(atomic, H, W)
-        for crack in combined.values():
-            full_mask_display |= reconstruct_full_mask_from_crack(crack, H, W)
-        full_mask_display[full_mask_display > 0] = 1
-
-        _, pixmap_mask = numpy_to_qimage_and_scaled_pixmap(
-            (full_mask_display * 255).astype(np.uint8),
-            self.all_segments_display.width(),
-            self.all_segments_display.height(),
-            is_gray=True
-        )
-        self.all_segments_display.setPixmap(pixmap_mask)'''
-    
+        
     def _draw_crack(self, im, crack, color_mask=(0,1,1), color_midline=(0,0,255),
         color_edges=(255,255,0), color_points=(255,0,0)):
         def _draw_polyline(im, pts, color, thickness=2):
@@ -1683,3 +1562,423 @@ class CrackUtils:
 
         self.save_annotation()
         self.change_image()
+        
+    
+    #################################################################################
+    # Metrics calculations functions
+    #################################################################################
+    
+    # ---- local helpers
+    @staticmethod
+    def compute_mask_metrics(gt_mask, pred_mask):
+        gt = gt_mask.astype(bool); pr = pred_mask.astype(bool)
+        tp = np.logical_and(gt, pr).sum()
+        fp = np.logical_and(~gt, pr).sum()
+        fn = np.logical_and(gt, ~pr).sum()
+        tn = np.logical_and(~gt, ~pr).sum()
+        precision = tp / (tp + fp + 1e-9)
+        recall    = tp / (tp + fn + 1e-9)
+        f1        = 2 * precision * recall / (precision + recall + 1e-9)
+        iou       = tp / (tp + fp + fn + 1e-9)
+        return {"precision": precision, "recall": recall, "f1": f1, "iou": iou,
+                "tp": int(tp), "fp": int(fp), "fn": int(fn), "tn": int(tn)}
+
+    @staticmethod
+    def save_mask_comparison_plot(gt_mask, pred_mask, out_path, show=False):
+        gt = gt_mask.astype(bool)
+        pr = pred_mask.astype(bool)
+        iou = np.logical_and(gt, pr)   # intersection
+        oou = np.logical_and(gt, ~pr)  # missed crack
+        cou = np.logical_and(~gt, pr)  # false positive
+        vis = np.zeros((*gt.shape, 3), dtype=np.uint8)
+        vis[iou] = [255, 255, 255]
+        vis[oou] = [255,   0,   0]
+        vis[cou] = [  0,   0, 255]
+        if show:
+            plt.figure(figsize=(8, 6))
+            plt.imshow(vis); plt.title("Mask Comparison Overlay"); plt.axis("off"); plt.show()
+        else:
+            plt.imsave(out_path, vis)
+            
+    def draw_existing_cracks(self, im):
+        """Overlay existing cracks (atomic + combined) in red onto a copy of the image."""
+        H, W = im.shape[:2]
+        ann = self.annotation.setdefault("annotations", {})
+        atomic = ann.setdefault("atomic_cracks", {})
+        combined = ann.setdefault("combined_cracks", {})
+
+        def reconstruct_full_mask(crack):
+            mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
+            if mc is None or bb is None or not len(mc):
+                return np.zeros((H, W), np.uint8)
+            crop = np.array(mc, dtype=np.uint8)
+            x0, y0, w, h = [int(v) for v in bb]
+            x1, y1 = min(x0 + w, W), min(y0 + h, H)
+            mask = np.zeros((H, W), np.uint8)
+            mask[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
+            return (mask > 0).astype(np.uint8)
+
+        red = np.zeros_like(im)
+        for crack in list(atomic.values()) + list(combined.values()):
+            m = reconstruct_full_mask(crack)
+            if np.any(m):
+                red[m.astype(bool)] = (255, 0, 0)
+
+        return cv2.addWeighted(im, 1, red, 0.35, 0)
+
+    @staticmethod
+    def _reconstruct_full_mask(crack, H, W):
+        try:
+            return reconstruct_full_mask_from_crack(crack, H, W)
+        except Exception:
+            mc = crack.get("mask_crop"); bb = crack.get("mask_bbox")
+            if mc is not None and bb is not None:
+                crop = np.array(mc, dtype=np.uint8)
+                x, y, w, h = [int(v) for v in bb]
+                x2, y2 = min(x+w, W), min(y+h, H)
+                w_eff, h_eff = max(0, x2-x), max(0, y2-y)
+                if h_eff > 0 and w_eff > 0:
+                    crop = (crop > 0).astype(np.uint8)[:h_eff, :w_eff]
+                    m = np.zeros((H, W), dtype=np.uint8)
+                    m[y:y+h_eff, x:x+w_eff] = crop
+                    return m
+            full = np.array(crack.get("mask", []), dtype=np.uint8)
+            if full.size == H*W and full.shape == (H, W):
+                return (full > 0).astype(np.uint8)
+            return np.zeros((H, W), dtype=np.uint8)
+        
+    @staticmethod
+    def normals_from_mask_for_midline(midline_xy, mask, max_radius=50):
+        """
+        Pixel-accurate version:
+        - Polygonizes the mask into exact pixel-boundary polygons using rasterio.
+        - Shifts coords by -0.5 so edges align with imshow pixel grid.
+        - Intersects midline normals with those polygons so endpoints lie exactly on the mask edge.
+        """
+        import numpy as np
+        import shapely
+        from shapely.geometry import shape, LineString, Point, MultiPoint
+        import rasterio.features
+
+        H, W = mask.shape
+        midline_xy = np.asarray(midline_xy, float)
+        if midline_xy.ndim != 2 or midline_xy.shape[1] != 2 or len(midline_xy) < 2:
+            n = len(midline_xy) if midline_xy.ndim > 0 else 0
+            return (np.full(n, np.nan),) * 5, []
+
+        # tangent + normals
+        try:
+            from cracktools.segmentation import compute_smooth_tangent_normals
+            _, nor = compute_smooth_tangent_normals(midline_xy[:, 0], midline_xy[:, 1])
+        except Exception:
+            dx, dy = np.gradient(midline_xy[:, 0]), np.gradient(midline_xy[:, 1])
+            nrm = np.hypot(dx, dy) + 1e-12
+            tan = np.stack([dx/nrm, dy/nrm], axis=1)
+            nor = np.stack([-tan[:, 1], tan[:, 0]], axis=1)
+
+        # polygonize mask -> shapely polygons
+        mask_bin = (mask > 0).astype(np.uint8)
+        polygons = []
+        for geom, val in rasterio.features.shapes(mask_bin, mask=mask_bin):
+            if val == 1:
+                poly = shape(geom)
+                # shift by -0.5 in both x and y
+                poly = shapely.affinity.translate(poly, xoff=-0.5, yoff=-0.5)
+                polygons.append(poly)
+        edges = [poly.boundary for poly in polygons]
+
+        N = len(midline_xy)
+        e1x = np.full(N, np.nan); e1y = np.full(N, np.nan)
+        e2x = np.full(N, np.nan); e2y = np.full(N, np.nan)
+        widths_mask = np.full(N, np.nan)
+
+        for i, (p, nvec) in enumerate(zip(midline_xy, nor)):
+            if not np.all(np.isfinite(p)) or not np.all(np.isfinite(nvec)):
+                continue
+
+            # build long ray
+            A = (p[0] - max_radius * nvec[0], p[1] - max_radius * nvec[1])
+            B = (p[0] + max_radius * nvec[0], p[1] + max_radius * nvec[1])
+            ray = LineString([A, B])
+
+            hits = []
+            for edge in edges:
+                inter = edge.intersection(ray)
+                if inter.is_empty:
+                    continue
+                if isinstance(inter, Point):
+                    hits.append((inter.x, inter.y))
+                elif isinstance(inter, MultiPoint):
+                    for g in inter.geoms:
+                        hits.append((g.x, g.y))
+                elif inter.geom_type == "LineString":
+                    coords = np.asarray(inter.coords, float)
+                    hits.append(tuple(coords[0])); hits.append(tuple(coords[-1]))
+
+            if len(hits) >= 2:
+                dists = [np.dot([hx - p[0], hy - p[1]], nvec) for (hx, hy) in hits]
+                left_pts = [(hx, hy) for (hx, hy), d in zip(hits, dists) if d < 0]
+                right_pts = [(hx, hy) for (hx, hy), d in zip(hits, dists) if d > 0]
+                if left_pts and right_pts:
+                    lp = max(left_pts, key=lambda q: np.dot([q[0]-p[0], q[1]-p[1]], nvec))
+                    rp = min(right_pts, key=lambda q: np.dot([q[0]-p[0], q[1]-p[1]], nvec))
+                    e1x[i], e1y[i] = lp
+                    e2x[i], e2y[i] = rp
+                    widths_mask[i] = np.hypot(rp[0]-lp[0], rp[1]-lp[1])
+
+        return (e1x, e1y, e2x, e2y, widths_mask), polygons
+
+    @staticmethod
+    def plot_mask_normals(midline, e1x, e1y, e2x, e2y, mask, contours=None,
+                        spacing_px=20, show=True, out_path=None, crack_label=""):
+        """
+        Plot normals + crack contours (polygons) for visualization.
+        - contours: list of Shapely Polygons (from rasterio.features.shapes)
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        H, W = mask.shape
+        plt.figure(figsize=(8, 8))
+
+        # Force 0 = black, 255 = white
+        mask_rgb = np.zeros((H, W, 3), dtype=np.uint8)
+        mask_rgb[mask > 0] = [255, 255, 255]
+
+        plt.imshow(mask_rgb, alpha=1.0)  # alpha=1 for full opaque b/w
+
+        # plot polygon contours
+        if contours:
+            for poly in contours:
+                if poly.is_empty:
+                    continue
+                # in plot_mask_normals when drawing contours
+                if poly.geom_type == "Polygon":
+                    x, y = poly.exterior.xy
+                    plt.plot(np.array(x), np.array(y),
+                            color="orange", lw=1.5, alpha=0.8)
+                    for interior in poly.interiors:
+                        xi, yi = interior.xy
+                        plt.plot(np.array(xi), np.array(yi),
+                                color="orange", lw=1.5, alpha=0.5)
+                elif poly.geom_type == "MultiPolygon":
+                    for sub in poly.geoms:
+                        x, y = sub.exterior.xy
+                        plt.plot(x, y, color="orange", lw=1.0, alpha=0.8)
+
+        # plot midline
+        if midline is not None and len(midline) > 1:
+            plt.plot(midline[:,0], midline[:,1], 'g-', lw=1.0, label="midline")
+
+        # plot normals
+        N = len(midline)
+        for i in range(0, N, spacing_px):
+            if np.isfinite(e1x[i]) and np.isfinite(e2x[i]):
+                plt.plot([e1x[i], e2x[i]], [e1y[i], e2y[i]],
+                        color="cyan", lw=0.5, alpha=0.8)
+                plt.scatter([e1x[i], e2x[i]], [e1y[i], e2y[i]],
+                            c=["red","blue"], s=8, marker="o", alpha=0.7)
+
+        plt.title(f"Mask normals — {crack_label}")
+        plt.axis("equal"); plt.legend(); plt.tight_layout()
+
+        if show:
+            plt.show()
+        elif out_path:
+            plt.savefig(out_path, dpi=200); plt.close()
+            
+    @staticmethod
+    def plot_width_differences(midline, w_mask, w_edge, mask, contours=None,
+                            spacing_px=20, show=True, out_path=None, crack_label=""):
+        """
+        Visualize width differences along the midline:
+        - Background mask (0=black, 255=white)
+        - Midline (green)
+        - Points colored by relative error (red=mask wider, blue=edge wider)
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        H, W = mask.shape
+        # force black/white background
+        mask_rgb = np.zeros((H, W, 3), dtype=np.uint8)
+        mask_rgb[mask > 0] = [255, 255, 255]
+
+        plt.figure(figsize=(8, 8))
+        plt.imshow(mask_rgb, origin="upper")
+
+        # plot contours if available
+        if contours:
+            for poly in contours:
+                if poly.geom_type == "Polygon":
+                    x, y = poly.exterior.xy
+                    plt.plot(x, y, color="orange", lw=0.8, alpha=0.7)
+                    for interior in poly.interiors:
+                        xi, yi = interior.xy
+                        plt.plot(xi, yi, color="orange", lw=0.5, alpha=0.5)
+
+        if midline is not None and len(midline) > 1:
+            plt.plot(midline[:, 0], midline[:, 1], 'g-', lw=1.0, label="midline")
+
+        # compute diffs
+        valid = np.isfinite(w_mask) & np.isfinite(w_edge)
+        diffs = w_edge - w_mask
+        diffs = np.where(valid, diffs, np.nan)
+
+        # color map: red (mask larger), blue (edge larger)
+        colors = []
+        for d in diffs:
+            if np.isnan(d):
+                colors.append("gray")
+            elif d > 0:
+                colors.append("blue")   # edge wider
+            else:
+                colors.append("red")    # mask wider
+
+        # sample points along midline
+        N = len(midline)
+        for i in range(0, N, spacing_px):
+            if np.isfinite(diffs[i]):
+                plt.scatter(midline[i, 0], midline[i, 1],
+                            c=colors[i], s=20, marker="o", alpha=0.8)
+
+        plt.title(f"Width comparison — {crack_label}")
+        plt.axis("equal"); plt.legend(); plt.tight_layout()
+
+        if show:
+            plt.show()
+        elif out_path:
+            plt.savefig(out_path, dpi=200)
+            plt.close()
+
+        return diffs
+    
+    @staticmethod
+    def compare_widths_for_cracks(ann, crack_mask, base_name, metrics_dir, display=True):
+        """
+        Compare mask-derived vs edge-tracking widths for all cracks.
+        - Plots midlines color-coded by signed width difference (edge - mask).
+        - Saves summary stats + per-point diffs.
+        """
+        import numpy as np, matplotlib.pyplot as plt, os, pandas as pd
+        from matplotlib.collections import LineCollection
+
+        H, W = crack_mask.shape
+        width_rows = []
+        diffs_rows = []
+
+        atomic = ann.get("atomic_cracks", {}) or {}
+        combined = ann.get("combined_cracks", {}) or {}
+
+        # skip atomics already absorbed in combined
+        atomics_in_combined = {m for cmb in combined.values() for m in cmb.get("members", [])}
+        all_cracks = [("atomic", cid, crack) for cid, crack in atomic.items() if cid not in atomics_in_combined]
+        all_cracks += [("combined", cid, crack) for cid, crack in combined.items()]
+
+        for ctype, cid, crack in all_cracks:
+            midline = np.asarray(crack.get("midline", []), float)
+            if midline.ndim != 2 or midline.shape[1] != 2 or len(midline) < 3:
+                continue
+
+            # mask-based widths
+            (_, _, _, _, w_mask), _ = CrackUtils.normals_from_mask_for_midline(
+                midline, crack_mask, max_radius=50
+            )
+
+            # edge-tracking widths
+            ne = crack.get("normal_edge_points")
+            w_edge = None
+            if ne and isinstance(ne, dict):
+                def _to_array(v):
+                    if isinstance(v, list) and len(v) == 2 and isinstance(v[0], (list, tuple)):
+                        return np.column_stack([v[0], v[1]]).astype(float)
+                    return np.array(v, float)
+                e1 = _to_array(ne.get("edge1", []))
+                e2 = _to_array(ne.get("edge2", []))
+                if e1.ndim == 2 and e2.ndim == 2 and len(e1) and len(e2):
+                    m = min(len(e1), len(e2), len(w_mask), len(midline))
+                    w_edge = np.full(m, np.nan)
+                    for i in range(m):
+                        if np.all(np.isfinite(e1[i])) and np.all(np.isfinite(e2[i])):
+                            w_edge[i] = np.hypot(e1[i,0] - e2[i,0], e1[i,1] - e2[i,1])
+                    # trim everything consistently
+                    w_mask = w_mask[:m]
+                    midline = midline[:m]
+
+            if w_edge is None:
+                continue
+
+            valid = np.isfinite(w_mask) & np.isfinite(w_edge)
+            n_valid = int(valid.sum())
+            if n_valid < 3:
+                continue
+
+            diff = w_edge[valid] - w_mask[valid]
+            coords = midline[valid]
+
+            # --- add stats row
+            width_rows.append({
+                "image": base_name, "crack_type": ctype, "crack_id": cid,
+                "n_valid": n_valid,
+                "mask_width_mean": float(np.mean(w_mask[valid])),
+                "edge_width_mean": float(np.mean(w_edge[valid])),
+                "width_diff_mae": float(np.mean(np.abs(diff))),
+                "width_diff_rmse": float(np.sqrt(np.mean(diff**2))),
+                "width_diff_mean": float(np.mean(diff)),
+                "width_diff_std": float(np.std(diff)),
+                "width_diff_min": float(np.min(diff)),
+                "width_diff_max": float(np.max(diff))
+            })
+
+            # --- save raw diffs
+            diffs_out = os.path.join(metrics_dir, f"{base_name}_{ctype}{cid}_width_diffs.csv")
+            pd.DataFrame({
+                "mid_x": coords[:,0], "mid_y": coords[:,1],
+                "mask_width": w_mask[valid],
+                "edge_width": w_edge[valid],
+                "width_diff": diff
+            }).to_csv(diffs_out, index=False)
+
+            from matplotlib.colors import TwoSlopeNorm
+
+            # --- plot crack with midline color-coded
+            if len(coords) > 1:
+                segments = np.stack([coords[:-1], coords[1:]], axis=1)
+
+                # get actual min/max
+                vmin = np.min(diff)
+                vmax = np.max(diff)
+
+                # symmetric scale around 0 so colors are proportional
+                max_abs = max(abs(vmin), abs(vmax))
+                norm = TwoSlopeNorm(vcenter=0.0, vmin=-max_abs, vmax=max_abs)
+
+                mask_rgb = np.zeros((H, W, 3), dtype=np.uint8)
+                mask_rgb[crack_mask > 0] = [255, 255, 255]
+
+                plt.figure(figsize=(8, 8))
+                plt.imshow(mask_rgb, origin="upper")
+
+                lc = LineCollection(
+                    segments, cmap="coolwarm", norm=norm,
+                    linewidth=3.0, alpha=0.9
+                )
+                lc.set_array(diff[:-1])  # color from diffs
+                plt.gca().add_collection(lc)
+
+                # colorbar with explicit min/max ticks
+                cbar = plt.colorbar(lc, ax=plt.gca(), shrink=0.7)
+                cbar.set_label("Width difference (edge - mask) [px]")
+                cbar.set_ticks([vmin, 0, vmax])
+                cbar.ax.set_yticklabels([f"{vmin:.2f}", "0", f"{vmax:.2f}"])
+
+                plt.title(f"Width diffs — {ctype} {cid}")
+                plt.axis("equal"); plt.tight_layout()
+
+                out_plot = os.path.join(metrics_dir, f"{base_name}_{ctype}{cid}_width_diffs.png")
+                if display: 
+                    plt.show()
+                else: 
+                    plt.savefig(out_plot, dpi=200); plt.close()
+
+        return width_rows, diffs_rows
