@@ -2215,3 +2215,44 @@ class CrackUtils:
         ]
         return "|".join(map(str, parts))
 
+    def debug_plot_midlines(self, crack_id, cache_key=None, show_gt=True, save_path=None):
+        """
+        Plot overlay of manual vs auto midline (and GT mask if available).
+        """
+        ann = self.annotation.get("annotations", {})
+        atomic = ann.get("atomic_cracks", {})
+        crack = atomic.get(str(crack_id))
+        if crack is None:
+            print(f"⚠️ No crack {crack_id} found")
+            return
+
+        cache_key = cache_key or CrackUtils._auto_cache_key(self)
+        auto_var = crack.get("variants", {}).get("auto", {}).get(cache_key)
+
+        man_xy = np.array(crack.get("midline", []), float)
+        auto_xy = np.array(auto_var["midline"], float) if auto_var else np.empty((0,2))
+
+        # Start with image
+        im = self.original_image.copy()
+
+        # Optional GT mask outline
+        if show_gt and getattr(self, "current_mask", None) is not None:
+            contours, _ = cv2.findContours(self.current_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(im, contours, -1, (0,0,255), 1)  # blue outline
+
+        # Plot with matplotlib
+        plt.figure(figsize=(8,8))
+        plt.imshow(im)
+        if len(man_xy) > 1:
+            plt.plot(man_xy[:,0], man_xy[:,1], 'g-', linewidth=2, label="Manual (GT midline)")
+        if len(auto_xy) > 1:
+            plt.plot(auto_xy[:,0], auto_xy[:,1], 'r-', linewidth=2, label="Auto midline")
+        plt.legend()
+        plt.title(f"Crack {crack_id} - cache_key={cache_key}")
+        if save_path:
+            plt.savefig(save_path, dpi=150)
+            print(f"✅ Saved debug plot → {save_path}")
+        else:
+            plt.show()
+
+

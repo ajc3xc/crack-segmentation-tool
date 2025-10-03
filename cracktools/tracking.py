@@ -5,11 +5,21 @@ import matplotlib.pyplot as plt
 
 try:
     import cupy as cp
-    CUPY_AVAILABLE = True
+    try:
+        _ = cp.cuda.runtime.getDeviceCount()
+        if _ > 0:
+            CUPY_AVAILABLE = True
+        else:
+            raise RuntimeError("No CUDA device found")
+    except Exception:
+        import numpy as np
+        cp = np
+        CUPY_AVAILABLE = False
 except ImportError:
-    import numpy as cp
+    import numpy as np
+    cp = np
     CUPY_AVAILABLE = False
-    
+   
 def asnumpy(x):
     if CUPY_AVAILABLE:
         return cp.asnumpy(x)

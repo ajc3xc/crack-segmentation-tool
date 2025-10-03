@@ -45,7 +45,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         self.clear_combined_cracks_button.clicked.connect(self.clear_combined_cracks)
         self.files_list.itemSelectionChanged.connect(self.name_selected)
         self.combine_segments_button.clicked.connect(self.combine_segments)
-        self.calculate_metrics_button.clicked.connect(lambda: self.run_mask_metrics(display=True))
+        #self.calculate_metrics_button.clicked.connect(lambda: self.run_mask_metrics(display=True))
+        self.calculate_metrics_button.clicked.connect(lambda: self.run_midline_and_mask_metrics(tau_px=3.0, crack_id="5"))
 
         #Tracking Tab
         self.select_points_button.clicked.connect(self.select_save_end_points)
@@ -2208,13 +2209,10 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         
     def generate_auto_variant_for_manual(self, crack_id, cache_key=None):
         """
-        Build auto midline for the MANUAL atomic crack `crack_id` and cache it as:
-        annotation['annotations']['atomic_cracks'][crack_id]['variants']['auto'][cache_key]
-        Returns the variant dict (or None on failure).
+        Properly generate an AUTO midline variant for a MANUAL crack using the
+        full OS→cost→midline_tracking pipeline (same as run_pipeline).
         """
         import numpy as np
-        import time  # only used if you later re-add timestamps
-
         ann = self.annotation.setdefault("annotations", {})
         atomic = ann.setdefault("atomic_cracks", {})
         crack = atomic.get(crack_id)
@@ -2223,23 +2221,20 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         src = (crack.get("source") or "").lower()
         if src.startswith("auto") or src == "combined":
-            return None  # only produce auto variants for MANUAL parents
+            return None
 
-        # ---- parameter key for this auto run ----
         cache_key = cache_key or CrackUtils._auto_cache_key(self)
         variants_root = crack.setdefault("variants", {}).setdefault("auto", {})
         if cache_key in variants_root:
-            return variants_root[cache_key]  # already cached
+            return variants_root[cache_key]
 
-        # ---- bbox & endpoints from MANUAL (manual midline is the skeleton) ----
+        # ---- bounding box and endpoints
         bb = crack.get("mask_bbox")
         if not bb or len(bb) != 4:
             return None
         x, y, w, h = map(int, bb)
-        x0, y0 = x, y
-        x1, y1 = x + w, y + h
+        x0, y0, x1, y1 = x, y, x+w, y+h
 
-        # Prefer MANUAL midline endpoints; else fall back to user_points
         man_ml = CrackUtils._finite_xy(crack.get("midline", []))
         if len(man_ml) >= 2:
             p0, p1 = man_ml[0], man_ml[-1]
@@ -2249,86 +2244,36 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 return None
             p0, p1 = np.array(up[0], float), np.array(up[-1], float)
 
-        # ---- crop & prep tracking using existing machinery ----
+        # ---- set state and crop
         self.active_bbox = [x0, y0, x1, y1]
         self.pts = [p0, p1]
         self.end_points = self.pts
-        self.update_image_crop()  # sets self.image_crop & per-box masks
-
-        # track seed in crop coords (y; x)
-        self.track = np.vstack([[p0[1] - y0, p1[1] - y0],
-                                [p0[0] - x0, p1[0] - x0]])  # (2xN)
-
-        self.current_source = "manual_poly"  # we are deriving auto from a manual parent
-
-        self.pts_crop = [np.array(self.pts[0]) - np.array([x0, y0]),
-                        np.array(self.pts[1]) - np.array([x0, y0])]
-        down = self.downsample_factor_box.value() if hasattr(self, 'downsample_factor_box') else 1
-        self.pts_crop_down = [p / max(1, down) for p in self.pts_crop]
-        self.edge_mask()
-
-        color_idx = 0 if getattr(self, 'edge_track_color_box', None) and self.edge_track_color_box.currentText() == 'R' \
-            else 1 if getattr(self, 'edge_track_color_box', None) and self.edge_track_color_box.currentText() == 'B' else 2
-        mu = self.mu_box.value() if hasattr(self, 'mu_box') else 0.2
-        l  = self.l_box.value()  if hasattr(self, 'l_box')  else 4
-        p  = self.p_box.value()  if hasattr(self, 'p_box')  else 1
-
-        # midline seed: straight line between endpoints in crop coords
-        midline_xy_crop = np.vstack([
-            np.linspace(self.pts_crop[0][0], self.pts_crop[1][0], 200),
-            np.linspace(self.pts_crop[0][1], self.pts_crop[1][1], 200)
-        ]).T  # (N,2) as (x,y)
-
-        # ---- run your edge tracking on the selected color channel ----
-        res = ct.segmentation.edges_tracking(
-            self.image_crop[:, :, color_idx],
-            self.pts_crop,
-            self.edge_mask1_crop, self.edge_mask2_crop,
-            midline=midline_xy_crop,
-            mu=mu, l=l, p=p,
-            return_normal_edges=True
-        )
-
-        e1, e2 = res.get("geodesic_edges", (None, None))
-        if e1 is None or e2 is None or len(e1) < 2 or len(e2) < 2:
+        self.update_image_crop()
+        if getattr(self, "skip_current_segment", False):
             return None
 
-        # ---- collect outputs in FULL image coords like manual cracks ----
-        if "midline" in res and res["midline"] is not None and len(res["midline"]) >= 2:
-            mid = np.asarray(res["midline"], float)
-        else:
-            mid = midline_xy_crop
+        # ---- run OS + cost + midline tracking (same as run_pipeline)
+        self.update_os()
+        self.update_cost()
+        self.midline_tracking()
 
-        auto_midline_full = np.column_stack([mid[:, 0] + x0, mid[:, 1] + y0])
-        e1_full = np.column_stack([e1[:, 0] + x0, e1[:, 1] + y0])
-        e2_full = np.column_stack([e2[:, 0] + x0, e2[:, 1] + y0])
+        # ---- now edge masks + edge tracking
+        self.edge_mask()
+        self.edge_tracking()
 
-        normals = res.get("normal_edge_points")
-        if normals is not None and len(normals) == 2:
-            (e1x, e1y), (e2x, e2y) = normals
-            n1_full = np.column_stack([e1x + x0, e1y + y0])
-            n2_full = np.column_stack([e2x + x0, e2y + y0])
-        else:
-            n1_full = np.empty((0, 2)); n2_full = np.empty((0, 2))
-
-        var = {
-            "midline": [[float(xx), float(yy)] for xx, yy in auto_midline_full],
-            "geodesic_edges": {
-                "edge1": [[float(xx), float(yy)] for xx, yy in e1_full],
-                "edge2": [[float(xx), float(yy)] for xx, yy in e2_full]
-            },
-            "normal_edge_points": {
-                "edge1": [[float(xx), float(yy)] for xx, yy in n1_full],
-                "edge2": [[float(xx), float(yy)] for xx, yy in n2_full]
-            },
-            "mask_crop": res.get("mask_crop").tolist() if res.get("mask_crop") is not None else None,
-            "mask_bbox": [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
+        # ---- collect results into variant dict (like save_current_segment)
+        atomic_var = {
+            "midline": crack.get("midline", []),  # updated by midline_tracking
+            "geodesic_edges": crack.get("geodesic_edges", {}),
+            "normal_edge_points": crack.get("normal_edge_points", {}),
+            "mask_crop": crack.get("mask_crop"),
+            "mask_bbox": crack.get("mask_bbox"),
         }
 
-        variants_root[cache_key] = var
-        return var
+        variants_root[cache_key] = atomic_var
+        return atomic_var
 
-    def run_midline_and_mask_metrics(self, tau_px=3.0):
+    def run_midline_and_mask_metrics(self, tau_px=3.0, crack_id=None):
         """
         For each MANUAL atomic crack:
         - ensure auto subsidiary for the current param key exists
@@ -2337,6 +2282,14 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         - save back into crack['metrics'] (JSON) and persist the JSON
         """
         import os, numpy as np
+        
+        # ---- guard: must have image + annotation
+        if not hasattr(self, "annotation") or not self.annotation:
+            print("⚠️ No annotation loaded — skipping metrics.")
+            return
+        if not hasattr(self, "original_image") or self.original_image is None:
+            print("⚠️ No image loaded — skipping metrics.")
+            return
 
         ann = self.annotation.setdefault("annotations", {})
         atomic = ann.setdefault("atomic_cracks", {})
@@ -2350,6 +2303,9 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         updated = 0
         for cid, crack in atomic.items():
+            if crack_id is not None and cid != str(crack_id):
+                continue
+            ran_one = True  
             src = (crack.get("source") or "").lower()
             if src in ("combined",) or src.startswith("auto"):
                 continue  # manual-only evaluation
@@ -2357,7 +2313,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             # ---- ensure auto variant for THIS manual crack and THIS param key ----
             have_var = crack.get("variants", {}).get("auto", {}).get(desired_key)
             if have_var is None:
-                var = generate_auto_variant_for_manual(self, cid, cache_key=desired_key)
+                var = self.generate_auto_variant_for_manual(cid, cache_key=desired_key)
                 if var is not None:
                     updated += 1
                     have_var = var
@@ -2403,6 +2359,25 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
             # write back
             atomic[cid] = crack
+
+            # ---- Debug plot per crack ----
+            if len(man_xy) > 1 or len(auto_xy) > 1:
+                im = self.original_image.copy()
+
+                # Draw GT mask outline if available
+                if GT_mask is not None:
+                    contours, _ = cv2.findContours(GT_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    cv2.drawContours(im, contours, -1, (0,0,255), 1)  # blue
+
+                plt.figure(figsize=(7,7))
+                plt.imshow(im)
+                if len(man_xy) > 1:
+                    plt.plot(man_xy[:,0], man_xy[:,1], 'g-', lw=2, label="Manual midline")
+                if len(auto_xy) > 1:
+                    plt.plot(auto_xy[:,0], auto_xy[:,1], 'r-', lw=2, label="Auto midline")
+                plt.legend()
+                plt.title(f"Crack {cid} (params={desired_key})")
+                plt.show()
 
         # persist to JSON on disk
         safe_json_dump(self.annotation, self.ann_name)

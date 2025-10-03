@@ -14,9 +14,19 @@ from time import time
 
 try:
     import cupy as cp
-    CUPY_AVAILABLE = True
+    try:
+        _ = cp.cuda.runtime.getDeviceCount()
+        if _ > 0:
+            CUPY_AVAILABLE = True
+        else:
+            raise RuntimeError("No CUDA device found")
+    except Exception:
+        import numpy as np
+        cp = np
+        CUPY_AVAILABLE = False
 except ImportError:
-    import numpy as cp
+    import numpy as np
+    cp = np
     CUPY_AVAILABLE = False
 
 def asnumpy(x):
@@ -253,7 +263,10 @@ def OrientationScoreTransform(im, size, nOrientations, design = "N", inflectionP
     #print(os.shape)
     os = os[:,size:-size,size:-size]
     #print(im.shape, os.shape)
-    return os.get()
+    if CUPY_AVAILABLE:
+        return os.get()
+    else:
+        return os
 
 def WaveletTransform2D(im, kernels):
     # im: shape (H, W)
