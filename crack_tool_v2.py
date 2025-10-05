@@ -2218,18 +2218,20 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         Fully recompute AUTO variant from MANUAL crack using OS→cost→midline_tracking→edges.
         Ensures all coordinates are restored to full-image space and safely JSON-serializable.
         """
-        import numpy as np, traceback, copy, json
+        import numpy as np, traceback
         from time import time
 
         ann = self.annotation.setdefault("annotations", {})
         atomic = ann.setdefault("atomic_cracks", {})
         crack = atomic.get(crack_id)
         if not crack:
-            print(f"[AUTO {crack_id}] ❌ not found"); return None
+            print(f"[AUTO {crack_id}] ❌ not found")
+            return None
 
         src = (crack.get("source") or "").lower()
         if src.startswith("auto") or src == "combined":
-            print(f"[AUTO {crack_id}] skip non-manual"); return None
+            print(f"[AUTO {crack_id}] skip non-manual")
+            return None
 
         cache_key = cache_key or CrackUtils._auto_cache_key(self)
         variants_root = crack.setdefault("variants", {}).setdefault("auto", {})
@@ -2240,7 +2242,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         # --- bbox and endpoints ---
         bb = crack.get("mask_bbox")
         if not bb or len(bb) != 4:
-            print(f"[AUTO {crack_id}] no bbox"); return None
+            print(f"[AUTO {crack_id}] no bbox")
+            return None
         x, y, w, h = map(int, bb)
         x0, y0, x1, y1 = x, y, x + w, y + h
 
@@ -2250,22 +2253,56 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         else:
             up = crack.get("user_points", [])
             if not up or len(up) < 2:
-                print(f"[AUTO {crack_id}] missing endpoints"); return None
+                print(f"[AUTO {crack_id}] missing endpoints")
+                return None
             p0, p1 = np.array(up[0], float), np.array(up[-1], float)
 
         self.active_bbox = [x0, y0, x1, y1]
-        self.pts = [p0, p1]
-        self.end_points = self.pts
 
-        # --- pipeline with timing ---
+        # --- convert global→local coordinates ---
+        p0_local = np.array(p0) - np.array([x, y])
+        p1_local = np.array(p1) - np.array([x, y])
+        # clip inside crop dimensions
+        p0_local = np.clip(p0_local, 0, [w - 1, h - 1])
+        p1_local = np.clip(p1_local, 0, [w - 1, h - 1])
+        self.pts = [p0_local, p1_local]
+        self.end_points = self.pts
+        print(f"[AUTO {crack_id}] local endpoints: {self.pts}")
+
+        # --- run update_image_crop first ---
+        try:
+            t0 = time()
+            self.update_image_crop()
+            print(f"update_image_crop time: {time() - t0:.3f}s")
+        except Exception as e:
+            print(f"[AUTO {crack_id}] ❌ update_image_crop failed: {e}")
+            traceback.print_exc()
+            return None
+
+        # --- ensure required attributes exist ---
+        if getattr(self, "image_crop_down", None) is None:
+            self.image_crop_down = getattr(self, "image_crop", None)
+        if getattr(self, "down", None) in (None, 0):
+            self.down = 1
+        self.current_source = "auto"
+
+        # --- ensure pts_crop_down exists (used in midline_tracking) ---
+        try:
+            self.pts_crop_down = [np.array(p) / float(self.down) for p in self.pts]
+            print(f"[AUTO {crack_id}] set pts_crop_down with down={self.down}")
+        except Exception as e:
+            print(f"[AUTO {crack_id}] ⚠️ failed to set pts_crop_down: {e}")
+
+        # --- run remaining pipeline ---
         for name, fn in [
-            ("update_image_crop", self.update_image_crop),
             ("update_os", self.update_os),
             ("update_cost", self.update_cost),
-            ("midline_tracking", self.midline_tracking)
+            ("midline_tracking", self.midline_tracking),
         ]:
             try:
-                t0 = time(); fn(); print(f"{name} time: {time()-t0:.3f}s")
+                t0 = time()
+                fn()
+                print(f"{name} time: {time() - t0:.3f}s")
             except Exception as e:
                 print(f"[AUTO {crack_id}] ❌ {name} failed: {e}")
                 traceback.print_exc()
@@ -2273,9 +2310,17 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         # --- edge tracking ---
         try:
+            # ✅ ensure endpoints are local crop coords before edge tracking
+            if hasattr(self, "pts"):
+                self.pts = [np.clip(np.array(p), 0, [w - 1, h - 1]) for p in self.pts]
+                self.end_points = self.pts
+                print(f"[AUTO {crack_id}] adjusted pts for local crop: {self.pts}")
+
             if callable(getattr(self, "edge_mask", None)) and callable(getattr(self, "edge_tracking", None)):
-                t0 = time(); self.edge_mask(); self.edge_tracking()
-                print(f"edge_mask/edge_tracking time: {time()-t0:.3f}s")
+                t0 = time()
+                self.edge_mask()
+                self.edge_tracking()
+                print(f"edge_mask/edge_tracking time: {time() - t0:.3f}s")
             else:
                 print(f"[AUTO {crack_id}] ⚠️ edge_mask/edge_tracking not callable")
         except Exception as e:
