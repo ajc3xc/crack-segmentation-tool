@@ -1022,8 +1022,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             e1_global = np.stack([e1x + xmin, e1y + ymin], axis=1)
             e2_global = np.stack([e2x + xmin, e2y + ymin], axis=1)
             normal_edges_full = {
-                "edge1": np.round(e1_global, 6).tolist(),
-                "edge2": np.round(e2_global, 6).tolist(),
+                "edge1": np.round(e1_global, ROUNDING_DIGITS).tolist(),
+                "edge2": np.round(e2_global, ROUNDING_DIGITS).tolist(),
             }
 
             # --- Build crack entry ---

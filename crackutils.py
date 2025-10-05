@@ -15,6 +15,7 @@ import time
 
 
 min_crop_size = 16
+ROUNDING_DIGITS=6
 
 #This class is basically is all of the utility / save and load or unimportant functions that aren't directly accessible via a ui button or aren't important
 #that way the 'main' / work in progress code can be more easily accessed and modified
@@ -2404,7 +2405,7 @@ class CrackUtils:
             raise
 
     @staticmethod
-    def _normals_to_json(normals, xmin, ymin, ndigits=6):
+    def _normals_to_json(normals, xmin, ymin, ndigits=ROUNDING_DIGITS):
         import numpy as np
 
         def to_xy2(arr):
