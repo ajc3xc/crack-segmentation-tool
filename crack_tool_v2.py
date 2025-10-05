@@ -1022,8 +1022,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             e1_global = np.stack([e1x + xmin, e1y + ymin], axis=1)
             e2_global = np.stack([e2x + xmin, e2y + ymin], axis=1)
             normal_edges_full = {
-                "edge1": np.round(e1_global, 2).tolist(),
-                "edge2": np.round(e2_global, 2).tolist(),
+                "edge1": np.round(e1_global, 6).tolist(),
+                "edge2": np.round(e2_global, 6).tolist(),
             }
 
             # --- Build crack entry ---
@@ -1042,7 +1042,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             }
 
             # round and make JSON-safe
-            crack_entry = CrackUtils._to_py(crack_entry, ndigits=3)
+            crack_entry = CrackUtils._to_py(crack_entry)
             atomic_cracks[str(self.current_crack_id)] = crack_entry
             print(f"[DEBUG] atomic_cracks updated for id={self.current_crack_id}")
 
