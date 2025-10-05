@@ -971,102 +971,86 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
             print(f"[DEBUG] save_current_segment bbox: xmin={xmin}, ymin={ymin}, xmax={xmax}, ymax={ymax}")
 
-            # Build crop mask from the two edges (in crop coords)
-            print(f"[DEBUG] track_e1 shape={np.shape(self.track_e1)}, track_e2 shape={np.shape(self.track_e2)}")
-            print(f"[DEBUG] track_e1 sample (y,x): {list(zip(self.track_e1[0][:5], self.track_e1[1][:5]))}")
-            print(f"[DEBUG] track_e2 sample (y,x): {list(zip(self.track_e2[0][:5], self.track_e2[1][:5]))}")
-
+            # --- Build crop mask ---
             edge_x_crop = np.concatenate((self.track_e1[1][::-1], self.track_e2[1]))
             edge_y_crop = np.concatenate((self.track_e1[0][::-1], self.track_e2[0]))
-            print(f"[DEBUG] edge_x_crop[:5]={edge_x_crop[:5]}, edge_y_crop[:5]={edge_y_crop[:5]}")
-
             mask_crop = ct.segmentation.create_mask(self.image_crop, edge_y_crop, edge_x_crop).astype(np.uint8)
             h, w = mask_crop.shape[:2]
             print(f"[DEBUG] mask_crop shape={mask_crop.shape}, nonzero={int((mask_crop>0).sum())}")
 
             src = getattr(self, "current_source", "auto")
             track_arr = np.array(self.adjusted_track, dtype=float)
-            print(f"[DEBUG] adjusted_track shape={track_arr.shape}, sample={track_arr[:, :5]}")
-
-            # Convert midline to full-image coords
-            midline_coords = [
-                [int(track_arr[1][i] + xmin), int(track_arr[0][i] + ymin)]
-                for i in range(track_arr.shape[1])
-            ]
+            midline_coords = [[int(track_arr[1][i] + xmin), int(track_arr[0][i] + ymin)]
+                            for i in range(track_arr.shape[1])]
             print(f"[DEBUG] midline first={midline_coords[0]}, last={midline_coords[-1]}")
 
             ann = self.annotation.setdefault("annotations", {})
             atomic_cracks = ann.setdefault("atomic_cracks", {})
 
-            # Add full, unclipped normal-edge points
-            '''normal_edges = getattr(self, "normal_edge_points", {}).get(self.current_crack_id)
-            normal_edges_full = None
-            if normal_edges is not None:
-                (e1x, e1y), (e2x, e2y) = normal_edges
-                print(f"[DEBUG] normal_edges e1 first={(e1x[0], e1y[0])}, e2 first={(e2x[0], e2y[0])}")
-                e1_global = np.stack([e1x + xmin, e1y + ymin], axis=1)
-                e2_global = np.stack([e2x + xmin, e2y + ymin], axis=1)
-                normal_edges_full = {"edge1": e1_global.tolist(), "edge2": e2_global.tolist()}'''
+            # --- Try to get normal edges ---
             normal_edges = getattr(self, "normal_edge_points", {}).get(self.current_crack_id)
-            normal_edges_full = None
-            if normal_edges is not None:
-                normal_edges_full = self._normals_to_json(normal_edges, xmin, ymin, ndigits=2)
+            print(f"[DEBUG] normal_edge_points type={type(normal_edges)}, keys={list(getattr(self,'normal_edge_points',{}).keys())}")
 
-            '''atomic_cracks[str(self.current_crack_id)] = {
-                "source": src,
-                "midline": midline_coords,
-                "geodesic_edges": {
-                    "edge1": [[int(self.track_e1[0][i] + xmin), int(self.track_e1[1][i] + ymin)]
-                            for i in range(len(self.track_e1[0]))],
-                    "edge2": [[int(self.track_e2[0][i] + xmin), int(self.track_e2[1][i] + ymin)]
-                            for i in range(len(self.track_e2[0]))]
-                },
-                "normal_edge_points": normal_edges_full,
-                "mask_crop": mask_crop.tolist(),
-                "mask_bbox": [int(xmin), int(ymin), int(w), int(h)],
-                "user_points": getattr(self, "user_points", []),
-                "user_connections": getattr(self, "user_connections", [])
-            }'''
-            
+            # normalize possible formats: list, tuple, dict
+            e1x = e1y = e2x = e2y = None
+            if isinstance(normal_edges, dict):
+                if "edge1" in normal_edges and "edge2" in normal_edges:
+                    e1 = normal_edges["edge1"]
+                    e2 = normal_edges["edge2"]
+                    # handle [[xlist],[ylist]] vs [[x,y],[x,y],...]
+                    if isinstance(e1, list) and len(e1) == 2 and isinstance(e1[0], list):
+                        e1x, e1y = np.array(e1[0]), np.array(e1[1])
+                        e2x, e2y = np.array(e2[0]), np.array(e2[1])
+                    else:
+                        e1 = np.array(e1, float)
+                        e2 = np.array(e2, float)
+                        if e1.ndim == 2 and e1.shape[1] == 2:
+                            e1x, e1y = e1[:, 0], e1[:, 1]
+                        if e2.ndim == 2 and e2.shape[1] == 2:
+                            e2x, e2y = e2[:, 0], e2[:, 1]
+            elif isinstance(normal_edges, (list, tuple)) and len(normal_edges) == 2:
+                # list form [[e1x,e1y], [e2x,e2y]]
+                e1x, e1y = np.array(normal_edges[0][0]), np.array(normal_edges[0][1])
+                e2x, e2y = np.array(normal_edges[1][0]), np.array(normal_edges[1][1])
+
+            if e1x is None or e2x is None:
+                print("[WARN] normal_edge_points missing or malformed → fallback using track_e1/e2")
+                e1x, e1y = self.track_e1[1], self.track_e1[0]
+                e2x, e2y = self.track_e2[1], self.track_e2[0]
+
+            # convert to global coords + reduce precision
+            e1_global = np.stack([e1x + xmin, e1y + ymin], axis=1)
+            e2_global = np.stack([e2x + xmin, e2y + ymin], axis=1)
+            normal_edges_full = {
+                "edge1": np.round(e1_global, 2).tolist(),
+                "edge2": np.round(e2_global, 2).tolist(),
+            }
+
+            # --- Build crack entry ---
             crack_entry = {
                 "source": src,
                 "midline": midline_coords,
                 "geodesic_edges": {
                     "edge1": np.stack([self.track_e1[0] + xmin, self.track_e1[1] + ymin], axis=1),
-                    "edge2": np.stack([self.track_e2[0] + xmin, self.track_e2[1] + ymin], axis=1)
+                    "edge2": np.stack([self.track_e2[0] + xmin, self.track_e2[1] + ymin], axis=1),
                 },
                 "normal_edge_points": normal_edges_full,
                 "mask_crop": mask_crop,
                 "mask_bbox": [int(xmin), int(ymin), int(w), int(h)],
                 "user_points": getattr(self, "user_points", []),
-                "user_connections": getattr(self, "user_connections", [])
+                "user_connections": getattr(self, "user_connections", []),
             }
 
-            # apply rounding & conversion to all numeric content
-            crack_entry = CrackUtils._to_py(crack_entry)
+            # round and make JSON-safe
+            crack_entry = CrackUtils._to_py(crack_entry, ndigits=3)
             atomic_cracks[str(self.current_crack_id)] = crack_entry
-            print(f"[DEBUG] atomic_cracks keys now: {list(atomic_cracks.keys())}")
-
-            # ---- NEW DEBUG VISUALIZATION (full-image overlay) ----
-            '''import matplotlib.pyplot as plt
-            fig, ax = plt.subplots(figsize=(12,8))
-            ax.imshow(self.original_image)
-            ax.plot([p[0] for p in midline_coords], [p[1] for p in midline_coords],
-                    'g-', lw=1, label="Saved Midline")
-            for edge in ["edge1", "edge2"]:
-                exy = atomic_cracks[str(self.current_crack_id)]["geodesic_edges"][edge]
-                ax.plot([p[0] for p in exy], [p[1] for p in exy],
-                        '-' if edge=="edge1" else '--',
-                        lw=1, label=f"Saved {edge}")
-            ax.legend()
-            ax.set_title(f"DEBUG: Saved crack {self.current_crack_id} (full-image overlay)")
-            plt.show()'''
-            # ------------------------------------------------------
+            print(f"[DEBUG] atomic_cracks updated for id={self.current_crack_id}")
 
             self.use_masks = True
             self.save_annotation()
 
         except Exception as e:
+            import traceback; traceback.print_exc()
             error(e)
     
     def select_end_points_manmidlines(self):
