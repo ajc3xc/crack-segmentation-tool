@@ -24,7 +24,7 @@ class CrackAnnotator(QtWidgets.QWidget):
         self.connections = [(min(a, b), max(a, b)) for a, b in (initial_connections or []) if a != b]
 
         min_dim = min(self.img_w, self.img_h) if self.img_w and self.img_h else 100
-        self.point_radius = max(3, min(20, int(0.005 * min_dim)))
+        self.point_radius = max(3, min(20, int(0.006 * min_dim)))
         self.boxes = boxes or []
 
         # --- zoom / pan / fit state ---
@@ -200,8 +200,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 (pos.y() - self.pan_y) / self.scale)
 
     def _find_point_at(self, pos):
-        # Keep hitbox radius constant in image space
-        r = self.point_radius
+        # Keep hitbox radius constant in screen space, not image space
+        r = self.point_radius / self.scale
         r2 = r * r
         for i, (x, y) in enumerate(self.points):
             if (x - pos[0])**2 + (y - pos[1])**2 <= r2:
@@ -978,7 +978,10 @@ class CrackAnnotator(QtWidgets.QWidget):
                 self.connection_mode and i == self.connecting_index) else QColor(200, 80, 80)
             qp.setBrush(brush)
             qp.setPen(Qt.NoPen)
-            qp.drawEllipse(center, int(self.point_radius * scale), int(self.point_radius * scale))
+            #qp.drawEllipse(center, int(self.point_radius * scale), int(self.point_radius * scale))
+            # keep circle size constant on screen regardless of zoom
+            r_screen = int(self.point_radius)
+            qp.drawEllipse(center, r_screen, r_screen)
 
         # --- editable midlines ---
         qp.setPen(QPen(QColor(0, 200, 200), 4))

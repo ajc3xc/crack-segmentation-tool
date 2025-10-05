@@ -1552,8 +1552,12 @@ class CrackUtils:
             if attached_to:
                 # extend existing combined by rebuilding with old members + this new one
                 members = set(combined[attached_to]["members"])
-                members.add(cid)
-                combined[attached_to] = self._build_combined_crack(sorted(members, key=lambda s: int(s)))
+                '''members.add(cid)
+                combined[attached_to] = self._build_combined_crack(sorted(members, key=lambda s: int(s)))'''
+                members_clean = [m for m in members if isinstance(m, (str, int)) and str(m).isdigit()]
+                if not members_clean:
+                    continue
+                combined[attached_to] = self._build_combined_crack(sorted(members_clean, key=lambda s: int(s)))
                 print(f"Extended combined {attached_to} with atomic {cid}")
             else:
                 # check if it overlaps with other "free" atomics → make a new combined
@@ -2053,14 +2057,62 @@ class CrackUtils:
         if xy is None or len(xy) < 2: return 0.0
         return float(np.sqrt(((xy[1:]-xy[:-1])**2).sum(1)).sum())
 
+    # --- DROP-IN REPLACEMENT in crackutils.py ---
     @staticmethod
     def _nn_dists(A, B):
-        """Nearest-neighbor distances from each point in A to set B (naive, robust)."""
-        if len(A)==0 or len(B)==0: 
-            return np.array([], float)
-        # (|A|, 1, 2) - (1, |B|, 2) -> (|A|, |B|)
-        d2 = ((A[:,None,:] - B[None,:,:])**2).sum(2)
-        return np.sqrt(d2.min(1))
+        """
+        Compute nearest-neighbor distances from each point in A to the closest point in B.
+        Automatically uses GPU (CuPy + cupyx.scipy.spatial.cKDTree) if available,
+        otherwise falls back to SciPy's CPU cKDTree.
+
+        Returns
+        -------
+        dists : np.ndarray of shape (len(A),)
+            Euclidean distances.
+        """
+        import numpy as np
+        try:
+            import cupy as cp
+            from cupyx.scipy.spatial import cKDTree as GPU_KDTree
+            CUPY_AVAILABLE = True
+            gpu = True
+            try:
+                # detect CUDA presence
+                _ = cp.cuda.runtime.getDeviceCount()
+                if _ <= 0:
+                    gpu = False
+            except Exception:
+                gpu = False
+        except ImportError:
+            CUPY_AVAILABLE = False
+            gpu = False
+
+        if A is None or B is None or len(A) == 0 or len(B) == 0:
+            return np.zeros((len(A),), dtype=float)
+
+        if gpu:
+            try:
+                A_gpu = cp.asarray(A, dtype=cp.float32)
+                B_gpu = cp.asarray(B, dtype=cp.float32)
+                tree = GPU_KDTree(B_gpu)
+                dists, _ = tree.query(A_gpu, k=1)
+                return cp.asnumpy(dists)
+            except Exception as e:
+                print(f"[nn_dists][warn] GPU KDTree failed → falling back to CPU: {e}")
+
+        # CPU fallback (SciPy)
+        try:
+            from scipy.spatial import cKDTree as CPU_KDTree
+            tree = CPU_KDTree(B)
+            dists, _ = tree.query(A, k=1)
+            return dists
+        except Exception as e:
+            print(f"[nn_dists][warn] CPU KDTree failed, using brute force: {e}")
+            A = np.asarray(A, float)
+            B = np.asarray(B, float)
+            diff = A[:, None, :] - B[None, :, :]
+            dists = np.sqrt(np.sum(diff ** 2, axis=2))
+            return np.min(dists, axis=1)
 
     @staticmethod
     def chamfer_symmetric(A, B):
@@ -2077,25 +2129,52 @@ class CrackUtils:
             return float('inf')
         return float(max(da.max(), db.max()))
 
+    # --- DROP-IN REPLACEMENT in crackutils.py ---
+
     @staticmethod
-    def frechet_discrete(A, B):
-        """Discrete Fréchet distance (Eiter & Mannila DP)."""
-        A = CrackUtils._finite_xy(A); B = CrackUtils._finite_xy(B)
-        if len(A)==0 or len(B)==0: return float('inf')
-        ca = np.full((len(A), len(B)), -1.0, dtype=float)
-        def _c(i,j):
-            if ca[i,j] > -0.5: return ca[i,j]
-            d = np.hypot(A[i,0]-B[j,0], A[i,1]-B[j,1])
-            if i==0 and j==0:
-                ca[i,j] = d
-            elif i==0:
-                ca[i,j] = max(_c(i, j-1), d)
-            elif j==0:
-                ca[i,j] = max(_c(i-1, j), d)
-            else:
-                ca[i,j] = max( min(_c(i-1,j), _c(i-1,j-1), _c(i,j-1)), d )
-            return ca[i,j]
-        return float(_c(len(A)-1, len(B)-1))
+    def frechet_discrete(A, B, max_points=800):
+        """
+        Iterative Eiter–Mannila discrete Fréchet distance.
+        - No recursion (avoids RecursionError)
+        - Resamples long polylines to <= max_points for robustness
+        """
+        A = CrackUtils._finite_xy(A)
+        B = CrackUtils._finite_xy(B)
+        if len(A) == 0 or len(B) == 0:
+            return float('inf')
+
+        # Optional safety downsampling by arclength (keeps geometry)
+        if len(A) > max_points:
+            A = CrackUtils._resample_by_arclen(A, N=max_points)
+        if len(B) > max_points:
+            B = CrackUtils._resample_by_arclen(B, N=max_points)
+
+        n, m = len(A), len(B)
+        # DP table of size (n x m)
+        ca = np.full((n, m), np.inf, dtype=float)
+
+        # helper to compute Euclidean distance quickly
+        def dist(i, j):
+            dx = A[i, 0] - B[j, 0]
+            dy = A[i, 1] - B[j, 1]
+            return np.hypot(dx, dy)
+
+        ca[0, 0] = dist(0, 0)
+        # first column
+        for i in range(1, n):
+            ca[i, 0] = max(ca[i-1, 0], dist(i, 0))
+        # first row
+        for j in range(1, m):
+            ca[0, j] = max(ca[0, j-1], dist(0, j))
+
+        # fill DP
+        for i in range(1, n):
+            Ai = A[i]  # small locality win
+            for j in range(1, m):
+                d = np.hypot(Ai[0] - B[j, 0], Ai[1] - B[j, 1])
+                ca[i, j] = max(min(ca[i-1, j], ca[i-1, j-1], ca[i, j-1]), d)
+
+        return float(ca[n-1, m-1])
 
     @staticmethod
     def tangent_angles(xy):
@@ -2169,18 +2248,39 @@ class CrackUtils:
         union = int((a | b).sum())
         return (inter / union) if union else float('nan')
 
+    # --- DROP-IN REPLACEMENT in crackutils.py ---
     @staticmethod
     def compute_midline_metrics(auto_xy, man_xy, tau=3.0):
-        """Return a dict with all centerline metrics."""
-        return {
-            "chamfer_mean": float(CrackUtils.chamfer_symmetric(man_xy, auto_xy)),
-            "hausdorff": float(CrackUtils.hausdorff_symmetric(man_xy, auto_xy)),
-            "frechet_discrete": float(CrackUtils.frechet_discrete(man_xy, auto_xy)),
-            "orth_dev": CrackUtils.orthogonal_deviation(man_xy, auto_xy, N=400),
-            "angle_err_deg": float(CrackUtils.angle_error_degrees(man_xy, auto_xy)),
-            "length_ratio": float(CrackUtils.length_ratio(man_xy, auto_xy)),
-            "coverage": CrackUtils.coverage_at_tau(man_xy, auto_xy, tau_px=tau)
+        """
+        Return a dict with centerline metrics.
+        Robust: guards Fréchet against huge inputs and exceptions.
+        """
+        A = CrackUtils._finite_xy(man_xy)
+        B = CrackUtils._finite_xy(auto_xy)
+
+        # Light downsampling for expensive ops
+        A_ds = CrackUtils._resample_by_arclen(A, N=min(600, len(A) or 0))
+        B_ds = CrackUtils._resample_by_arclen(B, N=min(600, len(B) or 0))
+
+        out = {
+            "chamfer_mean": float(CrackUtils.chamfer_symmetric(A, B)),
+            "hausdorff": float(CrackUtils.hausdorff_symmetric(A, B)),
+            "frechet_discrete": float('nan'),
+            "orth_dev": CrackUtils.orthogonal_deviation(A, B, N=400),
+            "angle_err_deg": float(CrackUtils.angle_error_degrees(A, B)),
+            "length_ratio": float(CrackUtils.length_ratio(A, B)),
+            "coverage": CrackUtils.coverage_at_tau(A, B, tau_px=tau)
         }
+
+        # Safe Fréchet (iterative DP) on the downsampled curves
+        try:
+            if len(A_ds) >= 2 and len(B_ds) >= 2:
+                out["frechet_discrete"] = float(CrackUtils.frechet_discrete(A_ds, B_ds, max_points=800))
+        except Exception as e:
+            # Don't crash metrics; just record NaN and log
+            print(f"[metrics][warn] Fréchet failed: {e}")
+
+        return out
 
     @staticmethod
     def widths_from_normals(n1_xy, n2_xy):
@@ -2255,4 +2355,94 @@ class CrackUtils:
         else:
             plt.show()
 
+    # ---------------- JSON helpers (static) ----------------
+    @staticmethod
+    def _to_py(obj, ndigits=6):
+        """
+        Recursively converts NumPy / CuPy arrays, pandas, etc. to plain
+        Python lists, rounding floats to `ndigits` decimals for compact JSON.
+        """
+        import numpy as np
 
+        if obj is None:
+            return None
+        if isinstance(obj, (int, bool, str)):
+            return obj
+        if isinstance(obj, float):
+            # round floats directly
+            return round(obj, ndigits)
+        if isinstance(obj, (list, tuple)):
+            return [CrackUtils._to_py(x, ndigits) for x in obj]
+        if isinstance(obj, dict):
+            return {k: CrackUtils._to_py(v, ndigits) for k, v in obj.items()}
+        if hasattr(obj, "tolist"):  # numpy / cupy array
+            return CrackUtils._to_py(obj.tolist(), ndigits)
+        return obj
+
+    @staticmethod
+    def safe_json_dump(data, path, compact=True):
+        """Atomic JSON writer — supports compact (semi-human) or fully minified mode."""
+        import os, tempfile, json
+        d = self._to_py(data)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path)+".", suffix=".tmp",
+                                dir=os.path.dirname(path))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                if compact:
+                    # minimal spacing, arrays inline
+                    json.dump(d, f, ensure_ascii=False, indent=None, separators=(',', ':'))
+                else:
+                    # readable multi-line, smaller indent
+                    json.dump(d, f, ensure_ascii=False, indent=1)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except Exception:
+            try: os.remove(tmp)
+            except Exception: pass
+            raise
+
+    @staticmethod
+    def _normals_to_json(normals, xmin, ymin, ndigits=6):
+        import numpy as np
+
+        def to_xy2(arr):
+            a = np.asarray(arr, float)
+            if a.ndim == 2 and a.shape[1] == 2:       # already Nx2
+                x, y = a[:, 0], a[:, 1]
+            elif a.ndim == 2 and a.shape[0] == 2:     # 2xN ( [xlist, ylist] )
+                x, y = a[0], a[1]
+            elif a.ndim == 1:                         # degenerate 1-D
+                x, y = a, np.full_like(a, np.nan, dtype=float)
+            else:
+                x = y = np.array([], float)
+
+            x = x + float(xmin)
+            y = y + float(ymin)
+
+            out = np.stack([x, y], axis=1)
+            # round
+            if np.isfinite(out).any():
+                out = np.round(out, ndigits=ndigits, where=np.isfinite(out))
+            # JSON-safe NaNs
+            out[~np.isfinite(out)] = None
+            return out.tolist()
+
+        # dict form: {"edge1":[xlist,ylist], "edge2":[xlist,ylist]} or {"edge1":Nx2,...}
+        if isinstance(normals, dict):
+            e1 = normals.get("edge1", [])
+            e2 = normals.get("edge2", [])
+            # accept either [xlist,ylist] or Nx2
+            e1 = e1 if isinstance(e1, (list, tuple)) else []
+            e2 = e2 if isinstance(e2, (list, tuple)) else []
+            e1 = to_xy2(e1)
+            e2 = to_xy2(e2)
+            return {"edge1": e1, "edge2": e2}
+
+        # tuple/list form: ((e1x,e1y), (e2x,e2y))
+        try:
+            (e1x, e1y), (e2x, e2y) = normals
+            return {"edge1": to_xy2([e1x, e1y]), "edge2": to_xy2([e2x, e2y])}
+        except Exception:
+            return {"edge1": [], "edge2": []}

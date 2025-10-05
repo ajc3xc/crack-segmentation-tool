@@ -1,33 +1,38 @@
 import numpy as np
 import scipy
-import cmath
-import math
-import sys
+import cmath, math, sys
 import skimage
 import matplotlib.pyplot as plt
 import scipy.ndimage as ndi
 import scipy.signal
 from skimage.filters import threshold_otsu
-# from skimage import filters
-# from skimage import measure
 from time import time
 
+# ---------- Robust backend selection ----------
+CUPY_AVAILABLE = False
 try:
-    import cupy as cp
+    import cupy as _cp
+    from cupyx.scipy import ndimage as _cnd
     try:
-        _ = cp.cuda.runtime.getDeviceCount()
-        if _ > 0:
+        if _cp.cuda.runtime.getDeviceCount() > 0:
             CUPY_AVAILABLE = True
-        else:
-            raise RuntimeError("No CUDA device found")
     except Exception:
-        import numpy as np
-        cp = np
         CUPY_AVAILABLE = False
-except ImportError:
-    import numpy as np
-    cp = np
+except Exception:
     CUPY_AVAILABLE = False
+
+if CUPY_AVAILABLE:
+    cp = _cp
+    xp = cp                          # array module (GPU)
+    nd = _cnd                        # ndimage (GPU)
+else:
+    import numpy as _np
+    import scipy.ndimage as _snd
+    cp = _np                         # so existing cp.* code won't crash
+    xp = _np                         # array module (CPU)
+    nd = _snd                        # ndimage (CPU)
+    
+print(CUPY_AVAILABLE)
 
 def asnumpy(x):
     if CUPY_AVAILABLE:
@@ -233,38 +238,42 @@ def CheckWavelet(window_size = 70,size = 75, nOrientations = 32, design = "N",
     #         plt.show()
     return os_check[display_orientations,:,:].real
            
-def OrientationScoreTransform(im, size, nOrientations, design = "N", inflectionPoint = 0.8, mnOrder = 8, splineOrder = 3,
-                              overlapFactor = 1, dcStdDev = 8, directional = False):
-    
-    """
-    directional     - Determines whenever the filter goes in both directions;
-    design          - Indicates which design is used N = Subscript[N, \[Psi]] or M = Subscript[M, \[Psi]]
-    inflectionPoint - Is the location of the inflection point as a factor in (positive) radial direction
-    splineOrder     - Order of the B - Spline that is used to construct the wavelet
-    mnOrder         - The order of the (Taylor expansion) gaussian decay used to construct the wavelet
-    dcStdDev        - The standard deviation of the gaussian window (in the Spatial domain) \
-                      that removes the center of the pie, to avoid long tails in the spatial domain
-    overlapFactor   - How much the cakepieces overlaps in \[Phi] - direction, this can be \
-                      seen as subsampling the angular direction
-    """
+def OrientationScoreTransform(im, size, nOrientations, design="N",
+                              inflectionPoint=0.8, mnOrder=8, splineOrder=3,
+                              overlapFactor=1, dcStdDev=8, directional=False):
+
     im = np.pad(im, pad_width=((size, size), (size, size)), mode='symmetric')
     start_time = time()
-    cws = CakeWaveletStack(size, nOrientations, design, inflectionPoint, mnOrder, splineOrder, overlapFactor,
-                    dcStdDev, directional)
-    
+    cws = CakeWaveletStack(size, nOrientations, design, inflectionPoint,
+                           mnOrder, splineOrder, overlapFactor, dcStdDev, directional)
+
     print(f"CakeWaveletStack time: {time() - start_time}")
     start_time = time()
-    cwsP = np.pad(cws, ([0,0],[np.floor((im.shape[0]-cws.shape[1])/2).astype(int),
-                           np.ceil((im.shape[0]-cws.shape[1])/2).astype(int)],
-                    [np.floor((im.shape[1]-cws.shape[2])/2).astype(int),
-                     np.ceil((im.shape[1]-cws.shape[2])/2).astype(int)]), mode='constant')
-    os = WaveletTransform2D(cp.asarray(im), cp.asarray(cwsP.real))
-    print(f"Wavelet Transform 2D time: {time() - start_time}")
-    #print(os.shape)
-    os = os[:,size:-size,size:-size]
-    #print(im.shape, os.shape)
+    cwsP = np.pad(
+        cws,
+        ([0,0],
+         [np.floor((im.shape[0]-cws.shape[1])/2).astype(int),
+          np.ceil((im.shape[0]-cws.shape[1])/2).astype(int)],
+         [np.floor((im.shape[1]-cws.shape[2])/2).astype(int),
+          np.ceil((im.shape[1]-cws.shape[2])/2).astype(int)]),
+        mode='constant'
+    )
+
+    # ---- GPU vs CPU branch
     if CUPY_AVAILABLE:
-        return os.get()
+        im_arr = cp.asarray(im)
+        kernels_arr = cp.asarray(cwsP.real)
+    else:
+        im_arr = np.asarray(im)
+        kernels_arr = np.asarray(cwsP.real)
+
+    os = WaveletTransform2D(im_arr, kernels_arr)
+
+    print(f"Wavelet Transform 2D time: {time() - start_time}")
+    os = os[:, size:-size, size:-size]
+
+    if CUPY_AVAILABLE:
+        return cp.asnumpy(os)  # bring back to CPU
     else:
         return os
 
@@ -411,7 +420,7 @@ import cupy as cp
 import cupyx.scipy.ndimage as nd
 #from cupyx import fuse
 
-@cp.fuse()
+'''@cp.fuse()
 def rotate_directional(dx, dy, cos_theta, sin_theta, dirr):
     return cp.where(
         dirr == 1,
@@ -497,7 +506,104 @@ def OrientationScoreTensor3_gpu(osObj, sigmaSpatial, sigmaOrientation, method):
         # Fill output tensor
         tensor[..., order_digits[1] - 1, order_digits[0] - 1] = derivative
 
-    return tensor
+    return tensor'''
+    
+def rotate_directional(dx, dy, cos_theta, sin_theta, dirr):
+    # dirr is int 1 or 2; cos/sin are broadcastable (No,1,1)
+    return (dx * cos_theta + dy * sin_theta) if dirr == 1 else (-dx * sin_theta + dy * cos_theta)
+
+def OrientationScoreTensor3(osObj, sigmaSpatial, sigmaOrientation, method):
+    """
+    Unified CPU/GPU implementation.
+    - On GPU: uses cupyx.scipy.ndimage for speed
+    - On CPU: uses scipy.ndimage / skimage filters (vectorized)
+    Returns: NumPy array (No,H,W,3,3)
+    """
+    No, H, W = osObj.Data.shape
+    symmetry = osObj.Symmetry
+    order_list = [11, 22] if method == "LIF" else [11, 21, 31, 12, 22, 32, 13, 23, 33]
+
+    sigmaOD = sigmaOrientation / osObj.AngularResolution
+    tensor = xp.zeros(osObj.Data.shape + (3, 3), dtype=xp.float32)
+
+    # Angles and trig (backend arrays for broadcasting)
+    angles = xp.arange(0, abs(symmetry), osObj.AngularResolution, dtype=xp.float32)
+    anglesMatrix = angles[:, None, None]
+    cos_theta = xp.cos(anglesMatrix)
+    sin_theta = xp.sin(anglesMatrix)
+
+    # Handle symmetry duplication if needed
+    periodicOS = xp.array(osObj.Data, dtype=xp.float32)
+    if symmetry == -xp.pi:
+        periodicOS = xp.concatenate([periodicOS, xp.conj(periodicOS)], axis=0)
+
+    # Small caches
+    cache = {}
+
+    def get_spatial_blur(data, sigma):
+        key = f"S_{float(sigma):.4f}"
+        if key not in cache:
+            # sigma=[0, s, s]: no blur along orientation axis
+            if CUPY_AVAILABLE:
+                cache[key] = nd.gaussian_filter(data, sigma=[0, sigma, sigma],
+                                                truncate=(4 * sigma + 1) / sigma, mode="nearest")
+            else:
+                cache[key] = scipy.ndimage.gaussian_filter(asnumpy(data), sigma=[0, sigma, sigma],
+                                                           truncate=(4 * sigma + 1) / sigma, mode="nearest")
+        return cache[key]
+
+    def get_orientation_blur(data, sigmaOD_val, angularOrder):
+        key = f"O_{float(sigmaOD_val):.4f}_{int(angularOrder)}"
+        if key not in cache:
+            if CUPY_AVAILABLE:
+                cache[key] = nd.gaussian_filter(data, sigma=[sigmaOD_val, 0.125, 0.125],
+                                                order=[angularOrder, 0, 0], mode="wrap", truncate=4)
+            else:
+                cache[key] = scipy.ndimage.gaussian_filter(asnumpy(data), [sigmaOD_val, 0.125, 0.125],
+                                                           order=[angularOrder, 0, 0], mode="wrap", truncate=4)
+        return cache[key]
+
+    for order in order_list:
+        order_digits = [int(x) for x in str(order)][::-1]  # e.g. [1,1]
+        n = int((xp.array(order_digits) == 1).sum() + (xp.array(order_digits) == 2).sum() + 1)
+        scaledSigmaSpatial = float(1.0 / math.sqrt(n) * sigmaSpatial)
+        angularOrder = int((xp.array(order_digits) == 3).sum())
+
+        spatialBlurred = get_spatial_blur(periodicOS, scaledSigmaSpatial)
+        orientBlurred = get_orientation_blur(spatialBlurred, float(sigmaOD), angularOrder)
+
+        if symmetry in [xp.pi, -xp.pi]:
+            orientBlurred = orientBlurred[:No]
+
+        derivative = orientBlurred / (osObj.AngularResolution ** angularOrder)
+
+        for dirr in order_digits:
+            if dirr == 3:
+                continue
+            orientationBlurredOS = derivative[:No] if symmetry in [xp.pi, -xp.pi] else derivative
+            trunc2 = (4 * scaledSigmaSpatial + 1) / scaledSigmaSpatial
+
+            if CUPY_AVAILABLE:
+                dx = nd.gaussian_filter(orientationBlurredOS, sigma=[0, scaledSigmaSpatial, scaledSigmaSpatial],
+                                        order=[0, 1, 0], truncate=trunc2, mode="nearest")
+                dy = nd.gaussian_filter(orientationBlurredOS, sigma=[0, scaledSigmaSpatial, scaledSigmaSpatial],
+                                        order=[0, 0, 1], truncate=trunc2, mode="nearest")
+            else:
+                dx = scipy.ndimage.gaussian_filter(asnumpy(orientationBlurredOS),
+                                                   [0, scaledSigmaSpatial, scaledSigmaSpatial],
+                                                   order=[0, 1, 0], truncate=trunc2, mode="nearest")
+                dy = scipy.ndimage.gaussian_filter(asnumpy(orientationBlurredOS),
+                                                   [0, scaledSigmaSpatial, scaledSigmaSpatial],
+                                                   order=[0, 0, 1], truncate=trunc2, mode="nearest")
+                dx = xp.asarray(dx); dy = xp.asarray(dy)
+
+            derivative = rotate_directional(dx, dy, cos_theta, sin_theta, dirr)
+
+        # place into tensor
+        # order digits correspond to indices (y,x)->(1,1) etc
+        tensor[..., order_digits[1] - 1, order_digits[0] - 1] = derivative
+
+    return asnumpy(tensor)
 
 def CreatePeriodicOrientationAxes(os,symmetry):
     if symmetry == np.pi or symmetry == 2*np.pi:
@@ -550,7 +656,7 @@ def norm_gaussian_filter(data,sigma,order,truncate = 4,mode = "wrap"):
 #                                     order=order,truncate=truncate, mode=mode)
     return r
 
-def CostFunctionVesselnessFiltering(U,ksi,zeta,sigma_s, method,sigmas_ext = 0, sigmaa_ext = 0):
+'''def CostFunctionVesselnessFiltering(U,ksi,zeta,sigma_s, method,sigmas_ext = 0, sigmaa_ext = 0):
     Nx = U.shape[1]
     Ny = U.shape[2]
     No = U.shape[0]
@@ -603,7 +709,53 @@ def CostFunctionVesselnessFiltering(U,ksi,zeta,sigma_s, method,sigmas_ext = 0, s
     #print(f"Remaining costfunctionvesselnessfiltering: {time() - start_time}")
     
     #return cost.get()
-    return cost.get() if CUPY_AVAILABLE else cost
+    return cost.get() if CUPY_AVAILABLE else cost'''
+    
+def CostFunctionVesselnessFiltering(U, ksi, zeta, sigma_s, method, sigmas_ext=0, sigmaa_ext=0):
+    """
+    U: orientation score volume (No,H,W) — NumPy array is fine.
+    Returns: NumPy array cost (No,H,W)
+    """
+    No, Nx, Ny = U.shape
+    betha = 0.75 / sigma_s
+    sigma1 = 0.5
+
+    obj = ObjPositionOrientationData(U, 2*np.pi, Wavelets=None, InputData=None, DcFilterImage=0)
+    H = OrientationScoreTensor3(obj, 0.5*sigma_s**2, 0.5*(2*betha*sigma_s)**2, method)   # NumPy
+
+    # Move to backend for math (GPU if available)
+    Hx = xp.asarray(H)
+    M = xp.diag([1/ksi, zeta/ksi, 1.0])
+    a = xp.ones((3,3), dtype=Hx.dtype)
+    b = M @ a @ M
+
+    Hess = xp.empty((No, Nx, Ny, 3, 3), dtype=Hx.dtype)
+    Hess[:] = b
+    Hess = Hess * Hx
+
+    lambda1 = Hess[..., 0, 0]
+    c = Hess[..., 1, 1]
+    Q = c
+
+    S_tmp = lambda1**2 + c**2
+    sigma2 = 0.2 * xp.max(xp.abs(S_tmp))
+
+    # fused version on GPU; vectorized on CPU
+    if CUPY_AVAILABLE:
+        @cp.fuse()
+        def fused_vesselness(lambda1, c, Q, sigma1, sigma2):
+            S = lambda1**2 + c**2
+            R = lambda1 / (c + 1e-6)
+            cost = cp.exp(-R**2 / (2 * sigma1**2)) * (1 - cp.exp(-S / (2 * sigma2)))
+            return cost * (1 - cp.heaviside(-Q, 0))
+        cost = fused_vesselness(lambda1, c, Q, sigma1, sigma2)
+        return cp.asnumpy(cost)
+    else:
+        S = lambda1**2 + c**2
+        R = lambda1 / (c + 1e-6)
+        cost = np.exp(-R**2 / (2 * sigma1**2)) * (1 - np.exp(-S / (2 * float(sigma2))))
+        cost = cost * (1 - np.heaviside(-asnumpy(Q), 0.0))
+        return cost
 
 def CostFunction(oc,lambdaa, p):
     cost = 1/(1 + lambdaa*(oc)**p)
