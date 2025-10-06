@@ -2384,7 +2384,7 @@ class CrackUtils:
     def safe_json_dump(data, path, compact=True):
         """Atomic JSON writer — supports compact (semi-human) or fully minified mode."""
         import os, tempfile, json
-        d = self._to_py(data)
+        d = CrackUtils._to_py(data)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path)+".", suffix=".tmp",
                                 dir=os.path.dirname(path))

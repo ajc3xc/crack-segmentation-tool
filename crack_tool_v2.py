@@ -2213,10 +2213,131 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         print(f"✅ Saved metrics → {mask_csv_path}, {summary_csv}, {diffs_csv}")
     
+    '''def generate_auto_variant_for_manual(self, crack_id, cache_key=None, force_recompute=False):
+        import numpy as np, traceback
+        from time import time
+
+        ann = self.annotation.setdefault("annotations", {})
+        atomic = ann.setdefault("atomic_cracks", {})
+        crack = atomic.get(crack_id)
+        if not crack:
+            print(f"[AUTO {crack_id}] ❌ not found"); return None
+
+        src = (crack.get("source") or "").lower()
+        if src.startswith("auto") or src == "combined":
+            print(f"[AUTO {crack_id}] skip non-manual"); return None
+
+        cache_key = cache_key or CrackUtils._auto_cache_key(self)
+        variants_root = crack.setdefault("variants", {}).setdefault("auto", {})
+        if cache_key in variants_root and not force_recompute:
+            print(f"[AUTO {crack_id}] using cached {cache_key}")
+            return variants_root[cache_key]
+
+        # --- bbox + endpoints ---
+        bb = crack.get("mask_bbox")
+        if not bb or len(bb) != 4:
+            print(f"[AUTO {crack_id}] no bbox"); return None
+        x, y, w, h = map(int, bb)
+        xmin, ymin, xmax, ymax = x, y, x + w, y + h
+
+        man_ml = CrackUtils._finite_xy(crack.get("midline", []))
+        if len(man_ml) >= 2:
+            p0, p1 = man_ml[0], man_ml[-1]
+        else:
+            up = crack.get("user_points", [])
+            if not up or len(up) < 2:
+                print(f"[AUTO {crack_id}] missing endpoints"); return None
+            p0, p1 = np.array(up[0], float), np.array(up[-1], float)
+
+        self.active_bbox = [xmin, ymin, xmax, ymax]
+        self.pts = [np.array(p0), np.array(p1)]
+        self.end_points = self.pts
+
+        # --- correct coordinate conversion (x,y order respected) ---
+        self.pts_crop = [np.array([pt[0] - xmin, pt[1] - ymin]) for pt in self.pts]
+        self.pts_crop = [np.clip(p, 0, [w - 1, h - 1]) for p in self.pts_crop]
+
+        if hasattr(self, "downsample_factor_box") and callable(self.downsample_factor_box.value):
+            down = self.downsample_factor_box.value()
+        else:
+            down = getattr(self, "down", 1) or 1
+        self.down = down
+        self.pts_crop_down = [p / down for p in self.pts_crop]
+
+        print(f"[AUTO {crack_id}] bbox=({xmin},{ymin},{w},{h}) down={down}")
+        print(f"[AUTO {crack_id}] pts_crop={self.pts_crop}")
+
+        # --- run pipeline ---
+        try:
+            t0 = time(); self.update_image_crop(); print(f"update_image_crop time: {time()-t0:.3f}s")
+            t0 = time(); self.update_os(); print(f"update_os time: {time()-t0:.3f}s")
+            t0 = time(); self.update_cost(); print(f"update_cost time: {time()-t0:.3f}s")
+            t0 = time(); self.midline_tracking(); print(f"midline_tracking time: {time()-t0:.3f}s")
+        except Exception as e:
+            print(f"[AUTO {crack_id}] ❌ pipeline failed: {e}")
+            traceback.print_exc()
+            return None
+
+        # --- edge tracking ---
+        try:
+            self.current_source = "auto"
+            if callable(getattr(self, "edge_mask", None)) and callable(getattr(self, "edge_tracking", None)):
+                t0 = time(); self.edge_mask(); self.edge_tracking()
+                print(f"edge_mask/edge_tracking time: {time()-t0:.3f}s")
+            else:
+                print(f"[AUTO {crack_id}] ⚠️ edge_mask/edge_tracking not callable")
+        except Exception as e:
+            print(f"[AUTO {crack_id}] ⚠️ edge_mask or tracking failed: {e}")
+            traceback.print_exc()
+
+        # --- collect + restore global ---
+        if getattr(self, "track", None) is not None:
+            auto_midline = np.array(self.track).T
+        elif getattr(self, "midline_xy", None) is not None:
+            auto_midline = np.asarray(self.midline_xy)
+        else:
+            auto_midline = np.asarray(crack.get("midline", []))
+
+        if len(auto_midline) > 0:
+            auto_midline = auto_midline + np.array([xmin, ymin])
+        if hasattr(self, "normal_edge_points"):
+            for key in ("edge1", "edge2"):
+                if key in self.normal_edge_points and len(self.normal_edge_points[key]) > 0:
+                    arr = np.asarray(self.normal_edge_points[key], float)
+                    self.normal_edge_points[key] = (arr + np.array([xmin, ymin])).tolist()
+
+        atomic_var = {
+            "midline": self._to_py(auto_midline),
+            "geodesic_edges": self._to_py(getattr(self, "geodesic_edges", crack.get("geodesic_edges", {}))),
+            "normal_edge_points": self._to_py(getattr(self, "normal_edge_points", crack.get("normal_edge_points", {}))),
+            "mask_crop": self._to_py(getattr(self, "mask_crop", crack.get("mask_crop"))),
+            "mask_bbox": self._to_py(crack.get("mask_bbox")),
+        }
+        variants_root[cache_key] = atomic_var
+
+        if len(crack.get("midline", [])) and len(atomic_var["midline"]):
+            m = np.asarray(crack["midline"], float)
+            a = np.asarray(atomic_var["midline"], float)
+            n = min(len(m), len(a))
+            d = np.linalg.norm(m[:n] - a[:n], axis=1).mean()
+            print(f"[AUTO {crack_id}] mean manual–auto Δ = {d:.2f}px")
+
+        if getattr(self, "ann_name", None):
+            try:
+                self.safe_json_dump(self.annotation, self.ann_name)
+                print(f"[AUTO {crack_id}] 💾 cached → {self.ann_name}")
+            except Exception as e:
+                print(f"[AUTO {crack_id}] ⚠️ cache save failed: {e}")
+                traceback.print_exc()
+
+        print(f"[AUTO {crack_id}] ✅ generated auto variant ({cache_key})")
+        return atomic_var'''
+        
     def generate_auto_variant_for_manual(self, crack_id, cache_key=None, force_recompute=False):
         """
-        Fully recompute AUTO variant from MANUAL crack using OS→cost→midline_tracking→edges.
-        Ensures all coordinates are restored to full-image space and safely JSON-serializable.
+        Recompute AUTO variant from a MANUAL crack using the same coord
+        conventions as run_pipeline: self.pts stays GLOBAL; *_crop* are LOCAL.
+        Adds detailed coordinate tracing to find source of translation error.
         """
         import numpy as np, traceback
         from time import time
@@ -2239,13 +2360,13 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             print(f"[AUTO {crack_id}] using cached {cache_key}")
             return variants_root[cache_key]
 
-        # --- bbox and endpoints ---
+        # --- bbox and endpoints (global) ---
         bb = crack.get("mask_bbox")
         if not bb or len(bb) != 4:
             print(f"[AUTO {crack_id}] no bbox")
             return None
         x, y, w, h = map(int, bb)
-        x0, y0, x1, y1 = x, y, x + w, y + h
+        xmin, ymin, xmax, ymax = x, y, x + w, y + h
 
         man_ml = CrackUtils._finite_xy(crack.get("midline", []))
         if len(man_ml) >= 2:
@@ -2257,77 +2378,66 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 return None
             p0, p1 = np.array(up[0], float), np.array(up[-1], float)
 
-        self.active_bbox = [x0, y0, x1, y1]
+        self.active_bbox = [xmin, ymin, xmax, ymax]
 
-        # --- convert global→local coordinates ---
-        p0_local = np.array(p0) - np.array([x, y])
-        p1_local = np.array(p1) - np.array([x, y])
-        # clip inside crop dimensions
-        p0_local = np.clip(p0_local, 0, [w - 1, h - 1])
-        p1_local = np.clip(p1_local, 0, [w - 1, h - 1])
-        self.pts = [p0_local, p1_local]
+        # ✅ Keep pts GLOBAL, like run_pipeline
+        self.pts = [np.array(p0, float), np.array(p1, float)]
         self.end_points = self.pts
-        print(f"[AUTO {crack_id}] local endpoints: {self.pts}")
 
-        # --- run update_image_crop first ---
+        # ✅ Provide LOCAL crop versions separately
+        self.pts_crop = [self.pts[0] - np.array([xmin, ymin]),
+                        self.pts[1] - np.array([xmin, ymin])]
+        # Clip inside crop
+        self.pts_crop = [np.clip(p, 0, [w - 1, h - 1]) for p in self.pts_crop]
+
+        # Downsample exactly like pipeline
+        if hasattr(self, "downsample_factor_box") and callable(self.downsample_factor_box.value):
+            down = self.downsample_factor_box.value()
+        else:
+            down = getattr(self, "down", 1) or 1
+        self.down = down
+        self.pts_crop_down = [p / float(down) for p in self.pts_crop]
+
+        print(f"\n[AUTO {crack_id}] bbox=({xmin},{ymin},{w},{h}) down={down}")
+        print(f"[AUTO {crack_id}] p0 global={p0}, p1 global={p1}")
+        print(f"[AUTO {crack_id}] p0_local={self.pts_crop[0]}, p1_local={self.pts_crop[1]}")
+
+        # --- pipeline ---
         try:
-            t0 = time()
-            self.update_image_crop()
-            print(f"update_image_crop time: {time() - t0:.3f}s")
+            t0 = time(); self.update_image_crop(); print(f"update_image_crop time: {time()-t0:.3f}s")
+            t0 = time(); self.update_os();         print(f"update_os time: {time()-t0:.3f}s")
+            t0 = time(); self.update_cost();       print(f"update_cost time: {time()-t0:.3f}s")
+            t0 = time(); self.midline_tracking();  print(f"midline_tracking time: {time()-t0:.3f}s")
         except Exception as e:
-            print(f"[AUTO {crack_id}] ❌ update_image_crop failed: {e}")
+            print(f"[AUTO {crack_id}] ❌ pipeline failed: {e}")
             traceback.print_exc()
             return None
 
-        # --- ensure required attributes exist ---
-        if getattr(self, "image_crop_down", None) is None:
-            self.image_crop_down = getattr(self, "image_crop", None)
-        if getattr(self, "down", None) in (None, 0):
-            self.down = 1
+        # Debug midline after tracking (LOCAL coords)
+        if getattr(self, "track", None) is not None:
+            test_track = np.array(self.track).T
+            print(f"[AUTO {crack_id}] midline_tracking out (LOCAL) sample={test_track[:3]} ... shape={test_track.shape}")
+        else:
+            print(f"[AUTO {crack_id}] ⚠️ midline_tracking produced no track")
+
+        # --- ensure local pts restored before edge tracking ---
         self.current_source = "auto"
-
-        # --- ensure pts_crop_down exists (used in midline_tracking) ---
         try:
-            self.pts_crop_down = [np.array(p) / float(self.down) for p in self.pts]
-            print(f"[AUTO {crack_id}] set pts_crop_down with down={self.down}")
-        except Exception as e:
-            print(f"[AUTO {crack_id}] ⚠️ failed to set pts_crop_down: {e}")
-
-        # --- run remaining pipeline ---
-        for name, fn in [
-            ("update_os", self.update_os),
-            ("update_cost", self.update_cost),
-            ("midline_tracking", self.midline_tracking),
-        ]:
-            try:
-                t0 = time()
-                fn()
-                print(f"{name} time: {time() - t0:.3f}s")
-            except Exception as e:
-                print(f"[AUTO {crack_id}] ❌ {name} failed: {e}")
-                traceback.print_exc()
-                return None
-
-        # --- edge tracking ---
-        try:
-            # ✅ ensure endpoints are local crop coords before edge tracking
-            if hasattr(self, "pts"):
-                self.pts = [np.clip(np.array(p), 0, [w - 1, h - 1]) for p in self.pts]
-                self.end_points = self.pts
-                print(f"[AUTO {crack_id}] adjusted pts for local crop: {self.pts}")
+            self.pts = [np.array(pt) - np.array([xmin, ymin]) for pt in [p0, p1]]
+            self.pts = [np.clip(p, 0, [w - 1, h - 1]) for p in self.pts]
+            self.end_points = self.pts
+            print(f"[AUTO {crack_id}] edge_tracking pts (local)={self.pts}")
 
             if callable(getattr(self, "edge_mask", None)) and callable(getattr(self, "edge_tracking", None)):
-                t0 = time()
-                self.edge_mask()
-                self.edge_tracking()
-                print(f"edge_mask/edge_tracking time: {time() - t0:.3f}s")
+                t0 = time(); self.edge_mask(); self.edge_tracking()
+                print(f"edge_mask/edge_tracking time: {time()-t0:.3f}s")
             else:
                 print(f"[AUTO {crack_id}] ⚠️ edge_mask/edge_tracking not callable")
         except Exception as e:
             print(f"[AUTO {crack_id}] ⚠️ edge_mask or tracking failed: {e}")
             traceback.print_exc()
 
-        # --- collect auto outputs ---
+        # --- collect midline (LOCAL) and convert to GLOBAL once ---
         if getattr(self, "track", None) is not None:
             auto_midline = np.array(self.track).T
         elif getattr(self, "midline_xy", None) is not None:
@@ -2335,38 +2445,51 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         else:
             auto_midline = np.asarray(crack.get("midline", []))
 
-        # --- convert to global coordinates (undo crop offset) ---
         if len(auto_midline) > 0:
-            auto_midline = auto_midline + np.array([x, y])
+            # Detect if the midline is already global
+            max_local = np.array([w, h])
+            if np.any(auto_midline[0] > max_local) or np.any(auto_midline[-1] > max_local):
+                print(f"[AUTO {crack_id}] 🟡 midline appears already GLOBAL (first={auto_midline[0]}, last={auto_midline[-1]}) — skipping offset")
+                auto_midline_global = auto_midline
+            else:
+                auto_midline_global = auto_midline + np.array([xmin, ymin])
+                print(f"[AUTO {crack_id}] ✅ applied crop offset Δ={[xmin, ymin]} → first={auto_midline_global[0]}")
+        else:
+            print(f"[AUTO {crack_id}] ⚠️ No auto midline found")
+            auto_midline_global = auto_midline
+
+
+        # Also convert edge normals if they’re in crop coords
         if hasattr(self, "normal_edge_points"):
             for key in ("edge1", "edge2"):
                 if key in self.normal_edge_points and len(self.normal_edge_points[key]) > 0:
                     arr = np.asarray(self.normal_edge_points[key], float)
-                    self.normal_edge_points[key] = (arr + np.array([x, y])).tolist()
+                    self.normal_edge_points[key] = (arr + np.array([xmin, ymin])).tolist()
 
-        # --- build variant (pure Python types) ---
+        # --- assemble variant ---
         atomic_var = {
-            "midline": self._to_py(auto_midline),
+            "midline": self._to_py(auto_midline_global),
             "geodesic_edges": self._to_py(getattr(self, "geodesic_edges", crack.get("geodesic_edges", {}))),
             "normal_edge_points": self._to_py(getattr(self, "normal_edge_points", crack.get("normal_edge_points", {}))),
             "mask_crop": self._to_py(getattr(self, "mask_crop", crack.get("mask_crop"))),
             "mask_bbox": self._to_py(crack.get("mask_bbox")),
         }
-
         variants_root[cache_key] = atomic_var
 
-        # --- debug: offset check ---
+        # --- compare manual vs auto ---
         if len(crack.get("midline", [])) and len(atomic_var["midline"]):
             m = np.asarray(crack["midline"], float)
             a = np.asarray(atomic_var["midline"], float)
             n = min(len(m), len(a))
-            d = np.linalg.norm(m[:n] - a[:n], axis=1).mean()
-            print(f"[AUTO {crack_id}] debug: mean manual–auto Δ = {d:.2f}px")
+            start_diff = np.linalg.norm(m[0] - a[0])
+            end_diff = np.linalg.norm(m[-1] - a[-1])
+            mean_diff = np.linalg.norm(m[:n] - a[:n], axis=1).mean()
+            print(f"[AUTO {crack_id}] start Δ={start_diff:.2f}px | end Δ={end_diff:.2f}px | mean Δ={mean_diff:.2f}px")
 
-        # --- atomic safe save ---
+        # --- safe save ---
         if getattr(self, "ann_name", None):
             try:
-                self.safe_json_dump(self.annotation, self.ann_name, compressed=True)
+                self.safe_json_dump(self.annotation, self.ann_name)
                 print(f"[AUTO {crack_id}] 💾 cached → {self.ann_name}")
             except Exception as e:
                 print(f"[AUTO {crack_id}] ⚠️ cache save failed: {e}")
@@ -2416,11 +2539,14 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             if len(man_xy) < 2:
                 continue
 
-            var = crack.get("variants", {}).get("auto", {}).get(key)
+            '''var = crack.get("variants", {}).get("auto", {}).get(key)
             if var is None:
-                var = self.generate_auto_variant_for_manual(cid, cache_key=key)
+                var = self.generate_auto_variant_for_manual(cid, cache_key=key, force_recompute=True)
                 if var is None:
-                    continue
+                    continue'''
+            var = self.generate_auto_variant_for_manual(cid, cache_key=key, force_recompute=True)
+            if var is None:
+                continue
 
             auto_xy = CrackUtils._finite_xy(var.get("midline", []))
             if len(auto_xy) < 2:
@@ -2454,6 +2580,10 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 plt.imshow(im)
                 plt.plot(man_xy[:,0], man_xy[:,1], 'g-',  lw=1.5, label="Manual")
                 plt.plot(auto_xy[:,0], auto_xy[:,1], 'r--', lw=1.5, label="Auto")
+                plt.scatter(man_xy[0,0], man_xy[0,1], c='lime', s=60, marker='o', edgecolors='k', label='Manual start')
+                plt.scatter(auto_xy[0,0], auto_xy[0,1], c='red', s=60, marker='x', label='Auto start')
+                plt.text(auto_xy[0,0]+5, auto_xy[0,1]+5, 'Auto start', color='red')
+                plt.text(man_xy[0,0]+5, man_xy[0,1]-10, 'Manual start', color='lime')
 
                 dists = []
                 step = max(1, len(man_xy)//40)
@@ -2473,7 +2603,6 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         print(f"[metrics] saved → {metrics_dir}")
         # (Optional) If this causes Qt warning in your setup, remove it.
         self.change_image()
-
     
 if __name__ == "__main__":
     import sys
