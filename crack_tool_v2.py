@@ -2337,7 +2337,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         """
         Recompute AUTO variant from a MANUAL crack using the same coord
         conventions as run_pipeline: self.pts stays GLOBAL; *_crop* are LOCAL.
-        Adds detailed coordinate tracing to find source of translation error.
+        Handles coordinate consistency with edge_mask() (expects local [y,x]).
         """
         import numpy as np, traceback
         from time import time
@@ -2380,17 +2380,16 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         self.active_bbox = [xmin, ymin, xmax, ymax]
 
-        # ✅ Keep pts GLOBAL, like run_pipeline
+        # Keep pts GLOBAL
         self.pts = [np.array(p0, float), np.array(p1, float)]
         self.end_points = self.pts
 
-        # ✅ Provide LOCAL crop versions separately
+        # Local crop versions
         self.pts_crop = [self.pts[0] - np.array([xmin, ymin]),
                         self.pts[1] - np.array([xmin, ymin])]
-        # Clip inside crop
         self.pts_crop = [np.clip(p, 0, [w - 1, h - 1]) for p in self.pts_crop]
 
-        # Downsample exactly like pipeline
+        # Downsample
         if hasattr(self, "downsample_factor_box") and callable(self.downsample_factor_box.value):
             down = self.downsample_factor_box.value()
         else:
@@ -2402,34 +2401,49 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         print(f"[AUTO {crack_id}] p0 global={p0}, p1 global={p1}")
         print(f"[AUTO {crack_id}] p0_local={self.pts_crop[0]}, p1_local={self.pts_crop[1]}")
 
-        # --- pipeline ---
+        # --- run OS pipeline ---
         try:
             t0 = time(); self.update_image_crop(); print(f"update_image_crop time: {time()-t0:.3f}s")
-            t0 = time(); self.update_os();         print(f"update_os time: {time()-t0:.3f}s")
-            t0 = time(); self.update_cost();       print(f"update_cost time: {time()-t0:.3f}s")
-            t0 = time(); self.midline_tracking();  print(f"midline_tracking time: {time()-t0:.3f}s")
+            if hasattr(self, "image_crop"):
+                print(f"[AUTO {crack_id}] DEBUG crop shape={self.image_crop.shape}, sum(first 5x5)={np.sum(self.image_crop[:5,:5])}")
+            t0 = time(); self.update_os();   print(f"update_os time: {time()-t0:.3f}s")
+            t0 = time(); self.update_cost(); print(f"update_cost time: {time()-t0:.3f}s")
+            t0 = time(); self.midline_tracking(); print(f"midline_tracking time: {time()-t0:.3f}s")
         except Exception as e:
             print(f"[AUTO {crack_id}] ❌ pipeline failed: {e}")
             traceback.print_exc()
             return None
 
-        # Debug midline after tracking (LOCAL coords)
+        # --- after midline_tracking ---
         if getattr(self, "track", None) is not None:
-            test_track = np.array(self.track).T
-            print(f"[AUTO {crack_id}] midline_tracking out (LOCAL) sample={test_track[:3]} ... shape={test_track.shape}")
+            track_arr = np.array(self.track).T
+            print(f"[AUTO {crack_id}] midline_tracking raw out={track_arr[:3]} ... shape={track_arr.shape}")
+
+            # Detect global or local
+            if np.any(track_arr[:, 0] > w * 1.5) or np.any(track_arr[:, 1] > h * 1.5):
+                print(f"[AUTO {crack_id}] 🔵 Detected GLOBAL coordinates — converting to local for edge_mask()")
+                auto_midline_local = track_arr - np.array([xmin, ymin])
+            else:
+                print(f"[AUTO {crack_id}] 🟢 Detected LOCAL coordinates — using as-is")
+                auto_midline_local = track_arr
+
+            # Ensure within crop range
+            auto_midline_local[:, 0] = np.clip(auto_midline_local[:, 0], 0, w - 1)
+            auto_midline_local[:, 1] = np.clip(auto_midline_local[:, 1], 0, h - 1)
+            self.track = auto_midline_local.T  # [x,y] transposed to match edge_mask()
+            print(f"[AUTO {crack_id}] track prepared for edge_mask(): x∈[{auto_midline_local[:,0].min():.1f},{auto_midline_local[:,0].max():.1f}], y∈[{auto_midline_local[:,1].min():.1f},{auto_midline_local[:,1].max():.1f}]")
+
         else:
             print(f"[AUTO {crack_id}] ⚠️ midline_tracking produced no track")
+            auto_midline_local = np.empty((0, 2))
 
-        # --- ensure local pts restored before edge tracking ---
+        # --- edge tracking (edge_mask expects local [y,x]) ---
         self.current_source = "auto"
         try:
-            self.pts = [np.array(pt) - np.array([xmin, ymin]) for pt in [p0, p1]]
-            self.pts = [np.clip(p, 0, [w - 1, h - 1]) for p in self.pts]
-            self.end_points = self.pts
-            print(f"[AUTO {crack_id}] edge_tracking pts (local)={self.pts}")
-
             if callable(getattr(self, "edge_mask", None)) and callable(getattr(self, "edge_tracking", None)):
-                t0 = time(); self.edge_mask(); self.edge_tracking()
+                t0 = time()
+                self.edge_mask()
+                self.edge_tracking()
                 print(f"edge_mask/edge_tracking time: {time()-t0:.3f}s")
             else:
                 print(f"[AUTO {crack_id}] ⚠️ edge_mask/edge_tracking not callable")
@@ -2437,34 +2451,9 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             print(f"[AUTO {crack_id}] ⚠️ edge_mask or tracking failed: {e}")
             traceback.print_exc()
 
-        # --- collect midline (LOCAL) and convert to GLOBAL once ---
-        if getattr(self, "track", None) is not None:
-            auto_midline = np.array(self.track).T
-        elif getattr(self, "midline_xy", None) is not None:
-            auto_midline = np.asarray(self.midline_xy)
-        else:
-            auto_midline = np.asarray(crack.get("midline", []))
-
-        if len(auto_midline) > 0:
-            # Detect if the midline is already global
-            max_local = np.array([w, h])
-            if np.any(auto_midline[0] > max_local) or np.any(auto_midline[-1] > max_local):
-                print(f"[AUTO {crack_id}] 🟡 midline appears already GLOBAL (first={auto_midline[0]}, last={auto_midline[-1]}) — skipping offset")
-                auto_midline_global = auto_midline
-            else:
-                auto_midline_global = auto_midline + np.array([xmin, ymin])
-                print(f"[AUTO {crack_id}] ✅ applied crop offset Δ={[xmin, ymin]} → first={auto_midline_global[0]}")
-        else:
-            print(f"[AUTO {crack_id}] ⚠️ No auto midline found")
-            auto_midline_global = auto_midline
-
-
-        # Also convert edge normals if they’re in crop coords
-        if hasattr(self, "normal_edge_points"):
-            for key in ("edge1", "edge2"):
-                if key in self.normal_edge_points and len(self.normal_edge_points[key]) > 0:
-                    arr = np.asarray(self.normal_edge_points[key], float)
-                    self.normal_edge_points[key] = (arr + np.array([xmin, ymin])).tolist()
+        # --- convert final midline to global for saving ---
+        auto_midline_global = auto_midline_local + np.array([xmin, ymin])
+        print(f"[AUTO {crack_id}] ✅ reconverted LOCAL→GLOBAL offset Δ={[xmin, ymin]}")
 
         # --- assemble variant ---
         atomic_var = {
