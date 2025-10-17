@@ -297,7 +297,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             error(e)
             self.midline_track_button.setStyleSheet("background-color : red")
 
-    def midline_tracking(self):
+    '''def midline_tracking(self):
         try :
             self.tracking_bar.setValue(0)
             w = self.track_width_box.value()
@@ -346,42 +346,144 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             error(e)
             self.update_track_display_button.setStyleSheet("background-color : red")
             self.track_full_screen_button.setStyleSheet("background-color : red")
+            self.edge_mask_button.setStyleSheet("background-color : red")'''
+            
+    def midline_tracking(self):
+        try:
+            import numpy as np
+            self.tracking_bar.setValue(0)
+            w = self.track_width_box.value()
+            color_name = self.track_color_box.currentText()
+            color = {'R': (255,0,0), 'G': (0,255,0), 'B': (0,0,255), 'W': (255,255,255)}.get(color_name, (255,0,0))
+
+            y_margin = self.y_margin_box.value()
+            x_margin = self.x_margin_box.value()
+            g11 = self.g11_box.value()
+            g22 = self.g22_box.value()
+            g33 = self.g33_box.value()
+            downsample_factor = self.downsample_factor_box.value()
+
+            # 1) Inputs
+            print("\n[TRACK_DBG] === midline_tracking() ENTRY ===")
+            print(f"[TRACK_DBG] downsample_factor={downsample_factor}, g11={g11}, g22={g22}, g33={g33}")
+            print(f"[TRACK_DBG] margins: x_margin={x_margin}, y_margin={y_margin}")
+            print(f"[TRACK_DBG] self.pts global[0]={self.pts[0]}, global[1]={self.pts[1]}")
+            print(f"[TRACK_DBG] self.pts_crop_down[0]={self.pts_crop_down[0]}, self.pts_crop_down[1]={self.pts_crop_down[1]}")
+
+            # 2) Fast marching in crop-down space
+            fm_out = ct.tracking.fast_marching(
+                self.costFunction,
+                self.pts_crop_down[0],
+                self.pts_crop_down[1],
+                g11=g11, g22=g22, g33=g33
+            )
+            track_crop_down = np.array(fm_out, dtype=float)  # handle list/tuple
+            print(f"[TRACK_DBG] fast_marching output shape={track_crop_down.shape}, "
+                f"start={track_crop_down[:,0]}, end={track_crop_down[:,-1]}")
+
+            # 2a) Ensure the path STARTS at p0 (not p1) in crop-down coords
+            d0 = np.linalg.norm(track_crop_down[:,0] - self.pts_crop_down[0])
+            d1 = np.linalg.norm(track_crop_down[:,0] - self.pts_crop_down[1])
+            need_reverse = (d1 < d0)
+            if need_reverse:
+                track_crop_down = track_crop_down[:, ::-1]
+                print(f"[TRACK_DBG] ⚠ path reversed so that first sample anchors at p0 "
+                    f"(d0={d0:.2f}, d1={d1:.2f})")
+            else:
+                print(f"[TRACK_DBG] path already starts near p0 (d0={d0:.2f}, d1={d1:.2f})")
+
+            # 3) Rescale back to crop space
+            track_crop_down[0] -= 0.5
+            track_crop_down[1] -= 0.5
+            track_crop = track_crop_down.copy()
+            track_crop[0] *= downsample_factor
+            track_crop[1] *= downsample_factor
+            self.track_crop = track_crop
+            print(f"[TRACK_DBG] track_crop start={track_crop[:,0]}, end={track_crop[:,-1]}")
+            # Tripwire: check start vs p0 in crop space
+            p0_local = np.asarray(self.pts[0]) - np.asarray(self.active_bbox[:2][::-1])[::-1]  # safer below:
+            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
+            p0_local = np.array([self.pts[0][0]-xmin, self.pts[0][1]-ymin], float)
+            print(f"[TRACK_DBG] Δ_start(crop→p0_local)={np.linalg.norm(track_crop[:,0]-p0_local):.2f}px")
+
+            # 4) Map to full image space
+            track_full_out = ct.tools.track_crop_to_full(track_crop, self.pts[0], self.pts[1],
+                                                        y_margin, x_margin)
+            track_full = np.array(track_full_out, dtype=float)
+            self.track = track_full
+            start_full = track_full[:, 0]
+            end_full   = track_full[:, -1]
+            print(f"[TRACK_DBG] track_full start={start_full}, end={end_full}")
+            print(f"[TRACK_DBG] pts[0]={self.pts[0]}, pts[1]={self.pts[1]}")
+            print(f"[TRACK_DBG] Δ_start(full→manual)={np.linalg.norm(start_full - self.pts[0]):.2f}px, "
+                f"Δ_end(full→manual)={np.linalg.norm(end_full - self.pts[1]):.2f}px")
+
+            # 5) Visualize (unchanged)
+            pts = np.array(track_crop).transpose(1,0).reshape((-1,1,2)).astype(np.int32)
+            im = self.image_crop.astype(np.uint8)
+            im = cv2.polylines(im, [pts], False, color, w)
+            qimage = QImage(im, im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimage)
+            scaled_pixmap = pixmap.scaled(self.track_display.width(), self.track_display.height(),
+                                        Qt.KeepAspectRatio, Qt.FastTransformation)
+            self.track_display.setPixmap(scaled_pixmap)
+            self.tracking_bar.setValue(100)
+            self.update_track_display_button.setStyleSheet("background-color : lightblue")
+            self.track_full_screen_button.setStyleSheet("background-color : lightblue")
+            self.edge_mask_button.setStyleSheet("background-color : lightblue")
+            print("[TRACK_DBG] === midline_tracking() EXIT ===\n")
+
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            error(e)
+            self.update_track_display_button.setStyleSheet("background-color : red")
+            self.track_full_screen_button.setStyleSheet("background-color : red")
             self.edge_mask_button.setStyleSheet("background-color : red")
-                
-    '''def edge_mask(self):
+            
+    def edge_mask(self, eval_mode=False):
         try:
             window_half_size = int(self.edge_filter_size_box.value() / 2)
-            black_crack = [-1 if self.crack_color_box.currentText() == 'Bright crack' else 1][0]
-            color_channel = [0 if self.color_chenel_box.currentText() == 'R'
-                            else 1 if self.color_chenel_box.currentText() == 'B'
-                            else 2][0]
+            black_crack = -1 if self.crack_color_box.currentText() == 'Bright crack' else 1
+            color_channel = 0 if self.color_chenel_box.currentText() == 'R' else (1 if self.color_chenel_box.currentText() == 'B' else 2)
 
             print(f"[EDGE_MASK] window_half_size={window_half_size}, black_crack={black_crack}, color_channel={color_channel}")
             print(f"[EDGE_MASK] self.track shape={np.array(self.track).shape}, sample={np.array(self.track)[:, :5]}")
-            print(f"[EDGE_MASK] self.pts={self.pts}, active_bbox={self.active_bbox}, current_source={getattr(self, 'current_source', None)}")
+            print(f"[EDGE_MASK] self.pts={self.pts}, active_bbox={self.active_bbox}, current_source={getattr(self, 'current_source', None)}, eval_mode={eval_mode}")
 
             img_gray = self.original_image[:, :, color_channel] * black_crack
-            track = np.array(self.track)
-
-            # Always store as [y, x] in full image coordinates
-            if getattr(self, "current_source", None) in ("manual", "manual_poly"):
-                # Manual track was stored in crop coords → convert back to full image coords
-                xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
-                track_full_y = track[0] + ymin
-                track_full_x = track[1] + xmin
-                track = np.vstack([track_full_y, track_full_x])
-                print("[EDGE_MASK] Manual mode - converted crop coords to full image coords")
-            else:
-                # Auto mode: stored as [y, x] but needs swap + shift
-                track = np.vstack([track[1], track[0]])
-                target_point = np.array([self.pts[1][1], self.pts[1][0]])
-                shift_vector = target_point - track[:, 0]
-                track = track + shift_vector[:, np.newaxis]
-                print(f"[EDGE_MASK] Auto mode - applied shift: {shift_vector}")
-
+            track_local_xy = np.array(self.track)  # (2,N) local [x,y] when eval_mode=True
             xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
-            self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(img_gray, track)
 
+            # Convert to FULL [y,x] for edge_masks()
+            if getattr(self, "current_source", None) in ("manual", "manual_poly"):
+                # manual: currently local → add bbox
+                track_full_y = track_local_xy[1] + ymin
+                track_full_x = track_local_xy[0] + xmin
+                track_full_yx = np.vstack([track_full_y, track_full_x])
+                print("[EDGE_MASK] Manual mode - local→full via +bbox")
+            else:
+                if eval_mode:
+                    # EVAL: auto self.track is local [x,y] → add bbox, no legacy shift
+                    track_full_y = track_local_xy[1] + ymin
+                    track_full_x = track_local_xy[0] + xmin
+                    track_full_yx = np.vstack([track_full_y, track_full_x])
+                    print("[EDGE_MASK] Auto eval mode - local→full via +bbox (no shift)")
+                else:
+                    # LEGACY GUI: self.track may already be full [x,y]; swap + apply legacy shift
+                    t = np.vstack([track_local_xy[1], track_local_xy[0]])  # swap to [y,x]
+                    target_point = np.array([self.pts[1][1], self.pts[1][0]])
+                    shift_vector = target_point - t[:, 0]
+                    track_full_yx = t + shift_vector[:, np.newaxis]
+                    print(f"[EDGE_MASK] Auto GUI mode - applied legacy shift: {shift_vector}")
+
+            # Tripwire: start point in FULL image space vs manual
+            auto_start_full = np.array([track_full_yx[1, 0], track_full_yx[0, 0]], float)  # [x,y]
+            man_start_full  = np.asarray(self.pts[0], float)
+            print(f"[EDGE_MASK] tripwire C (full coords): auto_start_full={auto_start_full} "
+                f"manual_start_full={man_start_full} Δ={np.linalg.norm(auto_start_full-man_start_full):.2f}px")
+
+            # Compute masks in full image coords
+            self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(img_gray, track_full_yx)
             print(f"[EDGE_MASK] edge_mask1 stats: min={self.edge_mask1.min()}, max={self.edge_mask1.max()}, shape={self.edge_mask1.shape}")
             print(f"[EDGE_MASK] edge_mask2 stats: min={self.edge_mask2.min()}, max={self.edge_mask2.max()}, shape={self.edge_mask2.shape}")
 
@@ -390,96 +492,14 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             self.edge_mask2_crop = self.edge_mask2[ymin:ymax, xmin:xmax]
             print(f"[EDGE_MASK] Cropped masks: shape1={self.edge_mask1_crop.shape}, shape2={self.edge_mask2_crop.shape}")
 
-            # Adjust track to crop coordinates
-            shifted_track = np.zeros_like(track)
-            shifted_track[0] = track[0] - ymin
-            shifted_track[1] = track[1] - xmin
+            # Adjust track to crop coordinates (local [y,x])
+            shifted_track = np.zeros_like(track_full_yx)
+            shifted_track[0] = track_full_yx[0] - ymin
+            shifted_track[1] = track_full_yx[1] - xmin
             self.adjusted_track = shifted_track
-            print(f"[EDGE_MASK] adjusted_track sample={self.adjusted_track[:, :5]}")
+            print(f"[EDGE_MASK] adjusted_track start (local [y,x])={self.adjusted_track[:, 0]}")
 
-            # Normalize for display
-            edge_mask1_crop = self.edge_mask1_crop - np.min(self.edge_mask1_crop)
-            if np.max(edge_mask1_crop) != 0:
-                edge_mask1_crop = (edge_mask1_crop * 255 / np.max(edge_mask1_crop)).astype(dtype=np.uint8)
-            else:
-                edge_mask1_crop = (edge_mask1_crop * 255).astype(dtype=np.uint8)
-
-            qimage = QImage(edge_mask1_crop, edge_mask1_crop.shape[1], edge_mask1_crop.shape[0],
-                            edge_mask1_crop.strides[0], QImage.Format_Grayscale8)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.edge_map_display.width(), self.edge_map_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.edge_map_display.setPixmap(scaled_pixmap)
-            self.edge_tracks_button.setStyleSheet("background-color : lightblue")
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            error(e)
-            self.edge_tracks_button.setStyleSheet("background-color : red")'''
-            
-    def edge_mask(self, eval_mode: bool = False):
-        """
-        Compute edge masks around the tracked midline.
-
-        Parameters
-        ----------
-        eval_mode : bool, optional
-            If True, skip the legacy 'shift_vector' adjustment used in GUI mode.
-            This ensures coordinate consistency when running evaluation pipelines
-            like generate_auto_variant_for_manual(). Default is False (GUI-safe).
-        """
-        try:
-            window_half_size = int(self.edge_filter_size_box.value() / 2)
-            black_crack = [-1 if self.crack_color_box.currentText() == 'Bright crack' else 1][0]
-            color_channel = [0 if self.color_chenel_box.currentText() == 'R'
-                            else 1 if self.color_chenel_box.currentText() == 'B'
-                            else 2][0]
-
-            print(f"[EDGE_MASK] window_half_size={window_half_size}, black_crack={black_crack}, color_channel={color_channel}")
-            print(f"[EDGE_MASK] self.track shape={np.array(self.track).shape}, sample={np.array(self.track)[:, :5]}")
-            print(f"[EDGE_MASK] self.pts={self.pts}, active_bbox={self.active_bbox}, current_source={getattr(self, 'current_source', None)}, eval_mode={eval_mode}")
-
-            img_gray = self.original_image[:, :, color_channel] * black_crack
-            track = np.array(self.track)
-            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
-
-            # --- Coordinate normalization ---
-            if getattr(self, "current_source", None) in ("manual", "manual_poly"):
-                # Manual: crop → full
-                track_full_y = track[0] + ymin
-                track_full_x = track[1] + xmin
-                track = np.vstack([track_full_y, track_full_x])
-                print("[EDGE_MASK] Manual mode - converted crop coords to full image coords")
-            else:
-                # Auto: stored as [y, x] but often needs swap
-                track = np.vstack([track[1], track[0]])
-                if eval_mode:
-                    # Corrected: no artificial shift
-                    print("[EDGE_MASK] Auto eval mode - no shift applied")
-                else:
-                    # Legacy GUI behavior (to preserve old alignment)
-                    target_point = np.array([self.pts[1][1], self.pts[1][0]])
-                    shift_vector = target_point - track[:, 0]
-                    track = track + shift_vector[:, np.newaxis]
-                    print(f"[EDGE_MASK] Auto GUI mode - applied shift: {shift_vector}")
-
-            # --- Edge masks computation ---
-            self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(img_gray, track)
-            print(f"[EDGE_MASK] edge_mask1 stats: min={self.edge_mask1.min()}, max={self.edge_mask1.max()}, shape={self.edge_mask1.shape}")
-            print(f"[EDGE_MASK] edge_mask2 stats: min={self.edge_mask2.min()}, max={self.edge_mask2.max()}, shape={self.edge_mask2.shape}")
-
-            # --- Crop masks ---
-            self.edge_mask1_crop = self.edge_mask1[ymin:ymax, xmin:xmax]
-            self.edge_mask2_crop = self.edge_mask2[ymin:ymax, xmin:xmax]
-            print(f"[EDGE_MASK] Cropped masks: shape1={self.edge_mask1_crop.shape}, shape2={self.edge_mask2_crop.shape}")
-
-            # --- Adjust track to crop coordinates ---
-            shifted_track = np.zeros_like(track)
-            shifted_track[0] = track[0] - ymin
-            shifted_track[1] = track[1] - xmin
-            self.adjusted_track = shifted_track
-            print(f"[EDGE_MASK] adjusted_track sample={self.adjusted_track[:, :5]}")
-
-            # --- Normalize for display ---
+            # Display
             edge_mask1_crop = self.edge_mask1_crop - np.min(self.edge_mask1_crop)
             if np.max(edge_mask1_crop) != 0:
                 edge_mask1_crop = (edge_mask1_crop * 255 / np.max(edge_mask1_crop)).astype(np.uint8)
@@ -493,7 +513,6 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                                         Qt.KeepAspectRatio, Qt.FastTransformation)
             self.edge_map_display.setPixmap(scaled_pixmap)
             self.edge_tracks_button.setStyleSheet("background-color : lightblue")
-
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -2297,7 +2316,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         print(f"✅ Saved metrics → {mask_csv_path}, {summary_csv}, {diffs_csv}")
         
-    def generate_auto_variant_for_manual(self, crack_id, cache_key=None, force_recompute=False):
+    '''def generate_auto_variant_for_manual(self, crack_id, cache_key=None, force_recompute=False):
         """
         Recompute AUTO variant from a MANUAL crack using the same coord
         conventions as run_pipeline: self.pts stays GLOBAL; *_crop* are LOCAL.
@@ -2543,6 +2562,204 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             print(f"[AUTO {crack_id}] best-translation reversed: t={t_rev}, mean_err={err_rev:.2f}")
 
         # --- safe save ---
+        if getattr(self, "ann_name", None):
+            try:
+                self.safe_json_dump(self.annotation, self.ann_name)
+                print(f"[AUTO {crack_id}] 💾 cached → {self.ann_name}")
+            except Exception as e:
+                print(f"[AUTO {crack_id}] ⚠️ cache save failed: {e}")
+                traceback.print_exc()
+
+        print(f"[AUTO {crack_id}] ✅ generated auto variant ({cache_key})")
+        return atomic_var'''
+        
+    def generate_auto_variant_for_manual(self, crack_id, cache_key=None, force_recompute=False):
+        """
+        Recompute AUTO variant from a MANUAL crack using the same coord
+        conventions as run_pipeline: self.pts stays GLOBAL; *_crop* are LOCAL.
+        Handles coordinate consistency with edge_mask() (expects local [y,x]).
+        """
+        import numpy as np, traceback, os, cv2
+        from time import time
+
+        def _dbg(arr, name):
+            arr = np.asarray(arr, float)
+            if arr.size == 0:
+                print(f"[DBG {name}] empty"); return
+            print(f"[DBG {name}] shape={arr.shape} "
+                f"x∈[{np.nanmin(arr[:,0]):.1f},{np.nanmax(arr[:,0]):.1f}] "
+                f"y∈[{np.nanmin(arr[:,1]):.1f},{np.nanmax(arr[:,1]):.1f}] "
+                f"head={arr[0]} tail={arr[-1]}")
+
+        ann = self.annotation.setdefault("annotations", {})
+        atomic = ann.setdefault("atomic_cracks", {})
+        crack = atomic.get(crack_id)
+        if not crack:
+            print(f"[AUTO {crack_id}] ❌ not found"); return None
+
+        src = (crack.get("source") or "").lower()
+        if src.startswith("auto") or src == "combined":
+            print(f"[AUTO {crack_id}] skip non-manual"); return None
+
+        cache_key = cache_key or CrackUtils._auto_cache_key(self)
+        variants_root = crack.setdefault("variants", {}).setdefault("auto", {})
+        if cache_key in variants_root and not force_recompute:
+            print(f"[AUTO {crack_id}] using cached {cache_key}")
+            return variants_root[cache_key]
+
+        # --- bbox & endpoints (global) ---
+        bb = crack.get("mask_bbox")
+        if not bb or len(bb) != 4:
+            print(f"[AUTO {crack_id}] no bbox"); return None
+        x, y, w, h = map(int, bb)
+        xmin, ymin, xmax, ymax = x, y, x + w, y + h
+
+        man_ml = CrackUtils._finite_xy(crack.get("midline", []))
+        if len(man_ml) >= 2:
+            p0, p1 = man_ml[0], man_ml[-1]
+        else:
+            up = crack.get("user_points", [])
+            if not up or len(up) < 2:
+                print(f"[AUTO {crack_id}] missing endpoints"); return None
+            p0, p1 = np.array(up[0], float), np.array(up[-1], float)
+
+        self.active_bbox = [xmin, ymin, xmax, ymax]
+
+        # GLOBAL endpoints (like run_pipeline)
+        self.pts = [np.array(p0, float), np.array(p1, float)]
+        self.end_points = self.pts
+
+        # LOCAL endpoints for crop/down
+        self.pts_crop = [self.pts[0] - np.array([xmin, ymin]),
+                        self.pts[1] - np.array([xmin, ymin])]
+        self.pts_crop = [np.clip(p, 0, [w - 1, h - 1]) for p in self.pts_crop]
+        down = self.downsample_factor_box.value() if hasattr(self, "downsample_factor_box") and callable(self.downsample_factor_box.value) else (getattr(self, "down", 1) or 1)
+        self.down = down
+        self.pts_crop_down = [p / float(down) for p in self.pts_crop]
+
+        print(f"\n[AUTO {crack_id}] bbox=({xmin},{ymin},{w},{h}) down={down}")
+        print(f"[AUTO {crack_id}] p0 global={p0}, p1 global={p1}")
+        print(f"[AUTO {crack_id}] p0_local={self.pts_crop[0]}, p1_local={self.pts_crop[1]}")
+
+        # --- OS pipeline ---
+        try:
+            t0 = time(); self.update_image_crop(); print(f"update_image_crop time: {time()-t0:.3f}s")
+            if hasattr(self, "image_crop"):
+                print(f"[AUTO {crack_id}] DEBUG crop shape={self.image_crop.shape}, sum(first 5x5)={np.sum(self.image_crop[:5,:5])}")
+            t0 = time(); self.update_os();   print(f"update_os time: {time()-t0:.3f}s")
+            t0 = time(); self.update_cost(); print(f"update_cost time: {time()-t0:.3f}s")
+            t0 = time(); self.midline_tracking(); print(f"midline_tracking time: {time()-t0:.3f}s")
+
+                        # --- normalize track from midline_tracking() just for EVAL ---
+            # Goal: ensure track starts exactly at p0 (manual start), oriented p0→p1, no translation offset.
+            if getattr(self, "track", None) is not None:
+                try:
+                    import numpy as np
+                    # 1) Convert to (N,2)
+                    tr = self.track
+                    if isinstance(tr, (list, tuple)):
+                        tr = np.array(tr, dtype=float)
+                    else:
+                        tr = np.asarray(tr, dtype=float)
+                    if tr.ndim != 2:
+                        raise ValueError(f"track bad ndim: {tr.ndim}")
+                    if tr.shape[0] == 2 and tr.shape[1] >= 2:
+                        track_xy = tr.T
+                    elif tr.shape[1] == 2 and tr.shape[0] >= 2:
+                        track_xy = tr
+                    else:
+                        raise ValueError(f"track bad shape: {tr.shape}")
+
+                    p0g = np.asarray(p0, float)
+                    p1g = np.asarray(p1, float)
+
+                    # 2) Determine orientation
+                    d_start_p0 = np.linalg.norm(track_xy[0] - p0g)
+                    d_start_p1 = np.linalg.norm(track_xy[0] - p1g)
+                    if d_start_p1 < d_start_p0:
+                        track_xy = track_xy[::-1]
+                        print(f"[EVAL ALIGN] reversed path so first sample anchors at p0 "
+                              f"(d_start_p0={d_start_p0:.2f}, d_start_p1={d_start_p1:.2f})")
+                    else:
+                        print(f"[EVAL ALIGN] path already starts near p0 (d_start_p0={d_start_p0:.2f}, d_start_p1={d_start_p1:.2f})")
+
+                    # 3) Translate so first point == p0 (manual start)
+                    delta = p0g - track_xy[0]
+                    track_xy = track_xy + delta
+
+                    # 4) Diagnostics
+                    d0 = np.linalg.norm(track_xy[0] - p0g)
+                    d1 = np.linalg.norm(track_xy[-1] - p1g)
+                    print(f"[EVAL ALIGN] pinned start to p0: Δ_start={d0:.3f}px (should be 0), "
+                          f"Δ_end_to_p1={d1:.2f}px")
+
+                    self.track = track_xy.T  # back to (2,N)
+
+                except Exception as _e:
+                    print(f"[EVAL ALIGN] ⚠ failed to normalize track: {_e}")
+            else:
+                print(f"[AUTO {crack_id}] ⚠️ midline_tracking produced no track")
+
+        except Exception as e:
+            print(f"[AUTO {crack_id}] ❌ pipeline failed: {e}")
+            traceback.print_exc()
+            return None
+
+        # --- Prepare LOCAL for edge_mask() ---
+        if getattr(self, "track", None) is not None:
+            track_global = np.array(self.track).T
+            a_local = track_global - np.array([xmin, ymin])
+            a_local[:,0] = np.clip(a_local[:,0], 0, w-1)
+            a_local[:,1] = np.clip(a_local[:,1], 0, h-1)
+            self.track = a_local.T
+            _dbg(a_local, "auto_midline_local(for edge_mask)")
+            auto_start_local = a_local[0]
+            man_start_local = np.asarray(p0) - np.array([xmin, ymin])
+            print(f"[EVAL ALIGN] local start Δ={np.linalg.norm(auto_start_local - man_start_local):.3f}px "
+                  f"auto_start_local={auto_start_local} manual_start_local={man_start_local}")
+            auto_midline_local = a_local
+        else:
+            print(f"[AUTO {crack_id}] ⚠️ midline_tracking produced no track")
+            auto_midline_local = np.empty((0, 2))
+
+        # --- edge tracking ---
+        self.current_source = "auto"
+        try:
+            if callable(getattr(self, "edge_mask", None)) and callable(getattr(self, "edge_tracking", None)):
+                t0 = time()
+                self.edge_mask(eval_mode=True)  # IMPORTANT: now respected
+                self.edge_tracking()
+                print(f"edge_mask/edge_tracking time: {time()-t0:.3f}s")
+            else:
+                print(f"[AUTO {crack_id}] ⚠️ edge_mask/edge_tracking not callable")
+        except Exception as e:
+            print(f"[AUTO {crack_id}] ⚠️ edge_mask or tracking failed: {e}")
+            traceback.print_exc()
+
+        # --- convert final midline to global for saving ---
+        auto_midline_global = auto_midline_local + np.array([xmin, ymin])
+        print(f"[AUTO {crack_id}] ✅ reconverted LOCAL→GLOBAL offset Δ={[xmin, ymin]}")
+
+        # --- assemble variant ---
+        atomic_var = {
+            "midline": self._to_py(auto_midline_global),
+            "geodesic_edges": self._to_py(getattr(self, "geodesic_edges", crack.get("geodesic_edges", {}))),
+            "normal_edge_points": self._to_py(getattr(self, "normal_edge_points", crack.get("normal_edge_points", {}))),
+            "mask_crop": self._to_py(getattr(self, "mask_crop", crack.get("mask_crop"))),
+            "mask_bbox": self._to_py(crack.get("mask_bbox")),
+        }
+        variants_root[cache_key] = atomic_var
+
+        # --- quick compare (global) ---
+        if len(crack.get("midline", [])) and len(atomic_var["midline"]):
+            m = np.asarray(crack["midline"], float)
+            a = np.asarray(atomic_var["midline"], float)
+            n = min(len(m), len(a))
+            start_diff = np.linalg.norm(m[0] - a[0])
+            end_diff   = np.linalg.norm(m[-1] - a[-1])
+            mean_diff  = np.linalg.norm(m[:n] - a[:n], axis=1).mean()
+            print(f"[AUTO {crack_id}] start Δ={start_diff:.2f}px | end Δ={end_diff:.2f}px | mean Δ={mean_diff:.2f}px")
+
         if getattr(self, "ann_name", None):
             try:
                 self.safe_json_dump(self.annotation, self.ann_name)
