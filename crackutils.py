@@ -882,8 +882,8 @@ class CrackUtils:
         if getattr(self, "use_masks", False) and hasattr(self, "mask_map"):
             mask_path = self.mask_map.get(base_name)
 
-            print(f"[DEBUG change_image] base_name={base_name}")
-            print(f"[DEBUG change_image] available mask_map keys (first 20): {list(self.mask_map.keys())[:20]}")
+            #print(f"[DEBUG change_image] base_name={base_name}")
+            #print(f"[DEBUG change_image] available mask_map keys (first 20): {list(self.mask_map.keys())[:20]}")
             print(f"[DEBUG change_image] mask_path for {base_name}: {mask_path}")
 
             if mask_path:

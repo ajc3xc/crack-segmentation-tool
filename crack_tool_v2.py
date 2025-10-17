@@ -2303,8 +2303,28 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         conventions as run_pipeline: self.pts stays GLOBAL; *_crop* are LOCAL.
         Handles coordinate consistency with edge_mask() (expects local [y,x]).
         """
-        import numpy as np, traceback
+        import numpy as np, traceback, os, cv2
         from time import time
+
+        def _dbg(arr, name):
+            arr = np.asarray(arr, float)
+            if arr.size == 0:
+                print(f"[DBG {name}] empty")
+                return
+            print(f"[DBG {name}] shape={arr.shape} "
+                f"x∈[{np.nanmin(arr[:,0]):.1f},{np.nanmax(arr[:,0]):.1f}] "
+                f"y∈[{np.nanmin(arr[:,1]):.1f},{np.nanmax(arr[:,1]):.1f}] "
+                f"head={arr[0]} tail={arr[-1]}")
+
+        def _best_translation(A, B):
+            """
+            Return t that minimizes mean ||A - (B + t)|| (A,B are Nx2).
+            """
+            n = min(len(A), len(B))
+            if n == 0: return np.array([np.nan, np.nan]), np.nan
+            t = (A[:n] - B[:n]).mean(axis=0)
+            err = np.linalg.norm((A[:n] - (B[:n] + t)), axis=1).mean()
+            return t, err
 
         ann = self.annotation.setdefault("annotations", {})
         atomic = ann.setdefault("atomic_cracks", {})
@@ -2373,6 +2393,17 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             t0 = time(); self.update_os();   print(f"update_os time: {time()-t0:.3f}s")
             t0 = time(); self.update_cost(); print(f"update_cost time: {time()-t0:.3f}s")
             t0 = time(); self.midline_tracking(); print(f"midline_tracking time: {time()-t0:.3f}s")
+
+            # --- evaluation correction (do not touch midline_tracking()) ---
+            if getattr(self, "track", None) is not None:
+                track_xy = np.array(self.track).T  # whatever midline_tracking produced
+                # If fast_marching produced global coords, reverse and apply single offset
+                track_xy = track_xy[::-1]  # fix orientation
+                track_xy[:, 0] -= xmin      # apply bbox once
+                track_xy[:, 1] -= ymin
+                self.track = track_xy.T     # back to [x,y] order
+                print(f"[AUTO {crack_id}] applied reversed+single-offset correction (global→local)")
+
         except Exception as e:
             print(f"[AUTO {crack_id}] ❌ pipeline failed: {e}")
             traceback.print_exc()
@@ -2380,23 +2411,89 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         # --- after midline_tracking ---
         if getattr(self, "track", None) is not None:
-            track_arr = np.array(self.track).T
-            print(f"[AUTO {crack_id}] midline_tracking raw out={track_arr[:3]} ... shape={track_arr.shape}")
+            track_xy = np.array(self.track).T  # whatever midline_tracking produced (unknown space)
+            
+            # quick orientation & offset test
+            fixed = track_xy[::-1]  # reverse
+            fixed_local = fixed - np.array([xmin, ymin])  # only once
+            self.track = fixed_local.T
+            print(f"[AUTO {crack_id}] temporary reversed+single-offset test → expect start≈manual start")
+            
+            _dbg(track_xy, "track_xy(raw)")
+            # Guess coord space by magnitude vs crop size
+            looks_global = (np.any(track_xy[:,0] > w * 1.5) or np.any(track_xy[:,1] > h * 1.5))
+            print(f"[AUTO {crack_id}] coord_guess → {'GLOBAL' if looks_global else 'LOCAL'}")
 
-            # Detect global or local
-            if np.any(track_arr[:, 0] > w * 1.5) or np.any(track_arr[:, 1] > h * 1.5):
-                print(f"[AUTO {crack_id}] 🔵 Detected GLOBAL coordinates — converting to local for edge_mask()")
-                auto_midline_local = track_arr - np.array([xmin, ymin])
+            if looks_global:
+                a_local = track_xy - np.array([xmin, ymin])
             else:
-                print(f"[AUTO {crack_id}] 🟢 Detected LOCAL coordinates — using as-is")
-                auto_midline_local = track_arr
+                a_local = track_xy.copy()
+            a_local[:,0] = np.clip(a_local[:,0], 0, w-1)
+            a_local[:,1] = np.clip(a_local[:,1], 0, h-1)
+            self.track = a_local.T  # what edge_mask() expects (local [x,y] transposed)
+            _dbg(a_local, "auto_midline_local(for edge_mask)")
 
-            # Ensure within crop range
-            auto_midline_local[:, 0] = np.clip(auto_midline_local[:, 0], 0, w - 1)
-            auto_midline_local[:, 1] = np.clip(auto_midline_local[:, 1], 0, h - 1)
-            self.track = auto_midline_local.T  # [x,y] transposed to match edge_mask()
-            print(f"[AUTO {crack_id}] track prepared for edge_mask(): x∈[{auto_midline_local[:,0].min():.1f},{auto_midline_local[:,0].max():.1f}], y∈[{auto_midline_local[:,1].min():.1f},{auto_midline_local[:,1].max():.1f}]")
+            # Build both globals for diagnostics
+            a_glob_from_local = a_local + np.array([xmin, ymin])
+            a_glob_from_raw   = track_xy.copy()  # if raw was global
 
+            # Manual global
+            m_glob = CrackUtils._finite_xy(crack.get("midline", []))
+            _dbg(m_glob, "manual_global")
+
+            # Which global interpretation is closer to manual?
+            t1, e1 = _best_translation(m_glob, a_glob_from_local)
+            t2, e2 = _best_translation(m_glob, a_glob_from_raw)
+            pick = "local+offset" if (not looks_global or e1 <= e2) else "raw_global"
+            print(f"[AUTO {crack_id}] best-fit translation (local→global): t={t1}, mean_err={e1:.2f}")
+            print(f"[AUTO {crack_id}] best-fit translation (raw_global):  t={t2}, mean_err={e2:.2f}")
+            print(f"[AUTO {crack_id}] → interpreting track as: {pick}")
+
+            # Start/end proximity diagnostics (both interpretations + reversed)
+            def _end_diag(aG, tag):
+                if len(aG) == 0 or len(m_glob) == 0: return
+                ds_s  = np.linalg.norm(aG[0]  - m_glob[0])
+                ds_e  = np.linalg.norm(aG[0]  - m_glob[-1])
+                de_s  = np.linalg.norm(aG[-1] - m_glob[0])
+                de_e  = np.linalg.norm(aG[-1] - m_glob[-1])
+                aG_rev = aG[::-1]
+                ds_s_r = np.linalg.norm(aG_rev[0]  - m_glob[0])
+                de_e_r = np.linalg.norm(aG_rev[-1] - m_glob[-1])
+                print(f"[AUTO {crack_id}] endpoints({tag}): "
+                    f"start→manStart={ds_s:.1f}, start→manEnd={ds_e:.1f}, "
+                    f"end→manStart={de_s:.1f}, end→manEnd={de_e:.1f} | "
+                    f"rev: start→manStart={ds_s_r:.1f}, end→manEnd={de_e_r:.1f}")
+
+            _end_diag(a_glob_from_local, "glob(from_local)")
+            _end_diag(a_glob_from_raw,   "glob(raw)")
+
+            # Save small overlay debug for eyeballing offsets
+            try:
+                dbg_dir = os.path.join(self.save_folder, "debug_autogen")
+                os.makedirs(dbg_dir, exist_ok=True)
+                base = os.path.splitext(os.path.basename(self.name))[0]
+                im = self.original_image.copy()
+                # bbox
+                cv2.rectangle(im, (xmin, ymin), (xmax, ymax), (0, 255, 255), 2)
+                # manual (green)
+                if len(m_glob) >= 2:
+                    for i in range(1, len(m_glob)):
+                        cv2.line(im, tuple(m_glob[i-1].astype(int)), tuple(m_glob[i].astype(int)), (0,255,0), 2)
+                    cv2.circle(im, tuple(m_glob[0].astype(int)), 4, (0,255,0), -1)
+                    cv2.circle(im, tuple(m_glob[-1].astype(int)), 4, (0,128,0), -1)
+                # auto (red, using our chosen interpretation)
+                aG = a_glob_from_local if (not looks_global or e1 <= e2) else a_glob_from_raw
+                if len(aG) >= 2:
+                    for i in range(1, len(aG)):
+                        cv2.line(im, tuple(aG[i-1].astype(int)), tuple(aG[i].astype(int)), (0,0,255), 2)
+                    cv2.drawMarker(im, tuple(aG[0].astype(int)), (0,0,255), cv2.MARKER_TILTED_CROSS, 12, 2)
+                outp = os.path.join(dbg_dir, f"{base}_cid{crack_id}_auto_debug.png")
+                cv2.imwrite(outp, im[:, :, ::-1])  # back to BGR for cv2
+                print(f"[AUTO {crack_id}] wrote debug overlay → {outp}")
+            except Exception as _e:
+                print(f"[AUTO {crack_id}] overlay save failed: {_e}")
+
+            auto_midline_local = a_local
         else:
             print(f"[AUTO {crack_id}] ⚠️ midline_tracking produced no track")
             auto_midline_local = np.empty((0, 2))
@@ -2406,10 +2503,9 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         try:
             if callable(getattr(self, "edge_mask", None)) and callable(getattr(self, "edge_tracking", None)):
                 t0 = time()
-                self.edge_mask(eval_mode=True)
+                self.edge_mask(eval_mode=True)  # no shift in eval mode
                 self.edge_tracking()
                 print(f"edge_mask/edge_tracking time: {time()-t0:.3f}s")
-                
             else:
                 print(f"[AUTO {crack_id}] ⚠️ edge_mask/edge_tracking not callable")
         except Exception as e:
@@ -2430,15 +2526,21 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         }
         variants_root[cache_key] = atomic_var
 
-        # --- compare manual vs auto ---
+        # --- compare manual vs auto (rich stats) ---
         if len(crack.get("midline", [])) and len(atomic_var["midline"]):
             m = np.asarray(crack["midline"], float)
             a = np.asarray(atomic_var["midline"], float)
             n = min(len(m), len(a))
             start_diff = np.linalg.norm(m[0] - a[0])
-            end_diff = np.linalg.norm(m[-1] - a[-1])
-            mean_diff = np.linalg.norm(m[:n] - a[:n], axis=1).mean()
+            end_diff   = np.linalg.norm(m[-1] - a[-1])
+            mean_diff  = np.linalg.norm(m[:n] - a[:n], axis=1).mean()
+            t_mean, err_mean = _best_translation(m, a)
+            # check reversed auto too
+            a_rev = a[::-1]
+            t_rev, err_rev = _best_translation(m, a_rev)
             print(f"[AUTO {crack_id}] start Δ={start_diff:.2f}px | end Δ={end_diff:.2f}px | mean Δ={mean_diff:.2f}px")
+            print(f"[AUTO {crack_id}] best-translation normal: t={t_mean}, mean_err={err_mean:.2f}")
+            print(f"[AUTO {crack_id}] best-translation reversed: t={t_rev}, mean_err={err_rev:.2f}")
 
         # --- safe save ---
         if getattr(self, "ann_name", None):
@@ -2460,7 +2562,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         - Visual overlay with yellow nearest-distance sticks
         Reuses cached auto variants; only computes when missing.
         """
-        import os, numpy as np, pandas as pd, matplotlib.pyplot as plt
+        import os, numpy as np, pandas as pd, matplotlib.pyplot as plt, cv2
 
         if not hasattr(self, "annotation") or not self.annotation:
             print("⚠️ No annotation loaded"); return
@@ -2493,14 +2595,8 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             if len(man_xy) < 2:
                 continue
 
-            '''var = crack.get("variants", {}).get("auto", {}).get(key)
-            if var is None:
-                var = self.generate_auto_variant_for_manual(cid, cache_key=key, force_recompute=True)
-                if var is None:
-                    continue'''
             var = self.generate_auto_variant_for_manual(cid, cache_key=key, force_recompute=True)
-            if var is None:
-                continue
+            if var is None: continue
 
             auto_xy = CrackUtils._finite_xy(var.get("midline", []))
             if len(auto_xy) < 2:
@@ -2527,18 +2623,32 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                     row["iou_auto_vs_gt"] = CrackUtils.mask_iou(full, GT_mask)
                 mask_rows.append(row)
 
-            # 3) debug overlay (yellow nearest sticks)
+            # 3) rich debug overlay (optional)
             if display:
+                # console diagnostics
+                n = min(len(man_xy), len(auto_xy))
+                start_d  = np.linalg.norm(man_xy[0]  - auto_xy[0])
+                end_d    = np.linalg.norm(man_xy[-1] - auto_xy[-1])
+                mean_d   = np.linalg.norm(man_xy[:n] - auto_xy[:n], axis=1).mean()
+                t_norm   = (man_xy[:n] - auto_xy[:n]).mean(axis=0)
+                auto_rev = auto_xy[::-1]
+                mean_d_r = np.linalg.norm(man_xy[:n] - auto_rev[:n], axis=1).mean()
+                print(f"[metrics cid={cid}] startΔ={start_d:.2f} endΔ={end_d:.2f} meanΔ={mean_d:.2f} "
+                    f"| best_t(normal)={t_norm} | meanΔ(reversed)={mean_d_r:.2f}")
+
+                # on-screen
                 im = self.original_image.copy()
                 plt.figure(figsize=(9, 9))
                 plt.imshow(im)
                 plt.plot(man_xy[:,0], man_xy[:,1], 'g-',  lw=1.5, label="Manual")
                 plt.plot(auto_xy[:,0], auto_xy[:,1], 'r--', lw=1.5, label="Auto")
+                # endpoints
                 plt.scatter(man_xy[0,0], man_xy[0,1], c='lime', s=60, marker='o', edgecolors='k', label='Manual start')
-                plt.scatter(auto_xy[0,0], auto_xy[0,1], c='red', s=60, marker='x', label='Auto start')
+                plt.scatter(auto_xy[0,0], auto_xy[0,1], c='red',  s=60, marker='x', label='Auto start')
                 plt.text(auto_xy[0,0]+5, auto_xy[0,1]+5, 'Auto start', color='red')
                 plt.text(man_xy[0,0]+5, man_xy[0,1]-10, 'Manual start', color='lime')
 
+                # nearest sticks
                 dists = []
                 step = max(1, len(man_xy)//40)
                 for p in man_xy[::step]:
@@ -2546,16 +2656,32 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                     q = auto_xy[np.argmin(d)]
                     dists.append(np.linalg.norm(q - p))
                     plt.plot([p[0], q[0]], [p[1], q[1]], 'y-', lw=0.6, alpha=0.5)
-                mean_d = np.mean(dists) if dists else 0.0
-                plt.title(f"{base_name} Crack {cid} | mean Δ={mean_d:.2f}px | key={key}")
+                mean_d_plot = np.mean(dists) if dists else 0.0
+                plt.title(f"{base_name} Crack {cid} | startΔ={start_d:.1f} endΔ={end_d:.1f} meanΔ={mean_d:.1f} | key={key}")
                 plt.legend(); plt.tight_layout(); plt.show()
+
+                # write a PNG too (for offline)
+                try:
+                    dbg_dir = os.path.join(self.save_folder, "debug_autogen")
+                    os.makedirs(dbg_dir, exist_ok=True)
+                    fig = plt.figure(figsize=(9,9))
+                    plt.imshow(self.original_image)
+                    plt.plot(man_xy[:,0], man_xy[:,1], 'g-', lw=1.5)
+                    plt.plot(auto_xy[:,0], auto_xy[:,1], 'r--', lw=1.5)
+                    plt.scatter(man_xy[0,0], man_xy[0,1], c='lime', s=60, marker='o', edgecolors='k')
+                    plt.scatter(auto_xy[0,0], auto_xy[0,1], c='red',  s=60, marker='x')
+                    plt.axis('off')
+                    outp = os.path.join(dbg_dir, f"{base_name}_cid{cid}_metrics_overlay.png")
+                    plt.savefig(outp, dpi=220, bbox_inches='tight'); plt.close(fig)
+                    print(f"[metrics cid={cid}] wrote overlay → {outp}")
+                except Exception as _e:
+                    print(f"[metrics cid={cid}] overlay save failed: {_e}")
 
         # CSV outputs
         if midline_rows: pd.DataFrame(midline_rows).to_csv(midline_csv, index=False)
         if mask_rows:    pd.DataFrame(mask_rows).to_csv(mask_csv,    index=False)
 
         print(f"[metrics] saved → {metrics_dir}")
-        # (Optional) If this causes Qt warning in your setup, remove it.
         self.change_image()
     
 if __name__ == "__main__":
