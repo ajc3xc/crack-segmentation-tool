@@ -348,7 +348,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             self.track_full_screen_button.setStyleSheet("background-color : red")
             self.edge_mask_button.setStyleSheet("background-color : red")
                 
-    def edge_mask(self):
+    '''def edge_mask(self):
         try:
             window_half_size = int(self.edge_filter_size_box.value() / 2)
             black_crack = [-1 if self.crack_color_box.currentText() == 'Bright crack' else 1][0]
@@ -410,6 +410,90 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             scaled_pixmap = pixmap.scaled(self.edge_map_display.width(), self.edge_map_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
             self.edge_map_display.setPixmap(scaled_pixmap)
             self.edge_tracks_button.setStyleSheet("background-color : lightblue")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            error(e)
+            self.edge_tracks_button.setStyleSheet("background-color : red")'''
+            
+    def edge_mask(self, eval_mode: bool = False):
+        """
+        Compute edge masks around the tracked midline.
+
+        Parameters
+        ----------
+        eval_mode : bool, optional
+            If True, skip the legacy 'shift_vector' adjustment used in GUI mode.
+            This ensures coordinate consistency when running evaluation pipelines
+            like generate_auto_variant_for_manual(). Default is False (GUI-safe).
+        """
+        try:
+            window_half_size = int(self.edge_filter_size_box.value() / 2)
+            black_crack = [-1 if self.crack_color_box.currentText() == 'Bright crack' else 1][0]
+            color_channel = [0 if self.color_chenel_box.currentText() == 'R'
+                            else 1 if self.color_chenel_box.currentText() == 'B'
+                            else 2][0]
+
+            print(f"[EDGE_MASK] window_half_size={window_half_size}, black_crack={black_crack}, color_channel={color_channel}")
+            print(f"[EDGE_MASK] self.track shape={np.array(self.track).shape}, sample={np.array(self.track)[:, :5]}")
+            print(f"[EDGE_MASK] self.pts={self.pts}, active_bbox={self.active_bbox}, current_source={getattr(self, 'current_source', None)}, eval_mode={eval_mode}")
+
+            img_gray = self.original_image[:, :, color_channel] * black_crack
+            track = np.array(self.track)
+            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
+
+            # --- Coordinate normalization ---
+            if getattr(self, "current_source", None) in ("manual", "manual_poly"):
+                # Manual: crop → full
+                track_full_y = track[0] + ymin
+                track_full_x = track[1] + xmin
+                track = np.vstack([track_full_y, track_full_x])
+                print("[EDGE_MASK] Manual mode - converted crop coords to full image coords")
+            else:
+                # Auto: stored as [y, x] but often needs swap
+                track = np.vstack([track[1], track[0]])
+                if eval_mode:
+                    # Corrected: no artificial shift
+                    print("[EDGE_MASK] Auto eval mode - no shift applied")
+                else:
+                    # Legacy GUI behavior (to preserve old alignment)
+                    target_point = np.array([self.pts[1][1], self.pts[1][0]])
+                    shift_vector = target_point - track[:, 0]
+                    track = track + shift_vector[:, np.newaxis]
+                    print(f"[EDGE_MASK] Auto GUI mode - applied shift: {shift_vector}")
+
+            # --- Edge masks computation ---
+            self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(img_gray, track)
+            print(f"[EDGE_MASK] edge_mask1 stats: min={self.edge_mask1.min()}, max={self.edge_mask1.max()}, shape={self.edge_mask1.shape}")
+            print(f"[EDGE_MASK] edge_mask2 stats: min={self.edge_mask2.min()}, max={self.edge_mask2.max()}, shape={self.edge_mask2.shape}")
+
+            # --- Crop masks ---
+            self.edge_mask1_crop = self.edge_mask1[ymin:ymax, xmin:xmax]
+            self.edge_mask2_crop = self.edge_mask2[ymin:ymax, xmin:xmax]
+            print(f"[EDGE_MASK] Cropped masks: shape1={self.edge_mask1_crop.shape}, shape2={self.edge_mask2_crop.shape}")
+
+            # --- Adjust track to crop coordinates ---
+            shifted_track = np.zeros_like(track)
+            shifted_track[0] = track[0] - ymin
+            shifted_track[1] = track[1] - xmin
+            self.adjusted_track = shifted_track
+            print(f"[EDGE_MASK] adjusted_track sample={self.adjusted_track[:, :5]}")
+
+            # --- Normalize for display ---
+            edge_mask1_crop = self.edge_mask1_crop - np.min(self.edge_mask1_crop)
+            if np.max(edge_mask1_crop) != 0:
+                edge_mask1_crop = (edge_mask1_crop * 255 / np.max(edge_mask1_crop)).astype(np.uint8)
+            else:
+                edge_mask1_crop = (edge_mask1_crop * 255).astype(np.uint8)
+
+            qimage = QImage(edge_mask1_crop, edge_mask1_crop.shape[1], edge_mask1_crop.shape[0],
+                            edge_mask1_crop.strides[0], QImage.Format_Grayscale8)
+            pixmap = QPixmap.fromImage(qimage)
+            scaled_pixmap = pixmap.scaled(self.edge_map_display.width(), self.edge_map_display.height(),
+                                        Qt.KeepAspectRatio, Qt.FastTransformation)
+            self.edge_map_display.setPixmap(scaled_pixmap)
+            self.edge_tracks_button.setStyleSheet("background-color : lightblue")
+
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -2212,126 +2296,6 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             dfd.to_csv(diffs_csv, index=False)
 
         print(f"✅ Saved metrics → {mask_csv_path}, {summary_csv}, {diffs_csv}")
-    
-    '''def generate_auto_variant_for_manual(self, crack_id, cache_key=None, force_recompute=False):
-        import numpy as np, traceback
-        from time import time
-
-        ann = self.annotation.setdefault("annotations", {})
-        atomic = ann.setdefault("atomic_cracks", {})
-        crack = atomic.get(crack_id)
-        if not crack:
-            print(f"[AUTO {crack_id}] ❌ not found"); return None
-
-        src = (crack.get("source") or "").lower()
-        if src.startswith("auto") or src == "combined":
-            print(f"[AUTO {crack_id}] skip non-manual"); return None
-
-        cache_key = cache_key or CrackUtils._auto_cache_key(self)
-        variants_root = crack.setdefault("variants", {}).setdefault("auto", {})
-        if cache_key in variants_root and not force_recompute:
-            print(f"[AUTO {crack_id}] using cached {cache_key}")
-            return variants_root[cache_key]
-
-        # --- bbox + endpoints ---
-        bb = crack.get("mask_bbox")
-        if not bb or len(bb) != 4:
-            print(f"[AUTO {crack_id}] no bbox"); return None
-        x, y, w, h = map(int, bb)
-        xmin, ymin, xmax, ymax = x, y, x + w, y + h
-
-        man_ml = CrackUtils._finite_xy(crack.get("midline", []))
-        if len(man_ml) >= 2:
-            p0, p1 = man_ml[0], man_ml[-1]
-        else:
-            up = crack.get("user_points", [])
-            if not up or len(up) < 2:
-                print(f"[AUTO {crack_id}] missing endpoints"); return None
-            p0, p1 = np.array(up[0], float), np.array(up[-1], float)
-
-        self.active_bbox = [xmin, ymin, xmax, ymax]
-        self.pts = [np.array(p0), np.array(p1)]
-        self.end_points = self.pts
-
-        # --- correct coordinate conversion (x,y order respected) ---
-        self.pts_crop = [np.array([pt[0] - xmin, pt[1] - ymin]) for pt in self.pts]
-        self.pts_crop = [np.clip(p, 0, [w - 1, h - 1]) for p in self.pts_crop]
-
-        if hasattr(self, "downsample_factor_box") and callable(self.downsample_factor_box.value):
-            down = self.downsample_factor_box.value()
-        else:
-            down = getattr(self, "down", 1) or 1
-        self.down = down
-        self.pts_crop_down = [p / down for p in self.pts_crop]
-
-        print(f"[AUTO {crack_id}] bbox=({xmin},{ymin},{w},{h}) down={down}")
-        print(f"[AUTO {crack_id}] pts_crop={self.pts_crop}")
-
-        # --- run pipeline ---
-        try:
-            t0 = time(); self.update_image_crop(); print(f"update_image_crop time: {time()-t0:.3f}s")
-            t0 = time(); self.update_os(); print(f"update_os time: {time()-t0:.3f}s")
-            t0 = time(); self.update_cost(); print(f"update_cost time: {time()-t0:.3f}s")
-            t0 = time(); self.midline_tracking(); print(f"midline_tracking time: {time()-t0:.3f}s")
-        except Exception as e:
-            print(f"[AUTO {crack_id}] ❌ pipeline failed: {e}")
-            traceback.print_exc()
-            return None
-
-        # --- edge tracking ---
-        try:
-            self.current_source = "auto"
-            if callable(getattr(self, "edge_mask", None)) and callable(getattr(self, "edge_tracking", None)):
-                t0 = time(); self.edge_mask(); self.edge_tracking()
-                print(f"edge_mask/edge_tracking time: {time()-t0:.3f}s")
-            else:
-                print(f"[AUTO {crack_id}] ⚠️ edge_mask/edge_tracking not callable")
-        except Exception as e:
-            print(f"[AUTO {crack_id}] ⚠️ edge_mask or tracking failed: {e}")
-            traceback.print_exc()
-
-        # --- collect + restore global ---
-        if getattr(self, "track", None) is not None:
-            auto_midline = np.array(self.track).T
-        elif getattr(self, "midline_xy", None) is not None:
-            auto_midline = np.asarray(self.midline_xy)
-        else:
-            auto_midline = np.asarray(crack.get("midline", []))
-
-        if len(auto_midline) > 0:
-            auto_midline = auto_midline + np.array([xmin, ymin])
-        if hasattr(self, "normal_edge_points"):
-            for key in ("edge1", "edge2"):
-                if key in self.normal_edge_points and len(self.normal_edge_points[key]) > 0:
-                    arr = np.asarray(self.normal_edge_points[key], float)
-                    self.normal_edge_points[key] = (arr + np.array([xmin, ymin])).tolist()
-
-        atomic_var = {
-            "midline": self._to_py(auto_midline),
-            "geodesic_edges": self._to_py(getattr(self, "geodesic_edges", crack.get("geodesic_edges", {}))),
-            "normal_edge_points": self._to_py(getattr(self, "normal_edge_points", crack.get("normal_edge_points", {}))),
-            "mask_crop": self._to_py(getattr(self, "mask_crop", crack.get("mask_crop"))),
-            "mask_bbox": self._to_py(crack.get("mask_bbox")),
-        }
-        variants_root[cache_key] = atomic_var
-
-        if len(crack.get("midline", [])) and len(atomic_var["midline"]):
-            m = np.asarray(crack["midline"], float)
-            a = np.asarray(atomic_var["midline"], float)
-            n = min(len(m), len(a))
-            d = np.linalg.norm(m[:n] - a[:n], axis=1).mean()
-            print(f"[AUTO {crack_id}] mean manual–auto Δ = {d:.2f}px")
-
-        if getattr(self, "ann_name", None):
-            try:
-                self.safe_json_dump(self.annotation, self.ann_name)
-                print(f"[AUTO {crack_id}] 💾 cached → {self.ann_name}")
-            except Exception as e:
-                print(f"[AUTO {crack_id}] ⚠️ cache save failed: {e}")
-                traceback.print_exc()
-
-        print(f"[AUTO {crack_id}] ✅ generated auto variant ({cache_key})")
-        return atomic_var'''
         
     def generate_auto_variant_for_manual(self, crack_id, cache_key=None, force_recompute=False):
         """
@@ -2442,9 +2406,10 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         try:
             if callable(getattr(self, "edge_mask", None)) and callable(getattr(self, "edge_tracking", None)):
                 t0 = time()
-                self.edge_mask()
+                self.edge_mask(eval_mode=True)
                 self.edge_tracking()
                 print(f"edge_mask/edge_tracking time: {time()-t0:.3f}s")
+                
             else:
                 print(f"[AUTO {crack_id}] ⚠️ edge_mask/edge_tracking not callable")
         except Exception as e:
