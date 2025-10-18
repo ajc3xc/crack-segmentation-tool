@@ -788,17 +788,22 @@ class CrackUtils:
             plt.show()
         except Exception as e:
             error(e)
-    
-        
-    def _draw_crack(self, im, crack, color_mask=(0,1,1), color_midline=(0,0,255),
-        color_edges=(255,255,0), color_points=(255,0,0)):
+      
+    def _draw_crack(self, im, crack,
+                color_mask=(0,1,1),
+                color_midline=(0,0,255),
+                color_edges=(255,255,0),
+                color_points=(255,0,0)):
+
+        import numpy as np, cv2
+        from skimage.segmentation import mark_boundaries
+
         def _draw_polyline(im, pts, color, thickness=2):
             """Draw a polyline where NaN rows mark gaps."""
             pts = np.asarray(pts, dtype=float)
             if pts.ndim != 2 or pts.shape[1] != 2:
                 return im
             valid = ~np.isnan(pts).any(axis=1)
-            # split into contiguous chunks without NaNs
             if not valid.any():
                 return im
             idx = np.where(~valid)[0]
@@ -831,17 +836,30 @@ class CrackUtils:
 
         # --- Geodesic edges ---
         edges = crack.get("geodesic_edges", {}) or {}
-        for _, edge_pts in edges.items():
-            edge_pts = np.array(edge_pts, dtype=float)
-            if len(edge_pts) > 1:
-                im = _draw_polyline(im, edge_pts, color_edges, 2)
-                
+        edge_list = []
+
+        # Normalize to a flat list of arrays
+        if isinstance(edges, dict):
+            edge_list = list(edges.values())
+        elif isinstance(edges, (list, tuple)):
+            for e in edges:
+                if isinstance(e, dict):
+                    edge_list.extend(list(e.values()))
+                elif isinstance(e, (list, np.ndarray)):
+                    edge_list.append(e)
+
+        print(f"[DRAW_DBG] crack {crack.get('id', '?')} has {len(edge_list)} geodesic edges")
+        for e in edge_list:
+            e = np.asarray(e, dtype=float)
+            if e.ndim == 2 and e.shape[1] == 2 and len(e) > 1:
+                im = _draw_polyline(im, e, color_edges, 2)
+
         # --- Midline ---
         midline = np.array(crack.get("midline", []), dtype=float)
         if len(midline) > 1:
             im = _draw_polyline(im, midline, color_midline, 2)
 
-        # --- Endpoints ---
+        # --- Endpoints (user_points or all_user_points) ---
         up = crack.get("user_points") or crack.get("all_user_points") or []
         for p in up:
             if p is None or len(p) < 2:
@@ -855,13 +873,12 @@ class CrackUtils:
 
         return im, mask_out
     
-    # crackutils.py  --- CrackUtils.change_image (DEBUG PATCHED)
     def change_image(self):
         import os, json, cv2
         import numpy as np
         import matplotlib.pyplot as plt
         from skimage.segmentation import mark_boundaries  # for colored boundaries
-        
+
         if not hasattr(self, "image_names") or not self.image_names:
             error("No images loaded. Please load images before using change_image().")
             return
@@ -881,9 +898,6 @@ class CrackUtils:
         self.current_mask = None
         if getattr(self, "use_masks", False) and hasattr(self, "mask_map"):
             mask_path = self.mask_map.get(base_name)
-
-            #print(f"[DEBUG change_image] base_name={base_name}")
-            #print(f"[DEBUG change_image] available mask_map keys (first 20): {list(self.mask_map.keys())[:20]}")
             print(f"[DEBUG change_image] mask_path for {base_name}: {mask_path}")
 
             if mask_path:
@@ -930,85 +944,52 @@ class CrackUtils:
                 for m in crack.get("members", []):
                     drawn_atomic.add(m)
 
-                # draw combined with reddish mask, same style for midline/edges/points
-                im, _ = self._draw_crack(im, crack,
-                                        color_mask=(.6, 0.6, 0.6),  # blue
-                                        color_midline=(0,0,255),   # green
-                                        color_edges=(255,255,0),     # yellow edges
-                                        color_points=(255,0,0))      # red-pink endpoints
+                print(f"[DEBUG COMBINED] crack_id={crack_id}")
+                for k in ["midline", "geodesic_edges", "normal_edge_points"]:
+                    print(f"  {k}: {'✓' if k in crack else '—'}")
+
+                # === Normalize geodesic_edges for drawing ===
+                geodesic_edges = crack.get("geodesic_edges", [])
+                if isinstance(geodesic_edges, dict):
+                    geodesic_edges = list(geodesic_edges.values())
+
+                flattened_edges = []
+                for e in geodesic_edges:
+                    if isinstance(e, dict):
+                        flattened_edges.extend(list(e.values()))
+                    elif isinstance(e, (list, tuple)) and len(e) > 0:
+                        flattened_edges.append(e)
+                crack["geodesic_edges"] = [np.array(x, dtype=float) for x in flattened_edges if len(x) >= 2]
+
+                # === Normalize normal_edge_points for drawing ===
+                normal_edges = crack.get("normal_edge_points", [])
+                if isinstance(normal_edges, dict):
+                    normal_edges = list(normal_edges.values())
+                elif isinstance(normal_edges, list) and len(normal_edges) == 2 and isinstance(normal_edges[0], (list, tuple)):
+                    normal_edges = [np.array(n, dtype=float) for n in normal_edges]
+
+                crack["normal_edge_points"] = normal_edges
+
+                print(f"  → normalized: {len(crack.get('geodesic_edges', []))} edges, "
+                    f"{len(crack.get('normal_edge_points', []))} normal pts")
+
+                # Draw combined (now always has normalized structures)
+                im, _ = self._draw_crack(
+                    im, crack,
+                    color_mask=(0, 0, 0),
+                    color_midline=(0, 0, 255),
+                    color_edges=(255, 255, 0),
+                    color_points=(255, 0, 0)
+                )
 
             # ---- Atomic cracks ----
             for crack_id, crack in atomic.items():
-                if crack_id in drawn_atomic:
-                    continue  # skip, already represented by combined
+                if any(crack_id in c.get("members", []) for c in combined.values()):
+                    print(f"Skipping crack id {crack_id} since part of combined")
+                    continue
                 im, mask_full = self._draw_crack(im, crack)
                 if mask_full is not None:
                     self.mask.append(mask_full)
-
-                    # --- Debug figure ---
-                    '''fig, axes = plt.subplots(1, 4, figsize=(20, 5))
-                    axes[0].imshow(self.original_image); axes[0].set_title("Original Image")
-
-                    axes[1].imshow(union_members, cmap="gray")
-                    axes[1].set_title("Union of atomic members")
-
-                    axes[2].imshow(mask_crop, cmap="gray")
-                    axes[2].set_title(f"Combined {crack_id} crop (shape={mask_crop.shape})")
-
-                    axes[3].imshow(union_crop, cmap="gray")
-                    axes[3].set_title("Union crop in bbox")
-
-                    for ax in axes: ax.axis("off")
-                    plt.tight_layout()
-                    out_path = f"debug_combined_{crack_id}.png"
-                    plt.savefig(out_path); plt.close()
-                    print(f"[DEBUG change_image] wrote {out_path}")'''
-
-            '''for crack_id, crack in list(combined.items()):
-                members = [m for m in crack.get("members", []) if m in atomic]
-                crack["members"] = members
-                if not members:
-                    continue
-
-                mask_full = reconstruct_full_mask_from_crack(crack, H, W)
-                if np.any(mask_full):
-                    im = (mark_boundaries(im/255.0, (mask_full>0).astype(np.uint8),
-                                        color=(1.0, 0.6, 0.6), background_label=0)*255).astype(np.uint8)
-
-                mc = crack.get("mask_crop"); bb = crack.get("mask_bbox")
-                if mc is not None and bb is not None:
-                    x, y, w, h = map(int, bb)
-                    mask_crop = np.array(mc, dtype=np.uint8)
-
-                    print(f"[DEBUG change_image] placing combined {crack_id}: "
-                        f"bbox(w={w},h={h}), mask_crop.shape={mask_crop.shape}")
-
-                    if mask_crop.shape != (h, w):
-                        print(f"  ⚠️ Shape mismatch: expected ({h},{w}), got {mask_crop.shape}")
-                        # auto-fix if clearly just transposed
-                        if mask_crop.shape == (w, h):
-                            print(f"  → fixing by transpose for {crack_id}")
-                            mask_crop = mask_crop.T
-
-                    mask_canvas = np.zeros((H, W), dtype=np.uint8)
-                    try:
-                        mask_canvas[y:y+h, x:x+w] = mask_crop[:h, :w]
-                    except Exception as e:
-                        print(f"[DEBUG change_image] ERROR placing mask_crop for combined {crack_id}: {e}")
-
-                    # --- Debug figure ---
-                    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-                    axes[0].imshow(self.original_image); axes[0].set_title("Original Image")
-                    axes[1].imshow(self.original_image)
-                    axes[1].imshow(mask_canvas, alpha=0.5, cmap="Reds")
-                    axes[1].set_title(f"Combined {crack_id} in full coords")
-                    axes[2].imshow(mask_crop, cmap="gray")
-                    axes[2].set_title(f"mask_crop raw (shape={mask_crop.shape})")
-                    for ax in axes: ax.axis("off")
-                    plt.tight_layout()
-                    out_path = f"debug_combined_{crack_id}.png"
-                    plt.savefig(out_path); plt.close()
-                    print(f"[DEBUG change_image] wrote {out_path}")'''
 
         # ---- Render main image to screen ----
         _, pixmap = numpy_to_qimage_and_scaled_pixmap(
