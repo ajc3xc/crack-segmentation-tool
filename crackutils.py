@@ -2230,40 +2230,257 @@ class CrackUtils:
         union = int((a | b).sum())
         return (inter / union) if union else float('nan')
 
-    # --- DROP-IN REPLACEMENT in crackutils.py ---
+    # ---------- NEW helpers ----------
+    @staticmethod
+    def _resample_xy_by_arclen(xy, N=400):
+        xy = np.asarray(xy, float)
+        if len(xy) < 2: return xy
+        d = np.hypot(np.diff(xy[:,0]), np.diff(xy[:,1]))
+        s = np.concatenate([[0], np.cumsum(d)])
+        if s[-1] <= 0: return xy
+        t = np.linspace(0, s[-1], min(N, len(xy)))
+        x = np.interp(t, s, xy[:,0]); y = np.interp(t, s, xy[:,1])
+        return np.column_stack([x, y])
+
+    @staticmethod
+    def _rms_curvature(xy):
+        import numpy as np
+        xy = np.asarray(xy, float)
+        n = len(xy)
+        if n < 3:
+            return float('nan')
+
+        # arc-length parameterization
+        ds = np.hypot(np.diff(xy[:,0]), np.diff(xy[:,1]))
+        s = np.concatenate([[0], np.cumsum(ds)])   # len = n
+        if s[-1] <= 0:
+            return float('nan')
+
+        dx = np.gradient(xy[:,0], s, edge_order=2)
+        dy = np.gradient(xy[:,1], s, edge_order=2)
+        ddx = np.gradient(dx, s, edge_order=2)
+        ddy = np.gradient(dy, s, edge_order=2)
+
+        num = np.abs(dx*ddy - dy*ddx)
+        den = (dx*dx + dy*dy)**1.5 + 1e-12
+        kappa = num / den
+        return float(np.sqrt(np.nanmean(kappa**2)))
+
+    @staticmethod
+    def _orth_stats(orth_dev_arr):
+        """
+        Accepts either a NumPy array of orthogonal deviations or a dict
+        returned by CrackUtils.orthogonal_deviation(). Extracts numeric values
+        robustly and returns summary stats including directional_bias.
+        """
+        import numpy as np
+
+        # unwrap dict form (e.g. {"orth_dev": [...]} or {"array": [...]} etc.)
+        if isinstance(orth_dev_arr, dict):
+            # try common keys
+            for k in ("orth_dev", "values", "array", "data"):
+                if k in orth_dev_arr:
+                    orth_dev_arr = orth_dev_arr[k]
+                    break
+            # if dict values are numeric scalars, flatten them
+            if isinstance(orth_dev_arr, dict):
+                orth_dev_arr = list(orth_dev_arr.values())
+
+        # convert to array
+        a = np.asarray(orth_dev_arr, float)
+        a = a[np.isfinite(a)]
+        if a.size == 0:
+            return dict(
+                orth_mean=np.nan,
+                orth_mean_abs=np.nan,
+                orth_std=np.nan,
+                directional_bias=np.nan
+            )
+
+        mu = float(np.mean(a))
+        sd = float(np.std(a) + 1e-12)
+        return {
+            "orth_mean": mu,
+            "orth_mean_abs": float(np.mean(np.abs(a))),
+            "orth_std": sd,
+            # signed normalized bias
+            "directional_bias": float(np.sign(mu) * (abs(mu)/sd))
+        }
+
+    @staticmethod
+    def _split_bins_by_arclen(xy, n_bins=5):
+        xy = np.asarray(xy, float)
+        if len(xy) < 2: return [xy]
+        d = np.hypot(np.diff(xy[:,0]), np.diff(xy[:,1]))
+        s = np.concatenate([[0], np.cumsum(d)])
+        edges = np.linspace(0, s[-1], n_bins+1)
+        bins = []
+        for i in range(n_bins):
+            lo, hi = edges[i], edges[i+1]
+            idx = np.where((s >= lo) & (s <= hi))[0]
+            if len(idx) >= 2:
+                bins.append(xy[idx])
+            else:
+                j = np.searchsorted(s, (lo+hi)/2)
+                j0 = max(0, j-1); j1 = min(len(xy)-1, j+1)
+                if j1 > j0:
+                    bins.append(xy[j0:j1+1])
+        return [b for b in bins if len(b) >= 2]
+
+    @staticmethod
+    def _widths_from_normal_pairs(normals):
+        """
+        normals (crop or full coords): [[e1x,e1y],[e2x,e2y]]
+        returns width array (NaN where missing)
+        """
+        if normals is None: return np.array([])
+        (e1x, e1y), (e2x, e2y) = normals
+        e1 = np.column_stack([np.asarray(e1x,float), np.asarray(e1y,float)])
+        e2 = np.column_stack([np.asarray(e2x,float), np.asarray(e2y,float)])
+        ok = np.isfinite(e1).all(axis=1) & np.isfinite(e2).all(axis=1)
+        w = np.full(len(e1), np.nan)
+        if ok.any():
+            w[ok] = np.hypot(e1[ok,0]-e2[ok,0], e1[ok,1]-e2[ok,1])
+        return w
+
+    @staticmethod
+    def _pearson_nan(a, b):
+        a = np.asarray(a, float); b = np.asarray(b, float)
+        n = min(a.size, b.size)
+        if n == 0: return float('nan')
+        a = a[:n]; b = b[:n]
+        ok = np.isfinite(a) & np.isfinite(b)
+        if ok.sum() < 3: return float('nan')
+        a = (a[ok] - a[ok].mean())/(a[ok].std()+1e-12)
+        b = (b[ok] - b[ok].mean())/(b[ok].std()+1e-12)
+        return float(np.mean(a*b))
+
     @staticmethod
     def compute_midline_metrics(auto_xy, man_xy, tau=3.0):
         """
-        Return a dict with centerline metrics.
-        Robust: guards Fréchet against huge inputs and exceptions.
+        Core and diagnostic midline metrics (robust to dict returns).
+
+        Outputs:
+        chamfer_mean, hausdorff, frechet_discrete, angle_err_deg,
+        length_ratio, coverage, orth_mean, orth_std, directional_bias,
+        curvature_rms_[auto|manual|ratio]
         """
+        import numpy as np
+
+        def _unwrap(v):
+            """extract numeric value if helper returns dict"""
+            if isinstance(v, dict):
+                for k in ("value", "mean", "coverage", "score", "dist"):
+                    if k in v and np.isscalar(v[k]):
+                        return float(v[k])
+                # try first numeric entry
+                for val in v.values():
+                    if np.isscalar(val):
+                        return float(val)
+                return float("nan")
+            try:
+                return float(v)
+            except Exception:
+                return float("nan")
+
         A = CrackUtils._finite_xy(man_xy)
         B = CrackUtils._finite_xy(auto_xy)
+        if len(A) < 2 or len(B) < 2:
+            return {k: np.nan for k in
+                    ("chamfer_mean","hausdorff","frechet_discrete",
+                    "angle_err_deg","length_ratio","coverage",
+                    "orth_mean","orth_std","directional_bias",
+                    "curvature_rms_auto","curvature_rms_manual","curvature_rms_ratio")}
 
-        # Light downsampling for expensive ops
-        A_ds = CrackUtils._resample_by_arclen(A, N=min(600, len(A) or 0))
-        B_ds = CrackUtils._resample_by_arclen(B, N=min(600, len(B) or 0))
+        # --- Light resampling for expensive ops ---
+        A_ds = CrackUtils._resample_by_arclen(A, N=min(600, len(A)))
+        B_ds = CrackUtils._resample_by_arclen(B, N=min(600, len(B)))
 
         out = {
-            "chamfer_mean": float(CrackUtils.chamfer_symmetric(A, B)),
-            "hausdorff": float(CrackUtils.hausdorff_symmetric(A, B)),
-            "frechet_discrete": float('nan'),
-            "orth_dev": CrackUtils.orthogonal_deviation(A, B, N=400),
-            "angle_err_deg": float(CrackUtils.angle_error_degrees(A, B)),
-            "length_ratio": float(CrackUtils.length_ratio(A, B)),
-            "coverage": CrackUtils.coverage_at_tau(A, B, tau_px=tau)
+            "chamfer_mean": _unwrap(CrackUtils.chamfer_symmetric(A, B)),
+            "hausdorff":    _unwrap(CrackUtils.hausdorff_symmetric(A, B)),
+            "frechet_discrete": float("nan"),
+            "angle_err_deg": _unwrap(CrackUtils.angle_error_degrees(A, B)),
+            "length_ratio":  _unwrap(CrackUtils.length_ratio(A, B)),
+            "coverage":      _unwrap(CrackUtils.coverage_at_tau(A, B, tau_px=tau)),
         }
 
-        # Safe Fréchet (iterative DP) on the downsampled curves
+        # --- Fréchet (optional but standard) ---
         try:
             if len(A_ds) >= 2 and len(B_ds) >= 2:
-                out["frechet_discrete"] = float(CrackUtils.frechet_discrete(A_ds, B_ds, max_points=800))
+                out["frechet_discrete"] = _unwrap(
+                    CrackUtils.frechet_discrete(A_ds, B_ds, max_points=800)
+                )
         except Exception as e:
-            # Don't crash metrics; just record NaN and log
             print(f"[metrics][warn] Fréchet failed: {e}")
 
-        return out
+        # --- Orthogonal deviation stats ---
+        orth = CrackUtils.orthogonal_deviation(A, B, N=400)
 
+        # --- unwrap dict structures safely ---
+        import numpy as np
+        def _extract_orth_array(obj):
+            if isinstance(obj, dict):
+                # direct key
+                for k in ("orth_dev", "values", "array", "data"):
+                    if k in obj:
+                        return _extract_orth_array(obj[k])
+                # nested numeric arrays
+                for v in obj.values():
+                    arr = _extract_orth_array(v)
+                    if arr is not None:
+                        return arr
+                return None
+            if isinstance(obj, (list, tuple, np.ndarray)):
+                return np.asarray(obj, float)
+            try:
+                return np.asarray([float(obj)], float)
+            except Exception:
+                return None
+
+        a = _extract_orth_array(orth)
+        if a is None:
+            a = np.empty(0)
+        a = np.asarray(a, float)
+        a = a[np.isfinite(a)]
+
+        if a.size:
+            mu = float(np.mean(a))
+            sd = float(np.std(a) + 1e-12)
+            out["orth_mean"] = mu
+            out["orth_std"]  = sd
+            out["directional_bias"] = float(np.sign(mu) * abs(mu) / sd)
+        else:
+            out["orth_mean"] = out["orth_std"] = out["directional_bias"] = np.nan
+
+        # --- Curvature RMS ratio (smoothness diagnostic) ---
+        def _rms_curvature(xy):
+            xy = np.asarray(xy, float)
+            n = len(xy)
+            if n < 3: return float("nan")
+            ds = np.hypot(np.diff(xy[:,0]), np.diff(xy[:,1]))
+            s  = np.concatenate([[0], np.cumsum(ds)])
+            if s[-1] <= 0: return float("nan")
+            dx = np.gradient(xy[:,0], s, edge_order=2)
+            dy = np.gradient(xy[:,1], s, edge_order=2)
+            ddx = np.gradient(dx, s, edge_order=2)
+            ddy = np.gradient(dy, s, edge_order=2)
+            num = np.abs(dx*ddy - dy*ddx)
+            den = (dx*dx + dy*dy)**1.5 + 1e-12
+            kappa = num / den
+            return float(np.sqrt(np.nanmean(kappa**2)))
+
+        kA = _rms_curvature(B_ds)
+        kM = _rms_curvature(A_ds)
+        out["curvature_rms_auto"]   = kA
+        out["curvature_rms_manual"] = kM
+        out["curvature_rms_ratio"]  = (
+            kA / (kM + 1e-12)
+            if np.isfinite(kA) and np.isfinite(kM) else np.nan
+        )
+
+        return out
+  
     @staticmethod
     def widths_from_normals(n1_xy, n2_xy):
         """Take Nx2 arrays; return width vector (min-aligned length)."""
