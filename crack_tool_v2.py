@@ -27,6 +27,10 @@ from crackutils import *
 from helpers.crackhelpers import *
 import cracktools as ct
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import itertools, pandas as pd, os
+from edge_workers import *
+
 from helpers.endpoint_annotator import CrackAnnotator
 min_crop_size = 16   
 class CrackToolsApplication(CrackUtils, Ui_MainWindow):
@@ -2365,6 +2369,12 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         else:
             self.change_image()
 
+    
+    
+    ###################################################################
+    ##    METRICS FUNCTIONS
+    ###################################################################
+    
     def run_mask_metrics(self, display=True, save_edges_json=False):
         """
         1) Mask IoU/F1/precision/recall for current image.
@@ -2628,13 +2638,12 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         print(f"[AUTO {crack_id}] ✅ generated auto variant ({cache_key})")
         return atomic_var
 
-    def run_midline_and_mask_metrics(self, tau_px=3.0, crack_id=None, display=True):
+    def run_midline_and_mask_metrics(self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True):
         """
         Old-style outputs:
         - Auto↔Manual midline metrics → metrics/midline_metrics.csv
         - IoU/F1 vs GT mask            → metrics/mask_metrics.csv
-        - Visual overlay with yellow nearest-distance sticks
-        Reuses cached auto variants; only computes when missing.
+        - Optional: parameter sweep on edge_mask/edge_tracking
         """
         import os, numpy as np, pandas as pd, matplotlib.pyplot as plt, cv2
 
@@ -2658,7 +2667,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         midline_rows, mask_rows = [], []
 
-        for cid, crack in atomic.items():
+        '''for cid, crack in atomic.items():
             src = (crack.get("source") or "").lower()
             if src in ("combined",) or src.startswith("auto"):  # evaluate only manual parents
                 continue
@@ -2669,21 +2678,20 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             if len(man_xy) < 2:
                 continue
 
-            #Just skip recomputing for now bc need to focus on non midline part
-            force_recompute=False
-            var = self.generate_auto_variant_for_manual(cid, cache_key=key, force_recompute=force_recompute)
+            # skip heavy recompute for now; we just want auto variant present
+            var = self.generate_auto_variant_for_manual(cid, cache_key=key, force_recompute=False)
             if var is None: continue
 
             auto_xy = CrackUtils._finite_xy(var.get("midline", []))
             if len(auto_xy) < 2:
                 continue
 
-            # 1) midline metrics
+            # --- 1) midline metrics ---
             m = CrackUtils.compute_midline_metrics(auto_xy, man_xy, tau=tau_px)
             m.update({"image": base_name, "crack_id": cid})
             midline_rows.append(m)
 
-            # 2) mask IoUs
+            # --- 2) mask IoUs ---
             if GT_mask is not None:
                 H, W = self.original_image.shape[:2]
                 row = {"image": base_name, "crack_id": cid}
@@ -2699,66 +2707,175 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                     row["iou_auto_vs_gt"] = CrackUtils.mask_iou(full, GT_mask)
                 mask_rows.append(row)
 
-            # 3) rich debug overlay (optional)
+            # --- 3) rich overlay (unchanged) ---
             if display:
-                # console diagnostics
                 n = min(len(man_xy), len(auto_xy))
                 start_d  = np.linalg.norm(man_xy[0]  - auto_xy[0])
                 end_d    = np.linalg.norm(man_xy[-1] - auto_xy[-1])
                 mean_d   = np.linalg.norm(man_xy[:n] - auto_xy[:n], axis=1).mean()
-                t_norm   = (man_xy[:n] - auto_xy[:n]).mean(axis=0)
-                auto_rev = auto_xy[::-1]
-                mean_d_r = np.linalg.norm(man_xy[:n] - auto_rev[:n], axis=1).mean()
-                print(f"[metrics cid={cid}] startΔ={start_d:.2f} endΔ={end_d:.2f} meanΔ={mean_d:.2f} "
-                    f"| best_t(normal)={t_norm} | meanΔ(reversed)={mean_d_r:.2f}")
+                print(f"[metrics cid={cid}] startΔ={start_d:.2f} endΔ={end_d:.2f} meanΔ={mean_d:.2f}")
 
-                # on-screen
-                im = self.original_image.copy()
-                plt.figure(figsize=(9, 9))
-                plt.imshow(im)
-                plt.plot(man_xy[:,0], man_xy[:,1], 'g-',  lw=1.5, label="Manual")
-                plt.plot(auto_xy[:,0], auto_xy[:,1], 'r--', lw=1.5, label="Auto")
-                # endpoints
-                plt.scatter(man_xy[0,0], man_xy[0,1], c='lime', s=60, marker='o', edgecolors='k', label='Manual start')
-                plt.scatter(auto_xy[0,0], auto_xy[0,1], c='red',  s=60, marker='x', label='Auto start')
-                plt.text(auto_xy[0,0]+5, auto_xy[0,1]+5, 'Auto start', color='red')
-                plt.text(man_xy[0,0]+5, man_xy[0,1]-10, 'Manual start', color='lime')
-
-                # nearest sticks
-                dists = []
-                step = max(1, len(man_xy)//40)
-                for p in man_xy[::step]:
-                    d = np.linalg.norm(auto_xy - p, axis=1)
-                    q = auto_xy[np.argmin(d)]
-                    dists.append(np.linalg.norm(q - p))
-                    plt.plot([p[0], q[0]], [p[1], q[1]], 'y-', lw=0.6, alpha=0.5)
-                mean_d_plot = np.mean(dists) if dists else 0.0
-                plt.title(f"{base_name} Crack {cid} | startΔ={start_d:.1f} endΔ={end_d:.1f} meanΔ={mean_d:.1f} | key={key}")
-                plt.legend(); plt.tight_layout(); plt.show()
-
-                # write a PNG too (for offline)
-                try:
-                    dbg_dir = os.path.join(self.save_folder, "debug_autogen")
-                    os.makedirs(dbg_dir, exist_ok=True)
-                    fig = plt.figure(figsize=(9,9))
-                    plt.imshow(self.original_image)
-                    plt.plot(man_xy[:,0], man_xy[:,1], 'g-', lw=1.5)
-                    plt.plot(auto_xy[:,0], auto_xy[:,1], 'r--', lw=1.5)
-                    plt.scatter(man_xy[0,0], man_xy[0,1], c='lime', s=60, marker='o', edgecolors='k')
-                    plt.scatter(auto_xy[0,0], auto_xy[0,1], c='red',  s=60, marker='x')
-                    plt.axis('off')
-                    outp = os.path.join(dbg_dir, f"{base_name}_cid{cid}_metrics_overlay.png")
-                    plt.savefig(outp, dpi=220, bbox_inches='tight'); plt.close(fig)
-                    print(f"[metrics cid={cid}] wrote overlay → {outp}")
-                except Exception as _e:
-                    print(f"[metrics cid={cid}] overlay save failed: {_e}")
-
-        # CSV outputs
+        # --- save classic metrics ---
         if midline_rows: pd.DataFrame(midline_rows).to_csv(midline_csv, index=False)
         if mask_rows:    pd.DataFrame(mask_rows).to_csv(mask_csv,    index=False)
+        print(f"[metrics] saved → {metrics_dir}")'''
 
-        print(f"[metrics] saved → {metrics_dir}")
+        # --- 4) optional: parameter sweep on one crack (quick test) ---
+        if do_param_sweep:
+            try:
+                print("\n[metrics] 🔁 Running parameter sweep test...")
+                df_sweep = self.sweep_edges_with_executor(crack_id or list(atomic.keys())[0], max_workers=4)
+                sweep_csv = os.path.join(metrics_dir, f"param_sweep_cid{crack_id or 'auto'}.csv")
+                df_sweep.to_csv(sweep_csv, index=False)
+                print(f"[metrics] 🔁 sweep saved → {sweep_csv}")
+            except Exception as e:
+                print(f"[metrics] ⚠️ sweep failed: {e}")
+
         self.change_image()
+
+    def extract_edge_inputs_for_subcrack(self, crack_id, color_channel=None):
+        """
+        Faithfully reconstructs the context that run_pipeline + edge_mask would have set
+        for a manual crack, so edge_param_worker sees exactly the same inputs.
+        Automatically reverses midline if needed to align with p0→p1.
+        """
+        import numpy as np
+        ann = self.annotation["annotations"]["atomic_cracks"][crack_id]
+        x, y, w, h = map(int, ann["mask_bbox"])
+        self.active_bbox = [x, y, x + w, y + h]
+
+        # Determine color channel
+        if color_channel is None:
+            color_channel = (
+                0 if self.edge_track_color_box.currentText() == "R"
+                else 1 if self.edge_track_color_box.currentText() == "B"
+                else 2
+            )
+
+        # --- use manual midline directly ---
+        man_xy_g = CrackUtils._finite_xy(ann["midline"])
+        if len(man_xy_g) < 2:
+            print(f"[extract_edge_inputs_for_subcrack] ⚠ no valid manual midline for {crack_id}")
+            return None
+
+        # --- define endpoints exactly like run_pipeline ---
+        self.pts = [np.array(man_xy_g[0]), np.array(man_xy_g[-1])]
+        self.end_points = self.pts
+
+        # --- now run the real crop creation ---
+        self.update_image_crop()
+        if getattr(self, "skip_current_segment", False):
+            return None
+
+        # --- compute local track in [y,x] form consistent with edge_mask ---
+        track_local_yx = np.vstack([
+            man_xy_g[:, 1] - y,  # y
+            man_xy_g[:, 0] - x   # x
+        ])
+
+        # --- Flip if start/end order mismatched (ensure start = p0) ---
+        # Convert [y,x] → [x,y] for comparison with pts_crop
+        start_xy = track_local_yx[:, 0][::-1]
+        end_xy = track_local_yx[:, -1][::-1]
+        d_start_p0 = np.linalg.norm(start_xy - self.pts_crop[0])
+        d_start_p1 = np.linalg.norm(start_xy - self.pts_crop[1])
+        if d_start_p1 < d_start_p0:
+            print(f"[extract_edge_inputs_for_subcrack] Reversing midline for crack {crack_id}")
+            track_local_yx = track_local_yx[:, ::-1]
+
+        # --- optional manual normals (crop coords) ---
+        man_normals_crop = None
+        if "normal_edge_points_full" in ann:
+            e1 = np.asarray(ann["normal_edge_points_full"]["edge1"], float)
+            e2 = np.asarray(ann["normal_edge_points_full"]["edge2"], float)
+            e1c = np.column_stack([e1[:, 0] - x, e1[:, 1] - y])
+            e2c = np.column_stack([e2[:, 0] - x, e2[:, 1] - y])
+            man_normals_crop = [[e1c[:, 0], e1c[:, 1]], [e2c[:, 0], e2c[:, 1]]]
+
+        # --- extract grayscale crop ---
+        gray = self.image_crop[:, :, color_channel].astype(np.float32)
+
+        # --- return payload identical in shape to edge_mask() context ---
+        return dict(
+            image_crop_gray=gray,
+            pts_crop=self.pts_crop,
+            adjusted_track=track_local_yx,
+            manual_midline_global=man_xy_g,
+            auto_midline_global=None,
+            bbox=(x, y, w, h),
+            manual_normals_crop=man_normals_crop,
+        )
+
+    def sweep_edges_with_executor(self, crack_id, grid=None, max_workers=8):
+        """
+        Run a small CPU param sweep on edge_mask/edge_tracking for one sub-crack.
+        Returns a DataFrame and also prints a short summary.
+        """
+        from edge_workers import edge_param_worker  # top-level worker module
+        base = self.extract_edge_inputs_for_subcrack(crack_id)
+        if base is None:
+            print("[sweep] could not prep payload base")
+            return pd.DataFrame()
+
+        if grid is None:
+            grid = {
+                "window_half_size": [12, 20, 28],
+                "mu": [3, 5],
+                "l":  [2, 3],
+                "p":  [6],           # fix first pass
+            }
+
+        keys = list(grid.keys())
+        combos = list(itertools.product(*[grid[k] for k in keys]))
+
+        rows = []
+        with ProcessPoolExecutor(max_workers=max_workers) as ex:
+            futs = []
+            for c in combos:
+                params = {k:v for k,v in zip(keys, c)}
+                payload = dict(base)          # shallow copy ok; arrays are read-only
+                payload["params"] = params
+                futs.append(ex.submit(edge_param_worker, payload))
+
+            for fut in as_completed(futs):
+                try:
+                    rows.append(fut.result())
+                except Exception as e:
+                    print("[sweep] worker failed:", e)
+
+        df = pd.DataFrame(rows)
+        # quick peek
+        if not df.empty:
+            keep = ["param_window_half_size","param_mu","param_l","param_p",
+                    "chamfer_mean","hausdorff","angle_err_deg","coverage",
+                    "directional_bias","curvature_rms_ratio","local_thickness_corr"]
+            existing = [c for c in keep if c in df.columns]
+            print(df[existing].sort_values(["chamfer_mean","hausdorff"]).head(8))
+        return df
+
+    def debug_edge_sweep_once(self, crack_id=None, max_workers=8):
+        """
+        Convenience wrapper: pick first manual crack if none given, run sweep, save CSV.
+        """
+        import os
+        ann = self.annotation["annotations"]["atomic_cracks"]
+        if crack_id is None:
+            # pick the first manual parent
+            for cid, ck in ann.items():
+                src = (ck.get("source") or "").lower()
+                if not src.startswith("auto") and src != "combined":
+                    crack_id = cid
+                    break
+        if crack_id is None:
+            print("[edge-sweep] no manual crack found")
+            return
+
+        df = self.sweep_edges_with_executor(crack_id, max_workers=max_workers)
+        out_dir = os.path.join(self.save_folder, "metrics")
+        os.makedirs(out_dir, exist_ok=True)
+        out_csv = os.path.join(out_dir, f"edge_sweep_cid{crack_id}.csv")
+        df.to_csv(out_csv, index=False)
+        print(f"[edge-sweep] wrote → {out_csv}")
     
 if __name__ == "__main__":
     import sys
