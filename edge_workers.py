@@ -184,7 +184,24 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 n = min(len(track_e1), len(track_e2))
                 auto_midline = 0.5 * (track_e1[:n] + track_e2[:n])
 
-            man_midline = man_xy_g
+            # --- Normalize coordinate frames before metric computation ---
+            # Convert manual midline (global) into local crop coordinates
+            man_midline = man_xy_g - np.array([x, y], float)
+
+            # Build auto_midline as before
+            if manual_normals_crop is not None:
+                e1 = np.column_stack(manual_normals_crop[0])
+                e2 = np.column_stack(manual_normals_crop[1])
+                n = min(len(e1), len(e2))
+                auto_midline = 0.5 * (e1[:n] + e2[:n])
+            else:
+                n = min(len(track_e1), len(track_e2))
+                auto_midline = 0.5 * (track_e1[:n] + track_e2[:n])
+
+            # --- Compute metrics ---
+            metrics = CrackUtils.compute_midline_metrics(auto_midline, man_midline, tau=3.0)
+            print(f"[edge_worker] metrics computed: chamfer_mean={metrics.get('chamfer_mean', np.nan):.3f}")
+
             metrics = CrackUtils.compute_midline_metrics(auto_midline, man_midline, tau=3.0)
             print(f"[edge_worker] metrics computed: chamfer_mean={metrics.get('chamfer_mean', np.nan):.3f}")
         except Exception as e:
