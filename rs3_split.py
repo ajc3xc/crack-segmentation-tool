@@ -234,3 +234,69 @@ def run_rs3_variants_split(
 
     out.sort(key=lambda z: z.get("variant_id", 0))
     return out
+
+# helper for human label + flat params to store alongside metrics
+def _variant_desc(vid, g, edge):
+    return dict(
+        variant_id=vid,
+        label=f"v{vid} — g11={g.get('g11',1):g}, g22={g.get('g22',25):g}, g33={g.get('g33',25):g}, "
+              f"w={edge.get('window_half_size')}, μ={edge.get('mu')}, l={edge.get('l')}, p={edge.get('p')}",
+        g11=float(g.get("g11", 1.0)),
+        g22=float(g.get("g22", 25.0)),
+        g33=float(g.get("g33", 25.0)),
+        win=int(edge.get("window_half_size")),
+        mu=float(edge.get("mu")),
+        ell=int(edge.get("l")),
+        p=int(edge.get("p")),
+    )
+    
+def plot_midlines_overlay_all(image_crop_rgb, man_local_xy, var_local_xy_by_id, variant_labels_by_id,
+                              save_overlay_png, save_legend_png):
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from itertools import cycle
+
+    # safe defaults
+    im = image_crop_rgb
+    if im.ndim == 2:
+        import cv2
+        im = cv2.cvtColor(im.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+
+    # line styles & colors (repeat as needed)
+    styles = cycle(["-", "--", "-.", ":"])
+    # 10 distinct-ish colors
+    palette = [(31/255,119/255,180/255),(255/255,127/255,14/255),(44/255,160/255,44/255),
+               (214/255,39/255,40/255),(148/255,103/255,189/255),(140/255,86/255,75/255),
+               (227/255,119/255,194/255),(127/255,127/255,127/255),(188/255,189/255,34/255),
+               (23/255,190/255,207/255)]
+    colors = cycle(palette)
+
+    # -------- overlay ----------
+    plt.figure(figsize=(8,8), dpi=150)
+    plt.imshow(im, origin="upper")
+    # manual with white outline + black core (like your 1_cid0_metrics_overlay.png)
+    if len(man_local_xy) > 1:
+        x, y = man_local_xy[:,0], man_local_xy[:,1]
+        plt.plot(x, y, '-', lw=4, color='white', alpha=0.9)
+        plt.plot(x, y, '-', lw=2, color='black', label='manual')
+
+    # autos
+    handles = []
+    for vid, xy in sorted(var_local_xy_by_id.items()):
+        if xy is None or len(xy) < 2: continue
+        col = next(colors); ls = next(styles)
+        h, = plt.plot(xy[:,0], xy[:,1], ls, lw=2, color=col,
+                      label=variant_labels_by_id.get(vid, f"v{vid}"))
+        handles.append(h)
+
+    plt.title("auto vs manual (crop)")
+    plt.axis("equal"); plt.tight_layout()
+    plt.savefig(save_overlay_png, dpi=200); plt.close()
+
+    # -------- legend-only tile ----------
+    if handles:
+        fig_leg = plt.figure(figsize=(6, 2 + 0.2*len(handles)), dpi=200)
+        fig_leg.legend(handles=handles, labels=[h.get_label() for h in handles],
+                       loc="center", frameon=False, ncol=1)
+        fig_leg.canvas.draw()
+        fig_leg.savefig(save_legend_png, dpi=200, bbox_inches="tight"); plt.close(fig_leg)
