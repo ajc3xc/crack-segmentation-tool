@@ -34,7 +34,7 @@ def tang_len(start_point_x,start_point_y,end_point_x,end_point_y):
     ddy = dy/l
     return ddx,ddy,l
 
-def rot_matrix(theta):
+'''def rot_matrix(theta):
     """Rotation matrix"""
     return np.array([[np.cos(theta),-np.sin(theta)],[np.sin(theta),np.cos(theta)]])
 
@@ -303,7 +303,7 @@ def Dijsktra_grid(grid, start_point, end_point,transition_cost = None):
     path_x.append(int(x))
     path_y.append(int(y))
 
-    return [path_x,path_y]
+    return [path_x,path_y]'''
 
 
 
@@ -367,8 +367,8 @@ def runReedsSheppGF(sides, dims, seeds, tips, metric):
         'verbosity': 0})
     #print("...")
     hfmIn.SetRect(sides = sides, dims = dims)
-    if hfmIn.mode=='gpu': 
-        hfmIn.update({'model':'Riemann3','periodic':(True,False,False)})
+    #if hfmIn.mode=='gpu': 
+    #    hfmIn.update({'model':'Riemann3','periodic':(True,False,False)})
     #print("....")
     hfmOut = hfmIn.Run()
     #print(".....")

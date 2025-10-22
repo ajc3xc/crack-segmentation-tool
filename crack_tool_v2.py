@@ -31,6 +31,10 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import itertools, pandas as pd, os
 from edge_workers import *
 
+from rs3_split import run_rs3_variants_split
+from edge_workers import *
+#from crackutils import CrackUtils
+
 from helpers.endpoint_annotator import CrackAnnotator
 min_crop_size = 16   
 class CrackToolsApplication(CrackUtils, Ui_MainWindow):
@@ -300,58 +304,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         except Exception as e:
             error(e)
             self.midline_track_button.setStyleSheet("background-color : red")
-
-    '''def midline_tracking(self):
-        try :
-            self.tracking_bar.setValue(0)
-            w = self.track_width_box.value()
-            if self.track_color_box.currentText() == "R":
-                color = (255,0,0)
-            elif self.track_color_box.currentText() == "G":
-                color = (0,255,0)
-            elif self.track_color_box.currentText() == "B":
-                color = (0,0,255)
-            elif self.track_color_box.currentText() == "W":
-                color = (255,255,255)
-
-            y_margin = self.y_margin_box.value()
-            x_margin = self.x_margin_box.value()
-            g11 = self.g11_box.value()
-            g22 = self.g22_box.value()
-            g33 = self.g33_box.value()
-            x_margin = self.x_margin_box.value()
-            downsample_factor = self.downsample_factor_box.value()
-
-            track_crop_down = ct.tracking.fast_marching(self.costFunction,self.pts_crop_down[0],self.pts_crop_down[1],g11=g11,g22=g22,g33=g33)
-            track_crop_down[0] = track_crop_down[0]-0.5
-            track_crop_down[1] = track_crop_down[1]-0.5
-            track_crop = track_crop_down.copy()
-            track_crop[0] = track_crop_down[0]*downsample_factor
-            track_crop[1] = track_crop_down[1]*downsample_factor
-            self.track_crop = track_crop
-            track = ct.tools.track_crop_to_full(track_crop,self.pts[0],self.pts[1],y_margin,x_margin)
-            #print(self.track_crop, track,downsample_factor)
-            self.track = track
-            #print(self.track)
-            pts = np.array(track_crop).transpose(1,0).reshape((-1,1,2)).astype(np.int32)
-            im = self.image_crop.astype(np.uint8)
-            im = cv2.polylines(im, [pts], False, color, w)
-            #print("...")
-            qimage = QImage(im, im.shape[1], im.shape[0], 
-                            im.strides[0], QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.track_display.width(), self.track_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.track_display.setPixmap(scaled_pixmap)
-            self.tracking_bar.setValue(100)
-            self.update_track_display_button.setStyleSheet("background-color : lightblue")
-            self.track_full_screen_button.setStyleSheet("background-color : lightblue")
-            self.edge_mask_button.setStyleSheet("background-color : lightblue")
-        except Exception as e:
-            error(e)
-            self.update_track_display_button.setStyleSheet("background-color : red")
-            self.track_full_screen_button.setStyleSheet("background-color : red")
-            self.edge_mask_button.setStyleSheet("background-color : red")'''
-            
+           
     def midline_tracking(self):
         try:
             import numpy as np
@@ -443,75 +396,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             self.update_track_display_button.setStyleSheet("background-color : red")
             self.track_full_screen_button.setStyleSheet("background-color : red")
             self.edge_mask_button.setStyleSheet("background-color : red")
-            
-    '''def edge_mask(self):
-        try:
-            window_half_size = int(self.edge_filter_size_box.value() / 2)
-            black_crack = [-1 if self.crack_color_box.currentText() == 'Bright crack' else 1][0]
-            color_channel = [0 if self.color_chenel_box.currentText() == 'R'
-                            else 1 if self.color_chenel_box.currentText() == 'B'
-                            else 2][0]
-
-            print(f"[EDGE_MASK] window_half_size={window_half_size}, black_crack={black_crack}, color_channel={color_channel}")
-            print(f"[EDGE_MASK] self.track shape={np.array(self.track).shape}, sample={np.array(self.track)[:, :5]}")
-            print(f"[EDGE_MASK] self.pts={self.pts}, active_bbox={self.active_bbox}, current_source={getattr(self, 'current_source', None)}")
-
-            img_gray = self.original_image[:, :, color_channel] * black_crack
-            track = np.array(self.track)
-
-            # Always store as [y, x] in full image coordinates
-            if getattr(self, "current_source", None) in ("manual", "manual_poly"):
-                # Manual track was stored in crop coords → convert back to full image coords
-                xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
-                track_full_y = track[0] + ymin
-                track_full_x = track[1] + xmin
-                track = np.vstack([track_full_y, track_full_x])
-                print("[EDGE_MASK] Manual mode - converted crop coords to full image coords")
-            else:
-                # Auto mode: stored as [y, x] but needs swap + shift
-                track = np.vstack([track[1], track[0]])
-                target_point = np.array([self.pts[1][1], self.pts[1][0]])
-                shift_vector = target_point - track[:, 0]
-                track = track + shift_vector[:, np.newaxis]
-                print(f"[EDGE_MASK] Auto mode - applied shift: {shift_vector}")
-
-            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
-            self.edge_mask1, self.edge_mask2 = ct.segmentation.edge_masks(img_gray, track)
-
-            print(f"[EDGE_MASK] edge_mask1 stats: min={self.edge_mask1.min()}, max={self.edge_mask1.max()}, shape={self.edge_mask1.shape}")
-            print(f"[EDGE_MASK] edge_mask2 stats: min={self.edge_mask2.min()}, max={self.edge_mask2.max()}, shape={self.edge_mask2.shape}")
-
-            # Crop masks
-            self.edge_mask1_crop = self.edge_mask1[ymin:ymax, xmin:xmax]
-            self.edge_mask2_crop = self.edge_mask2[ymin:ymax, xmin:xmax]
-            print(f"[EDGE_MASK] Cropped masks: shape1={self.edge_mask1_crop.shape}, shape2={self.edge_mask2_crop.shape}")
-
-            # Adjust track to crop coordinates
-            shifted_track = np.zeros_like(track)
-            shifted_track[0] = track[0] - ymin
-            shifted_track[1] = track[1] - xmin
-            self.adjusted_track = shifted_track
-            print(f"[EDGE_MASK] adjusted_track sample={self.adjusted_track[:, :5]}")
-
-            # Normalize for display
-            edge_mask1_crop = self.edge_mask1_crop - np.min(self.edge_mask1_crop)
-            if np.max(edge_mask1_crop) != 0:
-                edge_mask1_crop = (edge_mask1_crop * 255 / np.max(edge_mask1_crop)).astype(dtype=np.uint8)
-            else:
-                edge_mask1_crop = (edge_mask1_crop * 255).astype(dtype=np.uint8)
-
-            qimage = QImage(edge_mask1_crop, edge_mask1_crop.shape[1], edge_mask1_crop.shape[0],
-                            edge_mask1_crop.strides[0], QImage.Format_Grayscale8)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.edge_map_display.width(), self.edge_map_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.edge_map_display.setPixmap(scaled_pixmap)
-            self.edge_tracks_button.setStyleSheet("background-color : lightblue")
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            error(e)
-            self.edge_tracks_button.setStyleSheet("background-color : red")'''
-            
+                        
     def edge_mask(self):
         try:
             window_half_size = int(self.edge_filter_size_box.value() / 2)
@@ -2440,7 +2325,7 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
 
         print(f"✅ Saved metrics → {mask_csv_path}, {summary_csv}, {diffs_csv}")
                 
-    def generate_auto_variant_for_manual(self, crack_id, cache_key=None, force_recompute=False):
+    '''def generate_auto_variant_for_manual(self, crack_id, cache_key=None, force_recompute=False):
         """
         Recompute AUTO variant from a MANUAL crack using the same coord
         conventions as run_pipeline: self.pts stays GLOBAL; *_crop* are LOCAL.
@@ -2636,15 +2521,196 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
                 traceback.print_exc()
 
         print(f"[AUTO {crack_id}] ✅ generated auto variant ({cache_key})")
-        return atomic_var
+        return atomic_var'''
+
+    def generate_auto_variants_for_manual_parallel(
+        self,
+        crack_id,
+        g_variants=None,
+        cache_key=None,
+        force_recompute=True,
+        cpu_max_workers=None,
+        color_channel=None,
+        edge_params_fixed=None,   # if None → default to (w=45, mu=0, l=5, p=14)
+    ):
+        """
+        OS/Cost once (main proc, GPU-friendly) → PRESTAGE per g (main proc) → RS3 (CPU parallel) → reuse edge worker.
+        Caches variants under annotations.atomic_cracks[crack_id].variants.auto[cache_key]
+        """
+        import os, numpy as np, pandas as pd, traceback
+        from crackutils import CrackUtils
+        from edge_workers import edge_param_worker
+        #from parallel_hybrid import run_rs3_variants_split
+
+        # ---- base lookups ----
+        ann = self.annotation.setdefault("annotations", {})
+        atomic = ann.setdefault("atomic_cracks", {})
+        crack = atomic.get(crack_id)
+        if not crack:
+            print(f"[AUTO {crack_id}] ❌ not found"); return None
+        src = (crack.get("source") or "").lower()
+        if src.startswith("auto") or src == "combined":
+            print(f"[AUTO {crack_id}] skip non-manual"); return None
+
+        cache_key = cache_key or CrackUtils._auto_cache_key(self)
+        variants_root = crack.setdefault("variants", {}).setdefault("auto", {})
+        if cache_key in variants_root and not force_recompute:
+            print(f"[AUTO {crack_id}] using cached {cache_key}")
+            return variants_root[cache_key]
+
+        # ---- bbox & endpoints ----
+        bb = crack.get("mask_bbox")
+        if not bb or len(bb) != 4:
+            print(f"[AUTO {crack_id}] no bbox"); return None
+        x, y, w, h = map(int, bb)
+        xmin, ymin, xmax, ymax = x, y, x + w, y + h
+
+        man_xy_g = CrackUtils._finite_xy(crack.get("midline", []))
+        if len(man_xy_g) >= 2:
+            p0, p1 = np.array(man_xy_g[0], float), np.array(man_xy_g[-1], float)
+        else:
+            up = crack.get("user_points", [])
+            if not up or len(up) < 2:
+                print(f"[AUTO {crack_id}] missing endpoints"); return None
+            p0, p1 = np.array(up[0], float), np.array(up[-1], float)
+
+        self.active_bbox = [xmin, ymin, xmax, ymax]
+        self.pts = [p0.copy(), p1.copy()]
+        self.end_points = self.pts
+
+        # ---- OS/Cost (GPU-friendly) ----
+        try:
+            self.update_image_crop()
+            self.update_os()
+            self.update_cost()
+            os_cost = self.costFunction  # shape (No,Nx,Ny)
+        except Exception as e:
+            traceback.print_exc()
+            print(f"[AUTO {crack_id}] ❌ OS/COST stage failed: {e}")
+            return None
+
+        down = self.downsample_factor_box.value() if hasattr(self, "downsample_factor_box") else getattr(self, "down", 1) or 1
+        p0_down_xy = np.asarray(self.pts_crop_down[0], float)
+        p1_down_xy = np.asarray(self.pts_crop_down[1], float)
+
+        # ---- g variants ----
+        if g_variants is None:
+            # Only sweep midline g's; keep g11=1.0 as you requested.
+            vals = (20, 25, 30, 35, 40, 50, 60)
+            g_variants = [{"g11": 1.0, "g22": v, "g33": v} for v in vals]
+            g_variants += [
+                {"g11": 1.0, "g22": 25, "g33": 35},
+                {"g11": 1.0, "g22": 35, "g33": 25},
+            ]
+
+        print(f"[AUTO {crack_id}] bbox=({xmin},{ymin},{w},{h}) down={down}")
+        print(f"[AUTO {crack_id}] os_cost shape={np.shape(os_cost)} dtype={getattr(os_cost,'dtype',None)}")
+        print(f"[AUTO {crack_id}] p0_down_xy={p0_down_xy} p1_down_xy={p1_down_xy}")
+        print(f"[AUTO {crack_id}] trying {len(g_variants)} RS3 variants …")
+
+        # ---- split run: PRESTAGE (GPU) + RS3 (CPU parallel) ----
+        fm_results = run_rs3_variants_split(
+            ct=__import__('cracktools'),
+            os_cost=os_cost,
+            p0_down_xy=p0_down_xy,
+            p1_down_xy=p1_down_xy,
+            g_variants=g_variants,
+            down=int(down),
+            bbox_xyxy=[xmin, ymin, xmax, ymax],
+            cpu_max_workers=cpu_max_workers or min(os.cpu_count() or 8, 16),
+            mp_start_method="spawn",
+        )
+
+        # ---- build edge worker payload base ----
+        if color_channel is None:
+            color_channel = (
+                0 if self.edge_track_color_box.currentText() == "R"
+                else 1 if self.edge_track_color_box.currentText() == "B"
+                else 2
+            )
+        gray = self.image_crop[:, :, color_channel].astype(np.float32)
+        pts_crop = self.pts_crop
+
+        if edge_params_fixed is None:
+            edge_params_fixed = {"window_half_size": 45, "mu": 0, "l": 5, "p": 14}
+
+        base_payload = dict(
+            image_crop_gray=gray,
+            pts_crop=pts_crop,
+            manual_midline_global=man_xy_g,
+            auto_midline_global=None,
+            bbox=(x, y, w, h),
+            manual_normals_crop=None,
+            params=edge_params_fixed,
+        )
+
+        image_name = os.path.splitext(os.path.basename(self.name))[0]
+        variants_out, metrics_rows = {}, []
+
+        # ---- per-variant ----
+        for r in fm_results:
+            vid = r.get("variant_id")
+            if not r.get("ok"):
+                print(f"[AUTO {crack_id}] v{vid} ❌ {r.get('error')}")
+                continue
+
+            track_xy = np.asarray(r["track_full_xy"], float).T  # (N,2) [x,y]
+            d0 = np.linalg.norm(track_xy[0] - p0)
+            d1 = np.linalg.norm(track_xy[0] - p1)
+            if d1 < d0:
+                track_xy = track_xy[::-1]
+            track_xy = track_xy + (p0 - track_xy[0])
+
+            track_local_yx = np.vstack([track_xy[:, 1] - y, track_xy[:, 0] - x])
+            payload = dict(base_payload)
+            payload["adjusted_track"] = track_local_yx
+            res = edge_param_worker(payload)
+
+            variants_out[f"v{vid}"] = {
+                "midline": CrackUtils._to_py(track_xy),
+                "mask_bbox": [xmin, ymin, w, h],
+            }
+
+            if res and res.get("status") == "ok":
+                row = dict(res)
+                row.update({"image": image_name, "crack_id": crack_id, "variant_id": vid})
+                metrics_rows.append(row)
+
+            print(f"[AUTO {crack_id}] v{vid} len={len(track_xy)} "
+                f"startΔ={np.linalg.norm(track_xy[0]-p0):.2f} endΔ={np.linalg.norm(track_xy[-1]-p1):.2f}")
+
+        # ---- pick best ----
+        best_variant_id = None
+        if metrics_rows:
+            df = pd.DataFrame(metrics_rows)
+            df = df.sort_values(["chamfer_mean", "hausdorff", "coverage"],
+                                ascending=[True, True, False])
+            best_variant_id = int(df.iloc[0]["variant_id"])
+            out_dir = os.path.join(self.save_folder, "metrics")
+            os.makedirs(out_dir, exist_ok=True)
+            df.to_csv(os.path.join(out_dir, f"{image_name}_cid{crack_id}_rs3_variants.csv"), index=False)
+
+        packed = {"g_variants": g_variants, "variants": variants_out, "best_variant_id": best_variant_id}
+        variants_root[cache_key] = packed
+
+        if getattr(self, "ann_name", None):
+            try:
+                self.safe_json_dump(self.annotation, self.ann_name)
+                print(f"[AUTO {crack_id}] 💾 cached → {self.ann_name}")
+            except Exception as e:
+                print(f"[AUTO {crack_id}] ⚠ cache save failed: {e}")
+
+        print(f"[AUTO {crack_id}] ✅ {len(variants_out)} variants (best={best_variant_id}) "
+            f"using {cpu_max_workers or min(os.cpu_count() or 8,16)} workers")
+        return packed
 
     def run_midline_and_mask_metrics(self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True):
-        """
+        '''
         Old-style outputs:
         - Auto↔Manual midline metrics → metrics/midline_metrics.csv
         - IoU/F1 vs GT mask            → metrics/mask_metrics.csv
         - Optional: parameter sweep on edge_mask/edge_tracking
-        """
+        '''
         import os, numpy as np, pandas as pd, matplotlib.pyplot as plt, cv2
 
         if not hasattr(self, "annotation") or not self.annotation:
@@ -2666,6 +2732,42 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         print(f"\n[metrics] Running full metrics for {base_name}, key={key}")
 
         midline_rows, mask_rows = [], []
+        
+        # --- 4) optional: parameter sweep on one crack (quick test) ---
+        '''if do_param_sweep:
+            try:
+                print("\n[metrics] 🔁 Running parameter sweep test...")
+                df_sweep = self.sweep_edges_with_executor(crack_id or list(atomic.keys())[0], max_workers=4)
+                sweep_csv = os.path.join(metrics_dir, f"param_sweep_cid{crack_id or 'auto'}.csv")
+                df_sweep.to_csv(sweep_csv, index=False)
+                print(f"[metrics] 🔁 sweep saved → {sweep_csv}")
+            except Exception as e:
+                print(f"[metrics] ⚠️ sweep failed: {e}")'''
+                
+        fixed_edge = {"window_half_size": 45, "mu": 0, "l": 5, "p": 14}  # ← your now-value
+
+        ann = self.annotation.setdefault("annotations", {})
+        atomic = ann.setdefault("atomic_cracks", {})
+        base_name = os.path.splitext(os.path.basename(self.name))[0]
+        metrics_dir = os.path.join(self.save_folder, "metrics"); os.makedirs(metrics_dir, exist_ok=True)
+
+        # loop manual cracks
+        for cid, crack in atomic.items():
+            if (crack_id is not None) and (cid != str(crack_id)): continue
+            src = (crack.get("source") or "").lower()
+            if src.startswith("auto") or src == "combined": continue
+
+            man_xy = CrackUtils._finite_xy(crack.get("midline", []))
+            if len(man_xy) < 2: continue
+
+            pack = self.generate_auto_variants_for_manual_parallel(
+                cid,
+                edge_params_fixed=fixed_edge,         # ← inject fixed edge params
+                cpu_max_workers=8
+            )
+            # (optional) do plots/overlays here if you want
+        print("[metrics] done")            
+            
 
         '''for cid, crack in atomic.items():
             src = (crack.get("source") or "").lower()
@@ -2719,17 +2821,6 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         if midline_rows: pd.DataFrame(midline_rows).to_csv(midline_csv, index=False)
         if mask_rows:    pd.DataFrame(mask_rows).to_csv(mask_csv,    index=False)
         print(f"[metrics] saved → {metrics_dir}")'''
-
-        # --- 4) optional: parameter sweep on one crack (quick test) ---
-        if do_param_sweep:
-            try:
-                print("\n[metrics] 🔁 Running parameter sweep test...")
-                df_sweep = self.sweep_edges_with_executor(crack_id or list(atomic.keys())[0], max_workers=4)
-                sweep_csv = os.path.join(metrics_dir, f"param_sweep_cid{crack_id or 'auto'}.csv")
-                df_sweep.to_csv(sweep_csv, index=False)
-                print(f"[metrics] 🔁 sweep saved → {sweep_csv}")
-            except Exception as e:
-                print(f"[metrics] ⚠️ sweep failed: {e}")
 
         self.change_image()
 
@@ -2818,11 +2909,17 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
             return pd.DataFrame()
 
         if grid is None:
-            grid = {
+            '''grid = {
                 "window_half_size": [12, 20, 28],
                 "mu": [3, 5],
                 "l":  [2, 3],
                 "p":  [6],           # fix first pass
+            }'''
+            grid = {
+                "window_half_size": [35, 50],   # centered at 45 (≈ 90/2)
+                "mu": [0, 5],                        # include your 0 and the robust 5
+                "l":  [1, 2, 5],                     # include 5 per your fixed choice
+                "p":  [6, 14],                   # new=6, old=12, your 14
             }
 
         keys = list(grid.keys())
