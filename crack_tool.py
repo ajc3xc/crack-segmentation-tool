@@ -40,7 +40,7 @@ from edge_workers import *
 
 from helpers.endpoint_annotator import CrackAnnotator
 min_crop_size = 16   
-class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, Ui_MainWindow):
+class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CrackUtils, Ui_MainWindow):
     def setupUi(self, MainWindow):
         super().setupUi(MainWindow)
         

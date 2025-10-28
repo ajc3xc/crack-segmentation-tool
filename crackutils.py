@@ -12,8 +12,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 from math import hypot, atan2, pi
 from skimage.morphology import skeletonize
+import skimage
 import hashlib
 import time
+
+from helpers.endpoint_annotator import CrackAnnotator
 
 
 min_crop_size = 16
@@ -1443,7 +1446,7 @@ class CrackUtils:
 
         return cv2.addWeighted(im, 1, red, 0.35, 0)    
 
-def select_end_points_manmidlines(self):
+    def select_end_points_manmidlines(self):
         if not hasattr(self, "original_image") or self.original_image is None:
             error("No original image found.")
             return
