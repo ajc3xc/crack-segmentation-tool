@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # crack_helpers.py
 import json, os, shutil, tempfile
 import numpy as np

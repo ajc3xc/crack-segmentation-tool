@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import cracktools as ct
 from helpers.crackhelpers import *
 
@@ -18,7 +20,7 @@ min_crop_size = 16
 ROUNDING_DIGITS=6
 
 #This class is basically is all of the utility / save and load or unimportant functions that aren't directly accessible via a ui button or aren't important
-#that way the 'main' / work in progress code can be more easily accessed and modified
+#
 class CrackUtils:
     """
     UI-agnostic helpers you can call from your main app.
@@ -642,152 +644,6 @@ class CrackUtils:
             self.middlepoint_display.setPixmap(scaled_pixmap)
         except Exception as e:
             error(e)
-
-    def show_os(self):
-        import plotly.graph_objects as go
-        import numpy as np
-        color_channel = [0 if self.color_chenel_box.currentText()=='R' else 1 if self.color_chenel_box.currentText()=='B' else 2]
-        shift = -30
-        osGFCost_shift = np.roll(self.osGFCost, shift=shift,axis = 0)
-        osGFCost_shift.shape
-        downsample_factor = self.downsample_factor_box.value()
-        downsample_rate_spatial = downsample_factor
-        downsample_rate_angular = 1
-        # angular_shift = int(1*osGFCost.shape[0])
-        # osGFCosts = 
-        values = osGFCost_shift[:int(self.osGFCost.shape[0]/2),:,:].real
-        X, Y, Z = np.mgrid[:values.shape[0],:values.shape[1],:values.shape[2]]
-   
-        yim = np.linspace(0,self.image_crop_down.shape[0],self.image_crop_down.shape[0])
-        zim = np.linspace(0,self.image_crop_down.shape[1],self.image_crop_down.shape[1])
-
-
-        yim,zim = np.meshgrid(yim,zim)
-        xim = np.ones(yim.shape)*0
-
-        a = self.osGFCost.shape[0]/2-1
-        b = self.osGFCost.shape[1]
-        c = self.osGFCost.shape[2]
-
-        fig = go.Figure(data=go.Volume(
-            x=X.flatten(),
-            y=Y.flatten(),
-            z=Z.flatten(),
-            value=values.flatten(),
-            isomin=np.min(values),
-            isomax=np.max(values),
-            opacity=1, # needs to be small to see through all surfaces
-            opacityscale='min',
-            colorscale='Hot',
-            caps= dict(x_show=False, y_show=False, z_show=False, x_fill=1),
-
-        ))
-
-        fig.update_traces(lighting=dict(ambient = 0.4,diffuse = 0.9,fresnel = 0.8,roughness = 0.5,specular = 0.05),
-                        selector=dict(type='volume'))
-
-
-        fig.update_traces(surface=dict(count=5,fill = 1,pattern='all',show=True), selector=dict(type='volume'))
-
-
-        r = self.image_crop.shape[0]/self.image_crop_down.shape[1]
-        fig.update_layout(scene_aspectmode='manual',
-                        scene_aspectratio=dict(x=0.5, y=r, z=1))
-
-        fig.update_layout(scene_xaxis_showticklabels=False,
-                        scene_yaxis_showticklabels=False,
-                        scene_zaxis_showticklabels=False),
-        fig.add_surface(x=xim, y=yim, z=zim, 
-                        surfacecolor=self.image_crop_down[:,:,color_channel][:,:,0].T, 
-                        colorscale='gray', 
-                        showscale=False)
-
-        fig.add_scatter3d(
-                x=[0, 0, a, a, 0, 0, a, a, a, 0, 0, 0, 0, a, a, a],
-                y=[0, b, b, 0, 0, 0, 0, b, b, b, b, 0, b, b, 0, 0],
-                z=[0, 0, 0, 0, 0, c, c, c, 0, 0, c, c, c, c, c, 0],
-            mode = 'lines',
-            line=dict(
-                color='black',
-                width=2
-            )
-        )
-
-        fig.update_layout(scene = dict(
-                            xaxis = dict(showbackground=False),
-                            yaxis = dict(showbackground=False),
-                            zaxis = dict(showbackground=False)))
-        fig.update_layout(scene = dict(
-                            xaxis_title="θ",
-                            yaxis_title='x1',
-                            zaxis_title='x2'))
-
-
-
-        fig.update_traces(showscale=True, selector=dict(type='volume'))
-        fig.update_layout(margin_autoexpand=True)
-        fig.update_layout(font=dict(size = 60))
-        k = 4.5
-        camera = dict(
-            up=dict(x=1, y=0, z=0),
-            center=dict(x=-0.15, y=0, z=0),
-            eye=dict(x=0.085*k, y=0.23*k, z=0.2*k)
-        )
-        fig.update_layout(scene_camera=camera,title='default')
-
-        fig.show()
-    
-    def update_track_display(self):
-        try :
-            w = self.track_width_box.value()
-            if self.track_color_box.currentText() == "R":
-                color = (255,0,0)
-            elif self.track_color_box.currentText() == "G":
-                color = (0,255,0)
-            elif self.track_color_box.currentText() == "B":
-                color = (0,0,255)
-            elif self.track_color_box.currentText() == "W":
-                color = (255,255,255)
-            pts = np.array(self.track_crop).transpose(1,0).reshape((-1,1,2)).astype(np.int32)
-            im = self.image_crop.astype(np.uint8)
-            im = cv2.polylines(im, [pts], False, color, w)
-            qimage = QImage(im, im.shape[1], im.shape[0], 
-                            im.strides[0], QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.track_display.width(), self.track_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.track_display.setPixmap(scaled_pixmap)
-        except Exception as e:
-            error(e)
-
-    def track_full_screen(self):
-        try :
-            w = self.track_width_box.value()
-            if self.track_color_box.currentText() == "R":
-                color = (255,0,0)
-                c = 'r'
-            elif self.track_color_box.currentText() == "G":
-                color = (0,255,0)
-                c = 'g'
-            elif self.track_color_box.currentText() == "B":
-                color = (0,0,255)
-                c = 'b'
-            elif self.track_color_box.currentText() == "W":
-                color = (255,255,255)
-                c = 'w'
-
-            im = self.image.astype(np.uint8)
-        except Exception as e:
-            error(e)
-
-    def manual_segment_full_screen(self):
-        try:
-            pts = np.array([self.manuall_x,self.manuall_y]).transpose(1,0).reshape((-1,1,2)).astype(np.int32)
-            im = self.image.astype(np.uint8).copy()
-            plt.imshow(im)
-            plt.plot(self.manuall_x,self.manuall_y,'r',linewidth = 1)
-            plt.show()
-        except Exception as e:
-            error(e)
       
     def _draw_crack(self, im, crack,
                 color_mask=(0,1,1),
@@ -1013,7 +869,12 @@ class CrackUtils:
             self.all_segments_display.height(),
             is_gray=True
         )
-        self.all_segments_display.setPixmap(pixmap_mask)
+        self.all_segments_display.setPixmap(pixmap_mask)   
+        
+        
+        
+        
+        
 
     def _build_combined_crack(self, member_ids, pad=10):
         """
@@ -1581,3 +1442,422 @@ class CrackUtils:
                 red[m.astype(bool)] = (255, 0, 0)
 
         return cv2.addWeighted(im, 1, red, 0.35, 0)    
+
+def select_end_points_manmidlines(self):
+        if not hasattr(self, "original_image") or self.original_image is None:
+            error("No original image found.")
+            return
+        
+        if not hasattr(self, "annotation") or self.annotation is None:
+            error("No annotation data found.")
+            return
+
+        from PyQt5.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
+            QSizePolicy, QApplication, QMessageBox, QScrollArea, QLabel
+        )
+
+        boxes = self.get_all_bounding_boxes()
+
+        readonly_midlines = {}
+        readonly_connections = []
+        existing_midlines = {}
+
+        initial_points = list(getattr(self, "user_points", []) or [])
+        initial_conns = list(getattr(self, "user_connections", []) or [])
+        point_index_map = {tuple(pt): idx for idx, pt in enumerate(initial_points)}
+
+        def ensure_point(pt):
+            if tuple(pt) not in point_index_map:
+                point_index_map[tuple(pt)] = len(initial_points)
+                initial_points.append(pt)
+            return point_index_map[tuple(pt)]
+
+        if "annotations" in self.annotation:
+            ann = self.annotation["annotations"]
+
+            ann_midlines = ann.get("midlines", {})
+            for k_str, pts in ann_midlines.items():
+                try:
+                    i1, i2 = map(int, k_str.split("_"))
+                    if i1 != i2:  # Prevent self-midlines here
+                        poly = [tuple(map(float, xy)) for xy in pts]
+                        existing_midlines[(min(i1, i2), max(i1, i2))] = poly
+                except Exception as e:
+                    print(f"[WARN] Failed to parse manual midline {k_str}: {e}")
+
+            for cid, crack in ann.get("atomic_cracks", {}).items():
+                if hasattr(self, "current_crack_id") and str(cid) == str(self.current_crack_id):
+                    continue
+
+                src = crack.get("source", "auto")
+                up = crack.get("user_points", [])
+                if len(up) == 2:
+                    p1, p2 = tuple(up[0]), tuple(up[1])
+                else:
+                    ml = crack.get("midline", [])
+                    if len(ml) >= 2:
+                        p1, p2 = tuple(ml[0]), tuple(ml[-1])
+                    else:
+                        continue
+
+                idx1 = ensure_point(p1)
+                idx2 = ensure_point(p2)
+
+                if idx1 == idx2:
+                    continue  # Prevent self-midlines here too
+
+                if src in ("manual", "manual_poly"):
+                    poly = crack.get("midline", [])
+                    if poly:
+                        readonly_midlines[(idx1, idx2)] = [tuple(map(float, xy)) for xy in poly]
+                else:
+                    readonly_connections.append((p1, p2))
+
+        for (i1, i2), poly in existing_midlines.items():
+            start_idx = ensure_point(poly[0])
+            end_idx = ensure_point(poly[-1])
+            if start_idx != end_idx:
+                readonly_midlines[(start_idx, end_idx)] = poly
+
+        readonly_conn_idx = []
+        for p1, p2 in readonly_connections:
+            idx1 = ensure_point(p1)
+            idx2 = ensure_point(p2)
+            if idx1 != idx2:
+                readonly_conn_idx.append((min(idx1, idx2), max(idx1, idx2)))
+
+        annot = CrackAnnotator(
+            image=self.original_image,
+            boxes=boxes,
+            initial_points=initial_points,
+            initial_connections=initial_conns,
+            initial_midlines={},
+        )
+
+        annot.readonly_midlines = readonly_midlines
+        annot.readonly_connections = readonly_conn_idx
+
+        # Also enforce at the widget level:
+        # Wrap the original mousePressEvent to prevent bad start/finish overlaps
+        # Also enforce at the widget level:
+        orig_mousePressEvent = annot.mousePressEvent
+
+        def guarded_mousePressEvent(ev):
+            p = annot._to_image_coords(ev.pos())
+            point_i = annot._find_point_at(p)
+
+            # Gather extra debug state
+            last_pt = annot.polyline[-1] if annot.polyline else None
+            last_two_pts = annot.polyline[-2:] if len(annot.polyline) >= 2 else []
+            conn_key = None
+            if annot._is_drawing and point_i is not None and point_i != annot._start_idx:
+                conn_key = annot._sorted(annot._start_idx, point_i)
+            exists_midline = conn_key in annot.midlines if conn_key else None
+            exists_conn = conn_key in annot.connections if conn_key else None
+            exists_readonly_conn = conn_key in annot.readonly_connections if conn_key else None
+            exists_readonly_mid = conn_key in annot.readonly_midlines if conn_key else None
+
+            start_pt = annot.points[annot._start_idx] if annot._start_idx is not None and annot._start_idx < len(annot.points) else None
+
+            print(
+                f"[GUARDED_PRESS] btn={ev.button()} at {p} | "
+                f"point_i={point_i}, start_idx={annot._start_idx}, start_pt={start_pt} | "
+                f"_is_drawing={annot._is_drawing}, polyline_mode={annot.polyline_mode} | "
+                f"polyline_len={len(annot.polyline)}, last_pt={last_pt}, last_two_pts={last_two_pts} | "
+                f"_just_committed_midline={getattr(annot, '_just_committed_midline', False)}, "
+                f"_last_polyline_end_idx={getattr(annot, '_last_polyline_end_idx', None)} | "
+                f"conn_key={conn_key}, exists_midline={exists_midline}, exists_conn={exists_conn}, "
+                f"exists_readonly_conn={exists_readonly_conn}, exists_readonly_mid={exists_readonly_mid}"
+            )
+
+            # If not in polyline mode — just pass through immediately
+            if not annot.polyline_mode:
+                print("[GUARDED_PRESS] Not in polyline_mode — passing through")
+                orig_mousePressEvent(ev)
+                return
+
+            # --- Prevent immediate restart after a commit on either endpoint of last line ---
+            if getattr(annot, "_just_committed_midline", False):
+                last_end = getattr(annot, "_last_polyline_end_idx", None)
+                last_start = getattr(annot, "_last_polyline_start_idx", None)
+                if point_i is not None and point_i in (last_end, last_start):
+                    print(
+                        f"[GUARDED_PRESS] blocked: click is on endpoint {point_i} of last committed line "
+                        f"({last_start}, {last_end}) — skipping to avoid rubberband"
+                    )
+                    annot._just_committed_midline = False
+                    return
+                # Reset flag if click is elsewhere
+                annot._just_committed_midline = False
+
+            # Polyline mode but NOT drawing yet
+            if not annot._is_drawing:
+                if point_i is not None and annot._start_idx == point_i:
+                    print("[GUARDED_PRESS] blocked: start on same point as last start")
+                    return
+                print("[GUARDED_PRESS] passing to orig to START polyline")
+                orig_mousePressEvent(ev)
+                return
+
+            # Polyline mode AND currently drawing
+            if point_i is not None and point_i != annot._start_idx:
+                print(f"[GUARDED_PRESS] finishing midline via click on endpoint {point_i}, key={conn_key}")
+            elif point_i is None:
+                print("[GUARDED_PRESS] adding freehand point via click")
+            else:
+                print("[GUARDED_PRESS] ignored click (same as start idx)")
+
+            orig_mousePressEvent(ev)
+
+        annot.mousePressEvent = guarded_mousePressEvent
+
+        annot.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
+
+        dlg = QDialog(self.MainWindow)
+        dlg.setWindowTitle("Endpoints, Connections & Manual Midlines")
+        dlg.setWindowModality(Qt.ApplicationModal)
+        dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowMaximizeButtonHint)
+        layout = QVBoxLayout(dlg)
+
+        mode_btn = QPushButton("Switch to Connection Mode")
+        mode_btn.setCheckable(True)
+        layout.addWidget(mode_btn)
+
+        manual_btn = QPushButton("Manual Midlines: OFF")
+        manual_btn.setCheckable(True)
+        manual_btn.setVisible(False)
+        layout.addWidget(manual_btn)
+
+        hint = QLabel(
+            "Editable: Auto/Manual in black/light-blue.     Read-only: Auto/Manual cracks in gray/beige — cant delete in editor, must delete segment in Delete Segmentations.\n"
+            "Click unconnected point in Connection Mode to create new point.        Hover and click in respective mode to delete.        Mousewheel/2-finger swipe = zoom in/out.\n"
+            "Manual: Left-hold on starting point → draw → finish on a different endpoint.       Backspace/Z or Right-hold for fast/slow deletion.       Shimmy: zoom in toward direction, zoom out slightly to move; image may distort until 1.0 scale."
+        )
+        layout.addWidget(hint)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(annot)
+        layout.addWidget(scroll, 1)
+
+        btn_row = QHBoxLayout()
+        btn_done, btn_cancel = QPushButton("Done"), QPushButton("Cancel")
+        btn_row.addWidget(btn_done)
+        btn_row.addWidget(btn_cancel)
+        layout.addLayout(btn_row)
+
+        def all_points_in_boxes():
+            def in_any(pt):
+                x, y = pt
+                for xmin, ymin, xmax, ymax in boxes:
+                    if xmin <= x <= xmax and ymin <= y <= ymax:
+                        return True
+                return False
+
+            readonly_point_idxs = set()
+            for (i1, i2) in annot.readonly_connections:
+                readonly_point_idxs.update([i1, i2])
+            for (i1, i2) in annot.readonly_midlines.keys():
+                readonly_point_idxs.update([i1, i2])
+
+            bad = [
+                pt for idx, pt in enumerate(annot.points)
+                if idx not in readonly_point_idxs and not in_any(pt)
+            ]
+            return (len(bad) == 0, bad)
+
+        def confirm_discard():
+            mb = QMessageBox(dlg)
+            mb.setIcon(QMessageBox.Warning)
+            mb.setWindowTitle("Discard current midline?")
+            mb.setText("You're in the middle of drawing a midline. Discard it?")
+            mb.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            return mb.exec_() == QMessageBox.Yes
+
+        def update_controls_visibility():
+            if annot.polyline_mode:
+                mode_btn.setVisible(False)
+                manual_btn.setVisible(True)
+                manual_btn.setText("Manual Midlines: ON")
+                manual_btn.setStyleSheet("background:#79d2e6;")
+            else:
+                mode_btn.setVisible(True)
+                if annot.connection_mode:
+                    mode_btn.setText("Switch to Point Mode")
+                    mode_btn.setStyleSheet("background:#97e297;")
+                else:
+                    mode_btn.setText("Switch to Connection Mode")
+                    mode_btn.setStyleSheet("background:#e2c297;")
+                manual_btn.setVisible(annot.connection_mode and (not annot.all_pairs_saturated()))
+                manual_btn.setText("Manual Midlines: OFF")
+                manual_btn.setStyleSheet("")
+
+        mode_btn.clicked.connect(lambda: (annot.toggle_mode(), update_controls_visibility()))
+        manual_btn.clicked.connect(lambda checked: (
+            annot.set_mode_polyline(checked, confirm_cb=confirm_discard),
+            update_controls_visibility()
+        ))
+        update_controls_visibility()
+            
+        def on_done():
+            if annot.polyline_mode and annot._is_drawing:
+                if not confirm_discard():
+                    return
+                annot.set_mode_polyline(False)
+
+            ok, bad = all_points_in_boxes()
+            if not ok:
+                # Format the bad points as a readable string
+                bad_str = "\n".join([f"({x:.1f}, {y:.1f})" for (x, y) in bad])
+                QMessageBox.warning(
+                    dlg,
+                    "Points outside boxes",
+                    f"The following points are outside all bounding boxes:\n{bad_str}"
+                )
+                return
+
+            # Validate midlines are fully inside one bounding box
+            for (i1, i2), poly in annot.midlines.items():
+                if i1 == i2:
+                    continue
+
+                try:
+                    sx, sy = annot.points[i1]
+                    ex, ey = annot.points[i2]
+                except Exception:
+                    continue
+
+                def point_box(x, y):
+                    for bi, (xmin, ymin, xmax, ymax) in enumerate(boxes):
+                        if xmin <= x <= xmax and ymin <= y <= ymax:
+                            return bi
+                    return None
+
+                b1 = point_box(float(sx), float(sy))
+                b2 = point_box(float(ex), float(ey))
+
+                if b1 is None or b2 is None or b1 != b2:
+                    QMessageBox.warning(dlg, "Invalid midline",
+                        "A manual midline crosses or spans multiple boxes. Please fix before continuing.")
+                    return
+
+                xmin, ymin, xmax, ymax = boxes[b1]
+                for (x, y) in poly:
+                    if not (xmin <= float(x) <= xmax and ymin <= float(y) <= ymax):
+                        QMessageBox.warning(dlg, "Invalid midline",
+                            "A manual midline has points outside its box. Please fix before continuing.")
+                        return
+
+            self.user_points = annot.points
+            self.user_connections = [c for c in annot.connections if c not in annot.readonly_connections]
+
+            self.endpoint_pairs = [
+                (self.user_points[i1], self.user_points[i2])
+                for (i1, i2) in self.user_connections
+            ]
+
+            self.manual_endpoint_pairs = []
+            for (i1, i2), poly in annot.midlines.items():
+                if i1 != i2:  # Final check to prevent self-midline
+                    self.manual_endpoint_pairs.append((self.user_points[i1], self.user_points[i2]))
+
+            self.manual_midlines_tmp = {
+                f"{i1}_{i2}": [[float(x), float(y)] for (x, y) in poly]
+                for (i1, i2), poly in annot.midlines.items() if i1 != i2
+            }
+
+            if hasattr(self, "current_crack_id"):
+                crack_id_str = str(self.current_crack_id)
+                crack_entry = self.annotation.get("annotations", {}).get("atomic_cracks", {}).setdefault(crack_id_str, {})
+                crack_entry["user_points"] = list(self.user_points)
+                crack_entry["user_connections"] = list(self.user_connections)
+
+            dlg.accept()
+
+        btn_done.clicked.connect(on_done)
+        btn_cancel.clicked.connect(lambda: dlg.reject())
+
+        dlg.showMaximized()
+        QApplication.processEvents()
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        print(f"Points: {self.user_points}")
+        print(f"Connections: {self.user_connections}")
+        print(f"Endpoint pairs: {self.endpoint_pairs}")
+        print(f"Manual endpoint pairs: {getattr(self, 'manual_endpoint_pairs', [])}")
+        print(f"Midlines saved: {len(self.manual_midlines_tmp)}")
+        self.update_image_crop_button.setStyleSheet("background-color: lightblue")
+        self._debug_print_atomic_cracks("select_end_points_manmidlines AFTER ACCEPT")
+        self.all_selected_points = list(self.user_points)
+
+    def update_image_crop(self):
+        try:
+            downsample_factor = self.downsample_factor_box.value()
+            color_channel = [0 if self.color_chenel_box.currentText()=='R' else 1 if self.color_chenel_box.currentText()=='B' else 2]
+
+            # Use only the bounding box for cropping!
+            if not (hasattr(self, "active_bbox") and self.active_bbox is not None):
+                raise ValueError("No active bounding box for cropping.")
+            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
+            # Sanity check
+            if xmax <= xmin or ymax <= ymin:
+                print(f"Invalid bounding box cropping window: ({xmin},{ymin}) to ({xmax},{ymax}), skipping.")
+                return
+
+            # Crop the image to the bounding box
+            self.image_crop = self.original_image[ymin:ymax, xmin:xmax]
+            # Ensure the crop is not too small for tracking/segmentation
+            h, w = self.image_crop.shape[:2]
+            if h < min_crop_size or w < min_crop_size:
+                print(f"Skipping segment: Crop too small for processing ({w}x{h})")
+                # Optionally set a flag to skip the rest of the pipeline for this segment
+                self.skip_current_segment = True
+                return
+            else:
+                self.skip_current_segment = False
+            # Shift endpoints relative to bbox origin
+            self.pts_crop = [np.array([pt[0]-xmin, pt[1]-ymin]) for pt in self.pts]
+
+            # Sanity check: make sure all shifted points are in bounds
+            img_h, img_w = self.image_crop.shape[:2]
+            for pt in self.pts_crop:
+                if not (0 <= pt[0] < img_w and 0 <= pt[1] < img_h):
+                    print(f"Endpoint {pt} not in bbox-cropped image ({img_w},{img_h}), skipping this segment.")
+                    return
+
+            # Downsample as before
+            black_crack = [0 if self.crack_color_box.currentText() =='Bright crack' else 1 ][0]
+            func = np.min if black_crack==1 else np.max
+            self.image_crop_down = skimage.measure.block_reduce(
+                self.image_crop, block_size=(downsample_factor, downsample_factor, 1),
+                func=func, cval=0, func_kwargs=None)
+            self.pts_crop_down = [np.array(x) / downsample_factor for x in self.pts_crop]
+            self.image_down = skimage.measure.block_reduce(
+                self.original_image, block_size=(downsample_factor, downsample_factor, 1),
+                func=func, cval=0, func_kwargs=None)
+            self.pts_down = [np.array(x) / downsample_factor for x in self.pts]
+            gs_image = self.image_crop_down[:,:,color_channel].astype(np.uint8)
+            h, w = gs_image.shape[:2]
+            for idx, pt in enumerate(self.pts_crop_down):
+                x, y = int(round(pt[0])), int(round(pt[1]))
+                if 0 <= x < w and 0 <= y < h:
+                    gs_image = cv2.circle(gs_image, center=(x, y), radius=2, color=(0,255,0), thickness=2)
+                else:
+                    print(f"Warning: Skipping drawing point ({x},{y}) out of image bounds ({w},{h})")
+            qimage = QImage(gs_image.astype(dtype=np.uint8), gs_image.shape[1], gs_image.shape[0],
+                            gs_image.strides[0], QImage.Format_Grayscale8)
+            pixmap = QPixmap.fromImage(qimage)
+            scaled_pixmap = pixmap.scaled(self.image_crop_down_display.width(), self.image_crop_down_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+            self.image_crop_down_display.setPixmap(scaled_pixmap)
+            self.x_size_show.display(self.image_crop_down.shape[1])
+            self.y_size_show.display(self.image_crop_down.shape[0])
+            self.update_os_button.setStyleSheet("background-color : lightblue")
+            
+            # Debug: Visualize crop and points
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            error(f"update_image_crop: {e}")
+            self.update_os_button.setStyleSheet("background-color : red")

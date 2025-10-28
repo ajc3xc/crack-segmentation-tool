@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import cracktools as ct
 from helpers.crackhelpers import *
 
