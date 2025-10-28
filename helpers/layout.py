@@ -26,6 +26,14 @@ class Ui_MainWindow(object):
         self.tabWidget.setTabShape(QtWidgets.QTabWidget.Triangular)
         self.tabWidget.setObjectName("tabWidget")
         self.tab_5 = QtWidgets.QWidget()
+        
+        
+        
+        
+        
+        #####################################
+        # Select Image Tab (Main Tab)
+        #####################################
         self.tab_5.setObjectName("tab_5")
         self.label_34 = QtWidgets.QLabel(self.tab_5)
         self.label_34.setGeometry(QtCore.QRect(0, 0, 1921, 981))
@@ -89,14 +97,17 @@ class Ui_MainWindow(object):
         self.label_38.setGeometry(QtCore.QRect(100, 770, 106, 20))
         self.label_38.setObjectName("label_38")
         self.BatchPipelineButton = QtWidgets.QPushButton(self.tab_5)
-        self.BatchPipelineButton.setGeometry(QtCore.QRect(40, 440, 120, 31))
+        self.BatchPipelineButton.setGeometry(QtCore.QRect(40, 420, 120, 31))
         self.BatchPipelineButton.setObjectName("batch_pipeline_button")
-        self.calculate_metrics_button = QtWidgets.QPushButton(self.tab_5)
-        self.calculate_metrics_button.setGeometry(QtCore.QRect(35, 490, 130, 31))
-        self.calculate_metrics_button.setObjectName("calculate_metrics_button")
         self.combine_segments_button = QtWidgets.QPushButton(self.tab_5)
-        self.combine_segments_button.setGeometry(QtCore.QRect(55, 540, 90, 48))
+        self.combine_segments_button.setGeometry(QtCore.QRect(55, 470, 90, 48))
         self.combine_segments_button.setObjectName("combine_segments_button")
+        self.calculate_metrics_button = QtWidgets.QPushButton(self.tab_5)
+        self.calculate_metrics_button.setGeometry(QtCore.QRect(35, 520, 130, 31))
+        self.calculate_metrics_button.setObjectName("calculate_metrics_button")
+        self.batch_metrics_button = QtWidgets.QPushButton(self.tab_5)
+        self.batch_metrics_button.setGeometry(QtCore.QRect(35, 560, 130, 31))
+        self.batch_metrics_button.setObjectName("batch_metrics_button")
         
         self.clear_boxes_button = QtWidgets.QPushButton(self.tab_5)
         self.clear_boxes_button.setGeometry(QtCore.QRect(50, 850, 121, 28))
@@ -114,7 +125,7 @@ class Ui_MainWindow(object):
         self.segment_width_box_2.setProperty("value", 1)
         self.segment_width_box_2.setObjectName("segment_width_box_2")
         
-        
+           
         self.line_2 = QtWidgets.QFrame(self.tab_5)
         self.line_2.setGeometry(QtCore.QRect(0, 400, 211, 21))
         font = QtGui.QFont()
@@ -142,12 +153,14 @@ class Ui_MainWindow(object):
         self.line_4.setLineWidth(10)
         self.line_4.setFrameShape(QtWidgets.QFrame.HLine)
         self.line_4.setObjectName("line_4")
-        '''self.annotation_full_screen_button_3 = QtWidgets.QPushButton(self.tab_5)
-        self.annotation_full_screen_button_3.setGeometry(QtCore.QRect(40, 550, 140, 48))
-        self.annotation_full_screen_button_3.setObjectName("annotation_full_screen_button_3")
-        self.update_annotation_display_button_3 = QtWidgets.QPushButton(self.tab_5)
-        self.update_annotation_display_button_3.setGeometry(QtCore.QRect(15, 495, 185, 52))
-        self.update_annotation_display_button_3.setObjectName("update_annotation_display_button_3")'''
+        
+        
+        
+        
+        
+        #####################################
+        # OS / Cost / Tracking Tab
+        #####################################
         self.tabWidget.addTab(self.tab_5, "")
         self.tab = QtWidgets.QWidget()
         self.tab.setObjectName("tab")
@@ -567,8 +580,12 @@ class Ui_MainWindow(object):
         #self.mask_pipeline_button.raise_()
         self.track_full_screen_button.raise_()
         self.calculate_metrics_button.raise_()
+        self.batch_metrics_button.raise_()
         
         
+        #####################################
+        # Segmentation Tab
+        #####################################
         self.tabWidget.addTab(self.tab, "")
         self.tab_2 = QtWidgets.QWidget()
         self.tab_2.setObjectName("tab_2")
@@ -687,6 +704,13 @@ class Ui_MainWindow(object):
         self.save_current_segment_button.raise_()
         self.all_segments_display.raise_()
         self.tabWidget.addTab(self.tab_2, "")
+        
+        
+        
+        
+        #####################################
+        # Add segment manually tab
+        #####################################
         self.tab_3 = QtWidgets.QWidget()
         self.tab_3.setObjectName("tab_3")
         self.draw_segment_button = QtWidgets.QPushButton(self.tab_3)
@@ -741,37 +765,41 @@ class Ui_MainWindow(object):
         QtCore.QMetaObject.connectSlotsByName(MainWindow)
 
     def retranslateUi(self, MainWindow):
+        #Rule of thumb: Anything starting a line should be capitalized, else lowercase
         _translate = QtCore.QCoreApplication.translate
+        
         MainWindow.setWindowTitle(_translate("MainWindow", "MainWindow"))
-        #self.folder_line_edit.setText(_translate("MainWindow", r"C:\Users\13144\Documents\Masters_Thesis\crack_segmentation_comparison\dataset_data\labeled_cracks_wild\LCW Concrete Crack Detection\512x512_dilated_no_blanks\Train\images"))
-        self.BatchPipelineButton.setText(_translate("MainWindow","Batch Pipeline"))
-        self.clear_combined_cracks_button.setText(_translate("MainWindow","Clear combcracks"))
-        self.SelectFolderButton.setToolTip(_translate("MainWindow", "<html><head/><body><p>Draw counturs of a crack manually</p><p>Wheel mause to zoom in/out</p><p>LMB hold to draw</p><p>LMB release to fix contur part</p><p>RMB to erase previouse contur part</p></body></html>"))
+        
+        #Select Image Tab
+        self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_5), _translate("MainWindow", "Select Image"))
         self.SelectFolderButton.setText(_translate("MainWindow", "Select Folder"))
+        self.SelectFolderButton.setToolTip(_translate("MainWindow", "<html><head/><body><p>Draw counturs of a crack manually</p><p>Wheel mause to zoom in/out</p><p>LMB hold to draw</p><p>LMB release to fix contur part</p><p>RMB to erase previouse contur part</p></body></html>"))
         self.PreviousImageButton.setText(_translate("MainWindow", "Previous"))
-        self.label_35.setText(_translate("MainWindow", "Image:"))
         self.NextImageButton.setText(_translate("MainWindow", "Next"))
+        self.label_35.setText(_translate("MainWindow", "Image:"))
         self.filename_label_2.setText(_translate("MainWindow", "TextLabel"))
+        
+        self.BatchPipelineButton.setText(_translate("MainWindow","Batch Pipeline"))
+        self.combine_segments_button.setText(_translate("MainWindow", "Combine\nSegments"))
+        
+        self.label_37.setText(_translate("MainWindow", "Image size:"))
         self.draw_box_button.setText(_translate("MainWindow", "Draw boxes"))
+             
+        self.clear_boxes_button.setText(_translate("MainWindow", "Clear boxes"))
+        self.clear_segmentation_button.setText(_translate("MainWindow", "Clear segmentations"))
+        
+        self.clear_combined_cracks_button.setText(_translate("MainWindow","Clear combcracks"))
         self.label_29.setText(_translate("MainWindow", "Class"))
         self.label_36.setText(_translate("MainWindow", "0-crack"))
-        self.clear_boxes_button.setText(_translate("MainWindow", "Clear boxes"))
-        self.label_37.setText(_translate("MainWindow", "Image size:"))
-        self.save_b_button.setText(_translate("MainWindow", "Save boxes"))
         self.label_38.setText(_translate("MainWindow", "1-corrosion"))
-        self.clear_segmentation_button.setText(_translate("MainWindow", "Clear segmentations"))
-        #self.segment_color_box_2.setToolTip(_translate("MainWindow", "Track color on the vizualisation on the right"))
-        #self.segment_color_box_2.setCurrentText(_translate("MainWindow", "R"))
-        #self.segment_color_box_2.setItemText(0, _translate("MainWindow", "R"))
-        #self.segment_color_box_2.setItemText(1, _translate("MainWindow", "G"))
-        #self.segment_color_box_2.setItemText(2, _translate("MainWindow", "B"))
-        #self.segment_color_box_2.setItemText(3, _translate("MainWindow", "W"))
-        #self.label_33.setText(_translate("MainWindow", "Segmentation color"))
+        self.save_b_button.setText(_translate("MainWindow", "Save boxes"))
+
+        self.calculate_metrics_button.setText(_translate("MainWindow", "Calculate Metrics"))
+        
+
+        #Tracking Tab
         self.segment_width_box_2.setToolTip(_translate("MainWindow", "Track width on the vizualisation on the right"))
-        #elf.label_39.setText(_translate("MainWindow", "Segmentation width"))
-        #self.annotation_full_screen_button_3.setText(_translate("MainWindow", "Annotation\nFullscreen"))
-        #self.update_annotation_display_button_3.setText(_translate("MainWindow", "Update\nAnnotation Display"))
-        self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_5), _translate("MainWindow", "Select Image"))
+
         self.select_points_button.setToolTip(_translate("MainWindow", "<html><head/><body><p>Select TWO points on image (crack tips). </p><p>LMB click to select. </p><p>RMB click to undo previous selection. </p><p>Mouse wheel to zoom in/out </p><p>ESC to save and exit</p><p><br/></p></body></html>"))
         self.select_points_button.setText(_translate("MainWindow", "Select Crack\nEnd-Points"))
         self.label.setText(_translate("MainWindow", "Image size"))
@@ -838,11 +866,7 @@ class Ui_MainWindow(object):
         self.y_size_show.setToolTip(_translate("MainWindow", "Y size of image to process. Biger size - more processing time"))
         self.track_full_screen_button.setText(_translate("MainWindow", "Track\n Fullscreen"))
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab), _translate("MainWindow", "Tracking"))
-        self.edge_mask_button.setText(_translate("MainWindow", "Edge mask"))
-        self.combine_segments_button.setText(_translate("MainWindow", "Combine\nsegments"))
-        self.label_23.setText(_translate("MainWindow", "filter size"))
         self.edge_filter_size_box.setToolTip(_translate("MainWindow", "Determines how far from the crack track the algorithm looks for crack edges"))
-        self.edge_tracks_button.setText(_translate("MainWindow", "Edge tracks"))
         self.label_24.setText(_translate("MainWindow", "Track color"))
         self.label_25.setText(_translate("MainWindow", "Track width"))
         self.edge_track_color_box.setCurrentText(_translate("MainWindow", "R"))
@@ -850,19 +874,29 @@ class Ui_MainWindow(object):
         self.edge_track_color_box.setItemText(1, _translate("MainWindow", "G"))
         self.edge_track_color_box.setItemText(2, _translate("MainWindow", "B"))
         self.edge_track_color_box.setItemText(3, _translate("MainWindow", "W"))
-        self.edge_tracks_full_screen_button.setText(_translate("MainWindow", "Edge Tracks\nFullscreen"))
+        self.save_current_segment_button.setText(_translate("MainWindow", "Save segment"))
+        
+        
+        
+        #Segmentation tab
+        self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_2), _translate("MainWindow", "Segmentation"))
+        self.label_23.setText(_translate("MainWindow", "filter size"))
         self.label_26.setText(_translate("MainWindow", "mu"))
         self.label_27.setText(_translate("MainWindow", "l"))
         self.label_28.setText(_translate("MainWindow", "p"))
-        self.save_current_segment_button.setText(_translate("MainWindow", "Save segment"))
-        self.calculate_metrics_button.setText(_translate("MainWindow", "Calculate Metrics"))
-        self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_2), _translate("MainWindow", "Segmentation"))
+        self.edge_tracks_full_screen_button.setText(_translate("MainWindow", "Edge tracks\nFullscreen"))
+        self.edge_mask_button.setText(_translate("MainWindow", "Edge mask"))
+        self.edge_tracks_button.setText(_translate("MainWindow", "Edge tracks"))
+        
+        
+        
+        
+        #Add Segment Manually Tab
+        self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_3), _translate("MainWindow", "Add Segment Manually"))
         self.draw_segment_button.setToolTip(_translate("MainWindow", "<html><head/><body><p>Draw counturs of a crack manually</p><p>Wheel mause to zoom in/out</p><p>LMB hold to draw</p><p>LMB release to fix contur part</p><p>RMB to erase previouse contur part</p></body></html>"))
         self.draw_segment_button.setText(_translate("MainWindow", "Draw\nSegment"))
         self.erase_segment_button.setText(_translate("MainWindow", "Erase\nSegment"))
         self.reset_segment_button.setText(_translate("MainWindow", "Reset\nCanvas"))
         self.save_manuall_segment_button.setText(_translate("MainWindow", "Save\nSegment"))
-        self.manual_segment_full_screen_button.setText(_translate("MainWindow", "Show segment\n"
-"full screen"))
-        self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_3), _translate("MainWindow", "Add segment manually"))
+        self.manual_segment_full_screen_button.setText(_translate("MainWindow", "Show Segment\nFull Screen"))
 

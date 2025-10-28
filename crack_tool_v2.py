@@ -46,15 +46,23 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         self.SelectFolderButton.clicked.connect(self.select_folder)
         self.PreviousImageButton.clicked.connect(self.previous_image)
         self.NextImageButton.clicked.connect(self.next_image)
-        self.draw_box_button.clicked.connect(self.draw_box)
-        self.save_b_button.clicked.connect(self.save_box)
-        self.clear_boxes_button.clicked.connect(self.clear_boxes)
-        self.clear_segmentation_button.clicked.connect(self.clear_segmentation)
-        self.clear_combined_cracks_button.clicked.connect(self.clear_combined_cracks)
         self.files_list.itemSelectionChanged.connect(self.name_selected)
+        
         self.combine_segments_button.clicked.connect(self.combine_segments)
         #self.calculate_metrics_button.clicked.connect(lambda: self.run_mask_metrics(display=True))
         self.calculate_metrics_button.clicked.connect(lambda: self.run_midline_and_mask_metrics(tau_px=3.0, crack_id=None))
+        self.batch_metrics_button.clicked.connect(lambda: print('TODO'))
+        
+        
+        self.draw_box_button.clicked.connect(self.draw_box)
+        self.save_b_button.clicked.connect(self.save_box)
+        
+        self.clear_boxes_button.clicked.connect(self.clear_boxes)
+        self.clear_segmentation_button.clicked.connect(self.clear_segmentation)
+        self.clear_combined_cracks_button.clicked.connect(self.clear_combined_cracks)
+
+
+
 
         #Tracking Tab
         self.select_points_button.clicked.connect(self.select_save_end_points)
@@ -77,12 +85,18 @@ class CrackToolsApplication(CrackUtils, Ui_MainWindow):
         self.update_os_button.setText("Run Pipeline")
         self.update_os_button.clicked.connect(self.run_pipeline)
 
+
+
+
         #Segmentation Tab
         self.edge_mask_button.clicked.connect(self.edge_mask)
         self.edge_tracks_button.clicked.connect(self.edge_tracking)
         self.update_track_display_button.clicked.connect(self.update_track_display)
         self.track_full_screen_button.clicked.connect(self.track_full_screen)
         self.edge_tracks_full_screen_button.clicked.connect(self.edge_tracks_full_screen)
+ 
+       
+       
         
         #Add segment manually tab
         self.draw_segment_button.clicked.connect(lambda: self.draw_segment('add'))
