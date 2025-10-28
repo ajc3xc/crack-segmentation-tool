@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 from typing import Dict, Any
 import numpy as np
 import cv2

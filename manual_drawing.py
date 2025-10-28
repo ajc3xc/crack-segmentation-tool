@@ -11,6 +11,8 @@ import cracktools as ct
 #from helpers.layout import Ui_MainWindow
 from time import time
 
+#Functions for manual segmentation of preexisting cracks
+
 class ManualDrawing(CrackUtils):
     def save_manual_segment(self):
         """

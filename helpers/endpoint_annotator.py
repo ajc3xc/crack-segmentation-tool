@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtWidgets import QMessageBox
 from PyQt5.QtGui import QPainter, QPen, QColor, QPixmap, QImage
