@@ -100,7 +100,7 @@ class Ui_MainWindow(object):
         self.BatchPipelineButton.setGeometry(QtCore.QRect(40, 420, 120, 31))
         self.BatchPipelineButton.setObjectName("batch_pipeline_button")
         self.combine_segments_button = QtWidgets.QPushButton(self.tab_5)
-        self.combine_segments_button.setGeometry(QtCore.QRect(55, 470, 90, 48))
+        self.combine_segments_button.setGeometry(QtCore.QRect(55, 460, 90, 48))
         self.combine_segments_button.setObjectName("combine_segments_button")
         self.calculate_metrics_button = QtWidgets.QPushButton(self.tab_5)
         self.calculate_metrics_button.setGeometry(QtCore.QRect(35, 520, 130, 31))
