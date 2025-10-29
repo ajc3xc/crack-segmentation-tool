@@ -1164,7 +1164,7 @@ class CrackAnnotator(QtWidgets.QWidget):
                 )
 
         # --- points ---
-        print(len(self.points))
+        #print(len(self.points))
         for i, (x, y) in enumerate(self.points):
             x, y = apply_offset((x, y))
             center = QPoint(int(x * scale + xoff), int(y * scale + yoff))
