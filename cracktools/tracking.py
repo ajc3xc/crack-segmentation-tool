@@ -3,7 +3,7 @@ import scipy.interpolate
 import matplotlib.pyplot as plt
 # import sys
 
-try:
+'''try:
     import cupy as cp
     try:
         _ = cp.cuda.runtime.getDeviceCount()
@@ -23,7 +23,90 @@ except ImportError:
 def asnumpy(x):
     if CUPY_AVAILABLE:
         return cp.asnumpy(x)
+    return x'''
+    
+try:
+    import cupy as cp
+    try:
+        n_devices = cp.cuda.runtime.getDeviceCount()
+        if n_devices > 0:
+            CUPY_AVAILABLE = True
+
+            # -------------------------------
+            # 💾 GPU + Pinned Memory Pools
+            # -------------------------------
+            from cupy.cuda import pinned_memory
+
+            # Device (VRAM) pool
+            gpu_pool = cp.cuda.MemoryPool()
+            cp.cuda.set_allocator(gpu_pool.malloc)
+
+            # Host (CPU) pinned-memory pool
+            pin_pool = pinned_memory.PinnedMemoryPool()
+            pinned_memory.set_pinned_memory_allocator(pin_pool.malloc)
+
+            # 👇 New universal safe limit setter
+            if hasattr(pin_pool, "set_limit"):
+                pin_pool.set_limit(size=1024 * 1024 * 1024)  # 1 GB
+                pinned_limit = pin_pool.get_limit() / (1024**2)
+            else:
+                pinned_limit = "auto"
+
+            #print(f"[cupy] ✅ CUDA detected ({n_devices} device(s))")
+            #print(f"[cupy] Memory pools active (pinned_limit={pinned_limit} MiB)")
+
+        else:
+            raise RuntimeError("No CUDA device found")
+
+    except Exception as e:
+        print(f"[cupy] ⚠️ GPU unavailable or failed ({e}) — falling back to NumPy")
+        import numpy as np
+        cp = np
+        CUPY_AVAILABLE = False
+
+except ImportError:
+    print("[cupy] ❌ CuPy not installed — using NumPy fallback")
+    import numpy as np
+    cp = np
+    CUPY_AVAILABLE = False
+
+
+def asnumpy(x):
+    """Safe conversion to NumPy array whether x is CuPy or NumPy."""
+    if CUPY_AVAILABLE and hasattr(cp, "asnumpy"):
+        return cp.asnumpy(x)
     return x
+
+
+def free_cupy_caches():
+    """Manual cleanup — free all cached GPU + pinned blocks between images."""
+    if not CUPY_AVAILABLE:
+        return
+    try:
+        cp.get_default_memory_pool().free_all_blocks()
+        if hasattr(cp.cuda.pinned_memory, "get_default_pinned_memory_pool"):
+            cp.cuda.pinned_memory.get_default_pinned_memory_pool().free_all_blocks()
+    except Exception as e:
+        print(f"[cupy] cleanup warning: {e}")
+
+
+def asnumpy(x):
+    """Safe conversion to NumPy array whether x is CuPy or NumPy."""
+    if CUPY_AVAILABLE and hasattr(cp, "asnumpy"):
+        return cp.asnumpy(x)
+    return x
+
+
+def free_cupy_caches():
+    """Manual cleanup — free all cached GPU + pinned blocks between images."""
+    if not CUPY_AVAILABLE:
+        return
+    try:
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.cuda.pinned_memory.get_default_pinned_memory_pool().free_all_blocks()
+        cp._default_memory_pool = None
+    except Exception as e:
+        print(f"[cupy] cleanup warning: {e}")
 
 def tang_len(start_point_x,start_point_y,end_point_x,end_point_y):
     """Function defines oriantation and direction of line that connects two points"""
