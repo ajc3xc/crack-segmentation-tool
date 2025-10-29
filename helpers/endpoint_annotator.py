@@ -1052,7 +1052,86 @@ class CrackAnnotator(QtWidgets.QWidget):
 
         # --- read-only midlines ---
         qp.setPen(QPen(QColor(150, 150, 0), 2))
-        for key, poly in self.readonly_midlines.items():
+        '''for key, poly in self.readonly_midlines.items():
+            for i in range(1, len(poly)):
+                p1 = apply_offset(poly[i - 1])
+                p2 = apply_offset(poly[i])
+                qp.drawLine(
+                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                )'''
+                
+                # --- read-only midlines (auto) ---
+        # --- read-only midlines (manual + auto) ---
+        for key, entry in self.readonly_midlines.items():
+            poly = entry.get("poly", [])
+            color = entry.get("color", (150,150,0))
+            tag = entry.get("tag", "")
+            if not poly or len(poly) < 2:
+                continue
+
+            # Slightly different dash for unprocessed
+            style = Qt.DashLine if tag == "unprocessed" else Qt.SolidLine
+            qp.setPen(QPen(QColor(*color), 3, style))
+
+            for i in range(1, len(poly)):
+                p1 = apply_offset(poly[i-1])
+                p2 = apply_offset(poly[i])
+                qp.drawLine(
+                    QPoint(int(p1[0]*scale+xoff), int(p1[1]*scale+yoff)),
+                    QPoint(int(p2[0]*scale+xoff), int(p2[1]*scale+yoff))
+                )
+
+
+        # --- editable midlines (manual) ---
+        '''for key, entry in self.midlines.items():
+            if not entry:
+                continue
+            if isinstance(entry, dict):
+                poly = entry.get("poly", [])
+                unprocessed = entry.get("unprocessed", False)
+            else:
+                poly = entry
+                unprocessed = False
+            if len(poly) < 2:
+                continue
+
+            # Orange dashed if unprocessed; cyan solid if processed
+            color = QColor(255, 165, 0) if unprocessed else QColor(0, 200, 255)
+            style = Qt.DashLine if unprocessed else Qt.SolidLine
+            width = 5 if unprocessed else 4
+            thick = 8 if (self.connection_mode and key == self._hover_midline_key) else width
+            qp.setPen(QPen(color, thick, style))
+
+            for i in range(1, len(poly)):
+                p1 = apply_offset(poly[i - 1])
+                p2 = apply_offset(poly[i])
+                qp.drawLine(
+                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                )'''
+                
+        
+                # --- editable midlines (manual) ---
+        for key, entry in self.midlines.items():
+            # Support both dict and direct list forms
+            if isinstance(entry, dict):
+                poly = entry.get("poly", [])
+                unprocessed = entry.get("unprocessed", False)
+            else:
+                poly = entry
+                unprocessed = False
+
+            if not poly or len(poly) < 2:
+                continue
+
+            # Color/style based on processing state
+            color = QColor(255, 165, 0) if unprocessed else QColor(0, 200, 255)
+            style = Qt.DashLine if unprocessed else Qt.SolidLine
+            width = 5 if unprocessed else 4
+            thick = 8 if (self.connection_mode and key == getattr(self, "_hover_midline_key", None)) else width
+            qp.setPen(QPen(color, thick, style))
+
             for i in range(1, len(poly)):
                 p1 = apply_offset(poly[i - 1])
                 p2 = apply_offset(poly[i])
@@ -1060,6 +1139,7 @@ class CrackAnnotator(QtWidgets.QWidget):
                     QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
                     QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
+
 
         # --- editable connections ---
         for idx, (i1, i2) in enumerate(self.connections):

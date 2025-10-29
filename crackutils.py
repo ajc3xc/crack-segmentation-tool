@@ -782,7 +782,7 @@ class CrackUtils:
         self.mask = []
         self.annotation = {}
 
-        if os.path.exists(self.ann_name):
+        '''if os.path.exists(self.ann_name):
             with open(self.ann_name, encoding="utf-8") as f:
                 self.annotation = json.load(f)
             ann = self.annotation.get('annotations', {}) or {}
@@ -796,8 +796,56 @@ class CrackUtils:
                     if box_data['class'] == 0: box_color = (0,0,255)
                     elif box_data['class'] == 1: box_color = (0,255,0)
                     else: box_color = (255,0,0)
-                    cv2.rectangle(im, tuple(bb_pts[0]), tuple(bb_pts[1]), box_color, 3)
+                    cv2.rectangle(im, tuple(bb_pts[0]), tuple(bb_pts[1]), box_color, 3)'''
+                    
+                    
+        
+        if os.path.exists(self.ann_name):
+            with open(self.ann_name, encoding="utf-8") as f:
+                self.annotation = json.load(f)
+            ann = self.annotation.get('annotations', {}) or {}
+            atomic = ann.get("atomic_cracks", {}) or {}
+            combined = ann.get("combined_cracks", {}) or {}
 
+            # === NEW midline overlays ===
+            self.midlines = {}              # keep empty for editing only (fresh)
+            self.readonly_midlines = {}     # all loaded midlines from file
+
+            for cid, crack in atomic.items():
+                src = str(crack.get("source") or crack.get("src") or "").lower()
+                mid = crack.get("midline", [])
+                if not isinstance(mid, list) or len(mid) < 2:
+                    continue
+
+                has_auto = bool(crack.get("variants", {}).get("auto", {}))
+                tag = "unprocessed" if src.startswith("manual") and not has_auto else "manual"
+                color = (255,165,0) if tag == "unprocessed" else (0,200,255)
+                self.readonly_midlines[f"manual_{cid}"] = {
+                    "poly": mid, "color": color, "tag": tag
+                }
+
+                # Auto-best overlay
+                vroot = crack.get("variants", {}).get("auto", {})
+                for ck, pack in vroot.items():
+                    bid = pack.get("best_variant_id")
+                    if bid is None:
+                        continue
+                    best = pack["variants"].get(f"v{bid}", {})
+                    if "midline" in best and len(best["midline"]) >= 2:
+                        self.readonly_midlines[f"auto_{cid}"] = {
+                            "poly": best["midline"], "color": (0,255,0), "tag": "auto"
+                        }
+                        break
+
+            # ---- Bounding boxes ----
+            if 'box' in ann:
+                for key, box_data in ann['box'].items():
+                    bb_pts = np.array(box_data['bounding_box'])
+                    if box_data['class'] == 0: box_color = (0,0,255)
+                    elif box_data['class'] == 1: box_color = (0,255,0)
+                    else: box_color = (255,0,0)
+                    cv2.rectangle(im, tuple(bb_pts[0]), tuple(bb_pts[1]), box_color, 3)
+            
             drawn_atomic = set()
 
             # ---- Combined cracks ----
