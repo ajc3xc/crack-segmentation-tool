@@ -836,7 +836,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         x, y, w, h = map(int, ann["mask_bbox"])
         self.active_bbox = [x, y, x + w, y + h]
 
-        # Determine color channel
+        # --- Determine color channel ---
         if color_channel is None:
             color_channel = (
                 0 if self.edge_track_color_box.currentText() == "R"
@@ -844,22 +844,22 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 else 2
             )
 
-        # --- use manual midline directly ---
+        # --- Use manual midline directly ---
         man_xy_g = metrics._finite_xy(ann["midline"])
         if len(man_xy_g) < 2:
             print(f"[extract_edge_inputs_for_subcrack] ⚠ no valid manual midline for {crack_id}")
             return None
 
-        # --- define endpoints exactly like run_pipeline ---
+        # --- Define endpoints exactly like run_pipeline ---
         self.pts = [np.array(man_xy_g[0]), np.array(man_xy_g[-1])]
         self.end_points = self.pts
 
-        # --- now run the real crop creation ---
+        # --- Run the real crop creation ---
         self.update_image_crop()
         if getattr(self, "skip_current_segment", False):
             return None
 
-        # --- compute local track in [y,x] form consistent with edge_mask ---
+        # --- Compute local track in [y,x] form consistent with edge_mask ---
         track_local_yx = np.vstack([
             man_xy_g[:, 1] - y,  # y
             man_xy_g[:, 0] - x   # x
@@ -875,7 +875,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print(f"[extract_edge_inputs_for_subcrack] Reversing midline for crack {crack_id}")
             track_local_yx = track_local_yx[:, ::-1]
 
-        # --- optional manual normals (crop coords) ---
+        # --- Optional manual normals (crop coords) ---
         man_normals_crop = None
         if "normal_edge_points_full" in ann:
             e1 = np.asarray(ann["normal_edge_points_full"]["edge1"], float)
@@ -884,10 +884,16 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             e2c = np.column_stack([e2[:, 0] - x, e2[:, 1] - y])
             man_normals_crop = [[e1c[:, 0], e1c[:, 1]], [e2c[:, 0], e2c[:, 1]]]
 
-        # --- extract grayscale crop ---
+        # --- Extract grayscale crop ---
         gray = self.image_crop[:, :, color_channel].astype(np.float32)
 
-        # --- return payload identical in shape to edge_mask() context ---
+        # --- Clamp endpoints to crop bounds to prevent "seed out of range" ---
+        H, W = gray.shape[:2]
+        for p in self.pts_crop:
+            p[0] = np.clip(p[0], 0, W - 1e-3)
+            p[1] = np.clip(p[1], 0, H - 1e-3)
+
+        # --- Return payload identical in shape to edge_mask() context ---
         return dict(
             image_crop_gray=gray,
             pts_crop=self.pts_crop,

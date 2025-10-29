@@ -1722,43 +1722,16 @@ class CrackUtils:
             for k, v in self.manual_midlines_tmp.items():
                 print(f"   key={k}, len={len(v)})")
 
-            # --- persist per-crack user data into annotation skeleton if current id exists ---
-            '''if hasattr(self, "current_crack_id"):
-                crack_id_str = str(self.current_crack_id)
-                crack_entry = (
-                    self.annotation.get("annotations", {})
-                    .get("atomic_cracks", {})
-                    .setdefault(crack_id_str, {})
-                )
-                crack_entry["user_points"] = list(self.user_points)
-                crack_entry["user_connections"] = list(self.user_connections)'''
-            
             # --- persist manual midlines into annotation for saving ---
-            '''if not hasattr(self, "annotation"):
+            if not hasattr(self, "annotation") or not isinstance(self.annotation, dict):
                 self.annotation = {"annotations": {"atomic_cracks": {}}}
+
             ann = self.annotation.setdefault("annotations", {})
-            ac = ann.setdefault("atomic_cracks", {})
+            if "atomic_cracks" not in ann:
+                ann["atomic_cracks"] = {}
+            ac = ann["atomic_cracks"]
 
             # one entry per manual midline
-            for k, poly in self.manual_midlines_tmp.items():
-                try:
-                    if isinstance(k, tuple):
-                        i1, i2 = k
-                    elif isinstance(k, str) and "_" in k:
-                        i1, i2 = map(int, k.split("_"))
-                    else:
-                        continue
-
-                    cid = str(len(ac))
-                    ac[cid] = {
-                        "src": "manual_poly",
-                        "midline": [[float(x), float(y)] for (x, y) in poly],
-                        "user_points": [list(self.user_points[i1]), list(self.user_points[i2])],
-                        "user_connections": [[0, 1]],
-                        "mask_compact": [],
-                    }
-                except Exception as e:
-                    print(f"[DEBUG persist_manual_midline] failed for key={k}: {e}")'''
             for k, poly in self.manual_midlines_tmp.items():
                 try:
                     if isinstance(k, tuple):
@@ -1786,13 +1759,13 @@ class CrackUtils:
                         "user_points": [list(self.user_points[i1]), list(self.user_points[i2])],
                         "user_connections": [[0, 1]],
                         "mask_compact": [],
-                        "mask_bbox": mask_bbox,  # <── new line added
+                        "mask_bbox": mask_bbox,
                     }
 
                 except Exception as e:
                     print(f"[DEBUG persist_manual_midline] failed for key={k}: {e}")
 
-
+            print(f"[SAVE] Manual selections committed to in-memory annotations.")
             dlg.accept()
 
 
