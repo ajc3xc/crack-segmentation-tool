@@ -1641,7 +1641,7 @@ class CrackUtils:
                 except Exception:
                     continue
 
-                def point_box(x, y):
+                '''def point_box(x, y):
                     for bi, (xmin, ymin, xmax, ymax) in enumerate(boxes):
                         if xmin <= x <= xmax and ymin <= y <= ymax:
                             return bi
@@ -1653,14 +1653,74 @@ class CrackUtils:
                 if b1 is None or b2 is None or b1 != b2:
                     QMessageBox.warning(dlg, "Invalid midline",
                         "A manual midline crosses or spans multiple boxes. Please fix before continuing.")
+                    return'''
+                    
+                    
+                # --- Enhanced "shared-edge / overlap" rule (fixed) ---
+                def boxes_containing(x, y, tol=0.5):
+                    hits = []
+                    for i, (xmin, ymin, xmax, ymax) in enumerate(boxes):
+                        if (xmin - tol) <= x <= (xmax + tol) and (ymin - tol) <= y <= (ymax + tol):
+                            hits.append(i)
+                    return hits
+
+                sx, sy = float(sx), float(sy)
+                ex, ey = float(ex), float(ey)
+
+                S = set(boxes_containing(sx, sy))
+                E = set(boxes_containing(ex, ey))
+
+                if not S or not E:
+                    QMessageBox.warning(dlg, "Invalid midline", "One or both endpoints are outside all boxes.")
                     return
 
-                xmin, ymin, xmax, ymax = boxes[b1]
+                # 1) If both endpoints share any box, use that box.
+                effective_region = None  # (xmin, ymin, xmax, ymax)
+                shared = S & E
+                if shared:
+                    bidx = next(iter(shared))
+                    effective_region = boxes[bidx]
+                else:
+                    # 2) Otherwise, if their boxes overlap, use the intersection rectangle.
+                    for i in S:
+                        for j in E:
+                            xmin1, ymin1, xmax1, ymax1 = boxes[i]
+                            xmin2, ymin2, xmax2, ymax2 = boxes[j]
+                            oxmin, oymin = max(xmin1, xmin2), max(ymin1, ymin2)
+                            oxmax, oymax = min(xmax1, xmax2), min(ymax1, ymax2)
+                            if oxmin <= oxmax and oymin <= oymax:
+                                effective_region = (oxmin, oymin, oxmax, oymax)
+                                break
+                        if effective_region:
+                            break
+
+                if effective_region is None:
+                    QMessageBox.warning(
+                        dlg,
+                        "Invalid midline",
+                        "A manual midline spans boxes that don’t share a region. Please fix before continuing.",
+                    )
+                    return
+
+                xmin, ymin, xmax, ymax = effective_region
+
+                # 3) Ensure the entire polyline stays inside the effective region.
+                for (x, y) in poly:
+                    x, y = float(x), float(y)
+                    if not (xmin <= x <= xmax and ymin <= y <= ymax):
+                        QMessageBox.warning(
+                            dlg, "Invalid midline",
+                            "A manual midline has points outside its valid box/overlap region. Please fix before continuing."
+                        )
+                        return
+                    
+
+                '''xmin, ymin, xmax, ymax = boxes[b1]
                 for (x, y) in poly:
                     if not (xmin <= float(x) <= xmax and ymin <= float(y) <= ymax):
                         QMessageBox.warning(dlg, "Invalid midline",
                             "A manual midline has points outside its box. Please fix before continuing.")
-                        return
+                        return'''
 
             self.user_points = annot.points
             self.user_connections = [c for c in annot.connections if c not in annot.readonly_connections]

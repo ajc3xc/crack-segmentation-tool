@@ -781,6 +781,8 @@ class Ui_MainWindow(object):
         
         self.BatchPipelineButton.setText(_translate("MainWindow","Batch Pipeline"))
         self.combine_segments_button.setText(_translate("MainWindow", "Combine\nSegments"))
+        self.batch_metrics_button.setText(_translate("MainWindow", "Batch Metrics"))
+        self.calculate_metrics_button.setText(_translate("MainWindow", "Calculate Metrics"))
         
         self.label_37.setText(_translate("MainWindow", "Image size:"))
         self.draw_box_button.setText(_translate("MainWindow", "Draw boxes"))
@@ -793,8 +795,8 @@ class Ui_MainWindow(object):
         self.label_36.setText(_translate("MainWindow", "0-crack"))
         self.label_38.setText(_translate("MainWindow", "1-corrosion"))
         self.save_b_button.setText(_translate("MainWindow", "Save boxes"))
-
-        self.calculate_metrics_button.setText(_translate("MainWindow", "Calculate Metrics"))
+        
+        
         
 
         #Tracking Tab
