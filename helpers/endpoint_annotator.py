@@ -1061,26 +1061,35 @@ class CrackAnnotator(QtWidgets.QWidget):
                     QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )'''
                 
-                # --- read-only midlines (auto) ---
-        # --- read-only midlines (manual + auto) ---
-        for key, entry in self.readonly_midlines.items():
-            poly = entry.get("poly", [])
-            color = entry.get("color", (150,150,0))
-            tag = entry.get("tag", "")
+        # --- read-only midlines ---
+        for key, rec in self.readonly_midlines.items():
+            poly = rec.get("poly", [])
             if not poly or len(poly) < 2:
                 continue
-
-            # Slightly different dash for unprocessed
-            style = Qt.DashLine if tag == "unprocessed" else Qt.SolidLine
-            qp.setPen(QPen(QColor(*color), 3, style))
-
+            tag = rec.get("tag", "manual")
+            r,g,b = rec.get("color", (150,150,0))
+            # thicker, solid for processed; dashed + semi-transparent for unprocessed
+            if tag == "unprocessed":
+                pen = QPen(QColor(r, g, b, 180), 3, Qt.DashLine)
+            elif tag == "auto":
+                pen = QPen(QColor(r, g, b), 3)  # solid green
+            else:  # processed manual
+                pen = QPen(QColor(r, g, b), 3)
+            self.qp = self.qp if hasattr(self, "qp") else None  # (no-op; keeps linters happy)
+            qp.setPen(pen)
             for i in range(1, len(poly)):
-                p1 = apply_offset(poly[i-1])
-                p2 = apply_offset(poly[i])
+                p1x, p1y = poly[i-1]
+                p2x, p2y = poly[i]
+                # account for crop offset + pan/scale
+                p1x += getattr(self, "crop_offset", (0,0))[0]
+                p1y += getattr(self, "crop_offset", (0,0))[1]
+                p2x += getattr(self, "crop_offset", (0,0))[0]
+                p2y += getattr(self, "crop_offset", (0,0))[1]
                 qp.drawLine(
-                    QPoint(int(p1[0]*scale+xoff), int(p1[1]*scale+yoff)),
-                    QPoint(int(p2[0]*scale+xoff), int(p2[1]*scale+yoff))
+                    QPoint(int(p1x * scale + xoff), int(p1y * scale + yoff)),
+                    QPoint(int(p2x * scale + xoff), int(p2y * scale + yoff))
                 )
+
 
 
         # --- editable midlines (manual) ---
@@ -1155,6 +1164,7 @@ class CrackAnnotator(QtWidgets.QWidget):
                 )
 
         # --- points ---
+        print(len(self.points))
         for i, (x, y) in enumerate(self.points):
             x, y = apply_offset((x, y))
             center = QPoint(int(x * scale + xoff), int(y * scale + yoff))

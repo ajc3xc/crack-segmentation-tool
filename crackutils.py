@@ -734,19 +734,58 @@ class CrackUtils:
 
         return im, mask_out
     
+    def _reset_edit_state(self):
+        """Hard reset of all per-image editable UI state."""
+        # editable endpoints/links
+        self.points = []
+        self.connections = []
+
+        # read-only overlays (drawn from JSON)
+        self.readonly_connections = []
+        self.readonly_midlines = {}
+        self.midlines = {}
+        self.endpoint_pairs = None
+        # live drawing modes
+        self.polyline = []
+        self.polyline_mode = False
+        self.connection_mode = False
+        self.connecting_index = None
+
+        # hover/selection indices
+        self.hover_index = None
+        self.hover_line_index = None
+        self._hover_midline_key = None
+        
+        self.user_points = None
+        self.user_connections = None
+
+        # selection / bbox helpers
+        self.current_crack_id = None
+        self.bb_pts_list = []
+        # If you cache rectangles separately:
+        if hasattr(self, "boxes"):
+            self.boxes = []
+
+        # if any tools keep their own state, clear them too
+        if hasattr(self, "tool_state") and hasattr(self.tool_state, "clear"):
+            try:
+                self.tool_state.clear()
+            except Exception:
+                pass
+
+    
     def change_image(self):
         import os, json, cv2
         import numpy as np
-        import matplotlib.pyplot as plt
-        from skimage.segmentation import mark_boundaries  # for colored boundaries
 
         if not hasattr(self, "image_names") or not self.image_names:
             error("No images loaded. Please load images before using change_image().")
             return
 
-        self.current_crack_id = None
-        self.bb_pts_list = []
-        w = self.segment_width_box_2.value()
+        # --- HARD RESET of transient interactive state (fixes ghost points/boxes) ---
+        self._reset_edit_state()
+
+        # ---------------------------------------------------------------------------
 
         self.update_selected_item(os.path.basename(self.image_names[self.n]))
         self.name = self.image_names[self.n]
@@ -760,7 +799,6 @@ class CrackUtils:
         if getattr(self, "use_masks", False) and hasattr(self, "mask_map"):
             mask_path = self.mask_map.get(base_name)
             print(f"[DEBUG change_image] mask_path for {base_name}: {mask_path}")
-
             if mask_path:
                 if mask_path.endswith('.npy'):
                     mask = np.load(mask_path)
@@ -782,24 +820,6 @@ class CrackUtils:
         self.mask = []
         self.annotation = {}
 
-        '''if os.path.exists(self.ann_name):
-            with open(self.ann_name, encoding="utf-8") as f:
-                self.annotation = json.load(f)
-            ann = self.annotation.get('annotations', {}) or {}
-            atomic = ann.get("atomic_cracks", {}) or {}
-            combined = ann.get("combined_cracks", {}) or {}
-
-            # ---- Bounding boxes ----
-            if 'box' in ann:
-                for key, box_data in ann['box'].items():
-                    bb_pts = np.array(box_data['bounding_box'])
-                    if box_data['class'] == 0: box_color = (0,0,255)
-                    elif box_data['class'] == 1: box_color = (0,255,0)
-                    else: box_color = (255,0,0)
-                    cv2.rectangle(im, tuple(bb_pts[0]), tuple(bb_pts[1]), box_color, 3)'''
-                    
-                    
-        
         if os.path.exists(self.ann_name):
             with open(self.ann_name, encoding="utf-8") as f:
                 self.annotation = json.load(f)
@@ -807,24 +827,19 @@ class CrackUtils:
             atomic = ann.get("atomic_cracks", {}) or {}
             combined = ann.get("combined_cracks", {}) or {}
 
-            # === NEW midline overlays ===
-            self.midlines = {}              # keep empty for editing only (fresh)
-            self.readonly_midlines = {}     # all loaded midlines from file
-
+            # ==== Build read-only midline overlays with tags/colors ====
+            # manual (processed vs unprocessed) and auto-best (if cached)
             for cid, crack in atomic.items():
                 src = str(crack.get("source") or crack.get("src") or "").lower()
                 mid = crack.get("midline", [])
-                if not isinstance(mid, list) or len(mid) < 2:
-                    continue
+                if isinstance(mid, list) and len(mid) >= 2:
+                    has_auto = bool(crack.get("variants", {}).get("auto", {}))
+                    tag = "unprocessed" if src.startswith("manual") and not has_auto else "manual"
+                    # orange for unprocessed manual, cyan for processed manual
+                    color = (255, 165, 0) if tag == "unprocessed" else (0, 200, 255)
+                    self.readonly_midlines[f"manual_{cid}"] = {"poly": mid, "color": color, "tag": tag}
 
-                has_auto = bool(crack.get("variants", {}).get("auto", {}))
-                tag = "unprocessed" if src.startswith("manual") and not has_auto else "manual"
-                color = (255,165,0) if tag == "unprocessed" else (0,200,255)
-                self.readonly_midlines[f"manual_{cid}"] = {
-                    "poly": mid, "color": color, "tag": tag
-                }
-
-                # Auto-best overlay
+                # pick best auto variant (if present)
                 vroot = crack.get("variants", {}).get("auto", {})
                 for ck, pack in vroot.items():
                     bid = pack.get("best_variant_id")
@@ -833,11 +848,11 @@ class CrackUtils:
                     best = pack["variants"].get(f"v{bid}", {})
                     if "midline" in best and len(best["midline"]) >= 2:
                         self.readonly_midlines[f"auto_{cid}"] = {
-                            "poly": best["midline"], "color": (0,255,0), "tag": "auto"
+                            "poly": best["midline"], "color": (0, 255, 0), "tag": "auto"
                         }
                         break
 
-            # ---- Bounding boxes ----
+            # ---- Bounding boxes (optional, unchanged) ----
             if 'box' in ann:
                 for key, box_data in ann['box'].items():
                     bb_pts = np.array(box_data['bounding_box'])
@@ -845,44 +860,30 @@ class CrackUtils:
                     elif box_data['class'] == 1: box_color = (0,255,0)
                     else: box_color = (255,0,0)
                     cv2.rectangle(im, tuple(bb_pts[0]), tuple(bb_pts[1]), box_color, 3)
-            
+
             drawn_atomic = set()
 
-            # ---- Combined cracks ----
-            for crack_id, crack in combined.items():
+            # ---- Combined cracks (normalize then draw) ----
+            for crack_id, crack in (ann.get("combined_cracks", {}) or {}).items():
                 for m in crack.get("members", []):
                     drawn_atomic.add(m)
 
-                print(f"[DEBUG COMBINED] crack_id={crack_id}")
-                for k in ["midline", "geodesic_edges", "normal_edge_points"]:
-                    print(f"  {k}: {'✓' if k in crack else '—'}")
-
-                # === Normalize geodesic_edges for drawing ===
                 geodesic_edges = crack.get("geodesic_edges", [])
                 if isinstance(geodesic_edges, dict):
                     geodesic_edges = list(geodesic_edges.values())
-
-                flattened_edges = []
+                flat = []
                 for e in geodesic_edges:
-                    if isinstance(e, dict):
-                        flattened_edges.extend(list(e.values()))
-                    elif isinstance(e, (list, tuple)) and len(e) > 0:
-                        flattened_edges.append(e)
-                crack["geodesic_edges"] = [np.array(x, dtype=float) for x in flattened_edges if len(x) >= 2]
+                    if isinstance(e, dict): flat.extend(list(e.values()))
+                    elif isinstance(e, (list, tuple)) and len(e) > 0: flat.append(e)
+                crack["geodesic_edges"] = [np.array(x, dtype=float) for x in flat if len(x) >= 2]
 
-                # === Normalize normal_edge_points for drawing ===
                 normal_edges = crack.get("normal_edge_points", [])
                 if isinstance(normal_edges, dict):
                     normal_edges = list(normal_edges.values())
                 elif isinstance(normal_edges, list) and len(normal_edges) == 2 and isinstance(normal_edges[0], (list, tuple)):
                     normal_edges = [np.array(n, dtype=float) for n in normal_edges]
-
                 crack["normal_edge_points"] = normal_edges
 
-                print(f"  → normalized: {len(crack.get('geodesic_edges', []))} edges, "
-                    f"{len(crack.get('normal_edge_points', []))} normal pts")
-
-                # Draw combined (now always has normalized structures)
                 im, _ = self._draw_crack(
                     im, crack,
                     color_mask=(0, 0, 0),
@@ -891,10 +892,9 @@ class CrackUtils:
                     color_points=(255, 0, 0)
                 )
 
-            # ---- Atomic cracks ----
-            for crack_id, crack in atomic.items():
-                if any(crack_id in c.get("members", []) for c in combined.values()):
-                    print(f"Skipping crack id {crack_id} since part of combined")
+            # ---- Atomic cracks (non-combined) ----
+            for crack_id, crack in (ann.get("atomic_cracks", {}) or {}).items():
+                if any(crack_id in c.get("members", []) for c in (ann.get("combined_cracks", {}) or {}).values()):
                     continue
                 im, mask_full = self._draw_crack(im, crack)
                 if mask_full is not None:
@@ -922,11 +922,7 @@ class CrackUtils:
             self.all_segments_display.height(),
             is_gray=True
         )
-        self.all_segments_display.setPixmap(pixmap_mask)   
-        
-        
-        
-        
+        self.all_segments_display.setPixmap(pixmap_mask)
         
 
     def _build_combined_crack(self, member_ids, pad=10):
