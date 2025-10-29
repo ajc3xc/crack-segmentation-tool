@@ -7,7 +7,7 @@ import os
 import matplotlib.pyplot as plt
 
 from cracktools.segmentation import edge_masks, edges_tracking
-from metrics import *
+from helpers.metrics import *
 
 
 # ---------------------------------------------------------------------
