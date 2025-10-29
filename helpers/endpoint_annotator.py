@@ -280,7 +280,7 @@ class CrackAnnotator(QtWidgets.QWidget):
         return True
 
     # ---------- midlines ----------
-    def _commit_midline(self, end_idx):
+    '''def _commit_midline(self, end_idx):
         start_idx = self._start_idx
         if start_idx is None or end_idx is None or start_idx == end_idx:
             return
@@ -321,6 +321,108 @@ class CrackAnnotator(QtWidgets.QWidget):
         self._last_polyline_start_idx = start_idx
         self._last_polyline_end_idx   = end_idx
         self._just_committed_midline  = True
+
+        self.polyline.clear()
+        self._is_drawing = False
+        self._start_idx = None
+        self.update()'''
+        
+    def _commit_midline(self, end_idx):
+        start_idx = self._start_idx
+        if start_idx is None or end_idx is None or start_idx == end_idx:
+            return
+
+        key = self._sorted(start_idx, end_idx)
+        if (key in self.midlines) or (key in self.connections) \
+        or (key in self.readonly_connections) or (key in self.readonly_midlines):
+            self.polyline.clear()
+            self._is_drawing = False
+            self._start_idx = None
+            self.update()
+            return
+
+        # Build the polyline in drawn order
+        if len(self.polyline) >= 2:
+            middle = list(self.polyline[1:-1])
+            poly = [tuple(map(float, self.points[start_idx]))] + middle + [tuple(map(float, self.points[end_idx]))]
+        else:
+            poly = [tuple(map(float, self.points[start_idx])),
+                    tuple(map(float, self.points[end_idx]))]
+
+        # --- Enhanced shared-edge / overlap rule ---
+        if self.boxes:
+            def _boxes_containing_xy(x, y, tol=0.5):
+                hits = []
+                for i, (xmin, ymin, xmax, ymax) in enumerate(self.boxes or []):
+                    if (xmin - tol) <= x <= (xmax + tol) and (ymin - tol) <= y <= (ymax + tol):
+                        hits.append(i)
+                return hits
+
+            def _intersection_rect(bi, bj):
+                xmin1, ymin1, xmax1, ymax1 = self.boxes[bi]
+                xmin2, ymin2, xmax2, ymax2 = self.boxes[bj]
+                oxmin, oymin = max(xmin1, xmin2), max(ymin1, ymin2)
+                oxmax, oymax = min(xmax1, xmax2), min(ymax1, ymax2)
+                return (oxmin, oymin, oxmax, oymax) if (oxmin <= oxmax and oymin <= oymax) else None
+
+            def _poly_inside_rect(poly, rect):
+                xmin, ymin, xmax, ymax = rect
+                for (x, y) in poly:
+                    x, y = float(x), float(y)
+                    if not (xmin <= x <= xmax and ymin <= y <= ymax):
+                        return False
+                return True
+
+            sx, sy = self.points[start_idx]
+            ex, ey = self.points[end_idx]
+            S = set(_boxes_containing_xy(float(sx), float(sy)))
+            E = set(_boxes_containing_xy(float(ex), float(ey)))
+
+            if not S or not E:
+                QMessageBox.warning(
+                    self, "Out of bounds",
+                    "An endpoint is outside all bounding boxes.\nCommit cancelled."
+                )
+                self.polyline.clear()
+                self._is_drawing = False
+                self._start_idx = None
+                self.update()
+                return
+
+            effective_region = None
+
+            # prefer an actual common box
+            shared = S & E
+            if shared:
+                bidx = next(iter(shared))
+                effective_region = self.boxes[bidx]
+            else:
+                # else allow intersection of one box from S with one box from E
+                for i in S:
+                    for j in E:
+                        rect = _intersection_rect(i, j)
+                        if rect is not None:
+                            effective_region = rect
+                            break
+                    if effective_region is not None:
+                        break
+
+            if effective_region is None or not _poly_inside_rect(poly, effective_region):
+                QMessageBox.warning(
+                    self, "Out of bounds",
+                    "The midline and both endpoints must lie inside a single valid box/overlap region.\nCommit cancelled."
+                )
+                self.polyline.clear()
+                self._is_drawing = False
+                self._start_idx = None
+                self.update()
+                return
+
+        # If we reach here, it's valid — commit it
+        self.midlines[key] = poly
+        self._last_polyline_start_idx = start_idx
+        self._last_polyline_end_idx = end_idx
+        self._just_committed_midline = True
 
         self.polyline.clear()
         self._is_drawing = False
