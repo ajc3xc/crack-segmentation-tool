@@ -1337,31 +1337,33 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         edge_grid=None,            # if None → sensible default below
         g_variants=None,           # if None → defaults inside generate_auto_variants_for_manual_parallel
         cpu_max_workers=8,
-        apply_to_sample=False      # False → apply global params to ALL images; True → only sampled set
+        apply_to_sample=False      # False → apply global params to ALL images; True → sampled set only
     ):
         """
-        GLOBAL METRICS DRIVER (memory-safe, one image at a time).
+        GLOBAL METRICS DRIVER (one image in memory at a time, no manual edge precompute needed).
 
-        Phase A (calibration): pick ONE global edge-parameter set by sweeping a subset
-        of images and aggregating per-crack sweep metrics.
+        Phase A (calibration): learn ONE global edge-parameter set from a subset of images by
+        sweeping edge params against *manual midlines* (reconstructs edge worker payloads internally).
 
-        Phase B (application): for each image, for each manual atomic crack:
-            - run RS3 variants using the *global* edge params,
-            - pick best auto variant,
-            - materialize per-image combined *AUTO* masks using the *same member IDs*
-            as the manual combined cracks,
-            - compute final IoU + width metrics for that image.
+        Phase B (application): for each image:
+            - run RS3 auto variants for each manual atomic crack using the global edge params,
+            - select best variant and persist per-variant table,
+            - build AUTO combined masks with the *same member IDs* as manual combined,
+            - compute final per-image IoU/width metrics,
+            - export training supervision (manual GT widths from mask + auto-best edge artifacts).
 
-        Writes:
+        Saves:
         metrics/_summary/global_edge_sweep_all.csv
         metrics/_summary/global_best_edge_params.json
+        metrics/<image>/edge_params_used.json
         metrics/<image>/cid<id>/rs3_variants.csv
         metrics/<image>/combined/combined_metrics.csv
         metrics/<image>/{mask_metrics.csv,width_metrics.csv}
+        metrics/<image>/supervision/cid<id>/* (training artifacts)
         """
         import os, json, random
         import numpy as np, pandas as pd
-        from helpers import metrics
+        import metrics
 
         if not getattr(self, "image_names", []):
             print("[global-metrics] no images loaded"); return
@@ -1386,7 +1388,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         orig_n = self.n
 
         try:
-            # -------- Phase A: global calibration --------
+            # -------- Phase A: global calibration (no manual precompute needed) --------
             for t, i in enumerate(idxs_sample, 1):
                 self.n = i
                 self.change_image()
@@ -1406,6 +1408,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     if len(man_xy) < 2: 
                         continue
 
+                    # Uses your existing sweep that reconstructs payload from manual midline.
                     df_sweep = self.sweep_edges_with_executor(
                         cid, grid=edge_grid, max_workers=cpu_max_workers
                     )
@@ -1468,6 +1471,13 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 image_dir = os.path.join(self.save_folder, "metrics", base_name)
                 os.makedirs(image_dir, exist_ok=True)
 
+                # log the params used for this image
+                try:
+                    with open(os.path.join(image_dir, "edge_params_used.json"), "w") as f:
+                        json.dump(global_best_edge, f, indent=2)
+                except Exception as e:
+                    print(f"[apply] could not write edge_params_used.json: {e}")
+
                 ann = self.annotation.get("annotations", {}) or {}
                 atomic  = ann.get("atomic_cracks", {}) or {}
                 if not atomic:
@@ -1502,6 +1512,12 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 except Exception as e:
                     print(f"[apply] mask/width stage failed: {e}")
 
+                # 4) export training supervision (manual GT widths from mask + auto-best artifacts)
+                try:
+                    self.export_training_supervision_for_image(cache_key=metrics._auto_cache_key(self))
+                except Exception as e:
+                    print(f"[apply] supervision export failed: {e}")
+
             self.summarize_dataset_metrics()
             print("[global-metrics] ✅ finished")
 
@@ -1510,79 +1526,12 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             self.change_image()
 
 
-    def _build_combined_auto_masks_same_indices(self, cache_key=None):
-        """
-        Build *AUTO* combined masks that mirror manual combined_cracks membership.
-        The union is over the *best auto variant* masks of each member atomic crack.
-
-        Saves per-image:
-        metrics/<image>/combined/combined_<cid>_auto.png
-        metrics/<image>/combined/combined_<cid>_manual.png
-        metrics/<image>/combined/combined_metrics.csv
-        """
-        import os, cv2, numpy as np, pandas as pd
-        from helpers import metrics
-
-        base_name = os.path.splitext(os.path.basename(self.name))[0]
-        image_dir = os.path.join(self.save_folder, "metrics", base_name)
-        out_dir   = os.path.join(image_dir, "combined")
-        os.makedirs(out_dir, exist_ok=True)
-
-        ann = self.annotation.get("annotations", {}) or {}
-        atomic   = ann.get("atomic_cracks", {}) or {}
-        combined = ann.get("combined_cracks", {}) or {}
-        if not combined:
-            return
-
-        H, W = self.original_image.shape[:2]
-        rows = []
-        cache_key = cache_key or metrics._auto_cache_key(self)
-
-        for cmb_id, cmb in sorted(combined.items(), key=lambda kv: int(kv[0])):
-            members = cmb.get("members", []) or []
-            if not members:
-                continue
-
-            m_manual = metrics._reconstruct_full_mask(cmb, H, W)
-
-            m_auto = np.zeros((H, W), np.uint8)
-            for mid in members:
-                crack = atomic.get(mid)
-                if not crack:
-                    continue
-                pack = crack.get("variants", {}).get("auto", {}).get(cache_key)
-                if not pack:
-                    continue
-                bid = pack.get("best_variant_id")
-                if bid is None:
-                    continue
-                best = pack["variants"].get(f"v{bid}", {})
-                mm = metrics._reconstruct_full_mask(best, H, W)
-                if mm is not None:
-                    m_auto |= (mm > 0).astype(np.uint8)
-
-            cv2.imwrite(os.path.join(out_dir, f"combined_{cmb_id}_manual.png"),
-                        (m_manual>0).astype(np.uint8)*255)
-            cv2.imwrite(os.path.join(out_dir, f"combined_{cmb_id}_auto.png"),
-                        (m_auto>0).astype(np.uint8)*255)
-
-            row = {"image": base_name, "combined_id": cmb_id}
-            if getattr(self, "current_mask", None) is not None:
-                row["iou_manual_vs_gt"] = metrics.mask_iou(m_manual, self.current_mask)
-                row["iou_auto_vs_gt"]   = metrics.mask_iou(m_auto,   self.current_mask)
-            rows.append(row)
-
-        if rows:
-            pd.DataFrame(rows).to_csv(os.path.join(out_dir, "combined_metrics.csv"), index=False)
-            print(f"[combined] wrote → {os.path.join(out_dir, 'combined_metrics.csv')}")
-
-
     def run_metrics_on_current_image_quick(
         self,
         edge_grid=None,            # if None → default grid below
         g_variants=None,           # if None → defaults inside generate_auto_variants_for_manual_parallel
         cpu_max_workers=8,
-        do_edge_calibrate=True     # True → sweep manual cracks in THIS image to pick best single edge param set
+        do_edge_calibrate=True     # True → sweep THIS image to pick best single edge-param tuple
     ):
         """
         FAST iteration for the *current* image:
@@ -1592,11 +1541,12 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         - Run RS3 auto variants per manual crack with that fixed tuple.
         - Build combined AUTO masks using the exact same members as manual combined cracks.
         - Compute mask IoU + width diffs for the image.
+        - Export training supervision (manual GT widths from mask + auto-best artifacts).
 
         Returns: {"image": <name>, "best_edge": {...}}.
         """
-        import os, numpy as np, pandas as pd
-        from helpers import metrics
+        import os, json, numpy as np, pandas as pd
+        import metrics
 
         if getattr(self, "original_image", None) is None:
             print("[quick] no image loaded"); 
@@ -1651,6 +1601,14 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     "l":  int(row["param_l"]),
                     "p":  int(row["param_p"]),
                 }
+
+        # persist params used for this image
+        try:
+            with open(os.path.join(image_dir, "edge_params_used.json"), "w") as f:
+                json.dump(best_edge, f, indent=2)
+        except Exception as e:
+            print(f"[quick] could not write edge_params_used.json: {e}")
+
         print(f"[quick] using edge params: {best_edge}")
 
         # --- RS3 auto variants with fixed best_edge
@@ -1676,31 +1634,327 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         except Exception as e:
             print(f"[quick] combined auto-mask build failed: {e}")
 
-        # --- final per-image metrics
+        # --- final per-image IoU/width metrics
         try:
             self.compute_mask_and_width_metrics_for_image(display=False)
         except Exception as e:
             print(f"[quick] mask/width stage failed: {e}")
 
+        # --- export supervision (manual GT widths + auto-best artifacts)
+        try:
+            self.export_training_supervision_for_image(cache_key=metrics._auto_cache_key(self))
+        except Exception as e:
+            print(f"[quick] supervision export failed: {e}")
+
         print("[quick] ✅ done")
         return {"image": base_name, "best_edge": best_edge}
+
+
+    def _build_combined_auto_masks_same_indices(self, cache_key=None):
+        """
+        Build *AUTO* combined masks that mirror manual combined_cracks membership.
+        The union is over the *best auto variant* masks of each member atomic crack.
+
+        Saves per-image:
+        metrics/<image>/combined/combined_<cid>_auto.png
+        metrics/<image>/combined/combined_<cid>_manual.png
+        metrics/<image>/combined/combined_metrics.csv
+        """
+        import os, cv2, numpy as np, pandas as pd
+        import metrics
+
+        base_name = os.path.splitext(os.path.basename(self.name))[0]
+        image_dir = os.path.join(self.save_folder, "metrics", base_name)
+        out_dir   = os.path.join(image_dir, "combined")
+        os.makedirs(out_dir, exist_ok=True)
+
+        ann = self.annotation.get("annotations", {}) or {}
+        atomic   = ann.get("atomic_cracks", {}) or {}
+        combined = ann.get("combined_cracks", {}) or {}
+        if not combined:
+            return
+
+        H, W = self.original_image.shape[:2]
+        rows = []
+        cache_key = cache_key or metrics._auto_cache_key(self)
+
+        for cmb_id, cmb in combined.items():
+            members = cmb.get("members", []) or []
+            if not members:
+                continue
+
+            m_manual = metrics._reconstruct_full_mask(cmb, H, W)
+
+            m_auto = np.zeros((H, W), np.uint8)
+            for mid in members:
+                crack = atomic.get(mid)
+                if not crack:
+                    continue
+                pack = crack.get("variants", {}).get("auto", {}).get(cache_key)
+                if not pack:
+                    continue
+                bid = pack.get("best_variant_id")
+                if bid is None:
+                    continue
+                best = pack["variants"].get(f"v{bid}", {})
+                mm = metrics._reconstruct_full_mask(best, H, W)
+                if mm is not None:
+                    m_auto |= (mm > 0).astype(np.uint8)
+
+            cv2.imwrite(os.path.join(out_dir, f"combined_{cmb_id}_manual.png"),
+                        (m_manual>0).astype(np.uint8)*255)
+            cv2.imwrite(os.path.join(out_dir, f"combined_{cmb_id}_auto.png"),
+                        (m_auto>0).astype(np.uint8)*255)
+
+            row = {"image": base_name, "combined_id": cmb_id}
+            if getattr(self, "current_mask", None) is not None:
+                row["iou_manual_vs_gt"] = metrics.mask_iou(m_manual, self.current_mask)
+                row["iou_auto_vs_gt"]   = metrics.mask_iou(m_auto,   self.current_mask)
+            rows.append(row)
+
+        if rows:
+            pd.DataFrame(rows).to_csv(os.path.join(out_dir, "combined_metrics.csv"), index=False)
+            print(f"[combined] wrote → {os.path.join(out_dir, 'combined_metrics.csv')}")
+
+
+    def export_training_supervision_for_image(self, cache_key=None, normal_half_span=32.0, step=0.5):
+        """
+        Export per-crack supervision artifacts for training/analysis.
+
+        For each *manual* atomic crack:
+        - manual_midline.csv
+        - manual_mask.png (single-crack GT mask)
+        - manual_gt_width_samples.csv (widths from GT mask along manual midline normals)
+        - auto_best_midline.csv        (if best variant exists)
+        - auto_best_normals_edge1.csv, auto_best_normals_edge2.csv (if present)
+        - auto_best_params.json
+        - auto_best_width_samples.csv  (if both auto edges present)
+
+        All files saved under: metrics/<image>/supervision/cid<id>/
+        """
+        import os, json
+        import numpy as np
+        import pandas as pd
+        import cv2
+        import metrics
+
+        def _ensure_dir(p):
+            os.makedirs(p, exist_ok=True); return p
+
+        def _resample_polyline(xy, step=1.0):
+            xy = np.asarray(xy, float)
+            if len(xy) < 2: return xy
+            d = np.sqrt(((xy[1:] - xy[:-1])**2).sum(1))
+            s = np.concatenate([[0.0], np.cumsum(d)])
+            L = s[-1]
+            if L <= 1e-6: return xy
+            n = max(2, int(np.ceil(L/step))+1)
+            s_new = np.linspace(0, L, n)
+            # linear interpolate
+            x = np.interp(s_new, s, xy[:,0])
+            y = np.interp(s_new, s, xy[:,1])
+            return np.column_stack([x,y])
+
+        def _bilinear_sample(img01, pts_xy):
+            # img01: HxW float {0,1}; pts_xy: Nx2 (x,y) floats
+            H, W = img01.shape
+            x = pts_xy[:,0].clip(0, W-1)
+            y = pts_xy[:,1].clip(0, H-1)
+            x0 = np.floor(x).astype(int); x1 = np.minimum(x0+1, W-1)
+            y0 = np.floor(y).astype(int); y1 = np.minimum(y0+1, H-1)
+            fx = x - x0; fy = y - y0
+            Ia = img01[y0, x0]
+            Ib = img01[y0, x1]
+            Ic = img01[y1, x0]
+            Id = img01[y1, x1]
+            return (Ia*(1-fx)*(1-fy) + Ib*fx*(1-fy) + Ic*(1-fx)*fy + Id*fx*fy)
+
+        def _edges_from_mask_along_normals(mid_xy, mask_bin, half_span=32.0, ds=0.5):
+            # Returns DataFrame with per-sample mid/edge coords + width (px).
+            xy = _resample_polyline(mid_xy, step=1.0)
+            if len(xy) < 2: return pd.DataFrame()
+            # tangents
+            v = np.gradient(xy, axis=0)
+            nrm = np.stack([-v[:,1], v[:,0]], axis=1)
+            nrm_len = np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-9
+            n = nrm / nrm_len
+
+            ts = np.arange(-half_span, half_span+1e-6, ds)  # sample offsets
+            rows = []
+            for i, p in enumerate(xy):
+                line = p[None,:] + ts[:,None]*n[i:i+1,:]     # (T,2)
+                vals = _bilinear_sample(mask_bin.astype(float), line)
+                # pick leftmost ≥0.5 and rightmost ≥0.5 indices
+                on = np.where(vals >= 0.5)[0]
+                if len(on) == 0:
+                    rows.append([i, p[0], p[1], np.nan, np.nan, np.nan, np.nan, np.nan])
+                    continue
+                il, ir = on[0], on[-1]
+                xl, yl = line[il]
+                xr, yr = line[ir]
+                width = np.hypot(xr - xl, yr - yl)
+                rows.append([i, p[0], p[1], xl, yl, xr, yr, width])
+
+            return pd.DataFrame(rows, columns=[
+                "sample_idx","mid_x","mid_y","edgeL_x","edgeL_y","edgeR_x","edgeR_y","width_px"
+            ])
+
+        if getattr(self, "current_mask", None) is None:
+            print("[supervision] no GT mask loaded for this image"); 
+            return
+
+        base_name = os.path.splitext(os.path.basename(self.name))[0]
+        image_dir = os.path.join(self.save_folder, "metrics", base_name)
+        sup_root  = _ensure_dir(os.path.join(image_dir, "supervision"))
+
+        H, W = self.original_image.shape[:2]
+        mask_bin = (self.current_mask > 0).astype(np.uint8)
+
+        ann = self.annotation.get("annotations", {}) or {}
+        atomic = ann.get("atomic_cracks", {}) or {}
+        cache_key = cache_key or metrics._auto_cache_key(self)
+
+        for cid, crack in atomic.items():
+            src = (crack.get("source") or "").lower()
+            if src.startswith("auto") or src == "combined":
+                continue
+
+            man_xy = metrics._finite_xy(crack.get("midline", []))
+            if len(man_xy) < 2:
+                continue
+
+            # paths
+            out_dir = _ensure_dir(os.path.join(sup_root, f"cid{cid}"))
+
+            # ---- Manual GT: midline + single-crack mask + width samples from mask
+            pd.DataFrame(man_xy, columns=["x","y"]).to_csv(
+                os.path.join(out_dir, "manual_midline.csv"), index=False
+            )
+
+            m_manual = metrics._reconstruct_full_mask(crack, H, W)
+            cv2.imwrite(os.path.join(out_dir, "manual_mask.png"),
+                        (m_manual>0).astype(np.uint8)*255)
+
+            try:
+                df_gt = _edges_from_mask_along_normals(
+                    mid_xy=man_xy, mask_bin=mask_bin, half_span=normal_half_span, ds=step
+                )
+                if not df_gt.empty:
+                    df_gt.to_csv(os.path.join(out_dir, "manual_gt_width_samples.csv"), index=False)
+            except Exception as e:
+                print(f"[supervision] GT widths failed for cid={cid}: {e}")
+
+            # ---- Auto best variant artifacts (if exist)
+            pack = crack.get("variants", {}).get("auto", {}).get(cache_key)
+            if pack:
+                bid = pack.get("best_variant_id")
+                if bid is not None:
+                    best = pack["variants"].get(f"v{bid}", {})
+
+                    # midline
+                    auto_xy = np.asarray(best.get("midline", []), dtype=float)
+                    if auto_xy.size >= 4:
+                        pd.DataFrame(auto_xy, columns=["x","y"]).to_csv(
+                            os.path.join(out_dir, "auto_best_midline.csv"), index=False
+                        )
+
+                    # params
+                    params = best.get("params", {})
+                    try:
+                        with open(os.path.join(out_dir, "auto_best_params.json"), "w") as f:
+                            json.dump(params, f, indent=2)
+                    except Exception as e:
+                        print(f"[supervision] write params failed for cid={cid}: {e}")
+
+                    # normals/edge points (if edge worker provided them)
+                    ne = best.get("normal_edge_points_full") or best.get("normal_edge_points")
+                    if isinstance(ne, dict):
+                        e1 = np.asarray(ne.get("edge1", []), float)
+                        e2 = np.asarray(ne.get("edge2", []), float)
+                        if e1.size >= 4:
+                            pd.DataFrame(e1, columns=["x","y"]).to_csv(
+                                os.path.join(out_dir, "auto_best_normals_edge1.csv"), index=False
+                            )
+                        if e2.size >= 4:
+                            pd.DataFrame(e2, columns=["x","y"]).to_csv(
+                                os.path.join(out_dir, "auto_best_normals_edge2.csv"), index=False
+                            )
+                        # If both edges present and aligned by index, dump per-sample widths
+                        try:
+                            if e1.size >= 4 and e2.size >= 4:
+                                n = min(len(e1), len(e2))
+                                w = np.hypot(e1[:n,0]-e2[:n,0], e1[:n,1]-e2[:n,1])
+                                df_auto_w = pd.DataFrame({
+                                    "idx": np.arange(n),
+                                    "edge1_x": e1[:n,0], "edge1_y": e1[:n,1],
+                                    "edge2_x": e2[:n,0], "edge2_y": e2[:n,1],
+                                    "width_px": w
+                                })
+                                df_auto_w.to_csv(os.path.join(out_dir, "auto_best_width_samples.csv"), index=False)
+                        except Exception as e:
+                            print(f"[supervision] auto width export failed for cid={cid}: {e}")
 
 
     def run_midline_and_mask_metrics(self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True):
         """
         DEPRECATED wrapper kept for UI/back-compat.
-        Delegates to run_metrics_on_current_image_quick() with equivalent behavior.
+        Delegates to run_metrics_on_current_image_quick(), then writes midline_metrics.csv
+        (manual vs *best auto*) using cached best-variant results.
         """
-        # Map old flags → new quick-runner knobs
+        import os, numpy as np, pandas as pd
+        import metrics
+
+        # 1) run new quick pipeline
         _ = self.run_metrics_on_current_image_quick(
-            edge_grid=None,                 # use its default; or pass your old grid here if you prefer
-            g_variants=None,                # keep RS3 defaults
+            edge_grid=None,
+            g_variants=None,
             cpu_max_workers=8,
             do_edge_calibrate=bool(do_param_sweep)
         )
-        # If you still need midline-vs-best-auto CSVs, you can add a tiny post-step here to
-        # compute and write them, but most folks ended up reading the per-variant CSV + images.
 
+        # 2) re-materialize midline_metrics.csv (legacy expectation)
+        base_name = os.path.splitext(os.path.basename(self.name))[0]
+        image_dir = os.path.join(self.save_folder, "metrics", base_name)
+        ann = self.annotation.get("annotations", {}) or {}
+        atomic = ann.get("atomic_cracks", {}) or {}
+
+        rows = []
+        cache_key = metrics._auto_cache_key(self)
+        for cid, crack in atomic.items():
+            if (crack_id is not None) and (cid != str(crack_id)):
+                continue
+            src = (crack.get("source") or "").lower()
+            if src.startswith("auto") or src == "combined":
+                continue
+
+            man_xy = metrics._finite_xy(crack.get("midline", []))
+            if len(man_xy) < 2:
+                continue
+
+            pack = crack.get("variants", {}).get("auto", {}).get(cache_key)
+            if not pack:
+                continue
+            bid = pack.get("best_variant_id")
+            if bid is None:
+                continue
+            best = pack["variants"].get(f"v{bid}", {})
+            auto_xy = metrics._finite_xy(best.get("midline", []))
+            if len(auto_xy) < 2:
+                continue
+
+            mm = metrics.compute_midline_metrics(auto_xy, man_xy, tau=tau_px)
+            mm.update({"image": base_name, "crack_id": cid, "best_variant_id": bid})
+            rows.append(mm)
+
+        if rows:
+            os.makedirs(image_dir, exist_ok=True)
+            pd.DataFrame(rows).to_csv(os.path.join(image_dir, "midline_metrics.csv"), index=False)
+
+        if display:
+            try:
+                self.compute_mask_and_width_metrics_for_image(display=True)
+            except Exception as e:
+                print(f"[metrics] mask/width stage failed: {e}")
     
     
     
