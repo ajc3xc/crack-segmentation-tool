@@ -1895,11 +1895,27 @@ class CrackUtils:
             self.pts_crop = [np.array([pt[0]-xmin, pt[1]-ymin]) for pt in self.pts]
 
             # Sanity check: make sure all shifted points are in bounds
-            img_h, img_w = self.image_crop.shape[:2]
+            '''img_h, img_w = self.image_crop.shape[:2]
             for pt in self.pts_crop:
                 if not (0 <= pt[0] < img_w and 0 <= pt[1] < img_h):
                     print(f"Endpoint {pt} not in bbox-cropped image ({img_w},{img_h}), skipping this segment.")
-                    return
+                    return'''
+            # --- Relax endpoint bound check with small tolerance ---
+            img_h, img_w = self.image_crop.shape[:2]
+
+            # --- relaxed endpoint check with tolerance + clamping ---
+            tol = 1e-2
+            for i, pt in enumerate(self.pts_crop):
+                x, y = pt
+                if not (-tol <= x <= img_w - 1 + tol and -tol <= y <= img_h - 1 + tol):
+                    print(f"[WARN] Endpoint {pt} slightly outside crop ({img_w},{img_h}) → clamping instead of skipping.")
+                    x = np.clip(x, 0, img_w - 1e-3)
+                    y = np.clip(y, 0, img_h - 1e-3)
+                    self.pts_crop[i] = np.array([x, y], dtype=float)
+            # no early return here — never skip segment due to tiny overshoot
+
+
+
 
             # Downsample as before
             black_crack = [0 if self.crack_color_box.currentText() =='Bright crack' else 1 ][0]
