@@ -1616,14 +1616,15 @@ class CrackUtils:
         update_controls_visibility()
             
         def on_done():
+            # --- gracefully handle unfinished polylines ---
             if annot.polyline_mode and annot._is_drawing:
                 if not confirm_discard():
                     return
                 annot.set_mode_polyline(False)
 
+            # --- check all points are inside boxes ---
             ok, bad = all_points_in_boxes()
             if not ok:
-                # Format the bad points as a readable string
                 bad_str = "\n".join([f"({x:.1f}, {y:.1f})" for (x, y) in bad])
                 QMessageBox.warning(
                     dlg,
@@ -1632,33 +1633,17 @@ class CrackUtils:
                 )
                 return
 
-            # Validate midlines are fully inside one bounding box
+            # --- validate each midline lies fully within one valid region ---
             for (i1, i2), poly in annot.midlines.items():
                 if i1 == i2:
                     continue
-
                 try:
                     sx, sy = annot.points[i1]
                     ex, ey = annot.points[i2]
                 except Exception:
                     continue
 
-                '''def point_box(x, y):
-                    for bi, (xmin, ymin, xmax, ymax) in enumerate(boxes):
-                        if xmin <= x <= xmax and ymin <= y <= ymax:
-                            return bi
-                    return None
-
-                b1 = point_box(float(sx), float(sy))
-                b2 = point_box(float(ex), float(ey))
-
-                if b1 is None or b2 is None or b1 != b2:
-                    QMessageBox.warning(dlg, "Invalid midline",
-                        "A manual midline crosses or spans multiple boxes. Please fix before continuing.")
-                    return'''
-                    
-                    
-                # --- Enhanced "shared-edge / overlap" rule (fixed) ---
+                # --- Enhanced shared-edge / overlap rule (fixed) ---
                 def boxes_containing(x, y, tol=0.5):
                     hits = []
                     for i, (xmin, ymin, xmax, ymax) in enumerate(boxes):
@@ -1668,7 +1653,6 @@ class CrackUtils:
 
                 sx, sy = float(sx), float(sy)
                 ex, ey = float(ex), float(ey)
-
                 S = set(boxes_containing(sx, sy))
                 E = set(boxes_containing(ex, ey))
 
@@ -1676,14 +1660,14 @@ class CrackUtils:
                     QMessageBox.warning(dlg, "Invalid midline", "One or both endpoints are outside all boxes.")
                     return
 
-                # 1) If both endpoints share any box, use that box.
-                effective_region = None  # (xmin, ymin, xmax, ymax)
+                # 1️⃣ use shared box if possible
+                effective_region = None
                 shared = S & E
                 if shared:
                     bidx = next(iter(shared))
                     effective_region = boxes[bidx]
                 else:
-                    # 2) Otherwise, if their boxes overlap, use the intersection rectangle.
+                    # 2️⃣ otherwise use overlap of their boxes
                     for i in S:
                         for j in E:
                             xmin1, ymin1, xmax1, ymax1 = boxes[i]
@@ -1700,55 +1684,117 @@ class CrackUtils:
                     QMessageBox.warning(
                         dlg,
                         "Invalid midline",
-                        "A manual midline spans boxes that don’t share a region. Please fix before continuing.",
+                        "A manual midline spans boxes that don't share a region. Please fix before continuing."
                     )
                     return
 
                 xmin, ymin, xmax, ymax = effective_region
-
-                # 3) Ensure the entire polyline stays inside the effective region.
                 for (x, y) in poly:
                     x, y = float(x), float(y)
                     if not (xmin <= x <= xmax and ymin <= y <= ymax):
                         QMessageBox.warning(
-                            dlg, "Invalid midline",
+                            dlg,
+                            "Invalid midline",
                             "A manual midline has points outside its valid box/overlap region. Please fix before continuing."
                         )
                         return
-                    
 
-                '''xmin, ymin, xmax, ymax = boxes[b1]
-                for (x, y) in poly:
-                    if not (xmin <= float(x) <= xmax and ymin <= float(y) <= ymax):
-                        QMessageBox.warning(dlg, "Invalid midline",
-                            "A manual midline has points outside its box. Please fix before continuing.")
-                        return'''
-
+            # --- collect points and connections ---
             self.user_points = annot.points
             self.user_connections = [c for c in annot.connections if c not in annot.readonly_connections]
-
             self.endpoint_pairs = [
-                (self.user_points[i1], self.user_points[i2])
-                for (i1, i2) in self.user_connections
+                (self.user_points[i1], self.user_points[i2]) for (i1, i2) in self.user_connections
             ]
 
+            # --- finalize and pull actual midlines before the dialog closes ---
+            if hasattr(annot, "finalize_drawing_if_needed"):
+                annot.finalize_drawing_if_needed()
+            self.manual_midlines_tmp = dict(getattr(annot, "midlines", {}))
+
+            # --- build manual endpoint list for later reference ---
             self.manual_endpoint_pairs = []
             for (i1, i2), poly in annot.midlines.items():
-                if i1 != i2:  # Final check to prevent self-midline
+                if i1 != i2:
                     self.manual_endpoint_pairs.append((self.user_points[i1], self.user_points[i2]))
 
-            self.manual_midlines_tmp = {
-                f"{i1}_{i2}": [[float(x), float(y)] for (x, y) in poly]
-                for (i1, i2), poly in annot.midlines.items() if i1 != i2
-            }
+            # --- debug print to confirm ---
+            print(f"[DEBUG] manual_midlines_tmp contents: {len(self.manual_midlines_tmp)} midlines")
+            for k, v in self.manual_midlines_tmp.items():
+                print(f"   key={k}, len={len(v)})")
 
-            if hasattr(self, "current_crack_id"):
+            # --- persist per-crack user data into annotation skeleton if current id exists ---
+            '''if hasattr(self, "current_crack_id"):
                 crack_id_str = str(self.current_crack_id)
-                crack_entry = self.annotation.get("annotations", {}).get("atomic_cracks", {}).setdefault(crack_id_str, {})
+                crack_entry = (
+                    self.annotation.get("annotations", {})
+                    .get("atomic_cracks", {})
+                    .setdefault(crack_id_str, {})
+                )
                 crack_entry["user_points"] = list(self.user_points)
-                crack_entry["user_connections"] = list(self.user_connections)
+                crack_entry["user_connections"] = list(self.user_connections)'''
+            
+            # --- persist manual midlines into annotation for saving ---
+            '''if not hasattr(self, "annotation"):
+                self.annotation = {"annotations": {"atomic_cracks": {}}}
+            ann = self.annotation.setdefault("annotations", {})
+            ac = ann.setdefault("atomic_cracks", {})
+
+            # one entry per manual midline
+            for k, poly in self.manual_midlines_tmp.items():
+                try:
+                    if isinstance(k, tuple):
+                        i1, i2 = k
+                    elif isinstance(k, str) and "_" in k:
+                        i1, i2 = map(int, k.split("_"))
+                    else:
+                        continue
+
+                    cid = str(len(ac))
+                    ac[cid] = {
+                        "src": "manual_poly",
+                        "midline": [[float(x), float(y)] for (x, y) in poly],
+                        "user_points": [list(self.user_points[i1]), list(self.user_points[i2])],
+                        "user_connections": [[0, 1]],
+                        "mask_compact": [],
+                    }
+                except Exception as e:
+                    print(f"[DEBUG persist_manual_midline] failed for key={k}: {e}")'''
+            for k, poly in self.manual_midlines_tmp.items():
+                try:
+                    if isinstance(k, tuple):
+                        i1, i2 = k
+                    elif isinstance(k, str) and "_" in k:
+                        i1, i2 = map(int, k.split("_"))
+                    else:
+                        continue
+
+                    cid = str(len(ac))
+
+                    # --- compute synthetic bounding box of midline ---
+                    if poly:
+                        xs = [p[0] for p in poly]
+                        ys = [p[1] for p in poly]
+                        x, y = min(xs), min(ys)
+                        w, h = max(xs) - x, max(ys) - y
+                        mask_bbox = [float(x), float(y), float(w), float(h)]
+                    else:
+                        mask_bbox = [0.0, 0.0, 1.0, 1.0]
+
+                    ac[cid] = {
+                        "src": "manual_poly",
+                        "midline": [[float(x), float(y)] for (x, y) in poly],
+                        "user_points": [list(self.user_points[i1]), list(self.user_points[i2])],
+                        "user_connections": [[0, 1]],
+                        "mask_compact": [],
+                        "mask_bbox": mask_bbox,  # <── new line added
+                    }
+
+                except Exception as e:
+                    print(f"[DEBUG persist_manual_midline] failed for key={k}: {e}")
+
 
             dlg.accept()
+
 
         btn_done.clicked.connect(on_done)
         btn_cancel.clicked.connect(lambda: dlg.reject())
@@ -1766,6 +1812,86 @@ class CrackUtils:
         self.update_image_crop_button.setStyleSheet("background-color: lightblue")
         self._debug_print_atomic_cracks("select_end_points_manmidlines AFTER ACCEPT")
         self.all_selected_points = list(self.user_points)
+        
+        # === NEW: persist manual selections into annotations (runs before select_end_points_manmidlines returns) ===
+        try:
+            ann = self.annotation.setdefault("annotations", {})
+            atomic = ann.setdefault("atomic_cracks", {})
+
+            # helper: next gap-free numeric id as string (0,1,2,...)
+            def _next_id_str():
+                used = sorted(int(k) for k in atomic.keys() if str(k).isdigit())
+                nxt = 0
+                for k in used:
+                    if k == nxt:
+                        nxt += 1
+                    elif k > nxt:
+                        break
+                return str(nxt)
+
+            # helper: normalize a pair (for simple dup checks)
+            def _norm_pair(pA, pB, r=6):
+                return (round(float(pA[0]), r), round(float(pA[1]), r),
+                        round(float(pB[0]), r), round(float(pB[1]), r))
+
+            # build an existing-pairs set
+            existing_pairs = set()
+            for crack in atomic.values():
+                up = crack.get("user_points") or []
+                if len(up) == 2:
+                    existing_pairs.add(_norm_pair(up[0], up[1]))
+                    existing_pairs.add(_norm_pair(up[1], up[0]))
+
+            # 1) commit each drawn manual polyline as its own atomic crack
+            mm = (getattr(self, "manual_midlines_tmp", {}) or {})
+            for k, poly in mm.items():
+                try:
+                    i1, i2 = map(int, k.split("_"))
+                except Exception:
+                    continue
+                if not (0 <= i1 < len(self.user_points) and 0 <= i2 < len(self.user_points)):
+                    continue
+
+                p1 = self.user_points[i1]
+                p2 = self.user_points[i2]
+                if _norm_pair(p1, p2) in existing_pairs:
+                    continue
+
+                cid = _next_id_str()
+                atomic[cid] = {
+                    "source": "manual_poly",
+                    "user_points": [[float(p1[0]), float(p1[1])],
+                                    [float(p2[0]), float(p2[1])]],
+                    "user_connections": [[0, 1]],
+                    "midline": [[float(x), float(y)] for (x, y) in poly],
+                    # no mask/edges yet; pipeline can add those later
+                }
+                existing_pairs.add(_norm_pair(p1, p2))
+
+            # 2) optionally persist raw connections (without polylines) as "manual"
+            for (i1, i2) in (getattr(self, "user_connections", []) or []):
+                if not (0 <= i1 < len(self.user_points) and 0 <= i2 < len(self.user_points)):
+                    continue
+                p1 = self.user_points[i1]
+                p2 = self.user_points[i2]
+                if _norm_pair(p1, p2) in existing_pairs:
+                    continue
+
+                cid = _next_id_str()
+                atomic[cid] = {
+                    "source": "manual",
+                    "user_points": [[float(p1[0]), float(p1[1])],
+                                    [float(p2[0]), float(p2[1])]],
+                    "user_connections": [[0, 1]],
+                    "midline": [],  # pure connection; no polyline
+                }
+                existing_pairs.add(_norm_pair(p1, p2))
+
+            print("[SAVE] Manual selections committed to in-memory annotations.")
+        except Exception as e:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.critical(self.MainWindow, "Persist error", f"Failed to commit manual selections:\n{e}")
+            print(f"[SAVE] Persist error: {e}")
 
     def update_image_crop(self):
         try:

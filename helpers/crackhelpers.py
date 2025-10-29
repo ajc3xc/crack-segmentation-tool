@@ -76,7 +76,7 @@ def build_combined_mask(atomic_cracks: dict, H: int, W: int) -> np.ndarray:
     return out
 
 
-def filter_valid_cracks(atomic_cracks: dict, H: int, W: int) -> dict:
+'''def filter_valid_cracks(atomic_cracks: dict, H: int, W: int) -> dict:
     """
     Keep only cracks that have a mask (crop or legacy) OR geodesic edges OR a real midline.
     Ensures no bloated legacy 'mask' if compact info already exists.
@@ -97,8 +97,59 @@ def filter_valid_cracks(atomic_cracks: dict, H: int, W: int) -> dict:
             if has_crop and "mask" in crack:
                 del crack["mask"]
             kept[cid] = crack
-    return kept
+    return kept'''
+    
+def filter_valid_cracks(cracks, H, W):
+    """
+    Keep cracks that have:
+      - a compact mask, OR
+      - at least one geodesic/normal edge set, OR
+      - a manual midline with >=2 points, OR
+      - two user_points + connection (manual endpoint pair).
+    """
+    valid = {}
+    kept_manual = kept_masked = kept_edges = 0
 
+    for cid, crack in (cracks or {}).items():
+        if not isinstance(crack, dict):
+            continue
+
+        # 1) compact mask
+        mask = crack.get("mask_compact")
+        if isinstance(mask, list) and len(mask) > 0:
+            valid[cid] = crack
+            kept_masked += 1
+            continue
+
+        # 2) geodesic edges
+        ge = crack.get("geodesic_edges")
+        if isinstance(ge, dict) and any(len(v) >= 2 for v in ge.values()):
+            valid[cid] = crack
+            kept_edges += 1
+            continue
+        if isinstance(ge, (list, tuple)) and any(isinstance(e, (list, tuple)) and len(e) >= 2 for e in ge):
+            valid[cid] = crack
+            kept_edges += 1
+            continue
+
+        # 3) manual midline with >=2 pts
+        ml = crack.get("midline") or []
+        if isinstance(ml, (list, tuple)) and len(ml) >= 2:
+            valid[cid] = crack
+            kept_manual += 1
+            continue
+
+        # 4) fallback: 2 user_points + 1 connection
+        ups = crack.get("user_points") or []
+        conns = crack.get("user_connections") or []
+        if len(ups) == 2 and len(conns) >= 1:
+            valid[cid] = crack
+            kept_manual += 1
+            continue
+
+    print(f"[DEBUG filter_valid_cracks] total_in={len(cracks)} "
+          f"→ kept={len(valid)} (manual={kept_manual}, mask={kept_masked}, edges={kept_edges})")
+    return valid
 
 # ---------- Rendering helpers (numpy in / numpy out) ----------
 
