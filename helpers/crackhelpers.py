@@ -134,14 +134,14 @@ def numpy_to_qimage_and_scaled_pixmap(img_uint8: np.ndarray, target_w: int, targ
 
 # ---------- JSON write helper ----------
 
-def safe_json_dump(obj: dict, path: str) -> None:
+'''def safe_json_dump(obj: dict, path: str) -> None:
     """
     Atomic write: dump JSON to tmp then move.
     """
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".json")
     with os.fdopen(fd, "w") as f:
         json.dump(obj, f)
-    shutil.move(tmp, path)
+    shutil.move(tmp, path)'''
 
 # base_app.py
 import os, cv2, numpy as np

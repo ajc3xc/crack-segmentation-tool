@@ -7,8 +7,8 @@ import os
 import matplotlib.pyplot as plt
 
 from cracktools.segmentation import edge_masks, edges_tracking
+from helpers import metrics
 from helpers.metrics import *
-
 
 # ---------------------------------------------------------------------
 # Helper: mini diagnostic plot for failed or weird edge cases
@@ -201,10 +201,10 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 auto_midline = 0.5 * (track_e1[:n] + track_e2[:n])
 
             # --- Compute metrics ---
-            metrics = metrics.compute_midline_metrics(auto_midline, man_midline, tau=3.0)
+            metrics = compute_midline_metrics(auto_midline, man_midline, tau=3.0)
             print(f"[edge_worker] metrics computed: chamfer_mean={metrics.get('chamfer_mean', np.nan):.3f}")
 
-            metrics = metrics.compute_midline_metrics(auto_midline, man_midline, tau=3.0)
+            metrics = compute_midline_metrics(auto_midline, man_midline, tau=3.0)
             print(f"[edge_worker] metrics computed: chamfer_mean={metrics.get('chamfer_mean', np.nan):.3f}")
         except Exception as e:
             print(f"[edge_worker] ⚠️ midline metrics failed: {e}")
