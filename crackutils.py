@@ -22,6 +22,8 @@ from helpers.endpoint_annotator import CrackAnnotator
 min_crop_size = 16
 ROUNDING_DIGITS=6
 
+from helpers.metrics import *
+
 #This class is basically is all of the utility / save and load or unimportant functions that aren't directly accessible via a ui button or aren't important
 #
 class CrackUtils:
@@ -781,7 +783,7 @@ class CrackUtils:
         self.annotation = {}
 
         if os.path.exists(self.ann_name):
-            with open(self.ann_name) as f:
+            with open(self.ann_name, encoding="utf-8") as f:
                 self.annotation = json.load(f)
             ann = self.annotation.get('annotations', {}) or {}
             atomic = ann.get("atomic_cracks", {}) or {}
