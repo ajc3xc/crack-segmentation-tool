@@ -57,7 +57,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         self.combine_segments_button.clicked.connect(self.combine_segments)
         #self.calculate_metrics_button.clicked.connect(lambda: self.run_mask_metrics(display=True))
         self.calculate_metrics_button.clicked.connect(lambda: self.run_midline_and_mask_metrics(tau_px=3.0, crack_id=None))
-        self.batch_metrics_button.clicked.connect(lambda: self.batch_run_metrics_global)
+        self.batch_metrics_button.clicked.connect(lambda: self.batch_run_metrics_global(sample_frac=.2,max_images=10,seed=0,cpu_max_workers=8,apply_to_sample=False,edges_only=False))
         
         
         self.draw_box_button.clicked.connect(self.draw_box)
@@ -1673,19 +1673,22 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
     #####################################
     # New functions
     #####################################
-    def batch_run_metrics_global(
-        self,
-        sample_frac=0.20,          # % of images to use for global calibration
-        max_images=10,             # cap for calibration phase
-        seed=0,
-        edge_grid=None,            # if None → sensible default below
-        g_variants=None,           # if None → defaults inside generate_auto_variants_for_manual_parallel
-        cpu_max_workers=8,
-        apply_to_sample=False      # False → apply global params to ALL images; True → sampled set only
-    ):
+    '''def batch_run_metrics_global(
+            self,
+            sample_frac=0.20,          # % of images to use for global calibration
+            max_images=10,             # cap for calibration phase
+            seed=0,
+            edge_grid=None,            # if None → sensible default below
+            g_variants=None,           # if None → defaults inside generate_auto_variants_for_manual_parallel
+            cpu_max_workers=8,
+            apply_to_sample=False,     # False → apply global params to ALL images; True → sampled set only
+            edges_only=False,          # True → skip RS3; parallelize edge masks/tracking per crack
+            edge_parallel_workers=None # override worker count for the edge-only branch
+        ):
         """
         GLOBAL METRICS DRIVER (one image in memory at a time, no manual edge precompute needed).
         Includes timing for calibration + per-image application.
+        If `edges_only=True`, skips RS3 variants and runs parallel edge tracking per crack.
         """
         import os, json, random, time
         import numpy as np, pandas as pd
@@ -1801,8 +1804,11 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 os.makedirs(image_dir, exist_ok=True)
 
                 # log edge params used
-                with open(os.path.join(image_dir, "edge_params_used.json"), "w") as f:
-                    json.dump(global_best_edge, f, indent=2)
+                try:
+                    with open(os.path.join(image_dir, "edge_params_used.json"), "w") as f:
+                        json.dump(global_best_edge, f, indent=2)
+                except Exception as e:
+                    print(f"[apply] could not write edge_params_used.json: {e}")
 
                 ann = self.annotation.get("annotations", {}) or {}
                 atomic = ann.get("atomic_cracks", {}) or {}
@@ -1810,60 +1816,109 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     continue
 
                 # --- Subphase timers ---
-                t_auto_start = time.perf_counter()
-                for cid, crack in atomic.items():
-                    src = (crack.get("source") or "").lower()
-                    if src.startswith("auto") or src == "combined":
-                        continue
-                    man_xy = metrics._finite_xy(crack.get("midline", []))
-                    if len(man_xy) < 2:
-                        continue
+                t_auto = 0.0
+                t_edge_parallel = 0.0
 
-                    _ = self.generate_auto_variants_for_manual_parallel(
-                        crack_id=cid,
-                        g_variants=g_variants,
-                        edge_params_fixed=global_best_edge,
-                        cpu_max_workers=cpu_max_workers,
-                        force_recompute=True,
-                    )
-                t_auto = time.perf_counter() - t_auto_start
+                if edges_only:
+                    # ----------------- EDGE-ONLY FAST PATH -----------------
+                    t_edge_parallel_start = time.perf_counter()
+                    try:
+                        _ = self.run_edge_tracking_parallel(
+                            crack_ids=list(atomic.keys()),
+                            cpu_max_workers=edge_parallel_workers,
+                            edge_params_fixed=global_best_edge,
+                        )
+                    except Exception as e:
+                        print(f"[apply] edge-only parallel run failed: {e}")
+                    t_edge_parallel = time.perf_counter() - t_edge_parallel_start
 
-                # --- Build combined masks ---
-                t_mask_start = time.perf_counter()
-                try:
-                    self._build_combined_auto_masks_same_indices(cache_key=metrics._auto_cache_key(self))
-                except Exception as e:
-                    print(f"[apply] combined auto-mask build failed: {e}")
-                t_mask = time.perf_counter() - t_mask_start
+                    # No RS3 / no auto masks build; just compute manual mask/width metrics
+                    t_mask = 0.0  # we skip combined auto-mask build entirely
 
-                # --- Compute mask/width metrics ---
-                t_metrics_start = time.perf_counter()
-                try:
-                    self.compute_mask_and_width_metrics_for_image(display=False)
-                except Exception as e:
-                    print(f"[apply] mask/width stage failed: {e}")
-                t_metrics = time.perf_counter() - t_metrics_start
+                    t_metrics_start = time.perf_counter()
+                    try:
+                        # width/IoU for manual view; auto columns will be absent
+                        self.compute_mask_and_width_metrics_for_image(display=False)
+                    except Exception as e:
+                        print(f"[apply] mask/width stage failed: {e}")
+                    t_metrics = time.perf_counter() - t_metrics_start
 
-                # --- Export training supervision ---
-                t_sup_start = time.perf_counter()
-                try:
-                    self.export_training_supervision_for_image(cache_key=metrics._auto_cache_key(self))
-                except Exception as e:
-                    print(f"[apply] supervision export failed: {e}")
-                t_sup = time.perf_counter() - t_sup_start
+                    t_sup = 0.0  # supervision export relies on auto artifacts; skip in edge-only mode
 
+                else:
+                    # --------------- FULL RS3 VARIANTS PATH ----------------
+                    t_auto_start = time.perf_counter()
+                    for cid, crack in atomic.items():
+                        src = (crack.get("source") or "").lower()
+                        if src.startswith("auto") or src == "combined":
+                            continue
+                        man_xy = metrics._finite_xy(crack.get("midline", []))
+                        if len(man_xy) < 2:
+                            continue
+
+                        _ = self.generate_auto_variants_for_manual_parallel(
+                            crack_id=cid,
+                            g_variants=g_variants,
+                            edge_params_fixed=global_best_edge,
+                            cpu_max_workers=cpu_max_workers,
+                            force_recompute=True,
+                        )
+                    t_auto = time.perf_counter() - t_auto_start
+
+                    # --- Build combined masks ---
+                    t_mask_start = time.perf_counter()
+                    try:
+                        self._build_combined_auto_masks_same_indices(cache_key=metrics._auto_cache_key(self))
+                    except Exception as e:
+                        print(f"[apply] combined auto-mask build failed: {e}")
+                    t_mask = time.perf_counter() - t_mask_start
+
+                    # --- Compute mask/width metrics ---
+                    t_metrics_start = time.perf_counter()
+                    try:
+                        self.compute_mask_and_width_metrics_for_image(display=False)
+                    except Exception as e:
+                        print(f"[apply] mask/width stage failed: {e}")
+                    t_metrics = time.perf_counter() - t_metrics_start
+
+                    # --- Export training supervision ---
+                    t_sup_start = time.perf_counter()
+                    try:
+                        self.export_training_supervision_for_image(cache_key=metrics._auto_cache_key(self))
+                    except Exception as e:
+                        print(f"[apply] supervision export failed: {e}")
+                    t_sup = time.perf_counter() - t_sup_start
+
+                # --- per-image log row ---
                 t_img_total = time.perf_counter() - t_img_start
-                per_image_times.append({
+                row = {
                     "image": base_name,
-                    "auto_variants_s": round(t_auto, 2),
-                    "mask_build_s": round(t_mask, 2),
-                    "metrics_s": round(t_metrics, 2),
-                    "supervision_s": round(t_sup, 2),
-                    "total_image_s": round(t_img_total, 2),
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                })
-                print(f"[apply] ⏱ total {t_img_total:.2f}s (auto={t_auto:.2f}s, mask={t_mask:.2f}s, "
-                    f"metrics={t_metrics:.2f}s, sup={t_sup:.2f}s)")
+                    "total_image_s": round(t_img_total, 2),
+                    "metrics_s": round(t_metrics, 2),
+                }
+
+                if edges_only:
+                    row.update({
+                        "edge_parallel_s": round(t_edge_parallel, 2),
+                        "mask_build_s": 0.0,
+                        "auto_variants_s": 0.0,
+                        "supervision_s": 0.0,
+                        "mode": "edges_only"
+                    })
+                    print(f"[apply] ⏱ total {t_img_total:.2f}s (edge_parallel={t_edge_parallel:.2f}s, "
+                        f"metrics={t_metrics:.2f}s)")
+                else:
+                    row.update({
+                        "auto_variants_s": round(t_auto, 2),
+                        "mask_build_s": round(t_mask, 2),
+                        "supervision_s": round(t_sup, 2),
+                        "mode": "full"
+                    })
+                    print(f"[apply] ⏱ total {t_img_total:.2f}s (auto={t_auto:.2f}s, mask={t_mask:.2f}s, "
+                        f"metrics={t_metrics:.2f}s, sup={t_sup:.2f}s)")
+
+                per_image_times.append(row)
 
             # --- summary per-image CSV ---
             if per_image_times:
@@ -1899,10 +1954,379 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             f.write(f"Phase A (calibration): {tA:.2f} s\n")
             f.write(f"Phase B (application): {tB:.2f} s\n")
             f.write(f"Total runtime: {t_total:.2f} s\n")
+            f.write(f"Mode: {'edges_only' if edges_only else 'full'}\n")
             f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
-        print(f"[global-metrics] ⏱ total runtime = {t_total:.2f}s "
-            f"(A={tA:.2f}s, B={tB:.2f}s)")
+        print(f"[global-metrics] ⏱ total runtime = {t_total:.2f}s (A={tA:.2f}s, B={tB:.2f}s)")'''
+
+    def batch_run_metrics_global(
+            self,
+            sample_frac=0.20,          # % of images to use for global calibration
+            max_images=10,             # cap for calibration phase
+            seed=0,
+            edge_grid=None,            # if None → sensible default below
+            g_variants=None,           # if None → defaults inside generate_auto_variants_for_manual_parallel
+            cpu_max_workers=8,
+            apply_to_sample=False,     # False → apply global params to ALL images; True → sampled set only
+            edges_only=False,          # True → skip RS3; parallelize edge masks/tracking per crack
+            edge_parallel_workers=None # override worker count for the edge-only branch
+        ):
+        """
+        GLOBAL METRICS DRIVER (one image in memory at a time, no manual edge precompute needed).
+        - Prefilters calibration pool to images that actually have manual midlines (≥2 pts).
+        - Includes timing for calibration + per-image application.
+        - If `edges_only=True`, skips RS3 variants and runs parallel edge tracking per crack.
+
+        Writes:
+        metrics/_summary/global_edge_sweep_all.csv
+        metrics/_summary/global_best_edge_params.json
+        metrics/_summary/global_per_image_runtime.csv
+        metrics/_summary/global_runtime.csv
+        metrics/_summary/global_runtime_summary.txt
+        """
+        import os, json, random, time
+        import numpy as np, pandas as pd
+
+        if not getattr(self, "image_names", []):
+            print("[global-metrics] no images loaded")
+            return
+
+        # -------------- build an eligible calibration pool (must have manual midlines) --------------
+        def _ann_path_for_image(idx: int) -> str:
+            """Derive the expected annotation JSON path for image index `idx`."""
+            import os
+            img_path  = self.image_names[idx]
+            base_name = os.path.splitext(os.path.basename(img_path))[0]
+            # Your code stores annotations directly under `self.save_folder` as `<base>.json`
+            # e.g. .../Outputs/1.json (as seen in your logs)
+            return os.path.join(self.save_folder, f"{base_name}.json")
+
+        def _json_has_manual_midlines(ann_path: str) -> bool:
+            """Lightweight on-disk check: does JSON have any manual midline with ≥2 points?"""
+            import json
+            try:
+                with open(ann_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except UnicodeDecodeError:
+                # Fallback for any legacy files accidentally saved in cp1252, etc.
+                with open(ann_path, "r", encoding="cp1252", errors="strict") as f:
+                    data = json.load(f)
+            except Exception:
+                return False
+
+            ann    = (data or {}).get("annotations", {}) or {}
+            atomic = ann.get("atomic_cracks", {}) or {}
+            if not atomic:
+                return False
+
+            for crack in atomic.values():
+                src = (crack.get("source") or "").lower()
+                if src.startswith("auto") or src == "combined":
+                    continue
+                mid = crack.get("midline", [])
+                # Enough points to be meaningful
+                if isinstance(mid, list) and len(mid) >= 2:
+                    return True
+            return False
+
+        def _has_manual_midlines_for_index(idx: int) -> bool:
+            """
+            Fast path:
+            (1) if per-image JSON doesn't exist → False (skip)
+            (2) if JSON exists and has manual ≥2-pt midlines → True (no change_image() cost)
+            (3) else, do a final in-memory check via change_image() (robustness)
+            """
+            import contextlib
+            ann_path = _ann_path_for_image(idx)
+            if not os.path.exists(ann_path):
+                return False
+            if _json_has_manual_midlines(ann_path):
+                return True
+
+            # Fallback: load
+
+
+        rng = random.Random(seed)
+        all_idxs = list(range(len(self.image_names)))
+        eligible_idxs = [i for i in all_idxs if _has_manual_midlines_for_index(i)]
+        if not eligible_idxs:
+            print("[global-metrics] ❌ No images with manual midlines found — aborting.")
+            # try to restore a reasonable state
+            if all_idxs:
+                self.n = 0
+                self.change_image()
+            return
+
+        rng.shuffle(eligible_idxs)
+        k = max(1, int(len(eligible_idxs) * float(sample_frac)))
+        idxs_sample = eligible_idxs[:min(k, max_images)]
+        print(f"[global-metrics] calibration on {len(idxs_sample)} images "
+            f"(from {len(eligible_idxs)} eligible / {len(all_idxs)} total)")
+
+        if edge_grid is None:
+            edge_grid = {
+                "window_half_size": [35, 45, 55],
+                "mu": [0, 5],
+                "l": [2, 5],
+                "p": [6, 14],
+            }
+
+        sweep_rows = []
+        orig_n = self.n
+        summ_dir = os.path.join(self.save_folder, "metrics", "_summary")
+        os.makedirs(summ_dir, exist_ok=True)
+        return
+
+        # --- PHASE A: Calibration timer ---
+        tA_start = time.perf_counter()
+        try:
+            for t, i in enumerate(idxs_sample, 1):
+                self.n = i
+                self.change_image()
+                base_name = os.path.splitext(os.path.basename(self.name))[0]
+                print(f"\n====== [calibrate] {t}/{len(idxs_sample)}: {base_name} ======")
+
+                ann = self.annotation.get("annotations", {}) or {}
+                atomic = ann.get("atomic_cracks", {}) or {}
+                if not atomic:
+                    print("  [skip] no atomic cracks in annotation")
+                    continue
+
+                n_manual = 0
+                for cid, crack in atomic.items():
+                    src = (crack.get("source") or "").lower()
+                    if src.startswith("auto") or src == "combined":
+                        continue
+                    man_xy = metrics._finite_xy(crack.get("midline", []))
+                    if len(man_xy) < 2:
+                        continue
+                    n_manual += 1
+
+                    df_sweep = self.sweep_edges_with_executor(
+                        cid, grid=edge_grid, max_workers=cpu_max_workers
+                    )
+                    if df_sweep is None or df_sweep.empty:
+                        print(f"    [cid {cid}] sweep returned empty (no payload or worker error)")
+                        continue
+
+                    df_sweep = df_sweep.copy()
+                    df_sweep["image"]    = base_name
+                    df_sweep["crack_id"] = cid
+                    sweep_rows.append(df_sweep)
+
+                if n_manual == 0:
+                    print("  [skip] no manual midlines ≥2 points in this image")
+
+            # Either choose best from sweeps or fall back
+            if sweep_rows:
+                df_all = pd.concat(sweep_rows, ignore_index=True)
+                df_all.to_csv(os.path.join(summ_dir, "global_edge_sweep_all.csv"), index=False)
+
+                param_cols = ["param_window_half_size", "param_mu", "param_l", "param_p"]
+                keep_cols  = param_cols + ["chamfer_mean", "hausdorff", "coverage"]
+                sub = df_all[[c for c in keep_cols if c in df_all.columns]].dropna()
+
+                g = (sub.groupby(param_cols, as_index=False)
+                        .agg({"chamfer_mean":"mean","hausdorff":"mean","coverage":"mean"}))
+                g = g.sort_values(["chamfer_mean","hausdorff","coverage"],
+                                ascending=[True, True, False])
+
+                best = g.iloc[0].to_dict()
+                global_best_edge = {
+                    "window_half_size": int(best["param_window_half_size"]),
+                    "mu": float(best["param_mu"]),
+                    "l":  int(best["param_l"]),
+                    "p":  int(best["param_p"]),
+                }
+            else:
+                print("[global-metrics] ⚠ no sweep rows gathered — using default edge params")
+                global_best_edge = {"window_half_size": 45, "mu": 0.0, "l": 5, "p": 14}
+
+            with open(os.path.join(summ_dir, "global_best_edge_params.json"), "w") as f:
+                json.dump(global_best_edge, f, indent=2)
+            print(f"[global-metrics] ✅ global best edge params = {global_best_edge}")
+
+        finally:
+            self.n = orig_n
+            self.change_image()
+
+        tA = time.perf_counter() - tA_start
+        print(f"[global-metrics] ⏱ calibration phase took {tA:.2f} s")
+
+        # --- PHASE B: Apply timer ---
+        tB_start = time.perf_counter()
+
+        print("[global-metrics] applying global params to images…")
+        apply_idxs = idxs_sample if apply_to_sample else list(range(len(self.image_names)))
+
+        per_image_times = []
+
+        try:
+            for t, i in enumerate(apply_idxs, 1):
+                t_img_start = time.perf_counter()
+
+                self.n = i
+                self.change_image()
+                base_name = os.path.splitext(os.path.basename(self.name))[0]
+                print(f"\n====== [apply] {t}/{len(apply_idxs)}: {base_name} ======")
+                image_dir = os.path.join(self.save_folder, "metrics", base_name)
+                os.makedirs(image_dir, exist_ok=True)
+
+                # log edge params used
+                try:
+                    with open(os.path.join(image_dir, "edge_params_used.json"), "w") as f:
+                        json.dump(global_best_edge, f, indent=2)
+                except Exception as e:
+                    print(f"[apply] could not write edge_params_used.json: {e}")
+
+                ann = self.annotation.get("annotations", {}) or {}
+                atomic = ann.get("atomic_cracks", {}) or {}
+                if not atomic:
+                    continue
+
+                # --- Subphase timers ---
+                t_auto = 0.0
+                t_edge_parallel = 0.0
+
+                if edges_only:
+                    # ----------------- EDGE-ONLY FAST PATH -----------------
+                    t_edge_parallel_start = time.perf_counter()
+                    try:
+                        _ = self.run_edge_tracking_parallel(
+                            crack_ids=list(atomic.keys()),
+                            cpu_max_workers=edge_parallel_workers,
+                            edge_params_fixed=global_best_edge,
+                        )
+                    except Exception as e:
+                        print(f"[apply] edge-only parallel run failed: {e}")
+                    t_edge_parallel = time.perf_counter() - t_edge_parallel_start
+
+                    # No RS3 / no auto masks build; just compute manual mask/width metrics
+                    t_mask = 0.0  # we skip combined auto-mask build entirely
+
+                    t_metrics_start = time.perf_counter()
+                    try:
+                        # width/IoU for manual view; auto columns will be absent
+                        self.compute_mask_and_width_metrics_for_image(display=False)
+                    except Exception as e:
+                        print(f"[apply] mask/width stage failed: {e}")
+                    t_metrics = time.perf_counter() - t_metrics_start
+
+                    t_sup = 0.0  # supervision export relies on auto artifacts; skip in edge-only mode
+
+                else:
+                    # --------------- FULL RS3 VARIANTS PATH ----------------
+                    t_auto_start = time.perf_counter()
+                    for cid, crack in atomic.items():
+                        src = (crack.get("source") or "").lower()
+                        if src.startswith("auto") or src == "combined":
+                            continue
+                        man_xy = metrics._finite_xy(crack.get("midline", []))
+                        if len(man_xy) < 2:
+                            continue
+
+                        _ = self.generate_auto_variants_for_manual_parallel(
+                            crack_id=cid,
+                            g_variants=g_variants,
+                            edge_params_fixed=global_best_edge,
+                            cpu_max_workers=cpu_max_workers,
+                            force_recompute=True,
+                        )
+                    t_auto = time.perf_counter() - t_auto_start
+
+                    # --- Build combined masks ---
+                    t_mask_start = time.perf_counter()
+                    try:
+                        self._build_combined_auto_masks_same_indices(cache_key=metrics._auto_cache_key(self))
+                    except Exception as e:
+                        print(f"[apply] combined auto-mask build failed: {e}")
+                    t_mask = time.perf_counter() - t_mask_start
+
+                    # --- Compute mask/width metrics ---
+                    t_metrics_start = time.perf_counter()
+                    try:
+                        self.compute_mask_and_width_metrics_for_image(display=False)
+                    except Exception as e:
+                        print(f"[apply] mask/width stage failed: {e}")
+                    t_metrics = time.perf_counter() - t_metrics_start
+
+                    # --- Export training supervision ---
+                    t_sup_start = time.perf_counter()
+                    try:
+                        self.export_training_supervision_for_image(cache_key=metrics._auto_cache_key(self))
+                    except Exception as e:
+                        print(f"[apply] supervision export failed: {e}")
+                    t_sup = time.perf_counter() - t_sup_start
+
+                # --- per-image log row ---
+                t_img_total = time.perf_counter() - t_img_start
+                row = {
+                    "image": base_name,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "total_image_s": round(t_img_total, 2),
+                    "metrics_s": round(t_metrics, 2),
+                }
+
+                if edges_only:
+                    row.update({
+                        "edge_parallel_s": round(t_edge_parallel, 2),
+                        "mask_build_s": 0.0,
+                        "auto_variants_s": 0.0,
+                        "supervision_s": 0.0,
+                        "mode": "edges_only"
+                    })
+                    print(f"[apply] ⏱ total {t_img_total:.2f}s (edge_parallel={t_edge_parallel:.2f}s, "
+                        f"metrics={t_metrics:.2f}s)")
+                else:
+                    row.update({
+                        "auto_variants_s": round(t_auto, 2),
+                        "mask_build_s": round(t_mask, 2),
+                        "supervision_s": round(t_sup, 2),
+                        "mode": "full"
+                    })
+                    print(f"[apply] ⏱ total {t_img_total:.2f}s (auto={t_auto:.2f}s, mask={t_mask:.2f}s, "
+                        f"metrics={t_metrics:.2f}s, sup={t_sup:.2f}s)")
+
+                per_image_times.append(row)
+
+            # --- summary per-image CSV ---
+            if per_image_times:
+                df_times = pd.DataFrame(per_image_times)
+                df_times.to_csv(os.path.join(summ_dir, "global_per_image_runtime.csv"), index=False)
+                print(f"[global-metrics] 🕒 per-image runtimes logged ({len(per_image_times)} images)")
+
+            self.summarize_dataset_metrics()
+            print("[global-metrics] ✅ finished")
+
+            # --- aggregate all runtime logs from single-image runs ---
+            all_logs = []
+            for img in self.image_names:
+                base = os.path.splitext(os.path.basename(img))[0]
+                log_path = os.path.join(self.save_folder, "metrics", base, "runtime_log.csv")
+                if os.path.exists(log_path):
+                    df = pd.read_csv(log_path)
+                    df["image"] = base
+                    all_logs.append(df)
+            if all_logs:
+                df_all = pd.concat(all_logs, ignore_index=True)
+                df_all.to_csv(os.path.join(summ_dir, "global_runtime.csv"), index=False)
+                print(f"[global-metrics] 🕒 global_runtime.csv written ({len(all_logs)} images)")
+
+        finally:
+            self.n = orig_n
+            self.change_image()
+
+        tB = time.perf_counter() - tB_start
+        t_total = tA + tB
+        # --- final global runtime summary ---
+        with open(os.path.join(summ_dir, "global_runtime_summary.txt"), "w") as f:
+            f.write(f"Phase A (calibration): {tA:.2f} s\n")
+            f.write(f"Phase B (application): {tB:.2f} s\n")
+            f.write(f"Total runtime: {t_total:.2f} s\n")
+            f.write(f"Mode: {'edges_only' if edges_only else 'full'}\n")
+            f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+        print(f"[global-metrics] ⏱ total runtime = {t_total:.2f}s (A={tA:.2f}s, B={tB:.2f}s)")
 
 
     def run_metrics_on_current_image_quick(
@@ -2386,6 +2810,119 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         print(f"[metrics] ⏱ total runtime = {elapsed_total:.2f} sec "
             f"(auto={t_phase_auto:.2f}s, midline={t_phase_midline:.2f}s, mask/width={t_phase_maskwidth:.2f}s)")
+        
+    def run_edge_tracking_parallel(self, crack_ids=None, cpu_max_workers=None, edge_params_fixed=None, color_channel=None):
+        """
+        Parallelizes ONLY edge-mask + edge-tracking (no RS3 midline generation).
+        Each worker computes edge normals + widths for one manual crack.
+
+        Returns:
+            list of dicts with metrics, written also as edge_parallel_results.csv
+        """
+        import os, time
+        import numpy as np
+        import pandas as pd
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        from edge_workers import edge_param_worker
+
+        t0 = time.perf_counter()
+        ann = self.annotation.get("annotations", {}) or {}
+        atomic = ann.get("atomic_cracks", {}) or {}
+        if not atomic:
+            print("[edge-parallel] ❌ no cracks to process")
+            return []
+
+        if crack_ids is None:
+            crack_ids = list(atomic.keys())
+        if color_channel is None:
+            color_channel = (0 if self.edge_track_color_box.currentText() == "R"
+                            else 1 if self.edge_track_color_box.currentText() == "B"
+                            else 2)
+        if edge_params_fixed is None:
+            edge_params_fixed = {"window_half_size": 45, "mu": 0, "l": 5, "p": 14}
+        if cpu_max_workers is None:
+            cpu_max_workers = min(os.cpu_count() or 8, 12)
+
+        base_name = os.path.splitext(os.path.basename(self.name))[0]
+        metrics_dir = os.path.join(self.save_folder, "metrics", base_name)
+        os.makedirs(metrics_dir, exist_ok=True)
+
+        # ---- prepare payloads (safe, no mutation of self during parallel phase)
+        tasks = []
+        for cid in crack_ids:
+            crack = atomic.get(cid)
+            if not crack:
+                continue
+            src = (crack.get("source") or "").lower()
+            if src.startswith("auto") or src == "combined":
+                continue
+
+            bb = crack.get("mask_bbox")
+            if not bb or len(bb) != 4:
+                continue
+            x, y, w, h = map(int, bb)
+            xmin, ymin, xmax, ymax = x, y, x + w, y + h
+
+            man_xy_g = metrics._finite_xy(crack.get("midline", []))
+            if len(man_xy_g) < 2:
+                continue
+
+            self.active_bbox = [xmin, ymin, xmax, ymax]
+            self.pts = [man_xy_g[0], man_xy_g[-1]]
+            try:
+                self.update_image_crop()
+            except Exception as e:
+                print(f"[edge-parallel] cid{cid} crop failed: {e}")
+                continue
+
+            gray = self.image_crop[:, :, color_channel].astype(np.float32)
+            pts_crop = getattr(self, "pts_crop", np.zeros((2, 2)))
+            base_payload = dict(
+                image_crop_gray=gray,
+                pts_crop=pts_crop,
+                manual_midline_global=man_xy_g,
+                auto_midline_global=None,
+                bbox=(x, y, w, h),
+                manual_normals_crop=None,
+                params=edge_params_fixed,
+            )
+            tasks.append((cid, base_payload))
+
+        if not tasks:
+            print("[edge-parallel] nothing to run")
+            return []
+
+        print(f"[edge-parallel] launching {len(tasks)} edge workers across {cpu_max_workers} CPUs…")
+
+        # ---- parallel run
+        results = []
+        with ProcessPoolExecutor(max_workers=cpu_max_workers) as ex:
+            futs = {ex.submit(edge_param_worker, payload): cid for cid, payload in tasks}
+            for f in as_completed(futs):
+                cid = futs[f]
+                try:
+                    ew = f.result()
+                    if ew and isinstance(ew, dict):
+                        ew["crack_id"] = cid
+                        results.append(ew)
+                        print(f"[edge-parallel] cid{cid} ✅")
+                    else:
+                        print(f"[edge-parallel] cid{cid} empty")
+                except Exception as e:
+                    print(f"[edge-parallel] cid{cid} ❌ {e}")
+
+        # ---- summarize and save
+        t_elapsed = time.perf_counter() - t0
+        if results:
+            df = pd.DataFrame(results)
+            df.to_csv(os.path.join(metrics_dir, "edge_parallel_results.csv"), index=False)
+            print(f"[edge-parallel] ✅ finished {len(results)} cracks in {t_elapsed:.2f}s "
+                f"({t_elapsed/len(results):.2f}s/crack avg)")
+        else:
+            print(f"[edge-parallel] ⚠ no successful results (elapsed {t_elapsed:.2f}s)")
+
+        return results
+    
     
     
     
