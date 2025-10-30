@@ -456,13 +456,13 @@ class CombineClearSegments(CrackUtils):
         else:
             self.change_image()
 
-    def auto_combine_segments(self):
-        """
+    """def auto_combine_segments(self):
+        '''
         Automatically combine atomic cracks that overlap or share endpoints.
         Reuses _build_combined_crack for consistency.
         If an atomic crack already belongs to a combined crack, it will extend that
         combined crack when new overlaps/branches are detected.
-        """
+        '''
         if not hasattr(self, "original_image") or self.original_image is None:
             print("⚠️ No image loaded — skipping auto_combine_segments.")
             return
@@ -544,6 +544,183 @@ class CombineClearSegments(CrackUtils):
                     print(f"Auto-created combined {new_id} from atomics {overlaps}")
 
         self.save_annotation()
+        self.change_image()"""
+        
+    def auto_combine_segments(self):
+        """
+        Automatically combine atomic cracks that overlap, connect, or are close in midline space.
+        Reuses _build_combined_crack for consistency.
+        If an atomic crack already belongs to a combined crack, it will extend that
+        combined crack when new overlaps/branches are detected.
+        """
+        import numpy as np
+        from scipy.spatial.distance import cdist
+
+        if not hasattr(self, "original_image") or self.original_image is None:
+            print("⚠️ No image loaded — skipping auto_combine_segments.")
+            return
+        if not hasattr(self, "annotation") or not self.annotation:
+            print("⚠️ No annotation loaded — skipping auto_combine_segments.")
+            return
+
+        ann = self.annotation.setdefault("annotations", {})
+        atomic = ann.setdefault("atomic_cracks", {})
+        combined = ann.setdefault("combined_cracks", {})
+
+        H, W = self.original_image.shape[:2]
+
+        # --- Helper: reconstruct full mask if present ---
+        def mask_from_crack(crack):
+            mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
+            if mc is not None and bb is not None:
+                crop = np.array(mc, dtype=np.uint8)
+                x, y, w, h = [int(v) for v in bb]
+                x2, y2 = min(x+w, W), min(y+h, H)
+                w_eff, h_eff = max(0, x2-x), max(0, y2-y)
+                if h_eff > 0 and w_eff > 0:
+                    crop = (crop > 0).astype(np.uint8)[:h_eff, :w_eff]
+                    m = np.zeros((H, W), dtype=np.uint8)
+                    m[y:y+h_eff, x:x+w_eff] = crop
+                    return m
+            full = np.array(crack.get("mask", []), dtype=np.uint8)
+            if full.size == H*W and full.shape == (H, W):
+                return (full > 0).astype(np.uint8)
+            return np.zeros((H, W), dtype=np.uint8)
+
+        # --- Overlap / connection / proximity test ---
+        def cracks_overlap_or_connect(crackA, crackB, px_thresh=10.0):
+            # mask overlap
+            mA = mask_from_crack(crackA)
+            mB = mask_from_crack(crackB)
+            if np.any(mA & mB):
+                print(f"[COMBINE_DBG] mask overlap between {crackA.get('id','?')} and {crackB.get('id','?')}")
+                return True
+
+            # shared user endpoints
+            upA = [tuple(pt) for pt in crackA.get("user_points", [])]
+            upB = [tuple(pt) for pt in crackB.get("user_points", [])]
+            if set(upA) & set(upB):
+                print(f"[COMBINE_DBG] shared endpoints between {crackA.get('id','?')} and {crackB.get('id','?')}")
+                return True
+
+            # --- NEW: midline proximity fallback ---
+            a = np.asarray(crackA.get("midline", []), float)
+            b = np.asarray(crackB.get("midline", []), float)
+            if a.size and b.size:
+                try:
+                    dmin = np.min(cdist(a, b))
+                    if np.isfinite(dmin) and dmin < px_thresh:
+                        print(f"[COMBINE_DBG] midline proximity {dmin:.2f}px between {crackA.get('id','?')} and {crackB.get('id','?')}")
+                        return True
+                except Exception:
+                    pass
+            return False
+
+        # --- Build list of entries ---
+        seen_atomic = set(m for cmb in combined.values() for m in cmb.get("members", []))
+        entries = [("combined", cid) for cid in combined.keys()]
+        entries.extend(("atomic", aid) for aid in atomic.keys() if aid not in seen_atomic)
+
+        print(f"[COMBINE_DBG] starting auto_combine_segments with {len(atomic)} atomics")
+
+        # --- Check for attachments / new combines ---
+        for tpe, cid in list(entries):
+            if tpe != "atomic":
+                continue
+            crack = atomic[cid]
+            attached_to = None
+            for cmb_id, cmb in combined.items():
+                for m in cmb.get("members", []):
+                    if cracks_overlap_or_connect(crack, atomic.get(m, {})):
+                        attached_to = cmb_id
+                        break
+                if attached_to:
+                    break
+            if attached_to:
+                members = set(combined[attached_to]["members"])
+                members_clean = [m for m in members if str(m).isdigit()]
+                if not members_clean:
+                    continue
+                combined[attached_to] = self._build_combined_crack(sorted(members_clean, key=lambda s: int(s)))
+                print(f"[COMBINE_DBG] Extended combined {attached_to} with atomic {cid}")
+            else:
+                overlaps = [cid]
+                for tpe2, cid2 in entries:
+                    if tpe2 == "atomic" and cid2 != cid:
+                        if cracks_overlap_or_connect(crack, atomic[cid2]):
+                            overlaps.append(cid2)
+                if len(overlaps) > 1:
+                    new_id = str(max([int(k) for k in combined.keys() if k.isdigit()] or [-1]) + 1)
+                    combined[new_id] = self._build_combined_crack(sorted(overlaps, key=lambda s: int(s)))
+                    print(f"[COMBINE_DBG] Auto-created combined {new_id} from atomics {overlaps}")
+
+        self.save_annotation()
         self.change_image()
     
-  
+    def _combine_refresh_before_metrics(self):
+        """
+        Ensure combined cracks are up-to-date at the midline/normals level.
+        - Reloads current annotation JSON (so we operate on the right data)
+        - Runs auto_combine_segments() (uses _build_combined_crack)
+        - Rebuilds each combined from members to ensure consistency
+        """
+        import json, os
+        print("[COMBINE_DBG] === _combine_refresh_before_metrics START ===")
+
+        if not hasattr(self, "ann_name") or not self.ann_name:
+            print("[combine] No annotation path set; skipping combine refresh.")
+            return
+
+        # 🔸 Reload the actual annotation file to ensure we're not using stale memory
+        try:
+            if os.path.exists(self.ann_name):
+                with open(self.ann_name, "r", encoding="utf-8") as f:
+                    self.annotation = json.load(f)
+                print(f"[COMBINE_DBG] Reloaded annotation: {self.ann_name}")
+            else:
+                print(f"[combine] Annotation file not found: {self.ann_name}")
+                return
+        except Exception as e:
+            print(f"[combine] Failed to reload annotation JSON: {e}")
+            return
+
+        # 🔸 Run your proven auto_combine_segments() function
+        try:
+            print(f"[COMBINE_DBG] Starting auto_combine on {len(self.annotation.get('annotations', {}).get('atomic_cracks', {}))} atomics")
+            self.auto_combine_segments()
+        except Exception as e:
+            print(f"[combine] auto_combine_segments() failed: {e}")
+
+        # 🔸 Now refresh combined cracks directly from members
+        ann = self.annotation.setdefault("annotations", {})
+        atomic = ann.setdefault("atomic_cracks", {})
+        combined = ann.setdefault("combined_cracks", {})
+
+        changed = False
+        for cmb_id, cmb in list(combined.items()):
+            members = [m for m in cmb.get("members", []) if str(m) in atomic and str(m).isdigit()]
+            if not members:
+                del combined[cmb_id]
+                changed = True
+                print(f"[COMBINE_DBG] removed empty combined {cmb_id}")
+                continue
+
+            members_sorted = sorted(members, key=lambda s: int(s))
+            try:
+                combined[cmb_id] = self._build_combined_crack(members_sorted)
+                changed = True
+                print(f"[COMBINE_DBG] rebuilt combined {cmb_id} from members {members_sorted}")
+            except Exception as e:
+                print(f"[combine] rebuild failed for {cmb_id}: {e}")
+
+        print(f"[COMBINE_DBG] After combine: atomics={len(atomic)}, combined={len(combined)}")
+        for cid, cmb in combined.items():
+            print(f"[COMBINE_DBG]   combined {cid}: members={cmb.get('members')}")
+
+        if changed:
+            try:
+                self.save_annotation()
+            except Exception as e:
+                print(f"[combine] save_annotation failed: {e}")
+
+        print("[COMBINE_DBG] === _combine_refresh_before_metrics END ===")

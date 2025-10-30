@@ -417,7 +417,7 @@ def edges_tracking(
         if np.any(np.isinf(arr)):
             inf_ratio = np.mean(np.isinf(arr))
             print(f"[DEBUG seg] Infs detected in {name} ({inf_ratio*100:.2f}% of pixels)")
-        #print(f"[DEBUG seg] {name} stats: min={np.nanmin(arr):.3e}, max={np.nanmax(arr):.3e}")
+        print(f"[DEBUG seg] {name} stats: min={np.nanmin(arr):.3e}, max={np.nanmax(arr):.3e}")
 
     # --- geodesics ---
     track_e1 = _run_geodesic(metric1, seeds, tips, sides, dims)
