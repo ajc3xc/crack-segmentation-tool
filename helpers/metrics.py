@@ -1206,3 +1206,179 @@ def _normals_to_json(normals, xmin, ymin, ndigits=ROUNDING_DIGITS):
         return {"edge1": to_xy2([e1x, e1y]), "edge2": to_xy2([e2x, e2y])}
     except Exception:
         return {"edge1": [], "edge2": []}
+
+
+##########################################################
+# Helpers
+###########################################################
+# ======================== metrics.py (snapshot helpers) ========================
+import os, json, hashlib, math
+import numpy as np
+
+# --- small filesystem helpers -------------------------------------------------
+def _ensure_dir(p): os.makedirs(p, exist_ok=True); return p
+
+def metric_snapshot_root(save_folder, image_base):
+    """metrics/<image>/snapshot/"""
+    return _ensure_dir(os.path.join(save_folder, "metrics", image_base, "snapshot"))
+
+def metric_atomic_dir(save_folder, image_base):
+    """metrics/<image>/snapshot/atomic/"""
+    return _ensure_dir(os.path.join(metric_snapshot_root(save_folder, image_base), "atomic"))
+
+def metric_atomic_path_for(save_folder, image_base, crack_id):
+    return os.path.join(metric_atomic_dir(save_folder, image_base), f"cid{crack_id}_metrics.json")
+
+def metric_combined_path(save_folder, image_base):
+    return os.path.join(metric_snapshot_root(save_folder, image_base), "combined.json")
+
+def safe_read_json(path, default=None):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+def safe_write_json(path, payload):
+    _ensure_dir(os.path.dirname(path))
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+# --- snapshot assembly / persistence ------------------------------------------
+def snapshot_pick_crack_fields(cr):
+    """Keep only fields metrics care about (read-only in snapshot)."""
+    keep = {}
+    for k in ("source","midline","mask_bbox","geodesic_edges",
+              "normal_edge_points_full","normal_edge_points","mask_crop"):
+        if k in cr: keep[k] = cr[k]
+    # do NOT keep bulky 'variants' tree in authoring snapshot; we will store per-crack auto artifacts separately
+    return keep
+
+def snapshot_from_authoring(authoring_ann, cache_key=None):
+    """
+    Build an in-memory snapshot dict *without touching disk*.
+    You will later persist per-crack files with split_snapshot_to_files().
+    authoring_ann: {'atomic_cracks':{...}, 'combined_cracks':{...}}  (the .get('annotations', {}) block)
+    """
+    atomic_src   = (authoring_ann or {}).get("atomic_cracks", {}) or {}
+    combined_src = (authoring_ann or {}).get("combined_cracks", {}) or {}
+
+    atomic = { cid: snapshot_pick_crack_fields(cr) for cid, cr in atomic_src.items() }
+    combined = {}
+    for k, cmb in combined_src.items():
+        cc = {}
+        for fld in ("members","midline","mask_bbox","normal_edge_points_full","normal_edge_points"):
+            if fld in cmb: cc[fld] = cmb[fld]
+        # store optional 'auto' minimal fields, if present on authoring (not required)
+        if "auto" in cmb and isinstance(cmb["auto"], dict):
+            a = {}
+            for fld in ("midline","mask_bbox","normal_edge_points_full","normal_edge_points"):
+                if fld in cmb["auto"]: a[fld] = cmb["auto"][fld]
+            cc["auto"] = a
+        combined[k] = cc
+
+    # auto_best is not taken from authoring variants here; it’s populated later from per-crack files
+    return {"atomic_cracks": atomic, "combined_cracks": combined, "auto_best_atomic_cracks": {}}
+
+def split_snapshot_to_files(snapshot, save_folder, image_base, merge_if_exists=True):
+    """
+    Persist per-crack snapshot: one JSON per crack + one combined.json.
+    If merge_if_exists=True, keep previously computed fields (e.g., tracked edges, auto_best) already on disk.
+    """
+    atomic = snapshot.get("atomic_cracks", {}) or {}
+    for cid, cr in atomic.items():
+        p = metric_atomic_path_for(save_folder, image_base, cid)
+        if merge_if_exists:
+            old = safe_read_json(p, {})
+            # merge old computed stuff (e.g., autotrack, auto_best) into new minimal authoring view
+            for k in ("geodesic_edges","normal_edge_points_full","normal_edge_points",
+                      "mask_crop","auto_best"):
+                if k in old and k not in cr:
+                    cr[k] = old[k]
+        safe_write_json(p, cr)
+
+    # combined
+    cpath = metric_combined_path(save_folder, image_base)
+    cold  = safe_read_json(cpath, {}) if merge_if_exists else {}
+    cnew  = snapshot.get("combined_cracks", {}) or {}
+    # merge optional 'auto' sub if it already lived on disk
+    for k, v in (cold or {}).items():
+        if k in cnew and isinstance(v, dict) and "auto" in v and "auto" not in cnew[k]:
+            cnew[k]["auto"] = v["auto"]
+    safe_write_json(cpath, cnew)
+
+def load_snapshot_from_files(save_folder, image_base):
+    """Reassemble an in-memory snapshot dict by reading per-crack JSON + combined.json files."""
+    # atomic
+    adir = metric_atomic_dir(save_folder, image_base)
+    atomic = {}
+    try:
+        for fn in os.listdir(adir):
+            if not fn.endswith("_metrics.json") or not fn.startswith("cid"): continue
+            cid = fn[len("cid"):-len("_metrics.json")]
+            atomic[cid] = safe_read_json(os.path.join(adir, fn), {}) or {}
+    except Exception:
+        pass
+
+    # combined
+    combined = safe_read_json(metric_combined_path(save_folder, image_base), {}) or {}
+
+    # inject auto_best view (if per-crack 'auto_best' exists)
+    auto_best = {}
+    for cid, cr in atomic.items():
+        if isinstance(cr.get("auto_best"), dict):
+            auto_best[cid] = cr["auto_best"]
+
+    return {"atomic_cracks": atomic, "combined_cracks": combined, "auto_best_atomic_cracks": auto_best}
+
+def snapshot_fingerprint(snapshot):
+    j = json.dumps(snapshot or {}, sort_keys=True, separators=(",",":"))
+    return hashlib.sha1(j.encode("utf-8")).hexdigest()
+
+# --- auto-best helpers in per-crack files -------------------------------------
+def set_auto_variant_for_crack(save_folder, image_base, crack_id, variant_record, params=None, is_best=False):
+    """
+    Store one auto variant into the per-crack file; if is_best=True also update 'auto_best'.
+    variant_record must at least contain {"midline":[[x,y],...]} and may include
+    "normal_edge_points_full"/"normal_edge_points".
+    """
+    p = metric_atomic_path_for(save_folder, image_base, crack_id)
+    rec = safe_read_json(p, {}) or {}
+    # store whole variant list under 'auto_variants' list (optional)
+    av = rec.setdefault("auto_variants", [])
+    vstore = {"midline": variant_record.get("midline", [])}
+    for k in ("normal_edge_points_full","normal_edge_points","mask_bbox","params"):
+        if k in variant_record:
+            vstore[k] = variant_record[k]
+    if params and "params" not in vstore:
+        vstore["params"] = params
+    av.append(vstore)
+
+    if is_best:
+        rec["auto_best"] = vstore  # compact best copy
+
+    safe_write_json(p, rec)
+
+def set_tracked_edges_for_crack(save_folder, image_base, crack_id, edge_dict, mask_crop=None):
+    """
+    Save tracked edges/normals returned by your edge worker to the per-crack file.
+    edge_dict: may contain 'normal_edge_points_full' or 'normal_edge_points', 'geodesic_edges', etc.
+    """
+    p = metric_atomic_path_for(save_folder, image_base, crack_id)
+    rec = safe_read_json(p, {}) or {}
+    for k in ("normal_edge_points_full","normal_edge_points","geodesic_edges"):
+        if k in edge_dict:
+            rec[k] = edge_dict[k]
+    if mask_crop is not None:
+        rec["mask_crop"] = mask_crop
+    safe_write_json(p, rec)
+
+# --- minimal geometry utils (existing from your metrics) ----------------------
+# Expect these to already exist in your codebase:
+#   - _reconstruct_full_mask(obj, H, W)
+#   - mask_iou(m1, m2)
+#   - normals_from_mask_for_midline(midline_xy, mask, max_radius=50)
+#   - compute_midline_metrics(auto_xy, man_xy, tau)
+#   - compare_widths_for_cracks(ann_like, crack_mask, base_name, metrics_dir, display=False, tag=None)
+
+# For clarity: ann_like for compare_widths_for_cracks is {"atomic_cracks": {cid: crackdict, ...}}
