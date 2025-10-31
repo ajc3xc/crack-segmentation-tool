@@ -570,23 +570,40 @@ def _mask_midline_cache_key(mask_bin: np.ndarray, midline_xy: np.ndarray) -> str
     return (_sha1_ndarray(mask_bin.astype(np.uint8)), _sha1_ndarray(ml))
 
 def _plot_gt_normals(mask_bin, mid_xy, e1_xy, e2_xy, out_png, title):
+    """
+    Plot GT normals sparsely for visualization only.
+    (No effect on exported data.)
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+
     H, W = mask_bin.shape
     img = np.zeros((H, W, 3), np.uint8)
     img[mask_bin > 0] = (255, 255, 255)
 
     plt.figure(figsize=(8, 8))
     plt.imshow(img)
+
     if len(mid_xy) >= 2:
         plt.plot(mid_xy[:,0], mid_xy[:,1], 'k-', lw=3)
         plt.plot(mid_xy[:,0], mid_xy[:,1], 'w-', lw=1.5)
-    # draw normals as short segments
+
     n = min(len(e1_xy), len(e2_xy), len(mid_xy))
+    print(n)
     if n >= 2:
-        segs = np.stack([e1_xy[:n], e2_xy[:n]], axis=1)
+        # --- only subsample for drawing ---
+        stride = 100
+        e1_draw = e1_xy[::stride]
+        e2_draw = e2_xy[::stride]
+
+        segs = np.stack([e1_draw, e2_draw], axis=1)
         lc = LineCollection(segs, colors='C0', linewidths=1.5, alpha=0.85)
         plt.gca().add_collection(lc)
+
     plt.title(title)
-    plt.axis('equal'); plt.tight_layout()
+    plt.axis('equal')
+    plt.tight_layout()
     plt.savefig(out_png, dpi=200)
     plt.close()
 
@@ -1384,7 +1401,7 @@ def safe_json_dump(data, path, compact=True):
                 json.dump(d, f, ensure_ascii=False, indent=None, separators=(',', ':'))
             else:
                 # readable multi-line, smaller indent
-                json.dump(d, f, ensure_ascii=False, indent=1)
+                json.dump(d, f, ensure_ascii=False)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -1456,8 +1473,15 @@ def metric_atomic_dir(save_folder, image_base):
     """metrics/<image>/snapshot/atomic/"""
     return _ensure_dir(os.path.join(metric_snapshot_root(save_folder, image_base), "atomic"))
 
-def metric_atomic_path_for(save_folder, image_base, crack_id):
-    return os.path.join(metric_atomic_dir(save_folder, image_base), f"cid{crack_id}_metrics.json")
+'''def metric_atomic_path_for(save_folder, image_base, crack_id):
+    return os.path.join(metric_atomic_dir(save_folder, image_base), f"cid{crack_id}_metrics.json")'''
+    
+# -------------------- SNAPSHOT PATHS --------------------
+def metric_image_dir(save_folder, base_name):
+    return os.path.join(save_folder, "metrics", base_name)
+
+def metric_atomic_path_for(save_folder, base_name, crack_id):
+    return os.path.join(save_folder, "metrics", base_name, f"cid{crack_id}.json")
 
 def metric_combined_path(save_folder, image_base):
     return os.path.join(metric_snapshot_root(save_folder, image_base), "combined.json")
@@ -1469,10 +1493,12 @@ def safe_read_json(path, default=None):
     except Exception:
         return default
 
-def safe_write_json(path, payload):
-    _ensure_dir(os.path.dirname(path))
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+def safe_write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
 
 # --- snapshot assembly / persistence ------------------------------------------
 def snapshot_pick_crack_fields(cr):
@@ -1537,7 +1563,7 @@ def split_snapshot_to_files(snapshot, save_folder, image_base, merge_if_exists=T
             cnew[k]["auto"] = v["auto"]
     safe_write_json(cpath, cnew)
 
-def load_snapshot_from_files(save_folder, image_base):
+'''def load_snapshot_from_files(save_folder, image_base):
     """Reassemble an in-memory snapshot dict by reading per-crack JSON + combined.json files."""
     # atomic
     adir = metric_atomic_dir(save_folder, image_base)
@@ -1559,14 +1585,37 @@ def load_snapshot_from_files(save_folder, image_base):
         if isinstance(cr.get("auto_best"), dict):
             auto_best[cid] = cr["auto_best"]
 
-    return {"atomic_cracks": atomic, "combined_cracks": combined, "auto_best_atomic_cracks": auto_best}
+    return {"atomic_cracks": atomic, "combined_cracks": combined, "auto_best_atomic_cracks": auto_best}'''
+    
+def load_snapshot_from_files(save_folder, base_name):
+    """Load all cid*.json under metrics/<base> into a dict."""
+    root = metric_image_dir(save_folder, base_name)
+    out = {"atomic_cracks": {}, "combined_cracks": {}, "auto_best": {}}
+    if not os.path.isdir(root):
+        return out
+    for fn in os.listdir(root):
+        if not fn.startswith("cid") or not fn.endswith(".json"): 
+            continue
+        p = os.path.join(root, fn)
+        rec = safe_read_json(p, {})
+        if not rec: 
+            continue
+        cid = rec.get("crack_id")
+        if cid is None:
+            # fallback from filename
+            try: cid = int(fn[3:-5])
+            except: continue
+        out["atomic_cracks"][cid] = rec
+        if "auto_best" in rec and rec["auto_best"]:
+            out["auto_best"][cid] = rec["auto_best"]
+    return out
 
 def snapshot_fingerprint(snapshot):
     j = json.dumps(snapshot or {}, sort_keys=True, separators=(",",":"))
     return hashlib.sha1(j.encode("utf-8")).hexdigest()
 
 # --- auto-best helpers in per-crack files -------------------------------------
-def set_auto_variant_for_crack(save_folder, image_base, crack_id, variant_record, params=None, is_best=False):
+'''def set_auto_variant_for_crack(save_folder, image_base, crack_id, variant_record, params=None, is_best=False):
     """
     Store one auto variant into the per-crack file; if is_best=True also update 'auto_best'.
     variant_record must at least contain {"midline":[[x,y],...]} and may include
@@ -1587,7 +1636,62 @@ def set_auto_variant_for_crack(save_folder, image_base, crack_id, variant_record
     if is_best:
         rec["auto_best"] = vstore  # compact best copy
 
+    safe_write_json(p, rec)'''
+    
+def _flatten_variant_record(vid: int, vrec: dict, params: dict, scores: dict = None):
+    """
+    Keep bottom-level clean and single-line-ish:
+    {
+      "variant_id": 2, "midline": [[...],[...]], 
+      "params": {"g11":1,"g22":35,"g33":25,"win":45,"mu":0,"ell":5,"p":14},
+      "scores": {"chamfer_mean":..., "hausdorff":..., "coverage":...},
+      "normal_edge_points": {"edge1":[[x,y],...], "edge2":[[x,y],...]}
+    }
+    """
+    out = {
+        "variant_id": int(vid),
+        "midline": vrec.get("midline", []),
+        "params": params or {},
+        "scores": scores or {},
+    }
+    for k in ("normal_edge_points_full", "normal_edge_points"):
+        if k in vrec and vrec[k]:
+            out["normal_edge_points"] = vrec[k]
+            break
+    return out
+    
+def set_auto_variant_for_crack(save_folder, base_name, crack_id, vrec, params=None, is_best=False, scores=None):
+    """
+    Persist a variant under atomic crack snapshot (flat).
+    Ensures keys: auto_variants (dict of vN -> {...}), auto_best (single flat dict).
+    """
+    p = metric_atomic_path_for(save_folder, base_name, crack_id)
+    rec = safe_read_json(p, {})
+    if not rec: 
+        rec = {"crack_id": crack_id}
+
+    # Normalize container
+    av = rec.get("auto_variants")
+    if not isinstance(av, dict):
+        av = {}
+    vid = None
+    if isinstance(vrec, dict):
+        # best effort: try to extract known id from params/desc
+        vid = vrec.get("params", {}).get("variant_id", None)
+    # fallback from caller
+    if vid is None:
+        # caller usually passes 'v<id>' externally; we won't rely on that here
+        vid = len(av)
+
+    flat = _flatten_variant_record(vid, vrec, params or vrec.get("params", {}), scores=scores)
+    av[f"v{vid}"] = flat
+    rec["auto_variants"] = av
+
+    if is_best:
+        rec["auto_best"] = dict(flat)  # copy
+
     safe_write_json(p, rec)
+    return rec
 
 def set_tracked_edges_for_crack(save_folder, image_base, crack_id, edge_dict, mask_crop=None):
     """
@@ -1602,6 +1706,52 @@ def set_tracked_edges_for_crack(save_folder, image_base, crack_id, edge_dict, ma
     if mask_crop is not None:
         rec["mask_crop"] = mask_crop
     safe_write_json(p, rec)
+    
+def set_geodesic_edges_for_crack(save_folder, base_name, crack_id, ge_dict):
+    """Store geodesic edges (edge1/edge2 lists) under atomic crack snapshot."""
+    p = metric_atomic_path_for(save_folder, base_name, crack_id)
+    rec = safe_read_json(p, {})
+    if not rec:
+        rec = {"crack_id": crack_id}
+    rec["geodesic_edges"] = ge_dict or {}
+    safe_write_json(p, rec)
+    return rec
+
+# -------------------- PLOTTING (GT QUICK LOOK) --------------------
+def debug_plot_gt_preview(mask_bin, mid_xy, e1_xy=None, e2_xy=None, out_png=None, title="GT preview"):
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+    H, W = mask_bin.shape
+    import numpy as np, cv2
+    img = np.zeros((H, W, 3), np.uint8); img[mask_bin > 0] = (255,255,255)
+
+    plt.figure(figsize=(6,6))
+    plt.imshow(img, origin="upper")
+    if isinstance(mid_xy, np.ndarray) and len(mid_xy) >= 2:
+        plt.plot(mid_xy[:,0], mid_xy[:,1], 'k-', lw=3)
+        plt.plot(mid_xy[:,0], mid_xy[:,1], 'w-', lw=1.5)
+    if (e1_xy is not None) and (e2_xy is not None):
+        n = min(len(e1_xy), len(e2_xy))
+        stride = max(1, n // max(1, n // 8))  # ~8x sparser just for display
+        segs = np.stack([e1_xy[:n:stride], e2_xy[:n:stride]], axis=1)
+        lc = LineCollection(segs, colors='C0', linewidths=1.5, alpha=0.85)
+        plt.gca().add_collection(lc)
+    plt.title(title); plt.axis("equal"); plt.tight_layout()
+    if out_png:
+        os.makedirs(os.path.dirname(out_png), exist_ok=True)
+        plt.savefig(out_png, dpi=180)
+        plt.close()
+    else:
+        plt.show()
+
+# -------------------- NORMALS CACHE KEY --------------------
+# If you keep compare_widths_for_cracks here, make sure this is visible:
+import hashlib
+def _mask_midline_cache_key(mask_bin, midline):
+    h = hashlib.blake2b(digest_size=16)
+    h.update(mask_bin.tobytes())
+    h.update(np.asarray(midline, np.float32).tobytes())
+    return h.hexdigest()
 
 # --- minimal geometry utils (existing from your metrics) ----------------------
 # Expect these to already exist in your codebase:

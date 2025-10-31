@@ -1061,7 +1061,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     "had_outputs": found_any
                 }
                 with open(os.path.join(metrics_dir, "combine_probe.json"), "w", encoding="utf-8") as f:
-                    json.dump(report, f, indent=1)
+                    json.dump(report, f)
                 print(f"[combine/probe] wrote combine_probe.json → {metrics_dir}")
             except Exception as e:
                 print(f"[combine/probe] could not write probe json: {e}")
@@ -1310,7 +1310,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         payload["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
         payload["ann_fingerprint"] = self._metrics_compute_fingerprint()
         with open(self._metrics_state_path(base_name), "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=1)
+            json.dump(payload, f)
 
     '''def compute_mask_and_width_metrics_for_image(self, display=False):
         """
@@ -1750,7 +1750,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 global_best_edge = {"window_half_size": 45, "mu": 0.0, "l": 5, "p": 14}
 
             with open(os.path.join(summ_dir, "global_best_edge_params.json"), "w") as f:
-                json.dump(global_best_edge, f, indent=1)
+                json.dump(global_best_edge, f)
             print(f"[global-metrics] ✅ global best edge params = {global_best_edge}")
 
         finally:
@@ -1802,7 +1802,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 # log edge params used
                 try:
                     with open(os.path.join(image_dir, "edge_params_used.json"), "w") as f:
-                        json.dump(global_best_edge, f, indent=1)
+                        json.dump(global_best_edge, f)
                 except Exception as e:
                     print(f"[apply] could not write edge_params_used.json: {e}")
 
@@ -1811,7 +1811,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 if not atomic:
                     # nothing to do (but still record a stub and move on)
                     with open(os.path.join(image_dir, "status.json"), "w") as f:
-                        json.dump({"image": base_name, "processed_cracks": [], "note": "no atomic cracks"}, f, indent=1)
+                        json.dump({"image": base_name, "processed_cracks": [], "note": "no atomic cracks"}, f)
                     # mark done to avoid re-entering
                     open(done_flag, "a").close()
                     t_img_total = time.perf_counter() - t_img_start
@@ -1949,7 +1949,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                             "processed_cracks": processed_cracks,
                             "mode": ("edges_only" if edges_only else "full"),
                             "edge_params_used": global_best_edge
-                        }, f, indent=1)
+                        }, f)
                     # touch a DONE flag so future runs auto-skip this image
                     open(done_flag, "a").close()
                 except Exception as e:
@@ -2432,7 +2432,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     params = best.get("params", {})
                     try:
                         with open(os.path.join(out_dir, "auto_best_params.json"), "w") as f:
-                            json.dump(params, f, indent=1)
+                            json.dump(params, f)
                     except Exception as e:
                         print(f"[supervision] write params failed for cid={cid}: {e}")
 
@@ -2720,7 +2720,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         out["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
         out["ann_fingerprint"] = self._metrics_compute_fingerprint()
         with open(self._metrics_state_path(base_name), "w", encoding="utf-8") as f:
-            json.dump(out, f, indent=1)
+            json.dump(out, f)
 
     def metrics_is_fresh_for_current_image(self):
         """True if METRICS_STATE exists & snapshot fingerprint matches → skip."""
@@ -2995,7 +2995,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 return {}
 
         try:
-            # refresh snapshot
             print("[DEBUG METRICS] syncing snapshot ...")
             self._sync_metrics_snapshot_from_authoring(refresh_combine=True, persist=True)
         except Exception as e:
@@ -3036,11 +3035,16 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         print("[DEBUG METRICS] running compare_widths_for_cracks (manual)...")
         try:
-            width_rows_manual, _, normals_manual = compare_widths_for_cracks(
+            ret = compare_widths_for_cracks(
                 {"atomic_cracks": atomic}, self.current_mask, base_name, metrics_dir,
                 display=display, tag="manual",
                 return_normals=True, normals_plot=True, normals_dir=normals_dir
             )
+            if len(ret) == 3:
+                width_rows_manual, _, normals_manual = ret
+            else:
+                width_rows_manual, _ = ret
+                normals_manual = {}
             print(f"[DEBUG METRICS] manual width rows={len(width_rows_manual)} normals keys={len(normals_manual or {})}")
         except Exception as e:
             print(f"[DEBUG METRICS] manual compare_widths failed: {e}")
@@ -3048,11 +3052,12 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         print("[DEBUG METRICS] running compare_widths_for_cracks (auto)...")
         try:
-            width_rows_auto, _ = compare_widths_for_cracks(
+            ret = compare_widths_for_cracks(
                 {"atomic_cracks": auto_best}, self.current_mask, base_name, metrics_dir,
                 display=display, tag="auto",
                 return_normals=False, normals_plot=False
             )
+            width_rows_auto = ret[0] if len(ret) >= 1 else []
             print(f"[DEBUG METRICS] auto width rows={len(width_rows_auto)}")
         except Exception as e:
             print(f"[DEBUG METRICS] auto compare_widths failed: {e}")
@@ -3060,11 +3065,12 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         print("[DEBUG METRICS] running compare_widths_for_cracks (combined)...")
         try:
-            width_rows_combined, _ = compare_widths_for_cracks(
+            ret = compare_widths_for_cracks(
                 {"atomic_cracks": combined}, self.current_mask, base_name, metrics_dir,
                 display=display, tag="combined",
                 return_normals=False, normals_plot=False
             )
+            width_rows_combined = ret[0] if len(ret) >= 1 else []
             print(f"[DEBUG METRICS] combined width rows={len(width_rows_combined)}")
         except Exception as e:
             print(f"[DEBUG METRICS] combined compare_widths failed: {e}")
@@ -3526,24 +3532,181 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         self.metric_annotations = load_snapshot_from_files(self.save_folder, base_name)
         return results
 
+    # ---------- crack_tool.py (DROP-IN ADDITION inside the class) ----------
+
+    '''def ensure_tracked_edges_and_normals(self, crack_id, edge_params_fixed):
+        """
+        Guarantees: geodesic_edges + normal_edge_points exist in cid{crack_id}.json.
+        Also writes a quick GT preview plot for sanity.
+        """
+        import numpy as np, os
+        from helpers.metrics import (
+            metric_atomic_path_for, safe_read_json, safe_write_json, 
+            set_geodesic_edges_for_crack, debug_plot_gt_preview
+        )
+        from helpers.metrics import _reconstruct_full_mask  # if you already have this util in helpers
+        from helpers.metrics import metric_image_dir
+
+        base = self._image_base()
+        p = metric_atomic_path_for(self.save_folder, base, crack_id)
+        cr = safe_read_json(p, {})
+
+        # fast exits if already have what we need
+        ge = cr.get("geodesic_edges") or {}
+        has_e1 = isinstance(ge.get("edge1"), list) and len(ge.get("edge1")) > 1
+        has_e2 = isinstance(ge.get("edge2"), list) and len(ge.get("edge2")) > 1
+        has_normals = isinstance(cr.get("normal_edge_points") or cr.get("normal_edge_points_full"), dict)
+
+        mid = np.asarray(cr.get("midline", []), float)
+        if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 2:
+            print(f"[edges] cid{crack_id}: no midline → skip"); 
+            return False
+
+        if not (has_e1 and has_e2):
+            try:
+                # Use your existing parallel generator (writes snapshot)
+                _ = self.run_edge_tracking_parallel(crack_ids=[crack_id], cpu_max_workers=1, edge_params_fixed=edge_params_fixed)
+            except Exception as e:
+                print(f"[edges] cid{crack_id}: run_edge_tracking_parallel failed: {e}")
+
+            # Reload
+            cr = safe_read_json(p, {})
+            ge = cr.get("geodesic_edges") or {}
+            has_e1 = isinstance(ge.get("edge1"), list) and len(ge.get("edge1")) > 1
+            has_e2 = isinstance(ge.get("edge2"), list) and len(ge.get("edge2")) > 1
+
+            if not (has_e1 and has_e2):
+                print(f"[edges] cid{crack_id}: still missing geodesic edges after tracking.")
+                # try to at least store empty to avoid repeated attempts
+                set_geodesic_edges_for_crack(self.save_folder, base, crack_id, ge)
+                return False
+
+        # quick GT preview (mask + midline + geodesics visible)
+        try:
+            H, W = self.original_image.shape[:2]
+            mask_bin = (self.current_mask > 0).astype(np.uint8)
+            e1_xy = np.asarray(ge.get("edge1", []), float)
+            e2_xy = np.asarray(ge.get("edge2", []), float)
+            out_png = os.path.join(metric_image_dir(self.save_folder, base), f"cid{crack_id}", "gt_preview.png")
+            debug_plot_gt_preview(mask_bin, mid, e1_xy, e2_xy, out_png, title=f"GT/edges — cid{crack_id}")
+        except Exception as e:
+            print(f"[edges] cid{crack_id}: GT preview failed: {e}")
+
+        return True'''
+        
+    def ensure_tracked_edges_and_normals(self, crack_id, edge_params_fixed):
+        """
+        Guarantees: geodesic_edges + normal_edge_points exist in cid{crack_id}.json.
+        Adds deep debug inspection after edge-tracking to pinpoint missing keys.
+        """
+        import numpy as np, os, json, traceback
+        from helpers.metrics import (
+            metric_atomic_path_for, safe_read_json, safe_write_json,
+            set_geodesic_edges_for_crack, debug_plot_gt_preview
+        )
+        from helpers.metrics import metric_image_dir
+
+        base = self._image_base()
+        p = metric_atomic_path_for(self.save_folder, base, crack_id)
+        cr = safe_read_json(p, {})
+
+        print(f"[DEBUG edges] ===== ensure_tracked_edges_and_normals(cid={crack_id}) =====")
+        print(f"[DEBUG edges] path: {p}")
+        print(f"[DEBUG edges] keys before: {list(cr.keys())}")
+
+        # fast exits if already have what we need
+        ge = cr.get("geodesic_edges") or {}
+        has_e1 = isinstance(ge.get("edge1"), list) and len(ge.get("edge1")) > 1
+        has_e2 = isinstance(ge.get("edge2"), list) and len(ge.get("edge2")) > 1
+        has_normals = isinstance(cr.get("normal_edge_points") or cr.get("normal_edge_points_full"), dict)
+
+        print(f"[DEBUG edges] has_e1={has_e1} has_e2={has_e2} has_normals={has_normals}")
+
+        mid = np.asarray(cr.get("midline", []), float)
+        if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 2:
+            print(f"[edges] cid{crack_id}: no midline → skip")
+            return False
+
+        # --- Attempt regeneration if missing ---
+        if not (has_e1 and has_e2):
+            try:
+                print(f"[edges] cid{crack_id}: running edge tracking ...")
+                _ = self.run_edge_tracking_parallel(
+                    crack_ids=[crack_id], cpu_max_workers=1, edge_params_fixed=edge_params_fixed
+                )
+            except Exception as e:
+                print(f"[edges] cid{crack_id}: run_edge_tracking_parallel failed: {e}")
+                traceback.print_exc()
+
+            # Reload to inspect updated file
+            cr = safe_read_json(p, {})
+            print(f"[DEBUG edges] after tracking reload keys: {list(cr.keys())}")
+
+            ge = cr.get("geodesic_edges") or {}
+            has_e1 = isinstance(ge.get("edge1"), list) and len(ge.get("edge1")) > 1
+            has_e2 = isinstance(ge.get("edge2"), list) and len(ge.get("edge2")) > 1
+
+            # ✅ auto-detect if edge data lives under auto_best.normal_edge_points(_full)
+            if not (has_e1 and has_e2):
+                ab = cr.get("auto_best", {})
+                for keyname in ("normal_edge_points_full", "normal_edge_points"):
+                    if isinstance(ab.get(keyname), dict):
+                        ne = ab[keyname]
+                        e1 = ne.get("edge1", [])
+                        e2 = ne.get("edge2", [])
+                        if isinstance(e1, list) and len(e1) > 1 and isinstance(e2, list) and len(e2) > 1:
+                            print(f"[DEBUG edges] recovered edges from auto_best.{keyname} (len={len(e1)})")
+                            cr["geodesic_edges"] = {"edge1": e1, "edge2": e2}
+                            set_geodesic_edges_for_crack(self.save_folder, base, crack_id, cr["geodesic_edges"])
+                            safe_write_json(p, cr)
+                            has_e1 = has_e2 = True
+                            break
+
+            if not (has_e1 and has_e2):
+                print(f"[edges] cid{crack_id}: still missing geodesic edges after tracking.")
+                set_geodesic_edges_for_crack(self.save_folder, base, crack_id, ge)
+                return False
+
+        # --- Quick GT preview plot (mask + midline + geodesics visible) ---
+        try:
+            H, W = self.original_image.shape[:2]
+            mask_bin = (self.current_mask > 0).astype(np.uint8)
+            e1_xy = np.asarray(cr["geodesic_edges"].get("edge1", []), float)
+            e2_xy = np.asarray(cr["geodesic_edges"].get("edge2", []), float)
+            out_png = os.path.join(
+                metric_image_dir(self.save_folder, base), f"cid{crack_id}", "gt_preview.png"
+            )
+            debug_plot_gt_preview(
+                mask_bin, mid, e1_xy, e2_xy, out_png, title=f"GT/edges — cid{crack_id}"
+            )
+            print(f"[DEBUG edges] wrote GT preview: {out_png}")
+        except Exception as e:
+            print(f"[edges] cid{crack_id}: GT preview failed: {e}")
+            traceback.print_exc()
+
+        print(f"[DEBUG edges] ===== END ensure_tracked_edges_and_normals(cid={crack_id}) =====\n")
+        return True
+    
     # ---- 6) Auto variants generation (SAVE ONLY TO PER-CRACK FILES) --------------
+    # ---------- crack_tool.py (REPLACE the whole function) ----------
+
     def generate_auto_variants_for_manual_parallel(
             self, crack_id, g_variants=None, cache_key=None, force_recompute=True,
             cpu_max_workers=None, color_channel=None, edge_params_fixed=None
         ):
         """
-        Same interface as before, but stores variants and best directly under the crack’s
-        snapshot file (auto_variants[], auto_best), and DOES NOT touch self.annotation.
+        Stores variants + best directly under the crack's snapshot file (flat),
+        returns {"variants": {...}, "best_variant_id": int, "best": dict}.
         """
-        import os, numpy as np, pandas as pd, cv2, traceback
+        import os, numpy as np, pandas as pd, cv2, traceback, math
         from rs3_split import run_rs3_variants_split, _variant_desc, plot_midlines_overlay_all
         from edge_workers import edge_param_worker
-        from helpers.metrics import (set_auto_variant_for_crack, metric_atomic_path_for,
-                            safe_read_json, safe_write_json)
+        from helpers.metrics import (
+            set_auto_variant_for_crack, metric_atomic_path_for,
+            safe_read_json, safe_write_json, metric_image_dir
+        )
 
         base_name = self._image_base()
-
-        # snapshot crack
         p_cr = metric_atomic_path_for(self.save_folder, base_name, crack_id)
         crack = safe_read_json(p_cr, {})
         if not crack:
@@ -3562,11 +3725,11 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print(f"[AUTO {crack_id}] no manual midline"); return None
         p0, p1 = np.array(man_xy_g[0], float), np.array(man_xy_g[-1], float)
 
-        self.active_bbox = [xmin, ymin, xmax, ymax]
-        self.pts = [p0.copy(), p1.copy()]
-        self.end_points = self.pts
-
+        # crop/cost prep
         try:
+            self.active_bbox = [xmin, ymin, xmax, ymax]
+            self.pts = [p0.copy(), p1.copy()]
+            self.end_points = self.pts
             self.update_image_crop()
             self.update_os()
             self.update_cost()
@@ -3634,12 +3797,15 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             desc = _variant_desc(vid, g_variants[vid], edge_params_fixed)
             variant_labels_by_id[vid] = desc["label"]
 
+            # flat vrec
             vrec = {"midline": track_xy.tolist(), "mask_bbox":[x,y,w,h], "params": desc}
+            v_scores = {}
             if ew and isinstance(ew, dict):
                 for k in ("normal_edge_points_full","normal_edge_points"):
-                    if k in ew and ew[k]: vrec[k] = ew[k]
-
+                    if k in ew and ew[k]: 
+                        vrec[k] = ew[k]
                 if ew.get("status") == "ok":
+                    v_scores = {k: float(ew[k]) for k in ("chamfer_mean","hausdorff","coverage") if k in ew}
                     row = dict(ew)
                     row.update({
                         "image": base_name, "crack_id": crack_id, "variant_id": vid,
@@ -3650,15 +3816,14 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             variants_out[f"v{vid}"] = vrec
             var_local_xy_by_id[vid] = track_crop_xy
 
-            # persist this variant in per-crack file
-            from helpers.metrics import set_auto_variant_for_crack
-            set_auto_variant_for_crack(self.save_folder, base_name, crack_id, vrec, params=desc, is_best=False)
+            # persist flat variant (also writes auto_best later)
+            set_auto_variant_for_crack(self.save_folder, base_name, crack_id, vrec, params=desc, is_best=False, scores=v_scores)
 
             print(f"[AUTO {crack_id}] v{vid} len={len(track_xy)} startΔ={np.linalg.norm(track_xy[0]-p0):.2f} "
                 f"endΔ={np.linalg.norm(track_xy[-1]-p1):.2f}")
 
-        # choose best
-        best_variant_id = None
+        # choose best (by scores, smaller chamfer/hausdorff, larger coverage)
+        best_variant_id, best_flat = None, None
         if metrics_rows:
             df = pd.DataFrame(list(metrics_rows.values()))
             df = df.sort_values(["chamfer_mean","hausdorff","coverage"], ascending=[True,True,False])
@@ -3671,17 +3836,16 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             plt.title(f"Chamfer by variant — {base_name} cid{crack_id}")
             plt.xlabel("variant"); plt.ylabel("chamfer_mean")
             plt.tight_layout()
-            plt.savefig(os.path.join(crack_dir, "chamfer_by_variant.png"), dpi=160)
-            plt.close()
+            plt.savefig(os.path.join(crack_dir, "chamfer_by_variant.png"), dpi=160); plt.close()
 
-        # mark best in per-crack file
         if best_variant_id is not None and f"v{best_variant_id}" in variants_out:
-            set_auto_variant_for_crack(self.save_folder, base_name, crack_id,
-                                    variants_out[f"v{best_variant_id}"],
-                                    params=variants_out[f"v{best_variant_id}"].get("params"),
-                                    is_best=True)
+            best_rec = variants_out[f"v{best_variant_id}"]
+            best_flat = set_auto_variant_for_crack(
+                self.save_folder, base_name, crack_id,
+                best_rec, params=best_rec.get("params"), is_best=True
+            )["auto_best"]
 
-        # nice overlays
+        # overlays
         crop_rgb = self.image_crop.copy()
         if crop_rgb.ndim == 2: crop_rgb = cv2.cvtColor(crop_rgb, cv2.COLOR_GRAY2BGR)
         im_overlay = crop_rgb.copy()
@@ -3707,12 +3871,13 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             save_legend_png=os.path.join(crack_dir, "midlines_overlay_legend.png"),
         )
 
-        # reload snapshot to include auto_best
+        # refresh in-memory snapshot cache
         from helpers.metrics import load_snapshot_from_files
         self.metric_annotations = load_snapshot_from_files(self.save_folder, base_name)
 
         print(f"[AUTO {crack_id}] ✅ {len(variants_out)} variants (best={best_variant_id})")
-        return {"variants": variants_out, "best_variant_id": best_variant_id}
+        return {"variants": variants_out, "best_variant_id": best_variant_id, "best": best_flat}
+    
 
     # ---- 7) Combined auto masks from snapshot (REPLACE) --------------------------
     def _build_combined_auto_masks_same_indices(self, cache_key=None):
@@ -3816,7 +3981,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         t_edge_calib = time.perf_counter() - t_edge_start
 
         # Ensure tracked edges exist for manual cracks (snapshot write)
-        need_ids = []
+        '''need_ids = []
         for cid, cr in self._metric_atomic().items():
             src = (cr.get("source") or "").lower()
             if src.startswith("auto") or src == "combined": continue
@@ -3834,6 +3999,46 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 t_edgegen = time.perf_counter() - t_edgegen_start
                 print(f"[quick] edge-tracking for {len(need_ids)} manual cracks took {t_edgegen:.2f}s")
             except Exception as e:
+                print(f"[quick] manual edge-tracking failed: {e}")'''
+                # ---------- Ensure tracked edges exist for manual cracks (snapshot write) ----------
+        import numpy as np, time
+        from helpers.metrics import metric_atomic_path_for, safe_read_json
+        print("[DEBUG QUICK] verifying tracked edges + masks for all manual cracks...")
+
+        need_ids = []
+        for cid, cr in self._metric_atomic().items():
+            src = (cr.get("source") or "").lower()
+            if src.startswith("auto") or src == "combined":
+                continue
+
+            mid = np.asarray(cr.get("midline", []), float)
+            if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 2:
+                continue
+
+            ge = cr.get("geodesic_edges", {}) or {}
+            has_e1 = isinstance(ge.get("edge1"), list) and len(ge.get("edge1")) > 1
+            has_e2 = isinstance(ge.get("edge2"), list) and len(ge.get("edge2")) > 1
+            has_mask = cr.get("mask_crop") is not None
+
+            if not (has_e1 and has_e2 and has_mask):
+                need_ids.append(cid)
+
+        print(f"[DEBUG QUICK] cracks needing edge tracking: {need_ids}")
+        if need_ids:
+            try:
+                t_edgegen_start = time.perf_counter()
+                for cid in need_ids:
+                    try:
+                        print(f"[DEBUG QUICK] generating edges for cid={cid} ...")
+                        ok = self.ensure_tracked_edges_and_normals(cid, best_edge)
+                        if not ok:
+                            print(f"[DEBUG QUICK] ❌ ensure_tracked_edges_and_normals failed for cid={cid}")
+                    except Exception as e:
+                        print(f"[DEBUG QUICK] ❌ edge gen inner fail for cid={cid}: {e}")
+                t_edgegen = time.perf_counter() - t_edgegen_start
+                print(f"[quick] edge-tracking for {len(need_ids)} manual cracks took {t_edgegen:.2f}s")
+            except Exception as e:
+                import traceback; traceback.print_exc()
                 print(f"[quick] manual edge-tracking failed: {e}")
 
         # Auto variants per manual crack (snapshot write)
