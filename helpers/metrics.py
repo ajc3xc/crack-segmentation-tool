@@ -51,6 +51,20 @@ def save_mask_comparison_plot(gt_mask, pred_mask, out_path, show=False):
         plt.imsave(out_path, vis)
 
 def _reconstruct_full_mask(crack, H, W):
+    print(f"\n[DEBUG SUP]src={crack.get('src')}")
+
+    mc = crack.get('mask_crop', None)
+    bb = crack.get('mask_bbox', None)
+    mid = crack.get('midline', [])
+    print(f"  mask_crop type={type(mc)}, len={len(mc) if mc is not None else 'None'}")
+    print(f"  mask_bbox={bb}")
+    print(f"  midline len={len(mid)}")
+
+    if len(mid) > 0:
+        arr = np.array(mid, float)
+        print(f"  midline x-range=({arr[:,0].min():.1f},{arr[:,0].max():.1f}), "
+            f"y-range=({arr[:,1].min():.1f},{arr[:,1].max():.1f})")
+
     try:
         return reconstruct_full_mask_from_crack(crack, H, W)
     except Exception:

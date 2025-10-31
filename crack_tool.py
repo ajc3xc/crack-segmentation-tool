@@ -1375,7 +1375,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         # ---- g-variants to try ----
         if g_variants is None:
-            vals = (20, 25, 30, 40, 50, 70)
+            #vals = (20, 25, 30, 40, 50, 70)
+            #temp reduction just so I can quickly iterate
+            vals = (25, 50, 75)
             g_variants = [{"g11": 1.0, "g22": v, "g33": v} for v in vals]
             g_variants += [{"g11": 1.0, "g22": 25, "g33": 35}, {"g11": 1.0, "g22": 35, "g33": 25}]
 
@@ -2543,6 +2545,46 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         print(f"[global-metrics] ⏱ total runtime = {t_total:.2f}s (A={tA:.2f}s, B={tB:.2f}s)")
 
 
+    def _manual_crack_ids_needing_edges(self):
+        """Return list of manual crack IDs that have a midline but no geodesic edges/mask_crop yet."""
+        ids = []
+        ann = (self.annotation or {}).get("annotations", {}) or {}
+        for cid, crack in (ann.get("atomic_cracks", {}) or {}).items():
+            src = (crack.get("source") or crack.get("src") or "").lower()
+            if src.startswith("auto") or src == "combined":
+                continue
+            mid = crack.get("midline", [])
+            if isinstance(mid, list) and len(mid) >= 2:
+                ge = crack.get("geodesic_edges", {}) or {}
+                has_e1 = isinstance(ge.get("edge1"), list) and len(ge.get("edge1")) > 1
+                has_e2 = isinstance(ge.get("edge2"), list) and len(ge.get("edge2")) > 1
+                has_mask = crack.get("mask_crop") is not None
+                if not (has_e1 and has_e2 and has_mask):
+                    ids.append(cid)
+        print(f"[DEBUG] manual cracks needing edge tracking: {ids}")
+        return ids
+
+
+    def _audit_masks_and_edges(self, tag="AUDIT"):
+        """Print short summary of current cracks: useful before/after edge generation."""
+        import numpy as np
+        ann = (self.annotation or {}).get("annotations", {}) or {}
+        ac  = ann.get("atomic_cracks", {}) or {}
+        print(f"[{tag}] total atomics={len(ac)}")
+        for cid, crack in ac.items():
+            src = (crack.get("source") or crack.get("src") or "").lower()
+            mid = np.asarray(crack.get("midline", []), float)
+            ge  = crack.get("geodesic_edges", {}) or {}
+            mc  = crack.get("mask_crop", None)
+            bb  = crack.get("mask_bbox", None)
+            e1  = ge.get("edge1"); e2 = ge.get("edge2")
+            e1n = len(e1) if isinstance(e1, list) else 0
+            e2n = len(e2) if isinstance(e2, list) else 0
+            print(f"  cid={cid} src={src:<12} midlen={len(mid):<4} "
+                f"mask_crop={'ok' if mc is not None else 'None':<6} "
+                f"bbox={bb} ge1={e1n:<4} ge2={e2n:<4}")
+
+    
     def run_metrics_on_current_image_quick(
         self,
         edge_grid=None,
@@ -2600,6 +2642,40 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 }
         t_edge_calib = time.perf_counter() - t_edge_start
 
+        # --- ensure adjusted_track exists (rebuilt from midline if missing) ---
+        if not hasattr(self, "adjusted_track"):
+            try:
+                ann = (self.annotation or {}).get("annotations", {}) or {}
+                ac  = ann.get("atomic_cracks", {}) or {}
+                for cid, crack in ac.items():
+                    mid = crack.get("midline", [])
+                    if isinstance(mid, list) and len(mid) >= 2:
+                        arr = np.array(mid, dtype=float).T
+                        if arr.shape[0] == 2:
+                            self.adjusted_track = arr
+                            print(f"[quick] rebuilt adjusted_track from midline of cid={cid} shape={arr.shape}")
+                            break
+            except Exception as e:
+                print(f"[quick] failed to rebuild adjusted_track: {e}")
+
+        # --- ensure manual geodesic edges + mask exist for each manual crack ---
+        need_ids = self._manual_crack_ids_needing_edges()
+        if need_ids:
+            try:
+                t_edgegen_start = time.perf_counter()
+                _ = self.run_edge_tracking_parallel(
+                    crack_ids=need_ids,
+                    cpu_max_workers=cpu_max_workers,
+                    edge_params_fixed=best_edge,
+                )
+                t_edgegen = time.perf_counter() - t_edgegen_start
+                print(f"[quick] edge-tracking for {len(need_ids)} manual cracks took {t_edgegen:.2f}s")
+            except Exception as e:
+                print(f"[quick] manual edge-tracking failed: {e}")
+
+        # sanity print
+        self._audit_masks_and_edges("AFTER_EDGE")
+
         # --- auto variants ---
         t_auto_start = time.perf_counter()
         for cid, crack in (self.annotation.get("annotations", {}) or {}).get("atomic_cracks", {}).items():
@@ -2644,7 +2720,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         total_time = time.perf_counter() - t_total_start
 
-        # log timings per image
+        # --- log timings ---
         log_path = os.path.join(image_dir, "runtime_log.csv")
         row = {
             "image": base_name,
@@ -2667,7 +2743,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print(f"[quick] failed to write runtime_log.csv: {e}")
 
         print(f"[quick] ⏱ total runtime = {total_time:.2f}s (edge={t_edge_calib:.2f}s, auto={t_auto_variants:.2f}s, "
-            f"mask_build={t_mask_build:.2f}s, mask_width={t_mask_width:.2f}s, supervision={t_sup:.2f}s)")
+              f"mask_build={t_mask_build:.2f}s, mask_width={t_mask_width:.2f}s, supervision={t_sup:.2f}s)")
 
         return {"image": base_name, "best_edge": best_edge}
 
@@ -2683,6 +2759,29 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         """
         import os, cv2, numpy as np, pandas as pd
         
+        def _audit_masks_and_edges(self, tag="PRE"):
+            import numpy as np
+            ann = (self.annotation or {}).get("annotations", {}) or {}
+            ac  = ann.get("atomic_cracks", {}) or {}
+            print(f"[AUDIT-{tag}] atomics={len(ac)}")
+            for cid, crack in ac.items():
+                src = (crack.get("source") or crack.get("src") or "").lower()
+                mid = np.asarray(crack.get("midline", []), float)
+                ge  = crack.get("geodesic_edges", {}) or {}
+                mc  = crack.get("mask_crop", None)
+                bb  = crack.get("mask_bbox", None)
+                e1  = ge.get("edge1"); e2 = ge.get("edge2")
+                e1n = len(e1) if isinstance(e1, list) else 0
+                e2n = len(e2) if isinstance(e2, list) else 0
+                print(f"[AUDIT-{tag}] cid={cid} src={src} midlen={len(mid)} mask_crop={'None' if mc is None else 'ok'} "
+                    f"bbox={bb} ge1={e1n} ge2={e2n}")
+
+        self._audit_masks_and_edges("BEFORE_EDGE")
+        # (we'll add the edge step here)
+        self._audit_masks_and_edges("AFTER_EDGE")
+        # after autos:
+        self._audit_masks_and_edges("AFTER_AUTO")
+
 
         base_name = os.path.splitext(os.path.basename(self.name))[0]
         image_dir = os.path.join(self.save_folder, "metrics", base_name)

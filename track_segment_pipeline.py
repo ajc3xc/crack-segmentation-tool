@@ -424,62 +424,94 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
             xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
             print(f"[DEBUG] save_current_segment bbox: xmin={xmin}, ymin={ymin}, xmax={xmax}, ymax={ymax}")
 
-            # --- Build crop mask ---
+            # --------------------------------------------------------
+            # 🧩 1. Track sanity — BEFORE any mask building
+            if hasattr(self, "track"):
+                t = np.asarray(self.track)
+                print(f"[DEBUG TRACK] shape={t.shape}, min(x)={t[1].min():.2f}, max(x)={t[1].max():.2f}, "
+                    f"min(y)={t[0].min():.2f}, max(y)={t[0].max():.2f}")
+            else:
+                print("[DEBUG TRACK] MISSING self.track!")
+
+            if hasattr(self, "image_crop"):
+                h_c, w_c = self.image_crop.shape[:2]
+                print(f"[DEBUG CROP] image_crop shape={self.image_crop.shape}, "
+                    f"global_bbox size={(xmax-xmin)}x{(ymax-ymin)}")
+            else:
+                print("[DEBUG CROP] MISSING image_crop!")
+
+            # --------------------------------------------------------
+            # 🧩 2. Edge sanity
+            for nm, arr in [("track_e1", getattr(self, "track_e1", None)),
+                            ("track_e2", getattr(self, "track_e2", None))]:
+                if arr is None:
+                    print(f"[DEBUG {nm}] MISSING")
+                    continue
+                print(f"[DEBUG {nm}] len={len(arr[0]) if isinstance(arr, (list,tuple)) else 'n/a'}, "
+                    f"minx={np.min(arr[1]):.2f} maxx={np.max(arr[1]):.2f} "
+                    f"miny={np.min(arr[0]):.2f} maxy={np.max(arr[0]):.2f}")
+
+            # --------------------------------------------------------
+            # 3️⃣ Build crop mask
             edge_x_crop = np.concatenate((self.track_e1[1][::-1], self.track_e2[1]))
             edge_y_crop = np.concatenate((self.track_e1[0][::-1], self.track_e2[0]))
             mask_crop = ct.segmentation.create_mask(self.image_crop, edge_y_crop, edge_x_crop).astype(np.uint8)
             h, w = mask_crop.shape[:2]
-            print(f"[DEBUG] mask_crop shape={mask_crop.shape}, nonzero={int((mask_crop>0).sum())}")
+            nz = int((mask_crop > 0).sum())
+            print(f"[DEBUG MASK_CROP] shape={mask_crop.shape}, nonzero={nz}")
 
+            # Sanity check for out-of-bounds coordinates
+            if (edge_x_crop < 0).any() or (edge_y_crop < 0).any() or \
+            (edge_x_crop >= w).any() or (edge_y_crop >= h).any():
+                print(f"[WARN] edge coords out of crop bounds! "
+                    f"x range=({edge_x_crop.min():.1f},{edge_x_crop.max():.1f}), "
+                    f"y range=({edge_y_crop.min():.1f},{edge_y_crop.max():.1f}), "
+                    f"crop wh=({w},{h})")
+
+            # --------------------------------------------------------
             src = getattr(self, "current_source", "auto")
             track_arr = np.array(self.adjusted_track, dtype=float)
             midline_coords = [[int(track_arr[1][i] + xmin), int(track_arr[0][i] + ymin)]
                             for i in range(track_arr.shape[1])]
-            print(f"[DEBUG] midline first={midline_coords[0]}, last={midline_coords[-1]}")
+            print(f"[DEBUG MIDLINE] len={len(midline_coords)}, "
+                f"first={midline_coords[0]}, last={midline_coords[-1]}")
 
             ann = self.annotation.setdefault("annotations", {})
             atomic_cracks = ann.setdefault("atomic_cracks", {})
 
-            # --- Try to get normal edges ---
+            # --------------------------------------------------------
+            # 🧩 4. Normal edges sanity
             normal_edges = getattr(self, "normal_edge_points", {}).get(self.current_crack_id)
-            print(f"[DEBUG] normal_edge_points type={type(normal_edges)}, keys={list(getattr(self,'normal_edge_points',{}).keys())}")
+            print(f"[DEBUG] normal_edge_points type={type(normal_edges)}, "
+                f"keys={list(getattr(self,'normal_edge_points',{}).keys())}")
 
-            # normalize possible formats: list, tuple, dict
             e1x = e1y = e2x = e2y = None
             if isinstance(normal_edges, dict):
                 if "edge1" in normal_edges and "edge2" in normal_edges:
-                    e1 = normal_edges["edge1"]
-                    e2 = normal_edges["edge2"]
-                    # handle [[xlist],[ylist]] vs [[x,y],[x,y],...]
-                    if isinstance(e1, list) and len(e1) == 2 and isinstance(e1[0], list):
-                        e1x, e1y = np.array(e1[0]), np.array(e1[1])
-                        e2x, e2y = np.array(e2[0]), np.array(e2[1])
-                    else:
-                        e1 = np.array(e1, float)
-                        e2 = np.array(e2, float)
-                        if e1.ndim == 2 and e1.shape[1] == 2:
-                            e1x, e1y = e1[:, 0], e1[:, 1]
-                        if e2.ndim == 2 and e2.shape[1] == 2:
-                            e2x, e2y = e2[:, 0], e2[:, 1]
+                    e1 = np.array(normal_edges["edge1"], float)
+                    e2 = np.array(normal_edges["edge2"], float)
+                    print(f"[DEBUG NORMAL_EDGE] edge1 shape={e1.shape}, edge2 shape={e2.shape}")
             elif isinstance(normal_edges, (list, tuple)) and len(normal_edges) == 2:
-                # list form [[e1x,e1y], [e2x,e2y]]
                 e1x, e1y = np.array(normal_edges[0][0]), np.array(normal_edges[0][1])
                 e2x, e2y = np.array(normal_edges[1][0]), np.array(normal_edges[1][1])
-
-            if e1x is None or e2x is None:
+            else:
                 print("[WARN] normal_edge_points missing or malformed → fallback using track_e1/e2")
-                e1x, e1y = self.track_e1[1], self.track_e1[0]
-                e2x, e2y = self.track_e2[1], self.track_e2[0]
 
-            # convert to global coords + reduce precision
+            # --------------------------------------------------------
+            # 🧩 5. Mask write summary
+            print(f"[DEBUG SAVE_SUMMARY] src={src}, bbox=({xmin},{ymin},{xmax},{ymax}), "
+                f"mask_nonzero={nz}, track_pts={track_arr.shape[1]}")
+
+            # original remainder
+            e1x, e1y = self.track_e1[1], self.track_e1[0]
+            e2x, e2y = self.track_e2[1], self.track_e2[0]
             e1_global = np.stack([e1x + xmin, e1y + ymin], axis=1)
             e2_global = np.stack([e2x + xmin, e2y + ymin], axis=1)
             normal_edges_full = {
-                "edge1": np.round(e1_global, ROUNDING_DIGITS).tolist(),
-                "edge2": np.round(e2_global, ROUNDING_DIGITS).tolist(),
+                "edge1": np.round(e1_global, 2).tolist(),
+                "edge2": np.round(e2_global, 2).tolist(),
             }
 
-            # --- Build crack entry ---
             crack_entry = {
                 "source": src,
                 "midline": midline_coords,
@@ -494,17 +526,15 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
                 "user_connections": getattr(self, "user_connections", []),
             }
 
-            # round and make JSON-safe
             crack_entry = metrics._to_py(crack_entry)
             atomic_cracks[str(self.current_crack_id)] = crack_entry
             print(f"[DEBUG] atomic_cracks updated for id={self.current_crack_id}")
 
             self.use_masks = True
             self.save_annotation()
-
         except Exception as e:
-            import traceback; traceback.print_exc()
-            error(e)
+            print(f"[FUBAR] save_current_segment crashed: {e}")
+
             
     def show_os(self):
         import plotly.graph_objects as go
