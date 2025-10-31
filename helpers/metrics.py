@@ -416,7 +416,7 @@ def plot_width_differences(midline, w_mask, w_edge, mask, contours=None,
 
     return width_rows, diffs_rows'''
     
-def compare_widths_for_cracks(ann, crack_mask, base_name, metrics_dir, display=True, tag=None, **kwargs):
+'''def compare_widths_for_cracks(ann, crack_mask, base_name, metrics_dir, display=True, tag=None, **kwargs):
     """
     Compare mask-derived vs edge-tracking widths for all cracks.
     - Plots midlines color-coded by signed width difference (edge - mask).
@@ -537,7 +537,237 @@ def compare_widths_for_cracks(ann, crack_mask, base_name, metrics_dir, display=T
                 plt.savefig(out_plot, dpi=200)
                 plt.close()
 
+    return width_rows, diffs_rows'''
+    
+# helpers/metrics.py
+
+import os, hashlib
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
+from matplotlib.colors import TwoSlopeNorm
+
+# import your existing primitives
+#   normals_from_mask_for_midline(midline_xy, mask, max_radius)
+#   (and any others you already have here)
+from helpers.metrics import normals_from_mask_for_midline  # if this file IS helpers.metrics, remove this line
+
+# -------------------- lightweight cache for mask-normals ----------------------
+_NORMALS_CACHE = {}  # key: (mask_sha1, midline_sha1) -> (e1x,e1y,e2x,e2y,w_mask)
+
+def _sha1_ndarray(a: np.ndarray) -> str:
+    if a is None:
+        return "none"
+    a = np.ascontiguousarray(a)
+    h = hashlib.sha1()
+    h.update(a.view(np.uint8))
+    return h.hexdigest()
+
+def _mask_midline_cache_key(mask_bin: np.ndarray, midline_xy: np.ndarray) -> str:
+    # Reduce midline precision to avoid tiny float diffs busting the cache
+    ml = np.round(np.asarray(midline_xy, dtype=np.float32), 3)
+    return (_sha1_ndarray(mask_bin.astype(np.uint8)), _sha1_ndarray(ml))
+
+def _plot_gt_normals(mask_bin, mid_xy, e1_xy, e2_xy, out_png, title):
+    H, W = mask_bin.shape
+    img = np.zeros((H, W, 3), np.uint8)
+    img[mask_bin > 0] = (255, 255, 255)
+
+    plt.figure(figsize=(8, 8))
+    plt.imshow(img)
+    if len(mid_xy) >= 2:
+        plt.plot(mid_xy[:,0], mid_xy[:,1], 'k-', lw=3)
+        plt.plot(mid_xy[:,0], mid_xy[:,1], 'w-', lw=1.5)
+    # draw normals as short segments
+    n = min(len(e1_xy), len(e2_xy), len(mid_xy))
+    if n >= 2:
+        segs = np.stack([e1_xy[:n], e2_xy[:n]], axis=1)
+        lc = LineCollection(segs, colors='C0', linewidths=1.5, alpha=0.85)
+        plt.gca().add_collection(lc)
+    plt.title(title)
+    plt.axis('equal'); plt.tight_layout()
+    plt.savefig(out_png, dpi=200)
+    plt.close()
+
+def compare_widths_for_cracks(
+    ann, crack_mask, base_name, metrics_dir,
+    display=True, tag=None,
+    return_normals=False,
+    normals_plot=False,
+    normals_dir=None,
+    max_radius=50
+):
+    """
+    Compare mask-derived vs edge-tracking widths for all cracks.
+    ADDED:
+      - caching of mask->normals to avoid recomputation
+      - optional normals return + GT-normals plot export
+    Returns:
+      width_rows, diffs_rows, (optionally) normals_dict
+
+    normals_dict structure (when return_normals=True):
+      {
+        ("atomic", "<cid>"): {
+          "midline": (N,2) float32,
+          "mask_width": (N,) float32,
+          "gt_e1": (N,2) float32, "gt_e2": (N,2) float32,   # mask-derived
+          # if edge normals present in ann:
+          "edge_e1": (N,2) float32 or None,
+          "edge_e2": (N,2) float32 or None,
+        },
+        ("combined","<cid>"): {...}
+      }
+    """
+    os.makedirs(metrics_dir, exist_ok=True)
+    if normals_plot and normals_dir:
+        os.makedirs(normals_dir, exist_ok=True)
+
+    H, W = crack_mask.shape
+    width_rows, diffs_rows = [], []
+
+    atomic = ann.get("atomic_cracks", {}) or {}
+    combined = ann.get("combined_cracks", {}) or {}
+
+    atomics_in_combined = {str(m) for cmb in combined.values() for m in (cmb.get("members", []) or [])}
+    all_cracks = [("atomic", str(cid), crack) for cid, crack in atomic.items() if str(cid) not in atomics_in_combined]
+    all_cracks += [("combined", str(cid), crack) for cid, crack in combined.items()]
+
+    normals_dict = {} if return_normals else None
+
+    # Pre-hash mask once
+    mask_bin = (crack_mask > 0).astype(np.uint8)
+
+    for ctype, cid, crack in all_cracks:
+        midline = np.asarray(crack.get("midline", []), float)
+        if midline.ndim != 2 or midline.shape[1] != 2 or len(midline) < 3:
+            continue
+
+        # ---------- (A) GT normals/widths (cached) ----------
+        key = _mask_midline_cache_key(mask_bin, midline)
+        if key in _NORMALS_CACHE:
+            e1x, e1y, e2x, e2y, w_mask = _NORMALS_CACHE[key]
+        else:
+            (e1x, e1y, e2x, e2y, w_mask), _ = normals_from_mask_for_midline(midline, mask_bin, max_radius=max_radius)
+            _NORMALS_CACHE[key] = (e1x, e1y, e2x, e2y, w_mask)
+
+        gt_e1 = np.column_stack([e1x, e1y])
+        gt_e2 = np.column_stack([e2x, e2y])
+
+        # optional plot
+        if normals_plot and normals_dir:
+            out_png = os.path.join(normals_dir, f"{base_name}_{ctype}{cid}_gt_normals.png")
+            _plot_gt_normals(mask_bin, midline, gt_e1, gt_e2, out_png, f"GT normals — {ctype} {cid} ({tag or ''})")
+
+        # ---------- (B) edge-tracking widths (reused from ann if present) ----------
+        ne = crack.get("normal_edge_points") or crack.get("normal_edge_points_full")
+        w_edge = None
+        edge_e1 = edge_e2 = None
+        if isinstance(ne, dict):
+            def _to_xy(v):
+                # supports both {"edge1":[[x1,y1],...]} and {"edge1":[xs,ys]}
+                if isinstance(v, list) and len(v) == 2 and isinstance(v[0], (list, tuple)):
+                    return np.column_stack([v[0], v[1]]).astype(float)
+                return np.asarray(v, float)
+
+            e1 = _to_xy(ne.get("edge1", []))
+            e2 = _to_xy(ne.get("edge2", []))
+            m = min(len(e1), len(e2), len(w_mask), len(midline))
+            if m >= 3:
+                e1 = e1[:m]; e2 = e2[:m]
+                w_edge = np.hypot(e1[:,0] - e2[:,0], e1[:,1] - e2[:,1])
+                # trim GT to align
+                w_mask = w_mask[:m]
+                midline = midline[:m]
+                gt_e1 = gt_e1[:m]; gt_e2 = gt_e2[:m]
+                edge_e1, edge_e2 = e1, e2
+
+        if w_edge is None:
+            # No edge normals, still optionally return the GT normals
+            if return_normals:
+                normals_dict[(ctype, cid)] = {
+                    "midline": midline.astype(np.float32),
+                    "mask_width": w_mask.astype(np.float32),
+                    "gt_e1": gt_e1.astype(np.float32),
+                    "gt_e2": gt_e2.astype(np.float32),
+                    "edge_e1": None,
+                    "edge_e2": None,
+                }
+            continue
+
+        valid = np.isfinite(w_mask) & np.isfinite(w_edge)
+        if valid.sum() < 3:
+            continue
+
+        diff = w_edge[valid] - w_mask[valid]
+        coords = midline[valid]
+
+        # ---------- (C) stats row ----------
+        width_rows.append({
+            "image": base_name, "crack_type": ctype, "crack_id": cid,
+            "n_valid": int(valid.sum()),
+            "mask_width_mean": float(np.mean(w_mask[valid])),
+            "edge_width_mean": float(np.mean(w_edge[valid])),
+            "width_diff_mae": float(np.mean(np.abs(diff))),
+            "width_diff_rmse": float(np.sqrt(np.mean(diff ** 2))),
+            "width_diff_mean": float(np.mean(diff)),
+            "width_diff_std": float(np.std(diff)),
+            "width_diff_min": float(np.min(diff)),
+            "width_diff_max": float(np.max(diff))
+        })
+
+        # ---------- (D) raw diffs CSV + plot ----------
+        suffix = f"_{tag}" if tag else ""
+        diffs_out = os.path.join(metrics_dir, f"{base_name}_{ctype}{cid}{suffix}_width_diffs.csv")
+        pd.DataFrame({
+            "mid_x": coords[:, 0],
+            "mid_y": coords[:, 1],
+            "mask_width": w_mask[valid],
+            "edge_width": w_edge[valid],
+            "width_diff": diff
+        }).to_csv(diffs_out, index=False)
+
+        if len(coords) > 1:
+            segments = np.stack([coords[:-1], coords[1:]], axis=1)
+            vmin, vmax = np.min(diff), np.max(diff)
+            max_abs = max(abs(vmin), abs(vmax))
+            norm = TwoSlopeNorm(vcenter=0.0, vmin=-max_abs, vmax=max_abs)
+
+            mask_rgb = np.zeros((H, W, 3), dtype=np.uint8)
+            mask_rgb[mask_bin > 0] = [255, 255, 255]
+
+            plt.figure(figsize=(8, 8))
+            plt.imshow(mask_rgb, origin="upper")
+            lc = LineCollection(segments, cmap="coolwarm", norm=norm, linewidth=3.0, alpha=0.9)
+            lc.set_array(diff[:-1])
+            plt.gca().add_collection(lc)
+            cbar = plt.colorbar(lc, ax=plt.gca(), shrink=0.7)
+            cbar.set_label("Width difference (edge - mask) [px]")
+
+            tag_title = f" ({tag})" if tag else ""
+            plt.title(f"Width diffs — {ctype} {cid}{tag_title}")
+            plt.axis("equal"); plt.tight_layout()
+            plot_out = os.path.join(metrics_dir, f"{base_name}_{ctype}{cid}{suffix}_width_diffs.png")
+            if display: plt.show()
+            else:
+                plt.savefig(plot_out, dpi=200)
+                plt.close()
+
+        # ---------- (E) normals return ----------
+        if return_normals:
+            normals_dict[(ctype, cid)] = {
+                "midline": midline.astype(np.float32),
+                "mask_width": w_mask.astype(np.float32),
+                "gt_e1": gt_e1.astype(np.float32),
+                "gt_e2": gt_e2.astype(np.float32),
+                "edge_e1": edge_e1.astype(np.float32) if edge_e1 is not None else None,
+                "edge_e2": edge_e2.astype(np.float32) if edge_e2 is not None else None,
+            }
+
+    if return_normals:
+        return width_rows, diffs_rows, normals_dict
     return width_rows, diffs_rows
+
 
 ###############################################################################################
 # Midline Metrics
