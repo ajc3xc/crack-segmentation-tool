@@ -1881,16 +1881,31 @@ class CrackUtils:
                     existing_pairs.add(_norm_pair(up[1], up[0]))
 
             # 1) commit each drawn manual polyline as its own atomic crack
-            mm = (getattr(self, "manual_midlines_tmp", {}) or {})
-            print(f"manual_midlines_tmp len: {len(mm)}")
+            mm = dict(getattr(self, "manual_midlines_tmp", {}) or {})
+            print(f"manual_midlines_tmp len (pre-commit): {len(mm)}")
+            if not mm:
+                print("[WARN] No manual midlines to commit!")
+            print(f"metrics value: {metrics}")
+
             if metrics:
-                print("saving new manual polyline")
+                print("committing new manual_polys to in-memory annotations")
                 for k, poly in mm.items():
-                    try:
-                        i1, i2 = map(int, k.split("_"))
-                    except Exception:
+                    print(f"[DEBUG] keys in mm: {list(mm.keys())}")
+                    # --- normalize key format ---
+                    if isinstance(k, tuple):
+                        i1, i2 = k
+                    elif isinstance(k, str) and "_" in k:
+                        try:
+                            i1, i2 = map(int, k.split("_"))
+                        except ValueError:
+                            print(f"[WARN] bad key format: {k}")
+                            continue
+                    else:
+                        print(f"[WARN] skipping unrecognized key type {type(k)}: {k}")
                         continue
+
                     if not (0 <= i1 < len(self.user_points) and 0 <= i2 < len(self.user_points)):
+                        print(f"[WARN] invalid indices for key {k}")
                         continue
 
                     p1 = self.user_points[i1]
@@ -1905,30 +1920,14 @@ class CrackUtils:
                                         [float(p2[0]), float(p2[1])]],
                         "user_connections": [[0, 1]],
                         "midline": [[float(x), float(y)] for (x, y) in poly],
-                        # no mask/edges yet; pipeline can add those later
                     }
                     existing_pairs.add(_norm_pair(p1, p2))
+                    print(f"[MEM] added manual_poly id={cid}, len={len(poly)} pts")
 
-            # 2) optionally persist raw connections (without polylines) as "manual"
-            '''for (i1, i2) in (getattr(self, "user_connections", []) or []):
-                if not (0 <= i1 < len(self.user_points) and 0 <= i2 < len(self.user_points)):
-                    continue
-                p1 = self.user_points[i1]
-                p2 = self.user_points[i2]
-                if _norm_pair(p1, p2) in existing_pairs:
-                    continue
+            # 🔹 ensure all nested dicts exist and rebind them
+            self.annotation.setdefault("annotations", {})["atomic_cracks"] = atomic
+            print(f"[MEM] committed manual_polys to self.annotation (len={len(atomic)})")
 
-                cid = _next_id_str()
-                atomic[cid] = {
-                    "source": "manual",
-                    "user_points": [[float(p1[0]), float(p1[1])],
-                                    [float(p2[0]), float(p2[1])]],
-                    "user_connections": [[0, 1]],
-                    "midline": [],  # pure connection; no polyline
-                }
-                existing_pairs.add(_norm_pair(p1, p2))'''
-
-            print("[SAVE] Manual selections committed to in-memory annotations.")
         except Exception as e:
             from PyQt5.QtWidgets import QMessageBox
             QMessageBox.critical(self.MainWindow, "Persist error", f"Failed to commit manual selections:\n{e}")
