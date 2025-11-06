@@ -529,6 +529,13 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
             crack_entry = metrics._to_py(crack_entry)
             atomic_cracks[str(self.current_crack_id)] = crack_entry
             print(f"[DEBUG] atomic_cracks updated for id={self.current_crack_id}")
+            
+            # ✅ only insert if it’s valid and non-empty
+            if crack_entry.get("midline") and len(crack_entry["midline"]) > 1:
+                atomic_cracks[str(self.current_crack_id)] = crack_entry
+                print(f"[DEBUG] atomic_cracks updated for id={self.current_crack_id}")
+            else:
+                print(f"[SKIP] empty or invalid crack for id={self.current_crack_id} — not saving.")
 
             self.use_masks = True
             self.save_annotation()

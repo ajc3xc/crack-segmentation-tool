@@ -72,7 +72,7 @@ def _compare_reference_debug(payload, track_local_yx):
 # ---------------------------------------------------------------------
 # Helper: build binary mask from two edges or fallback ribbon
 # ---------------------------------------------------------------------
-def _crop_mask_from_edges(hc, wc, e1, e2, midline_xy=None, min_area=0.5, ribbon_px=4):
+'''def _crop_mask_from_edges(hc, wc, e1, e2, midline_xy=None, min_area=0.5, ribbon_px=4):
     mask = np.zeros((hc, wc), np.uint8)
     if e1 is None or e2 is None or len(e1) < 2 or len(e2) < 2:
         # fallback to ribbon if missing
@@ -93,8 +93,60 @@ def _crop_mask_from_edges(hc, wc, e1, e2, midline_xy=None, min_area=0.5, ribbon_
         pts = np.round(midline_xy).astype(np.int32).reshape(-1, 1, 2)
         cv2.polylines(mask, [pts], False, 1,
                       thickness=max(3, ribbon_px), lineType=cv2.LINE_AA)
-    return mask
+    return mask'''
+    
+def _crop_mask_from_edges(hc, wc, e1, e2, midline_xy=None, min_area=0.5, ribbon_px=4, debug_save=False, debug_dir="./debug_compare", tag=""):
+    """
+    Build a filled polygon mask from edge1/edge2 or fall back to midline ribbon.
+    Works both for crop-local and global coords (auto-clipped).
+    Optionally saves a debug PNG of the mask.
+    """
+    import numpy as np, cv2, os
 
+    mask = np.zeros((hc, wc), np.uint8)
+
+    def _finite_xy(A):
+        if A is None:
+            return np.empty((0, 2))
+        A = np.asarray(A, float)
+        return A[np.isfinite(A).all(1)]
+
+    e1 = _finite_xy(e1)
+    e2 = _finite_xy(e2)
+
+    # fallback to ribbon if missing
+    if len(e1) < 2 or len(e2) < 2:
+        if midline_xy is not None and len(midline_xy) >= 2:
+            pts = np.round(midline_xy).astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(mask, [pts], False, 1,
+                          thickness=max(3, ribbon_px), lineType=cv2.LINE_AA)
+        if debug_save:
+            os.makedirs(debug_dir, exist_ok=True)
+            cv2.imwrite(os.path.join(debug_dir, f"mask_{tag}_fallback.png"), mask * 255)
+        return mask
+
+    # combine edges into polygon
+    ex = np.concatenate([e1[:, 0][::-1], e2[:, 0]])
+    ey = np.concatenate([e1[:, 1][::-1], e2[:, 1]])
+
+    # clip to valid region
+    ex = np.clip(ex, 0, wc - 1)
+    ey = np.clip(ey, 0, hc - 1)
+
+    area = 0.5 * abs(np.dot(ex, np.roll(ey, -1)) - np.dot(ey, np.roll(ex, -1)))
+    if area > min_area:
+        poly = np.round(np.column_stack([ex, ey])).astype(np.int32)
+        cv2.fillPoly(mask, [poly], 1, lineType=cv2.LINE_AA)
+    elif midline_xy is not None and len(midline_xy) >= 2:
+        pts = np.round(midline_xy).astype(np.int32).reshape(-1, 1, 2)
+        cv2.polylines(mask, [pts], False, 1,
+                      thickness=max(3, ribbon_px), lineType=cv2.LINE_AA)
+
+    if debug_save:
+        os.makedirs(debug_dir, exist_ok=True)
+        cv2.imwrite(os.path.join(debug_dir, f"mask_{tag}.png"), mask * 255)
+
+    return mask
 
 # ---------------------------------------------------------------------
 # Worker: edge mask → edge tracking → mask creation → midline metrics
@@ -231,21 +283,25 @@ def _crop_mask_from_edges(hc, wc, e1, e2, midline_xy=None, min_area=0.5, ribbon_
 # Worker: edge mask → edge tracking → mask creation → midline metrics
 # ---------------------------------------------------------------------
 def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
-    import numpy as np, cv2, os, time
+    import numpy as np, cv2, os
+    from helpers.metrics import compute_midline_metrics  # keep as-is
 
     img = payload["image_crop_gray"]
     pts_crop = payload["pts_crop"]
     track_local_yx = payload["adjusted_track"]  # (2,N) [y,x]
     man_xy_g  = np.asarray(payload["manual_midline_global"], float)
-    manual_normals_crop = payload.get("manual_normals_crop", None)
-    x, y, w, h = payload["bbox"]
+    x, y, w, h = payload["bbox"]  # bbox in GLOBAL coords (x,y,w,h)
     P = payload["params"]
+    crack_id = payload.get("crack_id", "?")
+    base_name = payload.get("image_base", "unknown")
 
     try:
         img_norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         em1, em2 = edge_masks(img_norm, track_local_yx, window_half_size=int(P["window_half_size"]))
 
+        # local XY from YX
         midline_xy_crop = np.column_stack([track_local_yx[1], track_local_yx[0]])
+
         res = edges_tracking(
             image_crop=img_norm,
             pts_cropp=pts_crop,
@@ -261,70 +317,59 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             _debug_plot_edge_worker(img_norm, em1, em2, midline_xy_crop, None, None, P, tag="no_edges")
             return {"status": "fail_no_edges", **P}
 
+        # to arrays
         track_e1 = np.asarray(track_e1, float)
         track_e2 = np.asarray(track_e2, float)
+
         hc, wc = img.shape[:2]
         mask_crop = _crop_mask_from_edges(hc, wc, track_e1, track_e2, midline_xy=midline_xy_crop)
 
-        # ======================================================
-        # 🔍 Fast selective overlay save for visual debugging
-        # ======================================================
-        DEBUG_SAVE = True
-        DEBUG_SAVE_EVERY_N = 5
-        DEBUG_FAST_COMPRESSION = True
+        # --- NORMALS: provide BOTH the legacy key and the global/full form ---
+        normals = res.get("normal_edge_points")
+        if normals is not None:
+            (e1x, e1y), (e2x, e2y) = normals
+            e1x = np.asarray(e1x, float); e1y = np.asarray(e1y, float)
+            e2x = np.asarray(e2x, float); e2y = np.asarray(e2y, float)
 
-        img_name = payload.get("image_name", "unknown_image")
-        crack_id = int(payload.get("crack_id", -1))
-        save_root = payload.get("save_folder", ".")
+            # legacy/local format many callers expect:
+            normal_edge_points = [
+                [e1x.tolist(), e1y.tolist()],
+                [e2x.tolist(), e2y.tolist()],
+            ]
 
-        if DEBUG_SAVE and (crack_id % DEBUG_SAVE_EVERY_N == 0):
-            dbg_dir = os.path.join(save_root, "metrics", img_name, "debug_compare", f"cid{crack_id}")
+            # also provide GLOBAL coordinates (useful for exporters)
+            n1_full = np.column_stack([e1x + x, e1y + y])
+            n2_full = np.column_stack([e2x + x, e2y + y])
+            normal_edge_points_full = {
+                "edge1": n1_full.tolist(),
+                "edge2": n2_full.tolist(),
+            }
+        else:
+            normal_edge_points = None
+            normal_edge_points_full = None
+
+        # Simple preview (toggle)
+        DEBUG_SAVE = False
+        if DEBUG_SAVE:
+            dbg_dir = os.path.join(payload["save_folder"], "metrics", base_name, f"cid{crack_id}")
             os.makedirs(dbg_dir, exist_ok=True)
-
             overlay = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR)
-            for pt in midline_xy_crop.astype(int):
-                cv2.circle(overlay, tuple(pt), 1, (255, 255, 0), -1)
-            if len(track_e1) > 1:
-                cv2.polylines(overlay, [track_e1.astype(np.int32)], False, (0, 0, 255), 1)
-            if len(track_e2) > 1:
-                cv2.polylines(overlay, [track_e2.astype(np.int32)], False, (0, 255, 0), 1)
+            cv2.polylines(overlay, [track_e1.astype(np.int32)], False, (0, 0, 255), 1)
+            cv2.polylines(overlay, [track_e2.astype(np.int32)], False, (0, 255, 0), 1)
+            if normals is not None:
+                for px, py in zip(e1x.astype(int), e1y.astype(int)):
+                    cv2.circle(overlay, (int(px), int(py)), 1, (0, 0, 255), -1)
+                for px, py in zip(e2x.astype(int), e2y.astype(int)):
+                    cv2.circle(overlay, (int(px), int(py)), 1, (0, 255, 0), -1)
+            cv2.imwrite(os.path.join(dbg_dir, "auto_preview.png"), overlay)
+            cv2.imwrite(os.path.join(dbg_dir, "auto_mask.png"), (mask_crop * 255).astype(np.uint8))
 
-            ts = int(time.time() * 1000)
-            fsave = os.path.join(
-                dbg_dir,
-                f"overlay_mu{P['mu']}_l{P['l']}_p{P['p']}_w{P['window_half_size']}_{ts}.png"
-            )
-
-            if DEBUG_FAST_COMPRESSION:
-                cv2.imwrite(fsave, overlay, [cv2.IMWRITE_PNG_COMPRESSION, 1])
-            else:
-                cv2.imwrite(fsave, overlay)
-
-            #print(f"[edge_worker] overlay saved → {fsave}")
-
-        # ======================================================
-        # 🔍 Compute midline metrics vs manual midline (edge-aware)
-        # ======================================================
+        # --- midline comparison metrics (crop-local vs crop-local) ---
         try:
-            from crackutils import CrackUtils
-
-            # --- Build auto midline from manual normals if available ---
-            if manual_normals_crop is not None:
-                e1 = np.column_stack(manual_normals_crop[0])
-                e2 = np.column_stack(manual_normals_crop[1])
-                if len(e1) == len(e2) and len(e1) > 2:
-                    auto_midline = 0.5 * (e1 + e2)
-                else:
-                    n = min(len(e1), len(e2))
-                    auto_midline = 0.5 * (e1[:n] + e2[:n])
-            else:
-                n = min(len(track_e1), len(track_e2))
-                auto_midline = 0.5 * (track_e1[:n] + track_e2[:n])
-
-            man_midline = man_xy_g - np.array([x, y], float)
-
+            n = min(len(track_e1), len(track_e2))
+            auto_midline = 0.5 * (track_e1[:n] + track_e2[:n])
+            man_midline = man_xy_g - np.array([x, y], float)  # shift to crop
             metrics = compute_midline_metrics(auto_midline, man_midline, tau=3.0)
-
         except Exception as e:
             print(f"[edge_worker] ⚠️ midline metrics failed: {e}")
             metrics = {k: np.nan for k in [
@@ -332,9 +377,19 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "directional_bias","curvature_rms_ratio","local_thickness_corr"
             ]}
 
+        # return full geometry using keys downstream expects
         return {
             "status": "ok",
-            "mask_crop_sum": int(mask_crop.sum()),
+            "bbox": [x, y, w, h],
+            "mask_bbox": [x, y, w, h],               # <- many readers look for this
+            "mask_crop": mask_crop.tolist(),
+            "geodesic_edges": {
+                "edge1": track_e1.tolist(),
+                "edge2": track_e2.tolist()
+            },
+            # legacy/local normals + global normals
+            "normal_edge_points": normal_edge_points,
+            "normal_edge_points_full": normal_edge_points_full,
             **P,
             **metrics
         }
@@ -343,4 +398,6 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         print(f"[edge_worker] ❌ unexpected failure for params={P}: {e}")
         _debug_plot_edge_worker(img, np.zeros_like(img), np.zeros_like(img),
                                 None, None, None, P, tag="crash")
-        return {"status": "fail_exception", "error": str(e), **P}
+        out = {"status": "fail_exception", "error": str(e)}
+        out.update(P)
+        return out

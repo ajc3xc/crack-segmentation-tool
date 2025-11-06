@@ -198,7 +198,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             self.manual_endpoint_pairs = None
             self.all_selected_points = None  # reset before each run
             print("Calling select_end_points_manmidlines()...")
-            self.select_end_points_manmidlines()
+            self.select_end_points_manmidlines(metrics=False)
 
         # Merge auto + manual endpoint pairs (global, from annotator)
         all_pairs = []
@@ -402,6 +402,16 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                         # Pair-local globals so save_current_segment writes them into that crack
                         self.user_points = pair_user_points
                         self.user_connections = pair_user_connections
+                        
+                        # === QUICK TEST TRIPWIRE ===
+                        print(f"[TRIPWIRE] about to save crack with src={src}, p0={p0}, p1={p1}")
+                        print(f"   track shape: {getattr(self, 'track', None).shape if hasattr(self, 'track') else None}")
+                        print(f"   current_crack_id={self.current_crack_id}")
+                        print(f"   manual_midlines_tmp keys: {list(getattr(self, 'manual_midlines_tmp', {}).keys())}")
+                        print(f"   total atomic before save: {len(self.annotation['annotations']['atomic_cracks'])}")
+
+                        # 🧠  For now, bail early to inspect what’s going on — no file write, no mutation
+                        #return
 
                         # Save segment (midline + edges + mask + per-crack endpoints)
                         self.save_current_segment()
@@ -1570,19 +1580,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             # e.g. .../Outputs/1.json (as seen in your logs)
             return os.path.join(self.save_folder, f"{base_name}.json")
 
-        def _json_has_manual_midlines(ann_path: str) -> bool:
-            """Lightweight on-disk check: does JSON have any manual midline with ≥2 points?"""
-            import json
-            try:
-                with open(ann_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except UnicodeDecodeError:
-                # Fallback for any legacy files accidentally saved in cp1252, etc.
-                with open(ann_path, "r", encoding="cp1252", errors="strict") as f:
-                    data = json.load(f)
-            except Exception:
-                return False
-
             ann    = (data or {}).get("annotations", {}) or {}
             atomic = ann.get("atomic_cracks", {}) or {}
             if not atomic:
@@ -1623,7 +1620,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             ann_path = _ann_path_for_image(idx)
             if not os.path.exists(ann_path):
                 return False
-            if _json_has_manual_midlines(ann_path):
+            if metrics._json_has_manual_midlines(ann_path):
                 return True
 
             # Final in-memory check (robust against any stale/legacy JSON)
@@ -1779,7 +1776,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     continue
 
                 # 2) Skip if JSON exists but has no manual midlines with ≥2 points
-                if not _json_has_manual_midlines(ann_path):
+                if not metrics._json_has_manual_midlines(ann_path):
                     print(f"[apply] ⚠ Skipping {base_name} — JSON has no manual midlines.")
                     continue
 
@@ -3263,19 +3260,13 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         """
         Export *one* consolidated supervision CSV per image.
 
-        Includes:
-        - all atomic cracks not absorbed in any combined crack
-        - all combined cracks themselves
-        Produces:
-        metrics/<image>/supervision/supervision_all.csv
-
         Columns:
         image, crack_type, crack_id, sample_idx,
         mid_x, mid_y,
         edgeL_x, edgeL_y, edgeR_x, edgeR_y, width_px
         """
-        import os, json, numpy as np, pandas as pd, cv2, traceback
-        from helpers.metrics import normals_from_mask_for_midline, _reconstruct_full_mask
+        import os, numpy as np, pandas as pd, traceback
+        from helpers.metrics import normals_from_mask_for_midline
 
         base_name = self._image_base()
         print(f"[DEBUG SUP] === EXPORT (UNIFIED) for {base_name} ===")
@@ -3290,88 +3281,105 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         out_root = os.path.join(self.save_folder, "metrics", base_name, "supervision")
         os.makedirs(out_root, exist_ok=True)
 
-        atomic   = self._metric_atomic()
-        combined = self._metric_combined() or {}
-        auto_best = self._metric_auto_best()
+        atomic    = self._metric_atomic() or {}
+        combined  = self._metric_combined() or {}
+        auto_best = self._metric_auto_best() or {}
 
-        # collect atomic IDs that are part of combineds so we can skip duplicates
+        # atomics that were merged → skip to avoid duplicates
         atomics_in_combined = {str(m) for cmb in combined.values() for m in (cmb.get("members", []) or [])}
 
-        all_rows = []
+        def _pack_df(ctype, cid, mid_xy, e1, e2):
+            e1 = np.asarray(e1, float); e2 = np.asarray(e2, float); mid_xy = np.asarray(mid_xy, float)
+            if e1.ndim != 2 or e2.ndim != 2 or mid_xy.ndim != 2: return None
+            if e1.shape[0] < 2 or e2.shape[0] < 2 or mid_xy.shape[0] < 2: return None
+            n = min(len(mid_xy), len(e1), len(e2))
+            if n < 2: return None
+            w = np.hypot(e1[:n,0] - e2[:n,0], e1[:n,1] - e2[:n,1])
+            return pd.DataFrame({
+                "image": base_name,
+                "crack_type": ctype,
+                "crack_id": cid,
+                "sample_idx": np.arange(n, dtype=int),
+                "mid_x": mid_xy[:n,0], "mid_y": mid_xy[:n,1],
+                "edgeL_x": e1[:n,0],  "edgeL_y": e1[:n,1],
+                "edgeR_x": e2[:n,0],  "edgeR_y": e2[:n,1],
+                "width_px": w
+            })
 
-        # helper for one crack
         def _process_crack(ctype, cid, crack):
             mid_xy = np.asarray(crack.get("midline", []), float)
             if mid_xy.ndim != 2 or mid_xy.shape[1] != 2 or len(mid_xy) < 2:
                 print(f"[DEBUG SUP] skip invalid midline {ctype} {cid}")
                 return None
 
+            # 1) try precomputed normals dict if provided
             try:
                 if precomputed_normals and (ctype, str(cid)) in precomputed_normals:
                     nd = precomputed_normals[(ctype, str(cid))]
-                    e1 = nd.get("gt_e1"); e2 = nd.get("gt_e2")
-                    if e1 is not None and e2 is not None:
-                        w = np.hypot(e1[:,0]-e2[:,0], e1[:,1]-e2[:,1])
-                        df = pd.DataFrame({
-                            "image": base_name,
-                            "crack_type": ctype,
-                            "crack_id": cid,
-                            "sample_idx": np.arange(len(w)),
-                            "mid_x": mid_xy[:,0], "mid_y": mid_xy[:,1],
-                            "edgeL_x": e1[:,0], "edgeL_y": e1[:,1],
-                            "edgeR_x": e2[:,0], "edgeR_y": e2[:,1],
-                            "width_px": w
-                        })
-                        return df
+                    e1 = np.asarray(nd.get("gt_e1"))
+                    e2 = np.asarray(nd.get("gt_e2"))
+                    if e1 is not None and e2 is not None and len(e1) >= 2 and len(e2) >= 2:
+                        return _pack_df(ctype, cid, mid_xy, e1, e2)
             except Exception as e:
                 print(f"[DEBUG SUP] precomputed normals failed {ctype} {cid}: {e}")
                 traceback.print_exc()
 
+            # 2) try auto normals saved on the crack (if present)
+            try:
+                nd_auto = crack.get("normal_edge_points_full") or crack.get("normal_edge_points")
+                if nd_auto:
+                    if isinstance(nd_auto, dict):
+                        e1 = np.asarray(nd_auto.get("edge1"), float)
+                        e2 = np.asarray(nd_auto.get("edge2"), float)
+                    else:
+                        # legacy local form: [[e1x, e1y], [e2x, e2y]]
+                        (e1x, e1y), (e2x, e2y) = nd_auto
+                        e1 = np.column_stack([e1x, e1y])
+                        e2 = np.column_stack([e2x, e2y])
+                    df = _pack_df(ctype, cid, mid_xy, e1, e2)
+                    if df is not None:
+                        return df
+            except Exception as e:
+                print(f"[DEBUG SUP] auto normals parse failed {ctype} {cid}: {e}")
+                traceback.print_exc()
+
+            # 3) fallback: derive normals from mask along midline
             try:
                 (e1x, e1y, e2x, e2y, w_mask), _ = normals_from_mask_for_midline(mid_xy, mask_bin, max_radius=50)
-                df = pd.DataFrame({
-                    "image": base_name,
-                    "crack_type": ctype,
-                    "crack_id": cid,
-                    "sample_idx": np.arange(len(mid_xy)),
-                    "mid_x": mid_xy[:,0], "mid_y": mid_xy[:,1],
-                    "edgeL_x": e1x, "edgeL_y": e1y,
-                    "edgeR_x": e2x, "edgeR_y": e2y,
-                    "width_px": w_mask
-                })
-                return df
+                e1 = np.column_stack([e1x, e1y])
+                e2 = np.column_stack([e2x, e2y])
+                return _pack_df(ctype, cid, mid_xy, e1, e2)
             except Exception as e:
                 print(f"[DEBUG SUP] normals_from_mask_for_midline failed {ctype} {cid}: {e}")
                 traceback.print_exc()
                 return None
 
-        # --- atomic (excluding members of combined) ---
+        rows = []
+
+        # atomics (excluding those absorbed into combined)
         print(f"[DEBUG SUP] exporting atomics (excluding {len(atomics_in_combined)} absorbed)")
         for cid, crack in atomic.items():
-            if str(cid) in atomics_in_combined:
+            if str(cid) in atomics_in_combined: 
                 continue
             df = _process_crack("atomic", str(cid), crack)
-            if df is not None and not df.empty:
-                all_rows.append(df)
+            if df is not None and not df.empty: rows.append(df)
 
-        # --- combined cracks ---
+        # combined
         print(f"[DEBUG SUP] exporting {len(combined)} combined cracks")
         for cid, crack in combined.items():
             df = _process_crack("combined", str(cid), crack)
-            if df is not None and not df.empty:
-                all_rows.append(df)
+            if df is not None and not df.empty: rows.append(df)
 
-        # --- concat + save ---
-        if all_rows:
-            df_all = pd.concat(all_rows, ignore_index=True)
+        if rows:
+            df_all = pd.concat(rows, ignore_index=True)
             out_csv = os.path.join(out_root, "supervision_all.csv")
             df_all.to_csv(out_csv, index=False)
-            print(f"[DEBUG SUP] wrote {len(df_all)} samples from {len(all_rows)} cracks → {out_csv}")
+            print(f"[DEBUG SUP] wrote {len(df_all)} samples from {len(rows)} cracks → {out_csv}")
         else:
             print(f"[DEBUG SUP] no valid cracks to export for {base_name}")
 
         print(f"[DEBUG SUP] === END (UNIFIED) for {base_name} ===\n")
-        
+       
     # ---- 4) Extract inputs for a subcrack (READS SNAPSHOT ONLY) ------------------
     def extract_edge_inputs_for_subcrack(self, crack_id, color_channel=None):
         """
@@ -3943,9 +3951,48 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         if getattr(self, "original_image", None) is None:
             print("[quick] no image loaded"); return {}
+            
+        # 2) Skip if JSON exists but has no manual midlines with ≥2 points
 
         base_name = self._image_base()
         print(f"\n[quick] metrics for current image: {base_name}")
+        
+        # --- SAFETY: if current in-memory annotation has no valid manual midlines, skip + purge snapshot ---
+        ann = (getattr(self, "annotation", {}) or {}).get("annotations", {}) or {}
+        atomic = ann.get("atomic_cracks", {}) or {}
+
+        def _has_valid_manual_midlines(atomic_dict):
+            for crack in atomic_dict.values():
+                src = (crack.get("source") or "").lower()
+                if src.startswith("auto") or src == "combined":
+                    continue
+                mid = crack.get("midline", [])
+                if isinstance(mid, list) and len(mid) >= 2:
+                    return True
+            return False
+
+        if not atomic or not _has_valid_manual_midlines(atomic):
+            print(f"[DEBUG QUICK] 🧹 No valid manual midlines found in annotation — purging snapshot for {base_name}")
+            import os
+
+            # --- Construct per-image metrics snapshot path (where _metric_atomic() reads from)
+            metrics_dir = os.path.join(self.save_folder, "metrics")
+            snap_path = os.path.join(metrics_dir, f"{base_name}.json")
+
+            if os.path.exists(snap_path):
+                try:
+                    os.remove(snap_path)
+                    print(f"[DEBUG QUICK] Removed stale metrics snapshot: {snap_path}")
+                except Exception as e:
+                    print(f"[DEBUG QUICK] ⚠ Failed to remove {snap_path}: {e}")
+
+            # also clear in-memory metric_annotations if loaded
+            if hasattr(self, "metric_annotations"):
+                self.metric_annotations.clear()
+                print("[DEBUG QUICK] Cleared in-memory metric_annotations")
+
+            return {}
+        
         image_dir = self._metrics_dir()
         os.makedirs(image_dir, exist_ok=True)
 

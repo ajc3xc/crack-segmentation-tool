@@ -16,6 +16,56 @@ import time
 
 ROUNDING_DIGITS=6
 
+'''def _json_has_manual_midlines(ann_path: str) -> bool:
+    """Lightweight on-disk check: does JSON have any manual midline with ≥2 points?"""
+    import json
+    try:
+        with open(ann_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except UnicodeDecodeError:
+        # Fallback for any legacy files accidentally saved in cp1252, etc.
+        with open(ann_path, "r", encoding="cp1252", errors="strict") as f:
+            data = json.load(f)
+    except Exception:
+        return False
+'''
+
+def _json_has_manual_midlines(ann_path: str) -> bool:
+    """Lightweight on-disk check: does JSON have any manual midline with ≥2 points?
+       Also purges stale annotations that contain no valid atomic cracks.
+    """
+    import json, os
+    try:
+        with open(ann_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except UnicodeDecodeError:
+        with open(ann_path, "r", encoding="cp1252", errors="strict") as f:
+            data = json.load(f)
+    except Exception:
+        return False
+
+    ann = (data or {}).get("annotations", {}) or {}
+    atomic = ann.get("atomic_cracks", {}) or {}
+
+    # --- purge safety: no atomic cracks or all midlines empty ---
+    if not atomic or all(len(cr.get("midline", [])) < 2 for cr in atomic.values()):
+        print(f"[global-metrics] 🧹 purging stale JSON with no manual midlines: {ann_path}")
+        try:
+            os.remove(ann_path)
+        except Exception as e:
+            print(f"[global-metrics] ⚠ failed to remove {ann_path}: {e}")
+        return False
+
+    # --- otherwise: check for ≥2-pt manual midlines ---
+    for crack in atomic.values():
+        src = (crack.get("source") or "").lower()
+        if src.startswith("auto") or src == "combined":
+            continue
+        mid = crack.get("midline", [])
+        if isinstance(mid, list) and len(mid) >= 2:
+            return True
+    return False
+
 #################################################################################
 # Metrics calculations functions
 #################################################################################

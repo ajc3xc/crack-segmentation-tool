@@ -426,10 +426,16 @@ class ManualDrawing(CrackUtils):
             error(e)
                  
     # in select_save_end_points
-    def select_save_end_points(self):
-        self.select_end_points_manmidlines()
+    def select_save_end_points(self, metrics=True):
+        """
+        Select endpoints + manual midlines and immediately save annotation.
+        By default, runs in full pipeline mode (creates usable mask_crop entries).
+        Set pipeline=False for lightweight endpoint-only testing.
+        """
+        self.select_end_points_manmidlines(metrics=metrics)
         self.save_annotation()
         self.change_image()
+
         
     def manual_segment_full_screen(self):
         try:

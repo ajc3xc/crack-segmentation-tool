@@ -108,7 +108,7 @@ class CrackUtils:
         cracks = ann.get("atomic_cracks", {})
         print(f"\n[DEBUG] {label}: {len(cracks)} cracks currently stored.")
         for cid, crack in cracks.items():
-            src = crack.get("source", "?")
+            src = crack.get("source", crack.get("src", "?"))
             midline_len = len(crack.get("midline", []))
             mask_nonzero = np.count_nonzero(np.array(crack.get("mask", []), dtype=np.uint8))
             print(f"    ID={cid} src={src} midline_len={midline_len} mask_pixels={mask_nonzero}")
@@ -1402,7 +1402,8 @@ class CrackUtils:
 
         return cv2.addWeighted(im, 1, red, 0.35, 0)    
 
-    def select_end_points_manmidlines(self):
+    def select_end_points_manmidlines(self, metrics: bool = False):
+        print(metrics)
         if not hasattr(self, "original_image") or self.original_image is None:
             error("No original image found.")
             return
@@ -1494,8 +1495,27 @@ class CrackUtils:
             initial_midlines={},
         )
 
-        annot.readonly_midlines = readonly_midlines
-        annot.readonly_connections = readonly_conn_idx
+        #annot.readonly_midlines = readonly_midlines
+        #annot.readonly_connections = readonly_conn_idx
+        
+        ro_conns = []
+        for i1, i2 in readonly_conn_idx:
+            a, b = (i1, i2) if i1 <= i2 else (i2, i1)
+            ro_conns.append((a, b))
+
+        # --- wrap read-only midlines into records the painter expects ---
+        ro_mid = {}
+        for (i1, i2), poly in readonly_midlines.items():
+            a, b = (i1, i2) if i1 <= i2 else (i2, i1)
+            ro_mid[(a, b)] = {
+                "poly": [[float(x), float(y)] for (x, y) in poly],  # <- the key paintEvent reads
+                "color": (160, 160, 160),                           # optional; safe default
+                "readonly": True,                                   # optional; used by tools
+                "tag": "existing"                                   # optional; for legend/debug
+            }
+
+        annot.readonly_midlines = ro_mid
+        annot.readonly_connections = ro_conns
 
         # Also enforce at the widget level:
         # Wrap the original mousePressEvent to prevent bad start/finish overlaps
@@ -1776,38 +1796,39 @@ class CrackUtils:
             ac = ann["atomic_cracks"]
 
             # one entry per manual midline
-            for k, poly in self.manual_midlines_tmp.items():
-                try:
-                    if isinstance(k, tuple):
-                        i1, i2 = k
-                    elif isinstance(k, str) and "_" in k:
-                        i1, i2 = map(int, k.split("_"))
-                    else:
-                        continue
+            '''if metrics:
+                for k, poly in self.manual_midlines_tmp.items():
+                    try:
+                        if isinstance(k, tuple):
+                            i1, i2 = k
+                        elif isinstance(k, str) and "_" in k:
+                            i1, i2 = map(int, k.split("_"))
+                        else:
+                            continue
 
-                    cid = str(len(ac))
+                        cid = str(len(ac))
 
-                    # --- compute synthetic bounding box of midline ---
-                    if poly:
-                        xs = [p[0] for p in poly]
-                        ys = [p[1] for p in poly]
-                        x, y = min(xs), min(ys)
-                        w, h = max(xs) - x, max(ys) - y
-                        mask_bbox = [float(x), float(y), float(w), float(h)]
-                    else:
-                        mask_bbox = [0.0, 0.0, 1.0, 1.0]
+                        # --- compute synthetic bounding box of midline ---
+                        if poly:
+                            xs = [p[0] for p in poly]
+                            ys = [p[1] for p in poly]
+                            x, y = min(xs), min(ys)
+                            w, h = max(xs) - x, max(ys) - y
+                            mask_bbox = [float(x), float(y), float(w), float(h)]
+                        else:
+                            mask_bbox = [0.0, 0.0, 1.0, 1.0]
 
-                    ac[cid] = {
-                        "src": "manual_poly",
-                        "midline": [[float(x), float(y)] for (x, y) in poly],
-                        "user_points": [list(self.user_points[i1]), list(self.user_points[i2])],
-                        "user_connections": [[0, 1]],
-                        "mask_compact": [],
-                        "mask_bbox": mask_bbox,
-                    }
+                        ac[cid] = {
+                            "src": "manual_poly",
+                            "midline": [[float(x), float(y)] for (x, y) in poly],
+                            "user_points": [list(self.user_points[i1]), list(self.user_points[i2])],
+                            "user_connections": [[0, 1]],
+                            "mask_compact": [],
+                            "mask_bbox": mask_bbox,
+                        }
 
-                except Exception as e:
-                    print(f"[DEBUG persist_manual_midline] failed for key={k}: {e}")
+                    except Exception as e:
+                        print(f"[DEBUG persist_manual_midline] failed for key={k}: {e}")'''
 
             print(f"[SAVE] Manual selections committed to in-memory annotations.")
             dlg.accept()
@@ -1861,32 +1882,35 @@ class CrackUtils:
 
             # 1) commit each drawn manual polyline as its own atomic crack
             mm = (getattr(self, "manual_midlines_tmp", {}) or {})
-            for k, poly in mm.items():
-                try:
-                    i1, i2 = map(int, k.split("_"))
-                except Exception:
-                    continue
-                if not (0 <= i1 < len(self.user_points) and 0 <= i2 < len(self.user_points)):
-                    continue
+            print(f"manual_midlines_tmp len: {len(mm)}")
+            if metrics:
+                print("saving new manual polyline")
+                for k, poly in mm.items():
+                    try:
+                        i1, i2 = map(int, k.split("_"))
+                    except Exception:
+                        continue
+                    if not (0 <= i1 < len(self.user_points) and 0 <= i2 < len(self.user_points)):
+                        continue
 
-                p1 = self.user_points[i1]
-                p2 = self.user_points[i2]
-                if _norm_pair(p1, p2) in existing_pairs:
-                    continue
+                    p1 = self.user_points[i1]
+                    p2 = self.user_points[i2]
+                    if _norm_pair(p1, p2) in existing_pairs:
+                        continue
 
-                cid = _next_id_str()
-                atomic[cid] = {
-                    "source": "manual_poly",
-                    "user_points": [[float(p1[0]), float(p1[1])],
-                                    [float(p2[0]), float(p2[1])]],
-                    "user_connections": [[0, 1]],
-                    "midline": [[float(x), float(y)] for (x, y) in poly],
-                    # no mask/edges yet; pipeline can add those later
-                }
-                existing_pairs.add(_norm_pair(p1, p2))
+                    cid = _next_id_str()
+                    atomic[cid] = {
+                        "source": "manual_poly",
+                        "user_points": [[float(p1[0]), float(p1[1])],
+                                        [float(p2[0]), float(p2[1])]],
+                        "user_connections": [[0, 1]],
+                        "midline": [[float(x), float(y)] for (x, y) in poly],
+                        # no mask/edges yet; pipeline can add those later
+                    }
+                    existing_pairs.add(_norm_pair(p1, p2))
 
             # 2) optionally persist raw connections (without polylines) as "manual"
-            for (i1, i2) in (getattr(self, "user_connections", []) or []):
+            '''for (i1, i2) in (getattr(self, "user_connections", []) or []):
                 if not (0 <= i1 < len(self.user_points) and 0 <= i2 < len(self.user_points)):
                     continue
                 p1 = self.user_points[i1]
@@ -1902,96 +1926,582 @@ class CrackUtils:
                     "user_connections": [[0, 1]],
                     "midline": [],  # pure connection; no polyline
                 }
-                existing_pairs.add(_norm_pair(p1, p2))
+                existing_pairs.add(_norm_pair(p1, p2))'''
 
             print("[SAVE] Manual selections committed to in-memory annotations.")
         except Exception as e:
             from PyQt5.QtWidgets import QMessageBox
             QMessageBox.critical(self.MainWindow, "Persist error", f"Failed to commit manual selections:\n{e}")
             print(f"[SAVE] Persist error: {e}")
+            
+    '''def select_end_points_manmidlines(self, metrics: bool = False):
+        """
+        Endpoint/connection + manual-midline picker.
+
+        modes:
+        - metrics=False (default): legacy/pipeline behavior ("manual_poly" entries, no crops)
+        - metrics=True: store extra fields for metrics (mask_crop, mask_bbox, mask_pixels, status)
+        """
+        if not hasattr(self, "original_image") or self.original_image is None:
+            error("No original image found.")
+            return
+
+        if not hasattr(self, "annotation") or self.annotation is None:
+            error("No annotation data found.")
+            return
+
+        # ---- Qt imports & setup ----
+        from PyQt5 import QtWidgets
+        from PyQt5.QtCore import Qt
+        from PyQt5.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
+            QApplication, QMessageBox, QScrollArea, QLabel
+        )
+
+        import numpy as np
+        import cv2
+
+        boxes = self.get_all_bounding_boxes()
+
+        readonly_midlines = {}
+        readonly_connections = []
+        existing_midlines = {}
+
+        initial_points = list(getattr(self, "user_points", []) or [])
+        initial_conns  = list(getattr(self, "user_connections", []) or [])
+        point_index_map = {tuple(pt): idx for idx, pt in enumerate(initial_points)}
+
+        def ensure_point(pt):
+            if tuple(pt) not in point_index_map:
+                point_index_map[tuple(pt)] = len(initial_points)
+                initial_points.append(pt)
+            return point_index_map[tuple(pt)]
+
+        # ---- preload existing / readonly from annotations ----
+        if "annotations" in self.annotation:
+            ann = self.annotation["annotations"]
+
+            # previous freehand midlines (keyed by "i_j")
+            ann_midlines = ann.get("midlines", {})
+            for k_str, pts in ann_midlines.items():
+                try:
+                    i1, i2 = map(int, k_str.split("_"))
+                    if i1 != i2:
+                        poly = [tuple(map(float, xy)) for xy in pts]
+                        existing_midlines[(min(i1, i2), max(i1, i2))] = poly
+                except Exception as e:
+                    print(f"[WARN] Failed to parse manual midline {k_str}: {e}")
+
+            # atomic cracks → read-only overlays (manuals are read-only here)
+            for cid, crack in ann.get("atomic_cracks", {}).items():
+                if hasattr(self, "current_crack_id") and str(cid) == str(self.current_crack_id):
+                    continue
+
+                src = crack.get("source", crack.get("src", "auto"))
+                up  = crack.get("user_points", [])
+                if len(up) == 2:
+                    p1, p2 = tuple(up[0]), tuple(up[1])
+                else:
+                    ml = crack.get("midline", [])
+                    if len(ml) >= 2:
+                        p1, p2 = tuple(ml[0]), tuple(ml[-1])
+                    else:
+                        continue
+
+                idx1 = ensure_point(p1)
+                idx2 = ensure_point(p2)
+                if idx1 == idx2:
+                    continue
+
+                if src in ("manual", "manual_poly"):
+                    poly = crack.get("midline", [])
+                    if poly:
+                        readonly_midlines[(idx1, idx2)] = [tuple(map(float, xy)) for xy in poly]
+                else:
+                    readonly_connections.append((p1, p2))
+
+        # hoist prior readonly midlines keyed by point indices
+        for (i1, i2), poly in existing_midlines.items():
+            s = ensure_point(poly[0])
+            e = ensure_point(poly[-1])
+            if s != e:
+                readonly_midlines[(s, e)] = poly
+
+        readonly_conn_idx = []
+        for p1, p2 in readonly_connections:
+            i1 = ensure_point(p1)
+            i2 = ensure_point(p2)
+            if i1 != i2:
+                readonly_conn_idx.append((min(i1, i2), max(i1, i2)))
+
+        # ---- build annotator ----
+        annot = CrackAnnotator(
+            image=self.original_image,
+            boxes=boxes,
+            initial_points=initial_points,
+            initial_connections=initial_conns,
+            initial_midlines={},
+        )
+        annot.readonly_midlines = readonly_midlines
+        annot.readonly_connections = readonly_conn_idx
+
+        # guard mouse presses to avoid degenerate restarts
+        orig_mousePressEvent = annot.mousePressEvent
+
+        def guarded_mousePressEvent(ev):
+            p = annot._to_image_coords(ev.pos())
+            point_i = annot._find_point_at(p)
+
+            last_pt = annot.polyline[-1] if annot.polyline else None
+            last_two_pts = annot.polyline[-2:] if len(annot.polyline) >= 2 else []
+            conn_key = None
+            if annot._is_drawing and point_i is not None and point_i != annot._start_idx:
+                conn_key = annot._sorted(annot._start_idx, point_i)
+
+            print(
+                f"[GUARDED_PRESS] btn={ev.button()} at {p} | "
+                f"point_i={point_i}, start_idx={annot._start_idx} | "
+                f"_is_drawing={annot._is_drawing}, polyline_mode={annot.polyline_mode} | "
+                f"polyline_len={len(annot.polyline)}, last_pt={last_pt}, last_two_pts={last_two_pts} | "
+                f"conn_key={conn_key}"
+            )
+
+            if not annot.polyline_mode:
+                return orig_mousePressEvent(ev)
+
+            if getattr(annot, "_just_committed_midline", False):
+                last_end   = getattr(annot, "_last_polyline_end_idx", None)
+                last_start = getattr(annot, "_last_polyline_start_idx", None)
+                if point_i is not None and point_i in (last_end, last_start):
+                    print("[GUARDED_PRESS] blocked immediate restart on last line endpoint")
+                    annot._just_committed_midline = False
+                    return
+                annot._just_committed_midline = False
+
+            if not annot._is_drawing:
+                if point_i is not None and annot._start_idx == point_i:
+                    print("[GUARDED_PRESS] blocked: same start point")
+                    return
+                return orig_mousePressEvent(ev)
+
+            # currently drawing
+            return orig_mousePressEvent(ev)
+
+        annot.mousePressEvent = guarded_mousePressEvent
+        annot.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
+
+        # ---- dialog ----
+        dlg = QDialog(self.MainWindow)
+        dlg.setWindowTitle("Endpoints, Connections & Manual Midlines")
+        dlg.setWindowModality(Qt.ApplicationModal)
+        dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowMaximizeButtonHint)
+        layout = QVBoxLayout(dlg)
+
+        mode_btn = QPushButton("Switch to Connection Mode")
+        mode_btn.setCheckable(True)
+        layout.addWidget(mode_btn)
+
+        manual_btn = QPushButton("Manual Midlines: OFF")
+        manual_btn.setCheckable(True)
+        manual_btn.setVisible(False)
+        layout.addWidget(manual_btn)
+
+        hint = QLabel(
+            "Editable: Auto/Manual in black/light-blue.   Read-only shown in gray/beige.\n"
+            "Point/Connection modes add endpoints or connect them.  Mousewheel = zoom.\n"
+            "Manual midline: Left-hold on start endpoint → draw → release on different endpoint."
+        )
+        layout.addWidget(hint)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(annot)
+        layout.addWidget(scroll, 1)
+
+        btn_row = QHBoxLayout()
+        btn_done, btn_cancel = QPushButton("Done"), QPushButton("Cancel")
+        btn_row.addWidget(btn_done)
+        btn_row.addWidget(btn_cancel)
+        layout.addLayout(btn_row)
+
+        # ---- helpers ----
+        def all_points_in_boxes():
+            def in_any(pt):
+                x, y = pt
+                for xmin, ymin, xmax, ymax in boxes:
+                    if xmin <= x <= xmax and ymin <= y <= ymax:
+                        return True
+                return False
+
+            readonly_point_idxs = set()
+            for (i1, i2) in annot.readonly_connections:
+                readonly_point_idxs.update([i1, i2])
+            for (i1, i2) in annot.readonly_midlines.keys():
+                readonly_point_idxs.update([i1, i2])
+
+            bad = [
+                pt for idx, pt in enumerate(annot.points)
+                if idx not in readonly_point_idxs and not in_any(pt)
+            ]
+            return (len(bad) == 0, bad)
+
+        def confirm_discard():
+            mb = QMessageBox(dlg)
+            mb.setIcon(QMessageBox.Warning)
+            mb.setWindowTitle("Discard current midline?")
+            mb.setText("You're in the middle of drawing a midline. Discard it?")
+            mb.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            return mb.exec_() == QMessageBox.Yes
+
+        def update_controls_visibility():
+            if annot.polyline_mode:
+                mode_btn.setVisible(False)
+                manual_btn.setVisible(True)
+                manual_btn.setText("Manual Midlines: ON")
+                manual_btn.setStyleSheet("background:#79d2e6;")
+            else:
+                mode_btn.setVisible(True)
+                if annot.connection_mode:
+                    mode_btn.setText("Switch to Point Mode")
+                    mode_btn.setStyleSheet("background:#97e297;")
+                else:
+                    mode_btn.setText("Switch to Connection Mode")
+                    mode_btn.setStyleSheet("background:#e2c297;")
+                manual_btn.setVisible(annot.connection_mode and (not annot.all_pairs_saturated()))
+                manual_btn.setText("Manual Midlines: OFF")
+                manual_btn.setStyleSheet("")
+
+        mode_btn.clicked.connect(lambda: (annot.toggle_mode(), update_controls_visibility()))
+        manual_btn.clicked.connect(lambda checked: (
+            annot.set_mode_polyline(checked, confirm_cb=confirm_discard),
+            update_controls_visibility()
+        ))
+        update_controls_visibility()
+
+        # ---- Done handler ----
+        def on_done():
+            # close any in-progress polyline safely
+            if annot.polyline_mode and annot._is_drawing:
+                if not confirm_discard():
+                    return
+                annot.set_mode_polyline(False)
+
+            # validate points in boxes
+            ok, bad = all_points_in_boxes()
+            if not ok:
+                bad_str = "\n".join([f"({x:.1f}, {y:.1f})" for (x, y) in bad])
+                QMessageBox.warning(dlg, "Points outside boxes",
+                                    f"The following points are outside all bounding boxes:\n{bad_str}")
+                return
+
+            # validate each drawn midline fully lies in a shared/overlap region
+            for (i1, i2), poly in annot.midlines.items():
+                if i1 == i2:
+                    continue
+                try:
+                    sx, sy = annot.points[i1]
+                    ex, ey = annot.points[i2]
+                except Exception:
+                    continue
+
+                def boxes_containing(x, y, tol=0.5):
+                    hits = []
+                    for i, (xmin, ymin, xmax, ymax) in enumerate(boxes):
+                        if (xmin - tol) <= x <= (xmax + tol) and (ymin - tol) <= y <= (ymax + tol):
+                            hits.append(i)
+                    return hits
+
+                sx, sy = float(sx), float(sy)
+                ex, ey = float(ex), float(ey)
+                S = set(boxes_containing(sx, sy))
+                E = set(boxes_containing(ex, ey))
+
+                if not S or not E:
+                    QMessageBox.warning(dlg, "Invalid midline",
+                                        "One or both endpoints are outside all boxes.")
+                    return
+
+                effective_region = None
+                shared = S & E
+                if shared:
+                    bidx = next(iter(shared))
+                    effective_region = boxes[bidx]
+                else:
+                    for i in S:
+                        for j in E:
+                            xmin1, ymin1, xmax1, ymax1 = boxes[i]
+                            xmin2, ymin2, xmax2, ymax2 = boxes[j]
+                            oxmin, oymin = max(xmin1, xmin2), max(ymin1, ymin2)
+                            oxmax, oymax = min(xmax1, xmax2), min(ymax1, ymax2)
+                            if oxmin <= oxmax and oymin <= oymax:
+                                effective_region = (oxmin, oymin, oxmax, oymax)
+                                break
+                        if effective_region:
+                            break
+
+                if effective_region is None:
+                    QMessageBox.warning(
+                        dlg, "Invalid midline",
+                        "A manual midline spans boxes that don't share a region. Please fix before continuing."
+                    )
+                    return
+
+                xmin, ymin, xmax, ymax = effective_region
+                for (x, y) in poly:
+                    x, y = float(x), float(y)
+                    if not (xmin <= x <= xmax and ymin <= y <= ymax):
+                        QMessageBox.warning(
+                            dlg, "Invalid midline",
+                            "A manual midline has points outside its valid region. Please fix."
+                        )
+                        return
+
+            # ---- collect ui results ----
+            self.user_points = annot.points
+            self.user_connections = [c for c in annot.connections if c not in annot.readonly_connections]
+            self.endpoint_pairs = [
+                (self.user_points[i1], self.user_points[i2]) for (i1, i2) in self.user_connections
+            ]
+
+            # finalize drawing & capture midlines
+            if hasattr(annot, "finalize_drawing_if_needed"):
+                annot.finalize_drawing_if_needed()
+            self.manual_midlines_tmp = dict(getattr(annot, "midlines", {}))
+
+            # build manual endpoint pairs (needed by pipeline later)
+            self.manual_endpoint_pairs = []
+            for (i1, i2), poly in (self.manual_midlines_tmp or {}).items():
+                if i1 != i2 and 0 <= i1 < len(self.user_points) and 0 <= i2 < len(self.user_points):
+                    self.manual_endpoint_pairs.append((
+                        tuple(map(float, self.user_points[i1])),
+                        tuple(map(float, self.user_points[i2]))
+                    ))
+
+            print(f"[DEBUG] manual_midlines_tmp contents: {len(self.manual_midlines_tmp)} midlines")
+
+            # ---- persist selections into annotations ----
+            if not hasattr(self, "annotation") or not isinstance(self.annotation, dict):
+                self.annotation = {"annotations": {"atomic_cracks": {}}}
+
+            ann = self.annotation.setdefault("annotations", {})
+            ac  = ann.setdefault("atomic_cracks", {})
+
+            # append each drawn manual polyline as one atomic crack
+            for k, poly in (self.manual_midlines_tmp or {}).items():
+                try:
+                    if isinstance(k, tuple):
+                        i1, i2 = k
+                    elif isinstance(k, str) and "_" in k:
+                        i1, i2 = map(int, k.split("_"))
+                    else:
+                        continue
+
+                    cid = str(len(ac))
+
+                    # bbox around the polyline (for metrics=True we also create a tiny ribbon mask)
+                    if poly:
+                        xs = [p[0] for p in poly]
+                        ys = [p[1] for p in poly]
+                        x0, y0 = min(xs), min(ys)
+                        x1, y1 = max(xs), max(ys)
+                        w, h  = max(1, int(np.ceil(x1 - x0) + 3)), max(1, int(np.ceil(y1 - y0) + 3))
+                    else:
+                        x0 = y0 = 0.0
+                        w = h = 1
+
+                    entry = {
+                        "user_points": [list(self.user_points[i1]), list(self.user_points[i2])],
+                        "user_connections": [[0, 1]],
+                        "midline": [[float(x), float(y)] for (x, y) in poly],
+                        "mask_compact": [],
+                        "mask_bbox": [float(x0), float(y0), float(w), float(h)],
+                    }
+
+                    if metrics:
+                        # richer entry used by metrics/export (gives pipeline a head-start)
+                        mask_crop = np.zeros((int(h), int(w)), np.uint8)
+                        if poly:
+                            shifted = np.array([[px - x0, py - y0] for (px, py) in poly], np.int32)
+                            for i in range(len(shifted) - 1):
+                                cv2.line(mask_crop, tuple(shifted[i]), tuple(shifted[i + 1]), 1, 1)
+                        entry.update({
+                            "src": "manual",
+                            "mask_crop": mask_crop.tolist(),
+                            "mask_pixels": int(mask_crop.sum()),
+                            "status": "pending_edge_tracking",
+                        })
+                    else:
+                        # legacy lightweight
+                        entry.update({"src": "manual_poly"})
+
+                    ac[cid] = entry
+
+                except Exception as e:
+                    print(f"[DEBUG persist_manual_midline] failed for key={k}: {e}")
+
+            print(f"[SAVE] Manual selections committed ({'metrics' if metrics else 'legacy'}) mode.")
+            dlg.accept()
+
+        btn_done.clicked.connect(on_done)
+        btn_cancel.clicked.connect(lambda: dlg.reject())
+
+        dlg.showMaximized()
+        QApplication.processEvents()
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        print(f"Points: {self.user_points}")
+        print(f"Connections: {self.user_connections}")
+        print(f"Endpoint pairs: {self.endpoint_pairs}")
+        print(f"Manual endpoint pairs: {getattr(self, 'manual_endpoint_pairs', [])}")
+        print(f"Midlines saved: {len(self.manual_midlines_tmp)}")
+        self.update_image_crop_button.setStyleSheet("background-color: lightblue")
+        self._debug_print_atomic_cracks("select_end_points_manmidlines AFTER ACCEPT")
+        self.all_selected_points = list(self.user_points)
+
+        # --- also persist raw connections (without polylines) as "manual" for completeness ---
+        try:
+            ann = self.annotation.setdefault("annotations", {})
+            atomic = ann.setdefault("atomic_cracks", {})
+
+            def _next_id_str():
+                used = sorted(int(k) for k in atomic.keys() if str(k).isdigit())
+                nxt = 0
+                for k in used:
+                    if k == nxt:
+                        nxt += 1
+                    elif k > nxt:
+                        break
+                return str(nxt)
+
+            def _norm_pair(pA, pB, r=6):
+                return (round(float(pA[0]), r), round(float(pA[1]), r),
+                        round(float(pB[0]), r), round(float(pB[1]), r))
+
+            existing_pairs = set()
+            for crack in atomic.values():
+                up = crack.get("user_points") or []
+                if len(up) == 2:
+                    existing_pairs.add(_norm_pair(up[0], up[1]))
+                    existing_pairs.add(_norm_pair(up[1], up[0]))
+
+            for (i1, i2) in (getattr(self, "user_connections", []) or []):
+                if not (0 <= i1 < len(self.user_points) and 0 <= i2 < len(self.user_points)):
+                    continue
+                p1 = self.user_points[i1]
+                p2 = self.user_points[i2]
+                if _norm_pair(p1, p2) in existing_pairs:
+                    continue
+
+                cid = _next_id_str()
+                atomic[cid] = {
+                    "source": "manual",
+                    "user_points": [[float(p1[0]), float(p1[1])],
+                                    [float(p2[0]), float(p2[1])]],
+                    "user_connections": [[0, 1]],
+                    "midline": [],  # connection only
+                }
+                existing_pairs.add(_norm_pair(p1, p2))
+
+            print("[SAVE] Manual connections committed.")
+        except Exception as e:
+            QMessageBox.critical(self.MainWindow, "Persist error", f"Failed to commit manual selections:\n{e}")
+            print(f"[SAVE] Persist error: {e}")'''
 
     def update_image_crop(self):
         try:
-            downsample_factor = self.downsample_factor_box.value()
-            color_channel = [0 if self.color_chenel_box.currentText()=='R' else 1 if self.color_chenel_box.currentText()=='B' else 2]
+            import numpy as np, cv2, skimage.measure
+            from PyQt5.QtGui import QImage, QPixmap
+            from PyQt5.QtCore import Qt
 
-            # Use only the bounding box for cropping!
+            downsample_factor = self.downsample_factor_box.value()
+            color_channel = [0 if self.color_chenel_box.currentText()=='R'
+                            else 1 if self.color_chenel_box.currentText()=='B'
+                            else 2][0]
+
             if not (hasattr(self, "active_bbox") and self.active_bbox is not None):
                 raise ValueError("No active bounding box for cropping.")
-            xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
-            # Sanity check
+
+            H, W = self.original_image.shape[:2]
+            x0, y0, x1, y1 = self.active_bbox
+
+            # --- make crop inclusive (keep border pixels) ---
+            xmin = max(0, int(np.floor(x0)))
+            ymin = max(0, int(np.floor(y0)))
+            xmax = min(W, int(np.ceil(x1)))     # +1 to be inclusive
+            ymax = min(H, int(np.ceil(y1)))
+
             if xmax <= xmin or ymax <= ymin:
-                print(f"Invalid bounding box cropping window: ({xmin},{ymin}) to ({xmax},{ymax}), skipping.")
+                print(f"Invalid bounding box cropping window: ({xmin},{ymin})→({xmax},{ymax}), skipping.")
                 return
 
-            # Crop the image to the bounding box
             self.image_crop = self.original_image[ymin:ymax, xmin:xmax]
-            # Ensure the crop is not too small for tracking/segmentation
             h, w = self.image_crop.shape[:2]
+
+            min_crop_size = 8  # keep what you used before if different
             if h < min_crop_size or w < min_crop_size:
                 print(f"Skipping segment: Crop too small for processing ({w}x{h})")
-                # Optionally set a flag to skip the rest of the pipeline for this segment
                 self.skip_current_segment = True
                 return
             else:
                 self.skip_current_segment = False
-            # Shift endpoints relative to bbox origin
-            self.pts_crop = [np.array([pt[0]-xmin, pt[1]-ymin]) for pt in self.pts]
 
-            # Sanity check: make sure all shifted points are in bounds
-            '''img_h, img_w = self.image_crop.shape[:2]
-            for pt in self.pts_crop:
-                if not (0 <= pt[0] < img_w and 0 <= pt[1] < img_h):
-                    print(f"Endpoint {pt} not in bbox-cropped image ({img_w},{img_h}), skipping this segment.")
-                    return'''
-            # --- Relax endpoint bound check with small tolerance ---
-            img_h, img_w = self.image_crop.shape[:2]
+            # shift endpoints into crop frame
+            self.pts_crop = [np.array([pt[0]-xmin, pt[1]-ymin], dtype=float) for pt in self.pts]
 
-            # --- relaxed endpoint check with tolerance + clamping ---
+            # relaxed endpoint check (+ clamp)
             tol = 1e-2
             for i, pt in enumerate(self.pts_crop):
-                x, y = pt
-                if not (-tol <= x <= img_w - 1 + tol and -tol <= y <= img_h - 1 + tol):
-                    print(f"[WARN] Endpoint {pt} slightly outside crop ({img_w},{img_h}) → clamping instead of skipping.")
-                    x = np.clip(x, 0, img_w - 1e-3)
-                    y = np.clip(y, 0, img_h - 1e-3)
+                x, y = float(pt[0]), float(pt[1])
+                if not (-tol <= x <= (w - 1) + tol) or not (-tol <= y <= (h - 1) + tol):
+                    print(f"[WARN] Endpoint {pt} slightly outside crop ({w},{h}) → clamping instead of skipping.")
+                    x = np.clip(x, 0, w - 1 - 1e-6)   # ensure floor stays < w
+                    y = np.clip(y, 0, h - 1 - 1e-6)
                     self.pts_crop[i] = np.array([x, y], dtype=float)
-            # no early return here — never skip segment due to tiny overshoot
 
-
-
-
-            # Downsample as before
+            # Downsample
             black_crack = [0 if self.crack_color_box.currentText() =='Bright crack' else 1 ][0]
             func = np.min if black_crack==1 else np.max
+
             self.image_crop_down = skimage.measure.block_reduce(
                 self.image_crop, block_size=(downsample_factor, downsample_factor, 1),
                 func=func, cval=0, func_kwargs=None)
-            self.pts_crop_down = [np.array(x) / downsample_factor for x in self.pts_crop]
+
+            self.pts_crop_down = [np.array(x)/downsample_factor for x in self.pts_crop]
+
             self.image_down = skimage.measure.block_reduce(
                 self.original_image, block_size=(downsample_factor, downsample_factor, 1),
                 func=func, cval=0, func_kwargs=None)
-            self.pts_down = [np.array(x) / downsample_factor for x in self.pts]
-            gs_image = self.image_crop_down[:,:,color_channel].astype(np.uint8)
-            h, w = gs_image.shape[:2]
-            for idx, pt in enumerate(self.pts_crop_down):
-                x, y = int(round(pt[0])), int(round(pt[1]))
-                if 0 <= x < w and 0 <= y < h:
-                    gs_image = cv2.circle(gs_image, center=(x, y), radius=2, color=(0,255,0), thickness=2)
+
+            self.pts_down = [np.array(x)/downsample_factor for x in self.pts]
+
+            gs_image = self.image_crop_down[:, :, color_channel].astype(np.uint8)
+            hh, ww = gs_image.shape[:2]
+
+            # --- draw with FLOOR + clamp so (w-1e-3) can't round to w ---
+            for pt in self.pts_crop_down:
+                x = int(np.floor(pt[0]))
+                y = int(np.floor(pt[1]))
+                if 0 <= x < ww and 0 <= y < hh:
+                    gs_image = cv2.circle(gs_image, (x, y), 2, (255,), thickness=2)
                 else:
-                    print(f"Warning: Skipping drawing point ({x},{y}) out of image bounds ({w},{h})")
-            qimage = QImage(gs_image.astype(dtype=np.uint8), gs_image.shape[1], gs_image.shape[0],
+                    print(f"Warning: Skipping drawing point ({x},{y}) out of image bounds ({ww},{hh})")
+
+            qimage = QImage(gs_image, gs_image.shape[1], gs_image.shape[0],
                             gs_image.strides[0], QImage.Format_Grayscale8)
             pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.image_crop_down_display.width(), self.image_crop_down_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.image_crop_down_display.setPixmap(scaled_pixmap)
+            scaled = pixmap.scaled(self.image_crop_down_display.width(),
+                                self.image_crop_down_display.height(),
+                                Qt.KeepAspectRatio, Qt.FastTransformation)
+
+            self.image_crop_down_display.setPixmap(scaled)
             self.x_size_show.display(self.image_crop_down.shape[1])
             self.y_size_show.display(self.image_crop_down.shape[0])
             self.update_os_button.setStyleSheet("background-color : lightblue")
-            
-            # Debug: Visualize crop and points
+
         except Exception as e:
             import traceback
             traceback.print_exc()
             error(f"update_image_crop: {e}")
             self.update_os_button.setStyleSheet("background-color : red")
+
