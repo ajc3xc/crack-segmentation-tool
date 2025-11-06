@@ -349,7 +349,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             normal_edge_points_full = None
 
         # Simple preview (toggle)
-        DEBUG_SAVE = False
+        DEBUG_SAVE = True
         if DEBUG_SAVE:
             dbg_dir = os.path.join(payload["save_folder"], "metrics", base_name, f"cid{crack_id}")
             os.makedirs(dbg_dir, exist_ok=True)

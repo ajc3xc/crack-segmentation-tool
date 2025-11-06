@@ -2462,7 +2462,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                             print(f"[supervision] auto width export failed for cid={cid}: {e}")
 
 
-    def run_midline_and_mask_metrics(self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True):
+    '''def run_midline_and_mask_metrics(self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True):
         """
         Wrapper for single-image metrics with timing logs.
         Delegates to run_metrics_on_current_image_quick(), then writes midline_metrics.csv
@@ -2569,120 +2569,242 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print(f"[metrics] ⚠ failed to write runtime_log.csv: {e}")
 
         print(f"[metrics] ⏱ total runtime = {elapsed_total:.2f} sec "
-            f"(auto={t_phase_auto:.2f}s, midline={t_phase_midline:.2f}s, mask/width={t_phase_maskwidth:.2f}s)")
-        
-    '''def run_edge_tracking_parallel(self, crack_ids=None, cpu_max_workers=None, edge_params_fixed=None, color_channel=None):
+            f"(auto={t_phase_auto:.2f}s, midline={t_phase_midline:.2f}s, mask/width={t_phase_maskwidth:.2f}s)")'''
+            
+    def smoke_test_edges_for_manual(self, crack_id, edge_params=None, color_channel=None):
         """
-        Parallelizes ONLY edge-mask + edge-tracking (no RS3 midline generation).
-        Each worker computes edge normals + widths for one manual crack.
-
-        Returns:
-            list of dicts with metrics, written also as edge_parallel_results.csv
+        Minimal edge sanity: load cid snapshot, crop, run edge_param_worker once,
+        persist geodesic_edges + normal_edge_points, and dump multiple preview PNGs.
+        Includes visual debug overlays for quick inspection.
         """
-        import os, time
-        import numpy as np
-        import pandas as pd
-        from concurrent.futures import ProcessPoolExecutor, as_completed
-        from edge_workers import edge_param_worker
+        import os, numpy as np, traceback, cv2
+        from edge_workers import edge_param_worker, _debug_plot_edge_worker
+        from helpers.metrics import (
+            metric_atomic_path_for, safe_read_json, safe_write_json,
+            set_tracked_edges_for_crack, debug_plot_gt_preview,
+            metric_image_dir
+        )
 
-        t0 = time.perf_counter()
-        ann = self.annotation.get("annotations", {}) or {}
-        atomic = ann.get("atomic_cracks", {}) or {}
-        if not atomic:
-            print("[edge-parallel] ❌ no cracks to process")
-            return []
+        base = self._image_base()
+        p = metric_atomic_path_for(self.save_folder, base, crack_id)
+        cr = safe_read_json(p, {})
+        if not cr:
+            print(f"[smoke] no snapshot for cid={crack_id}")
+            return False
 
-        if crack_ids is None:
-            crack_ids = list(atomic.keys())
+        x, y, w, h = map(int, cr.get("mask_bbox", [0, 0, 0, 0]))
+        if w <= 0 or h <= 0:
+            print(f"[smoke] cid{crack_id} missing bbox")
+            return False
+
+        man_xy_g = np.asarray(cr.get("midline", []), float)
+        if man_xy_g.ndim != 2 or man_xy_g.shape[1] != 2 or len(man_xy_g) < 2:
+            print(f"[smoke] cid{crack_id} invalid midline")
+            return False
+
+        # prep crop like pipeline
+        try:
+            self.active_bbox = [x, y, x + w, y + h]
+            self.pts = [man_xy_g[0].copy(), man_xy_g[-1].copy()]
+            self.end_points = self.pts
+            self.update_image_crop()
+            if getattr(self, "skip_current_segment", False):
+                print(f"[smoke] crop skipped for cid{crack_id}")
+                return False
+        except Exception as e:
+            traceback.print_exc()
+            print(f"[smoke] crop stage failed cid{crack_id}: {e}")
+            return False
+
         if color_channel is None:
-            color_channel = (0 if self.edge_track_color_box.currentText() == "R"
-                            else 1 if self.edge_track_color_box.currentText() == "B"
-                            else 2)
-        if edge_params_fixed is None:
-            edge_params_fixed = {"window_half_size": 45, "mu": 0, "l": 5, "p": 14}
-        if cpu_max_workers is None:
-            cpu_max_workers = min(os.cpu_count() or 8, 12)
+            color_channel = (
+                0
+                if self.edge_track_color_box.currentText() == "R"
+                else 1
+                if self.edge_track_color_box.currentText() == "B"
+                else 2
+            )
+
+        gray = self.image_crop[:, :, color_channel].astype(np.float32)
+        track_local_yx = np.vstack([man_xy_g[:, 1] - y, man_xy_g[:, 0] - x])  # [2,N] yx in crop
+        # ensure start ~ p0
+        d0 = np.linalg.norm(track_local_yx[:, 0][::-1] - self.pts_crop[0])
+        d1 = np.linalg.norm(track_local_yx[:, 0][::-1] - self.pts_crop[1])
+        if d1 < d0:
+            track_local_yx = track_local_yx[:, ::-1]
+
+        if edge_params is None:
+            edge_params = {"window_half_size": 45, "mu": 0, "l": 5, "p": 14}
+
+        # === Build payload for worker ===
+        payload = dict(
+            image_crop_gray=gray,
+            pts_crop=self.pts_crop,
+            adjusted_track=track_local_yx,
+            manual_midline_global=man_xy_g,
+            auto_midline_global=None,
+            bbox=(x, y, w, h),
+            manual_normals_crop=None,
+            params=edge_params,
+            save_folder=self.save_folder,        # ✅ worker needs this for path creation
+            image_base=self._image_base(),        # optional, helps naming consistency
+            crack_id=str(crack_id),               # ✅ NEW: ensures “cid?” becomes “cid0”
+        )
+
+        # === Run edge tracking worker ===
+        ew = edge_param_worker(payload)
+        if not isinstance(ew, dict):
+            print(f"[smoke] edge worker returned empty for cid{crack_id}")
+            return False
+
+        # persist results
+        set_tracked_edges_for_crack(self.save_folder, base, crack_id, ew, mask_crop=ew.get("mask_crop"))
+
+        # === Debug plot 1: edge-worker overlay ===
+        try:
+            e1 = np.array(ew.get("geodesic_edges", {}).get("edge1", []), float)
+            e2 = np.array(ew.get("geodesic_edges", {}).get("edge2", []), float)
+            params = payload["params"]
+            tag = f"cid{crack_id}_smoke"
+            _debug_plot_edge_worker(
+                gray,
+                np.zeros_like(gray),
+                np.zeros_like(gray),
+                np.column_stack([track_local_yx[1], track_local_yx[0]]),
+                e1,
+                e2,
+                params,
+                tag=tag,
+            )
+            print(f"[smoke] wrote edge-worker debug plot for cid{crack_id}")
+        except Exception as e:
+            print(f"[smoke] debug plot failed: {e}")
+
+        # === Debug plot 2: combined overlay of edges ===
+        try:
+            ge = cr.get("geodesic_edges", {})
+            overlay = self.original_image.copy()
+            if overlay.ndim == 2:
+                overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2BGR)
+            for key, arr in ge.items():
+                arr = np.array(arr, float)
+                if arr.ndim == 2 and len(arr) >= 2:
+                    color = (0, 0, 255) if "edge1" in key else (0, 255, 0)
+                    cv2.polylines(overlay, [arr.astype(np.int32)], False, color, 1)
+            save_dir = os.path.join(self.save_folder, "debug_outputs")
+            os.makedirs(save_dir, exist_ok=True)
+            out_path = os.path.join(save_dir, f"{self._image_base()}_cid{crack_id}_edges_overlay.png")
+            cv2.imwrite(out_path, overlay)
+            print(f"[smoke] saved combined overlay → {out_path}")
+        except Exception as e:
+            print(f"[smoke] overlay plot failed: {e}")
+
+        # === Debug plot 3: GT/mask preview ===
+        try:
+            from helpers.metrics import _reconstruct_full_mask
+            H, W = self.original_image.shape[:2]
+            mask_bin = (
+                (self.current_mask > 0).astype(np.uint8)
+                if getattr(self, "current_mask", None) is not None
+                else None
+            )
+            ge = safe_read_json(p, {}).get("geodesic_edges", {})
+            e1 = np.asarray(ge.get("edge1", []), float)
+            e2 = np.asarray(ge.get("edge2", []), float)
+            out_png = os.path.join(
+                metric_image_dir(self.save_folder, base), f"cid{crack_id}", "smoke_gt_preview.png"
+            )
+            if mask_bin is None:
+                debug_plot_gt_preview(
+                    np.zeros((H, W), np.uint8),
+                    man_xy_g,
+                    e1,
+                    e2,
+                    out_png,
+                    title=f"Edges cid{crack_id}",
+                )
+            else:
+                debug_plot_gt_preview(
+                    mask_bin, man_xy_g, e1, e2, out_png, title=f"GT/edges — cid{crack_id}"
+                )
+            print(f"[smoke] wrote preview → {out_png}")
+        except Exception as e:
+            print(f"[smoke] preview failed: {e}")
+
+        print(f"[smoke] ✅ edges ok for cid{crack_id}")
+        return True
+    
+    def run_midline_and_mask_metrics(self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True):
+        """
+        Bare-minimum smoke test for manual cracks:
+        • sync snapshot (atomics only)
+        • ensure edge tracking (once per manual crack)
+        • compute mask/width metrics (manual only)
+        Keeps full signature for GUI button compatibility.
+        """
+        import os, time, numpy as np, traceback
+
+        if not getattr(self, "name", None):
+            print("[metrics] ⚠ no image loaded — aborting smoke test.")
+            return
 
         base_name = os.path.splitext(os.path.basename(self.name))[0]
-        metrics_dir = os.path.join(self.save_folder, "metrics", base_name)
-        os.makedirs(metrics_dir, exist_ok=True)
+        image_dir = os.path.join(self.save_folder, "metrics", base_name)
+        os.makedirs(image_dir, exist_ok=True)
 
-        # ---- prepare payloads (safe, no mutation of self during parallel phase)
-        tasks = []
-        for cid in crack_ids:
-            crack = atomic.get(cid)
-            if not crack:
-                continue
-            src = (crack.get("source") or "").lower()
+        print(f"\n[SMOKE] ===== running minimal metrics for {base_name} =====")
+
+        t_total_start = time.perf_counter()
+
+        # --- 1) Load snapshot (manual atomics only) ---
+        try:
+            self._sync_metrics_snapshot_from_authoring(refresh_combine=False, persist=True)
+        except Exception as e:
+            traceback.print_exc()
+            print(f"[SMOKE] snapshot sync failed: {e}")
+            return
+
+        atomic = self._metric_atomic()
+        if not atomic:
+            print("[SMOKE] ❌ no cracks found in snapshot")
+            return
+
+        best_edge = {"window_half_size":45, "mu":0.0, "l":5, "p":14}
+
+        # --- 2) Edge smoke test for manual cracks ---
+        need_ids = []
+        for cid, cr in atomic.items():
+            src = (cr.get("source") or "").lower()
             if src.startswith("auto") or src == "combined":
                 continue
-
-            bb = crack.get("mask_bbox")
-            if not bb or len(bb) != 4:
+            mid = np.asarray(cr.get("midline", []), float)
+            if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 2:
                 continue
-            x, y, w, h = map(int, bb)
-            xmin, ymin, xmax, ymax = x, y, x + w, y + h
+            ge = cr.get("geodesic_edges", {}) or {}
+            has_e1 = isinstance(ge.get("edge1"), list) and len(ge.get("edge1")) > 1
+            has_e2 = isinstance(ge.get("edge2"), list) and len(ge.get("edge2")) > 1
+            if not (has_e1 and has_e2):
+                need_ids.append(cid)
 
-            man_xy_g = metrics._finite_xy(crack.get("midline", []))
-            if len(man_xy_g) < 2:
-                continue
-
-            self.active_bbox = [xmin, ymin, xmax, ymax]
-            self.pts = [man_xy_g[0], man_xy_g[-1]]
+        print(f"[SMOKE] manual cracks needing edges: {need_ids}")
+        for cid in need_ids:
             try:
-                self.update_image_crop()
+                self.smoke_test_edges_for_manual(cid, edge_params=best_edge)
             except Exception as e:
-                print(f"[edge-parallel] cid{cid} crop failed: {e}")
-                continue
+                traceback.print_exc()
+                print(f"[SMOKE] ❌ edge smoke failed for cid={cid}: {e}")
 
-            gray = self.image_crop[:, :, color_channel].astype(np.float32)
-            pts_crop = getattr(self, "pts_crop", np.zeros((2, 2)))
-            base_payload = dict(
-                image_crop_gray=gray,
-                pts_crop=pts_crop,
-                manual_midline_global=man_xy_g,
-                auto_midline_global=None,
-                bbox=(x, y, w, h),
-                manual_normals_crop=None,
-                params=edge_params_fixed,
-            )
-            tasks.append((cid, base_payload))
+        # --- 3) Compute mask/width metrics (manual only) ---
+        try:
+            print("[SMOKE] running mask/width metrics ...")
+            self.compute_mask_and_width_metrics_for_image(display=display, export_supervision=False)
+        except Exception as e:
+            traceback.print_exc()
+            print(f"[SMOKE] mask/width stage failed: {e}")
 
-        if not tasks:
-            print("[edge-parallel] nothing to run")
-            return []
-
-        print(f"[edge-parallel] launching {len(tasks)} edge workers across {cpu_max_workers} CPUs…")
-
-        # ---- parallel run
-        results = []
-        with ProcessPoolExecutor(max_workers=cpu_max_workers) as ex:
-            futs = {ex.submit(edge_param_worker, payload): cid for cid, payload in tasks}
-            for f in as_completed(futs):
-                cid = futs[f]
-                try:
-                    ew = f.result()
-                    if ew and isinstance(ew, dict):
-                        ew["crack_id"] = cid
-                        results.append(ew)
-                        print(f"[edge-parallel] cid{cid} ✅")
-                    else:
-                        print(f"[edge-parallel] cid{cid} empty")
-                except Exception as e:
-                    print(f"[edge-parallel] cid{cid} ❌ {e}")
-
-        # ---- summarize and save
-        t_elapsed = time.perf_counter() - t0
-        if results:
-            df = pd.DataFrame(results)
-            df.to_csv(os.path.join(metrics_dir, "edge_parallel_results.csv"), index=False)
-            print(f"[edge-parallel] ✅ finished {len(results)} cracks in {t_elapsed:.2f}s "
-                f"({t_elapsed/len(results):.2f}s/crack avg)")
-        else:
-            print(f"[edge-parallel] ⚠ no successful results (elapsed {t_elapsed:.2f}s)")
-
-        return results'''
-        
+        total_time = time.perf_counter() - t_total_start
+        print(f"[SMOKE] ✅ completed minimal metrics in {total_time:.2f}s\n")
+          
     # ================= crack_tool.py (metrics snapshot integration) =================
 
     # ---- 0) tiny shorthands -------------------------------------------------------
@@ -2792,168 +2914,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
     def _metric_auto_best(self):
         self._ensure_metric_annotations()
         return self.metric_annotations.get("auto_best_atomic_cracks", {}) or {}
-
-    # ---- 2) compute_mask_and_width_metrics_for_image (REPLACE) -------------------
-    '''def compute_mask_and_width_metrics_for_image(self, display=False, export_supervision=False):
-        """
-        Metrics driver (snapshot-only):
-        - Build/refresh per-crack snapshot files (no authoring mutation)
-        - Compute IoU for atomic + combined
-        - Compute width diffs for manual, auto-best, combined
-        - Optionally export supervision from snapshot
-        """
-        
-        self._ensure_metrics_cache()
-        import os, json, numpy as np, pandas as pd
-        from helpers.metrics import _reconstruct_full_mask, mask_iou, safe_read_json
-
-        if getattr(self, "current_mask", None) is None:
-            print("[mask/width] no GT mask loaded for this image")
-            return {}
-
-        base_name   = self._image_base()
-        metrics_dir = self._metrics_dir()
-        os.makedirs(metrics_dir, exist_ok=True)
-
-        # Fast skip if no manual midlines in authoring file (cheap gate)
-        ann_path = getattr(self, "ann_name", None)
-        if ann_path and os.path.exists(ann_path):
-            try:
-                with open(ann_path, "r", encoding="utf-8") as f: data = json.load(f)
-                has_manual = any(
-                    len(v.get("midline", [])) > 1 and not str(v.get("source","")).startswith("auto")
-                    for v in (data.get("annotations", {}) or {}).get("atomic_cracks", {}).values()
-                )
-                if not has_manual:
-                    print(f"[mask/width] {base_name}: no manual midlines → skip")
-                    return {}
-            except Exception as e:
-                print(f"[mask/width] {base_name}: JSON read failed ({e}) → skip")
-                return {}
-
-        # 1) Refresh per-crack files from authoring (no mutation)
-        self._sync_metrics_snapshot_from_authoring(refresh_combine=True, persist=True)
-        atomic    = self._metric_atomic()
-        combined  = self._metric_combined()
-        auto_best = self._metric_auto_best()
-        H, W      = self.original_image.shape[:2]
-
-        # 2) MASK IoU (atomic)
-        mask_rows = []
-        for cid, crack in atomic.items():
-            src = (crack.get("source") or "").lower()
-            if src.startswith("auto"):  # never treat an 'auto' parent as manual
-                continue
-            try:
-                m_manual = _reconstruct_full_mask(crack, H, W)
-            except Exception:
-                m_manual = None
-            row = {"image": base_name, "crack_id": cid}
-            row["iou_manual_vs_gt"] = mask_iou(m_manual, self.current_mask) if m_manual is not None else np.nan
-
-            if cid in auto_best:
-                try:
-                    mm = _reconstruct_full_mask(auto_best[cid], H, W)
-                except Exception:
-                    mm = None
-                row["iou_auto_vs_gt"] = mask_iou(mm, self.current_mask) if mm is not None else np.nan
-
-            mask_rows.append(row)
-
-        if mask_rows:
-            pd.DataFrame(mask_rows).to_csv(os.path.join(metrics_dir, "mask_metrics.csv"), index=False)
-
-        # 3) MASK IoU (combined)
-        comb_rows = []
-        if combined:
-            for k, cmb in combined.items():
-                row = {"image": base_name, "combined_id": str(k)}
-                try:
-                    mC = _reconstruct_full_mask(cmb, H, W)
-                    row["iou_manual_vs_gt"] = mask_iou(mC, self.current_mask)
-                except Exception:
-                    row["iou_manual_vs_gt"] = np.nan
-                try:
-                    a = cmb.get("auto", None)
-                    if a is not None:
-                        mA = _reconstruct_full_mask(a, H, W)
-                        row["iou_auto_vs_gt"] = mask_iou(mA, self.current_mask)
-                except Exception:
-                    row["iou_auto_vs_gt"] = np.nan
-                comb_rows.append(row)
-            if comb_rows:
-                pd.DataFrame(comb_rows).to_csv(os.path.join(metrics_dir, "combined_mask_metrics.csv"), index=False)
-
-        # 4) WIDTHS
-        from helpers.metrics import compare_widths_for_cracks
-        width_rows_manual, _ = compare_widths_for_cracks({"atomic_cracks": atomic}, self.current_mask,
-                                                        base_name, metrics_dir, display=display, tag="manual")
-        width_rows_auto,   _ = compare_widths_for_cracks({"atomic_cracks": auto_best}, self.current_mask,
-                                                        base_name, metrics_dir, display=display, tag="auto")
-        if width_rows_manual:
-            pd.DataFrame(width_rows_manual).to_csv(os.path.join(metrics_dir, "width_metrics_manual.csv"), index=False)
-        if width_rows_auto:
-            pd.DataFrame(width_rows_auto).to_csv(os.path.join(metrics_dir, "width_metrics_auto.csv"), index=False)
-
-        width_rows_combined = []
-        if combined:
-            try:
-                width_rows_combined, _ = compare_widths_for_cracks({"atomic_cracks": combined}, self.current_mask,
-                                                                base_name, metrics_dir, display=display, tag="combined")
-            except Exception as e:
-                print(f"[mask/width][combined] width metrics failed: {e}")
-            if width_rows_combined:
-                pd.DataFrame(width_rows_combined).to_csv(os.path.join(metrics_dir, "width_metrics_combined.csv"), index=False)
-
-        # 5) Optional supervision (from snapshot only)
-        if export_supervision:
-            try:
-                self._export_supervision_from_snapshot()
-            except Exception as e:
-                print(f"[mask/width] supervision export failed: {e}")
-
-        # rename any legacy plots
-        for fn in os.listdir(metrics_dir):
-            if "_width_diffs" in fn and fn.endswith(".png") and "atomic" in fn:
-                src = os.path.join(metrics_dir, fn)
-                if "manual" not in fn and "auto" not in fn:
-                    try:
-                        os.replace(src, os.path.join(metrics_dir, fn.replace("_width_diffs", "_manual_width_diffs")))
-                    except Exception as e:
-                        print(f"[mask/width] rename failed for {fn}: {e}")
-
-        # 6) Cache + METRICS_STATE
-        out = {}
-        if mask_rows:
-            out["mask_means_atomic"] = pd.DataFrame(mask_rows).mean(numeric_only=True).to_dict()
-        if comb_rows:
-            out["mask_means_combined"] = pd.DataFrame(comb_rows).mean(numeric_only=True).to_dict()
-
-        means = {}
-        if width_rows_manual:
-            for k, v in pd.DataFrame(width_rows_manual).mean(numeric_only=True).items(): means[f"manual_{k}"] = v
-        if width_rows_auto:
-            for k, v in pd.DataFrame(width_rows_auto).mean(numeric_only=True).items():   means[f"auto_{k}"] = v
-        if width_rows_combined:
-            for k, v in pd.DataFrame(width_rows_combined).mean(numeric_only=True).items(): means[f"combined_{k}"] = v
-        if means: out["width_means"] = means
-
-        self._ensure_metric_annotations()
-        self.metrics_cache[self._image_base()] = {
-            "atomic": {"mask_rows": mask_rows, "width_manual_rows": width_rows_manual, "width_auto_rows": width_rows_auto},
-            "combined": {"mask_rows": comb_rows, "width_rows": width_rows_combined},
-            "summary": out,
-        }
-
-        try:
-            # pass-through of edge_params_used if present
-            ep_path = os.path.join(metrics_dir, "edge_params_used.json")
-            edge_params_used = safe_read_json(ep_path, None)
-            self._metrics_write_state(self._image_base(), {"edge_params_used": edge_params_used, "done": True})
-        except Exception as e:
-            print(f"[mask/width] could not write METRICS_STATE.json: {e}")
-
-        return out'''
         
     def compute_mask_and_width_metrics_for_image(self, display=False, export_supervision=False):
         """
@@ -3084,177 +3044,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 traceback.print_exc()
 
         print(f"[DEBUG METRICS] ===== END for {base_name} =====\n")
-
-    # ---- 3) Supervision export from snapshot (REPLACE) ---------------------------
-    '''def _export_supervision_from_snapshot(self, normal_half_span=32.0, step=0.5):
-        """
-        Export per-crack supervision strictly from the per-crack files (snapshot).
-        """
-        import os, json
-        import numpy as np, pandas as pd, cv2
-        from helpers.metrics import (normals_from_mask_for_midline)
-
-        if getattr(self, "current_mask", None) is None:
-            print("[supervision] no GT mask loaded"); return
-
-        base_name = self._image_base()
-        out_root  = os.path.join(self.save_folder, "metrics", base_name, "supervision")
-        os.makedirs(out_root, exist_ok=True)
-
-        H, W = self.original_image.shape[:2]
-        mask_bin = (self.current_mask > 0).astype(np.uint8)
-
-        atomic    = self._metric_atomic()
-        auto_best = self._metric_auto_best()
-
-        for cid, crack in atomic.items():
-            src = (crack.get("source") or "").lower()
-            if src.startswith("auto") or src == "combined": continue
-
-            man_xy = np.asarray(crack.get("midline", []), float)
-            if man_xy.ndim != 2 or man_xy.shape[1] != 2 or len(man_xy) < 2: continue
-
-            out_dir = os.path.join(out_root, f"cid{cid}")
-            os.makedirs(out_dir, exist_ok=True)
-
-            # manual midline & mask
-            pd.DataFrame(man_xy, columns=["x","y"]).to_csv(os.path.join(out_dir, "manual_midline.csv"), index=False)
-            from helpers.metrics import _reconstruct_full_mask
-            m_manual = _reconstruct_full_mask(crack, H, W)
-            cv2.imwrite(os.path.join(out_dir, "manual_mask.png"), (m_manual>0).astype(np.uint8)*255)
-
-            # widths: prefer stored normals; else exact polygon normals fallback
-            ne = crack.get("normal_edge_points_full") or crack.get("normal_edge_points")
-            if isinstance(ne, dict):
-                e1 = np.asarray(ne.get("edge1", []), float)
-                e2 = np.asarray(ne.get("edge2", []), float)
-                if e1.ndim == 2 and e2.ndim == 2 and len(e1) == len(e2) == len(man_xy):
-                    w = np.hypot(e1[:,0]-e2[:,0], e1[:,1]-e2[:,1])
-                    pd.DataFrame({
-                        "sample_idx": np.arange(len(man_xy)),
-                        "mid_x": man_xy[:,0], "mid_y": man_xy[:,1],
-                        "edgeL_x": e1[:,0],  "edgeL_y": e1[:,1],
-                        "edgeR_x": e2[:,0],  "edgeR_y": e2[:,1],
-                        "width_px": w
-                    }).to_csv(os.path.join(out_dir, "manual_gt_width_samples.csv"), index=False)
-                else:
-                    (e1x,e1y,e2x,e2y,w_mask), _ = normals_from_mask_for_midline(man_xy, mask_bin, max_radius=50)
-                    pd.DataFrame({
-                        "sample_idx": np.arange(len(man_xy)),
-                        "mid_x": man_xy[:,0], "mid_y": man_xy[:,1],
-                        "edgeL_x": e1x, "edgeL_y": e1y,
-                        "edgeR_x": e2x, "edgeR_y": e2y,
-                        "width_px": w_mask
-                    }).to_csv(os.path.join(out_dir, "manual_gt_width_samples.csv"), index=False)
-            else:
-                (e1x,e1y,e2x,e2y,w_mask), _ = normals_from_mask_for_midline(man_xy, mask_bin, max_radius=50)
-                pd.DataFrame({
-                    "sample_idx": np.arange(len(man_xy)),
-                    "mid_x": man_xy[:,0], "mid_y": man_xy[:,1],
-                    "edgeL_x": e1x, "edgeL_y": e1y,
-                    "edgeR_x": e2x, "edgeR_y": e2y,
-                    "width_px": w_mask
-                }).to_csv(os.path.join(out_dir, "manual_gt_width_samples.csv"), index=False)
-
-            # auto-best (if present in per-crack file)
-            if cid in auto_best:
-                best = auto_best[cid]
-                auto_xy = np.asarray(best.get("midline", []), float)
-                if auto_xy.ndim == 2 and auto_xy.shape[1] == 2 and len(auto_xy) >= 2:
-                    pd.DataFrame(auto_xy, columns=["x","y"]).to_csv(os.path.join(out_dir, "auto_best_midline.csv"), index=False)
-                params = best.get("params", None)
-                if params:
-                    with open(os.path.join(out_dir, "auto_best_params.json"), "w") as f:
-                        json.dump(params, f, indent=2)
-
-                neA = best.get("normal_edge_points_full") or best.get("normal_edge_points")
-                if isinstance(neA, dict):
-                    e1A = np.asarray(neA.get("edge1", []), float)
-                    e2A = np.asarray(neA.get("edge2", []), float)
-                    if e1A.size >= 4:
-                        pd.DataFrame(e1A, columns=["x","y"]).to_csv(os.path.join(out_dir, "auto_best_normals_edge1.csv"), index=False)
-                    if e2A.size >= 4:
-                        pd.DataFrame(e2A, columns=["x","y"]).to_csv(os.path.join(out_dir, "auto_best_normals_edge2.csv"), index=False)
-                    if e1A.size >= 4 and e2A.size >= 4 and len(e1A) == len(e2A):
-                        wA = np.hypot(e1A[:,0]-e2A[:,0], e1A[:,1]-e2A[:,1])
-                        pd.DataFrame({
-                            "idx": np.arange(len(wA)),
-                            "edge1_x": e1A[:,0], "edge1_y": e1A[:,1],
-                            "edge2_x": e2A[:,0], "edge2_y": e2A[:,1],
-                            "width_px": wA
-                        }).to_csv(os.path.join(out_dir, "auto_best_width_samples.csv"), index=False)'''
-                        
-    '''def _export_supervision_from_snapshot(self, normal_half_span=32.0, step=0.5, precomputed_normals=None):
-        """
-        Export per-crack supervision strictly from snapshot, with verbose debug.
-        """
-        import os, json, numpy as np, pandas as pd, cv2, traceback
-        from helpers.metrics import normals_from_mask_for_midline, _reconstruct_full_mask
-
-        print(f"[DEBUG SUP] === EXPORT START for {self._image_base()} ===")
-        if getattr(self, "current_mask", None) is None:
-            print("[DEBUG SUP] no GT mask loaded — abort")
-            return
-
-        base_name = self._image_base()
-        out_root  = os.path.join(self.save_folder, "metrics", base_name, "supervision")
-        os.makedirs(out_root, exist_ok=True)
-
-        H, W = self.original_image.shape[:2]
-        mask_bin = (self.current_mask > 0).astype(np.uint8)
-
-        atomic    = self._metric_atomic()
-        auto_best = self._metric_auto_best()
-
-        for cid, crack in atomic.items():
-            try:
-                src = crack.get("source")
-                print(f"[DEBUG SUP] cid={cid} src={src}")
-                mask_crop = crack.get("mask_crop", None)
-                bb = crack.get("mask_bbox", None)
-                mid = np.asarray(crack.get("midline", []), float)
-                print(f"  mask_crop type={type(mask_crop)}, bbox={bb}, midlen={len(mid)}")
-                if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 2:
-                    print(f"  [DEBUG SUP] skip invalid midline cid={cid}")
-                    continue
-
-                out_dir = os.path.join(out_root, f"cid{cid}")
-                os.makedirs(out_dir, exist_ok=True)
-                pd.DataFrame(mid, columns=["x","y"]).to_csv(os.path.join(out_dir, "manual_midline.csv"), index=False)
-
-                try:
-                    m_manual = _reconstruct_full_mask(crack, H, W)
-                    cv2.imwrite(os.path.join(out_dir, "manual_mask.png"), (m_manual>0).astype(np.uint8)*255)
-                except Exception as e:
-                    print(f"  [DEBUG SUP] reconstruct mask failed cid={cid}: {e}")
-                    traceback.print_exc()
-
-                # ---- Normals ----
-                try:
-                    if precomputed_normals and ("atomic", str(cid)) in precomputed_normals:
-                        nd = precomputed_normals[("atomic", str(cid))]
-                        e1 = nd.get("gt_e1"); e2 = nd.get("gt_e2")
-                        if e1 is not None and e2 is not None:
-                            w = np.hypot(e1[:,0]-e2[:,0], e1[:,1]-e2[:,1])
-                            df = pd.DataFrame({
-                                "idx": np.arange(len(w)),
-                                "edgeL_x": e1[:,0], "edgeL_y": e1[:,1],
-                                "edgeR_x": e2[:,0], "edgeR_y": e2[:,1],
-                                "width_px": w
-                            })
-                            df.to_csv(os.path.join(out_dir, "manual_gt_width_samples.csv"), index=False)
-                            print(f"  [DEBUG SUP] wrote precomputed normals for cid={cid}")
-                            continue
-                    (e1x,e1y,e2x,e2y,w_mask), _ = normals_from_mask_for_midline(mid, mask_bin, max_radius=50)
-                    print(f"  [DEBUG SUP] computed normals via fallback cid={cid}")
-                except Exception as e:
-                    print(f"  [DEBUG SUP] normals_from_mask_for_midline failed cid={cid}: {e}")
-                    traceback.print_exc()
-            except Exception as e:
-                print(f"[DEBUG SUP] fatal for cid={cid}: {e}")
-                traceback.print_exc()
-
-        print(f"[DEBUG SUP] === EXPORT END for {self._image_base()} ===\n")'''
     
     def _export_supervision_for_image(self, normal_half_span=32.0, step=0.5, precomputed_normals=None):
         """
@@ -3541,66 +3330,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         return results
 
     # ---------- crack_tool.py (DROP-IN ADDITION inside the class) ----------
-
-    '''def ensure_tracked_edges_and_normals(self, crack_id, edge_params_fixed):
-        """
-        Guarantees: geodesic_edges + normal_edge_points exist in cid{crack_id}.json.
-        Also writes a quick GT preview plot for sanity.
-        """
-        import numpy as np, os
-        from helpers.metrics import (
-            metric_atomic_path_for, safe_read_json, safe_write_json, 
-            set_geodesic_edges_for_crack, debug_plot_gt_preview
-        )
-        from helpers.metrics import _reconstruct_full_mask  # if you already have this util in helpers
-        from helpers.metrics import metric_image_dir
-
-        base = self._image_base()
-        p = metric_atomic_path_for(self.save_folder, base, crack_id)
-        cr = safe_read_json(p, {})
-
-        # fast exits if already have what we need
-        ge = cr.get("geodesic_edges") or {}
-        has_e1 = isinstance(ge.get("edge1"), list) and len(ge.get("edge1")) > 1
-        has_e2 = isinstance(ge.get("edge2"), list) and len(ge.get("edge2")) > 1
-        has_normals = isinstance(cr.get("normal_edge_points") or cr.get("normal_edge_points_full"), dict)
-
-        mid = np.asarray(cr.get("midline", []), float)
-        if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 2:
-            print(f"[edges] cid{crack_id}: no midline → skip"); 
-            return False
-
-        if not (has_e1 and has_e2):
-            try:
-                # Use your existing parallel generator (writes snapshot)
-                _ = self.run_edge_tracking_parallel(crack_ids=[crack_id], cpu_max_workers=1, edge_params_fixed=edge_params_fixed)
-            except Exception as e:
-                print(f"[edges] cid{crack_id}: run_edge_tracking_parallel failed: {e}")
-
-            # Reload
-            cr = safe_read_json(p, {})
-            ge = cr.get("geodesic_edges") or {}
-            has_e1 = isinstance(ge.get("edge1"), list) and len(ge.get("edge1")) > 1
-            has_e2 = isinstance(ge.get("edge2"), list) and len(ge.get("edge2")) > 1
-
-            if not (has_e1 and has_e2):
-                print(f"[edges] cid{crack_id}: still missing geodesic edges after tracking.")
-                # try to at least store empty to avoid repeated attempts
-                set_geodesic_edges_for_crack(self.save_folder, base, crack_id, ge)
-                return False
-
-        # quick GT preview (mask + midline + geodesics visible)
-        try:
-            H, W = self.original_image.shape[:2]
-            mask_bin = (self.current_mask > 0).astype(np.uint8)
-            e1_xy = np.asarray(ge.get("edge1", []), float)
-            e2_xy = np.asarray(ge.get("edge2", []), float)
-            out_png = os.path.join(metric_image_dir(self.save_folder, base), f"cid{crack_id}", "gt_preview.png")
-            debug_plot_gt_preview(mask_bin, mid, e1_xy, e2_xy, out_png, title=f"GT/edges — cid{crack_id}")
-        except Exception as e:
-            print(f"[edges] cid{crack_id}: GT preview failed: {e}")
-
-        return True'''
         
     def ensure_tracked_edges_and_normals(self, crack_id, edge_params_fixed):
         """
