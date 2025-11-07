@@ -100,7 +100,7 @@ def save_mask_comparison_plot(gt_mask, pred_mask, out_path, show=False):
     else:
         plt.imsave(out_path, vis)
 
-def _reconstruct_full_mask(crack, H, W):
+'''def _reconstruct_full_mask(crack, H, W):
     print(f"\n[DEBUG SUP]src={crack.get('src')}")
 
     mc = crack.get('mask_crop', None)
@@ -132,7 +132,73 @@ def _reconstruct_full_mask(crack, H, W):
         full = np.array(crack.get("mask", []), dtype=np.uint8)
         if full.size == H*W and full.shape == (H, W):
             return (full > 0).astype(np.uint8)
+        return np.zeros((H, W), dtype=np.uint8)'''
+        
+def _reconstruct_full_mask(crack, H, W):
+    """
+    Strict version with detailed debug:
+    Verifies crop size, bbox validity, and paste location before constructing full mask.
+    Does NOT silently repair or fallback — if data is inconsistent, returns zeros + message.
+    """
+    import numpy as np
+
+    src = crack.get("src") or crack.get("source")
+    mc = crack.get("mask_crop", None)
+    bb = crack.get("mask_bbox", None)
+    mid = crack.get("midline", [])
+    print(f"\n[DEBUG MASK] src={src}")
+    print(f"  mask_crop type={type(mc)}, len={len(mc) if mc is not None else 'None'}")
+    print(f"  mask_bbox={bb}")
+    print(f"  midline len={len(mid)}")
+
+    if len(mid) > 0:
+        arr = np.array(mid, float)
+        print(f"  midline x-range=({arr[:,0].min():.1f},{arr[:,0].max():.1f}), "
+              f"y-range=({arr[:,1].min():.1f},{arr[:,1].max():.1f})")
+
+    # sanity
+    if mc is None or bb is None:
+        print("[DEBUG MASK] ❌ missing mask_crop or mask_bbox")
         return np.zeros((H, W), dtype=np.uint8)
+
+    crop = np.array(mc, dtype=np.uint8)
+    if crop.ndim != 2:
+        print(f"[DEBUG MASK] ❌ mask_crop ndim={crop.ndim}, expected 2")
+        return np.zeros((H, W), dtype=np.uint8)
+
+    if not isinstance(bb, (list, tuple)) or len(bb) != 4:
+        print("[DEBUG MASK] ❌ invalid bbox format")
+        return np.zeros((H, W), dtype=np.uint8)
+
+    x, y, w, h = [int(v) for v in bb]
+    print(f"[DEBUG MASK] bbox parsed → x={x}, y={y}, w={w}, h={h}")
+
+    # check if bbox is within image
+    if x < 0 or y < 0 or x >= W or y >= H:
+        print("[DEBUG MASK] ❌ bbox origin outside image bounds")
+        return np.zeros((H, W), dtype=np.uint8)
+
+    # check crop consistency
+    print(f"[DEBUG MASK] crop shape={crop.shape}, target area=({y}:{y+h}, {x}:{x+w})")
+
+    if h <= 0 or w <= 0:
+        print("[DEBUG MASK] ❌ non-positive bbox dimensions")
+        return np.zeros((H, W), dtype=np.uint8)
+
+    # safe paste within limits
+    x2, y2 = min(x + w, W), min(y + h, H)
+    w_eff, h_eff = max(0, x2 - x), max(0, y2 - y)
+    if w_eff == 0 or h_eff == 0:
+        print("[DEBUG MASK] ❌ effective bbox has zero area after clipping")
+        return np.zeros((H, W), dtype=np.uint8)
+
+    crop = (crop > 0).astype(np.uint8)
+    crop = crop[:h_eff, :w_eff]
+
+    m = np.zeros((H, W), dtype=np.uint8)
+    m[y:y+h_eff, x:x+w_eff] = crop
+    print(f"[DEBUG MASK] ✅ pasted crop ({crop.shape}) into full mask at ({x},{y})")
+    return m
     
 def normals_from_mask_for_midline(midline_xy, mask, max_radius=50):
     """
@@ -1743,19 +1809,15 @@ def set_auto_variant_for_crack(save_folder, base_name, crack_id, vrec, params=No
     safe_write_json(p, rec)
     return rec
 
-def set_tracked_edges_for_crack(save_folder, image_base, crack_id, edge_dict, mask_crop=None):
-    """
-    Save tracked edges/normals returned by your edge worker to the per-crack file.
-    edge_dict: may contain 'normal_edge_points_full' or 'normal_edge_points', 'geodesic_edges', etc.
-    """
-    p = metric_atomic_path_for(save_folder, image_base, crack_id)
-    rec = safe_read_json(p, {}) or {}
-    for k in ("normal_edge_points_full","normal_edge_points","geodesic_edges"):
-        if k in edge_dict:
-            rec[k] = edge_dict[k]
+def set_tracked_edges_for_crack(save_folder: str, base: str, cid, payload: dict, mask_crop=None):
+    p = metric_atomic_path_for(save_folder, base, cid)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    data = dict(payload or {})
     if mask_crop is not None:
-        rec["mask_crop"] = mask_crop
-    safe_write_json(p, rec)
+        data["mask_crop"] = mask_crop
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    return p
     
 def set_geodesic_edges_for_crack(save_folder, base_name, crack_id, ge_dict):
     """Store geodesic edges (edge1/edge2 lists) under atomic crack snapshot."""
@@ -1802,6 +1864,131 @@ def _mask_midline_cache_key(mask_bin, midline):
     h.update(mask_bin.tobytes())
     h.update(np.asarray(midline, np.float32).tobytes())
     return h.hexdigest()
+
+def reconstruct_manual_mask_from_edges(crack: dict, H: int, W: int) -> "np.ndarray":
+    """
+    Strictly reconstruct a full-image binary mask (H,W) from geodesic_edges only.
+    If edges are missing or invalid → returns all zeros.
+    """
+    import numpy as np, cv2
+
+    ge = crack.get("geodesic_edges") or {}
+    e1 = np.asarray(ge.get("edge1", []), float)
+    e2 = np.asarray(ge.get("edge2", []), float)
+
+    if e1.ndim != 2 or e2.ndim != 2 or len(e1) < 2 or len(e2) < 2:
+        return np.zeros((H, W), np.uint8)
+
+    e1 = e1[np.isfinite(e1).all(axis=1)]
+    e2 = e2[np.isfinite(e2).all(axis=1)]
+    if len(e1) < 2 or len(e2) < 2:
+        return np.zeros((H, W), np.uint8)
+
+    poly = np.vstack([e1, e2[::-1]])
+    mask = np.zeros((H, W), np.uint8)
+    cv2.fillPoly(mask, [np.round(poly).astype(np.int32)], 255)
+    return mask
+
+def merged_metric_atomic(authoring_atomic, save_folder, image_base):
+    """
+    Merge authoring cracks with any per-cid metric snapshots.
+    Supports either .../metrics/<image_base>/cid/<cid>.json
+    or .../metrics/<image_base>/cid<cid>.json
+    """
+    import os, json
+    merged = {}
+    base_dir = os.path.join(save_folder, "metrics", image_base)
+
+    for cid, cr in (authoring_atomic or {}).items():
+        merged[cid] = dict(cr)
+        path_opts = [
+            os.path.join(base_dir, "cid", f"{cid}.json"),
+            os.path.join(base_dir, f"cid{cid}.json"),
+        ]
+        for path in path_opts:
+            if os.path.exists(path):
+                try:
+                    with open(path, "r") as f:
+                        snap = json.load(f) or {}
+                    merged[cid].update(snap)
+                    print(f"[merge] ✅ merged edges from {path}")
+                    break
+                except Exception as e:
+                    print(f"[merge] ⚠ failed {path}: {e}")
+    return merged
+
+# === helpers/metrics.py ===
+
+import os, json, numpy as np, cv2
+
+def _safe_poly_fill(H, W, e1, e2):
+    """Return (H,W) binary mask by filling polygon between two global-edge polylines."""
+    e1 = np.asarray(e1, float); e2 = np.asarray(e2, float)
+    if e1.ndim != 2 or e2.ndim != 2 or len(e1) < 2 or len(e2) < 2:
+        return np.zeros((H, W), np.uint8)
+    e1 = e1[np.isfinite(e1).all(axis=1)]
+    e2 = e2[np.isfinite(e2).all(axis=1)]
+    if len(e1) < 2 or len(e2) < 2:
+        return np.zeros((H, W), np.uint8)
+    poly = np.vstack([e1, e2[::-1]]).astype(np.int32)
+    poly[:,0] = np.clip(poly[:,0], 0, W-1)
+    poly[:,1] = np.clip(poly[:,1], 0, H-1)
+    m = np.zeros((H, W), np.uint8)
+    cv2.fillPoly(m, [poly], 1)
+    return m
+
+def manual_mask_from_crack(crack: dict, H: int, W: int) -> np.ndarray:
+    """
+    Build a binary manual mask for a single crack.
+    Priority: geodesic_edges polygon → (optional) mask_crop+mask_bbox → zeros.
+    """
+    ge = (crack or {}).get("geodesic_edges", {}) or {}
+    if ("edge1" in ge) and ("edge2" in ge):
+        m = _safe_poly_fill(H, W, ge.get("edge1", []), ge.get("edge2", []))
+        if m.any():
+            return m.astype(np.uint8)
+
+    # Fallback ONLY if a (legacy) crop exists
+    mc = crack.get("mask_crop", None)
+    bb = crack.get("mask_bbox", None)
+    if mc is not None and isinstance(bb, (list, tuple)) and len(bb) == 4:
+        x, y, w, h = [int(v) for v in bb]
+        if w > 0 and h > 0:
+            x0, y0 = max(0, x), max(0, y)
+            x1, y1 = min(W, x + w), min(H, y + h)
+            if x1 > x0 and y1 > y0:
+                crop = (np.asarray(mc) > 0).astype(np.uint8)
+                crop = crop[:(y1-y0), ::(x1-x0)]
+                m = np.zeros((H, W), np.uint8)
+                m[y0:y1, x0:x1] = crop[:(y1-y0), :(x1-x0)]
+                if m.any():
+                    return m
+    return np.zeros((H, W), np.uint8)
+
+def merged_metric_atomic(authoring_atomic: dict, save_folder: str, image_base: str) -> dict:
+    """
+    Merge authoring entries with per-cid snapshots (supports both layouts):
+      .../metrics/<base>/cid/<cid>.json  OR  .../metrics/<base>/cid<cid>.json
+    """
+    merged = {}
+    base_dir = os.path.join(save_folder, "metrics", image_base)
+    for cid, cr in (authoring_atomic or {}).items():
+        merged[cid] = dict(cr)
+        path_opts = [
+            os.path.join(base_dir, "cid", f"{cid}.json"),
+            os.path.join(base_dir, f"cid{cid}.json"),
+        ]
+        for p in path_opts:
+            if os.path.exists(p):
+                try:
+                    with open(p, "r") as f:
+                        snap = json.load(f) or {}
+                    merged[cid].update(snap)
+                    print(f"[merge] ✅ merged edges from {p}")
+                    break
+                except Exception as e:
+                    print(f"[merge] ⚠ failed {p}: {e}")
+    return merged
 
 # --- minimal geometry utils (existing from your metrics) ----------------------
 # Expect these to already exist in your codebase:

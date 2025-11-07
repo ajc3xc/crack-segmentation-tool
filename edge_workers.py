@@ -283,14 +283,14 @@ def _crop_mask_from_edges(hc, wc, e1, e2, midline_xy=None, min_area=0.5, ribbon_
 # Worker: edge mask → edge tracking → mask creation → midline metrics
 # ---------------------------------------------------------------------
 def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
-    import numpy as np, cv2, os
-    from helpers.metrics import compute_midline_metrics  # keep as-is
+    import numpy as np, cv2, os, json
+    from helpers.metrics import compute_midline_metrics, set_tracked_edges_for_crack
 
     img = payload["image_crop_gray"]
     pts_crop = payload["pts_crop"]
     track_local_yx = payload["adjusted_track"]  # (2,N) [y,x]
-    man_xy_g  = np.asarray(payload["manual_midline_global"], float)
-    x, y, w, h = payload["bbox"]  # bbox in GLOBAL coords (x,y,w,h)
+    man_xy_g = np.asarray(payload["manual_midline_global"], float)
+    x, y, w, h = map(int, payload["bbox"])  # bbox in GLOBAL coords
     P = payload["params"]
     crack_id = payload.get("crack_id", "?")
     base_name = payload.get("image_base", "unknown")
@@ -299,7 +299,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         img_norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         em1, em2 = edge_masks(img_norm, track_local_yx, window_half_size=int(P["window_half_size"]))
 
-        # local XY from YX
+        # --- derive crop-local midline (x,y) ---
         midline_xy_crop = np.column_stack([track_local_yx[1], track_local_yx[0]])
 
         res = edges_tracking(
@@ -317,27 +317,28 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             _debug_plot_edge_worker(img_norm, em1, em2, midline_xy_crop, None, None, P, tag="no_edges")
             return {"status": "fail_no_edges", **P}
 
-        # to arrays
+        # convert to numpy
         track_e1 = np.asarray(track_e1, float)
         track_e2 = np.asarray(track_e2, float)
 
+        # --- build local crop mask (for debug) ---
         hc, wc = img.shape[:2]
         mask_crop = _crop_mask_from_edges(hc, wc, track_e1, track_e2, midline_xy=midline_xy_crop)
 
-        # --- NORMALS: provide BOTH the legacy key and the global/full form ---
+        # --- NORMALS ---
         normals = res.get("normal_edge_points")
         if normals is not None:
             (e1x, e1y), (e2x, e2y) = normals
             e1x = np.asarray(e1x, float); e1y = np.asarray(e1y, float)
             e2x = np.asarray(e2x, float); e2y = np.asarray(e2y, float)
 
-            # legacy/local format many callers expect:
+            # legacy/local format
             normal_edge_points = [
                 [e1x.tolist(), e1y.tolist()],
                 [e2x.tolist(), e2y.tolist()],
             ]
 
-            # also provide GLOBAL coordinates (useful for exporters)
+            # GLOBAL coords (for exports)
             n1_full = np.column_stack([e1x + x, e1y + y])
             n2_full = np.column_stack([e2x + x, e2y + y])
             normal_edge_points_full = {
@@ -348,7 +349,11 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             normal_edge_points = None
             normal_edge_points_full = None
 
-        # Simple preview (toggle)
+        # --- convert edges to GLOBAL coords ---
+        track_e1_global = np.column_stack([track_e1[:, 0] + x, track_e1[:, 1] + y])
+        track_e2_global = np.column_stack([track_e2[:, 0] + x, track_e2[:, 1] + y])
+
+        # --- optional debug overlay ---
         DEBUG_SAVE = True
         if DEBUG_SAVE:
             dbg_dir = os.path.join(payload["save_folder"], "metrics", base_name, f"cid{crack_id}")
@@ -356,19 +361,14 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             overlay = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR)
             cv2.polylines(overlay, [track_e1.astype(np.int32)], False, (0, 0, 255), 1)
             cv2.polylines(overlay, [track_e2.astype(np.int32)], False, (0, 255, 0), 1)
-            if normals is not None:
-                for px, py in zip(e1x.astype(int), e1y.astype(int)):
-                    cv2.circle(overlay, (int(px), int(py)), 1, (0, 0, 255), -1)
-                for px, py in zip(e2x.astype(int), e2y.astype(int)):
-                    cv2.circle(overlay, (int(px), int(py)), 1, (0, 255, 0), -1)
             cv2.imwrite(os.path.join(dbg_dir, "auto_preview.png"), overlay)
             cv2.imwrite(os.path.join(dbg_dir, "auto_mask.png"), (mask_crop * 255).astype(np.uint8))
 
-        # --- midline comparison metrics (crop-local vs crop-local) ---
+        # --- midline comparison metrics (crop-local) ---
         try:
             n = min(len(track_e1), len(track_e2))
             auto_midline = 0.5 * (track_e1[:n] + track_e2[:n])
-            man_midline = man_xy_g - np.array([x, y], float)  # shift to crop
+            man_midline = man_xy_g - np.array([x, y], float)  # shift GT to crop coords
             metrics = compute_midline_metrics(auto_midline, man_midline, tau=3.0)
         except Exception as e:
             print(f"[edge_worker] ⚠️ midline metrics failed: {e}")
@@ -377,22 +377,26 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "directional_bias","curvature_rms_ratio","local_thickness_corr"
             ]}
 
-        # return full geometry using keys downstream expects
-        return {
+        # --- compose final payload ---
+        result = {
             "status": "ok",
             "bbox": [x, y, w, h],
-            "mask_bbox": [x, y, w, h],               # <- many readers look for this
+            "mask_bbox": [x, y, w, h],
             "mask_crop": mask_crop.tolist(),
             "geodesic_edges": {
-                "edge1": track_e1.tolist(),
-                "edge2": track_e2.tolist()
+                "edge1": track_e1_global.tolist(),
+                "edge2": track_e2_global.tolist(),
             },
-            # legacy/local normals + global normals
             "normal_edge_points": normal_edge_points,
             "normal_edge_points_full": normal_edge_points_full,
             **P,
             **metrics
         }
+
+        # --- SAVE SNAPSHOT (flat filename) ---
+        set_tracked_edges_for_crack(payload["save_folder"], base_name, crack_id, result)
+
+        return result
 
     except Exception as e:
         print(f"[edge_worker] ❌ unexpected failure for params={P}: {e}")
@@ -401,3 +405,4 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         out = {"status": "fail_exception", "error": str(e)}
         out.update(P)
         return out
+

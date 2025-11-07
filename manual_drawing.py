@@ -427,10 +427,8 @@ class ManualDrawing(CrackUtils):
                  
     def commit_manual_midlines_full(self):
         """
-        Enrich manual_poly cracks (already created by select_end_points_manmidlines)
-        with mask_crop + mask_bbox based on update_image_crop().
-        Pure update — never creates new cracks.
-        Includes detailed debugging.
+        Update existing manual_poly cracks with a valid mask_bbox only.
+        Do NOT store mask_crop here (edge rasterization is produced later by the worker).
         """
         import numpy as np, json
 
@@ -441,7 +439,7 @@ class ManualDrawing(CrackUtils):
             return (round(float(pA[0]), r), round(float(pA[1]), r),
                     round(float(pB[0]), r), round(float(pB[1]), r))
 
-        # 1️⃣ Build reverse lookup
+        # reverse lookup: user_points -> crack id
         pair_to_id = {}
         for cid, cr in atomic.items():
             up = cr.get("user_points") or []
@@ -450,23 +448,17 @@ class ManualDrawing(CrackUtils):
                 pair_to_id[_norm_pair(up[1], up[0])] = cid
         print(f"[DEBUG FULL] built pair_to_id for {len(pair_to_id)//2} cracks")
 
-        # 2️⃣ Prepare GUI data
-        points = getattr(self, "all_selected_points", None)
-        if points is None:
-            points = getattr(self, "user_points", []) or []
+        points = getattr(self, "all_selected_points", None) or getattr(self, "user_points", []) or []
         mm = dict(getattr(self, "manual_midlines_tmp", {}) or {})
         print(f"[DEBUG FULL] processing {len(mm)} manual midlines")
 
         updated = 0
-        for k, poly in mm.items():
+        for k, _poly in mm.items():
             if isinstance(k, tuple) and len(k) == 2:
                 i1, i2 = map(int, k)
             elif isinstance(k, str) and "_" in k:
-                try:
-                    i1, i2 = map(int, k.split("_"))
-                except ValueError:
-                    print(f"[WARN FULL] bad key format {k}")
-                    continue
+                try: i1, i2 = map(int, k.split("_"))
+                except ValueError: continue
             else:
                 continue
 
@@ -481,55 +473,24 @@ class ManualDrawing(CrackUtils):
 
             cid = pair_to_id[norm_key]
             crack = atomic[cid]
-            print(f"[DEBUG FULL] updating cid={cid} for pair {p1}->{p2}")
 
-            # --- Compute bbox same as update_image_crop ---
-            boxes = self.get_all_bounding_boxes()
+            # choose bbox that contains both endpoints (use your existing get_all_bounding_boxes)
             bbox = None
-            for b in boxes:
-                xmin, ymin, xmax, ymax = b
+            for xmin, ymin, xmax, ymax in self.get_all_bounding_boxes():
                 if (xmin <= p1[0] <= xmax and ymin <= p1[1] <= ymax and
                     xmin <= p2[0] <= xmax and ymin <= p2[1] <= ymax):
-                    bbox = list(b)
+                    bbox = [int(xmin), int(ymin), int(xmax - xmin), int(ymax - ymin)]
                     break
             if bbox is None:
-                print(f"[WARN FULL] no bbox found for {p1}->{p2}, skipping bbox update")
+                print(f"[WARN FULL] no bbox found for {p1}->{p2}; skipping")
                 continue
 
-            xmin, ymin, xmax, ymax = bbox
-            self.active_bbox = bbox
-            self.pts = [np.array(p1), np.array(p2)]
-            self.update_image_crop()
-            if getattr(self, "skip_current_segment", False):
-                print(f"[WARN FULL] bbox too small; skipping manual pair {p1}->{p2}")
-                continue
-
-            h, w = self.image_crop.shape[:2]
-            mask_crop = np.zeros((h, w), dtype=np.uint8)
-            mask_bbox = [int(xmin), int(ymin), int(w), int(h)]
-
-            crack["mask_crop"] = mask_crop.tolist()
-            crack["mask_bbox"] = mask_bbox
+            crack["mask_bbox"] = bbox
+            crack.pop("mask_crop", None)  # ensure we don't leave stale crops
             updated += 1
-            print(f"[MEM FULL] ✅ updated id={cid} mask_bbox={mask_bbox} crop_shape={mask_crop.shape}")
+            print(f"[MEM FULL] ✅ id={cid} mask_bbox={bbox} (no mask_crop)")
 
         print(f"[SUMMARY FULL] updated {updated}/{len(mm)} manual midlines")
-
-        # 🧾 Dump preview of each manual_poly entry
-        print("\n[SUMMARY FULL] Final manual_poly cracks (in-memory):")
-        for cid, cr in atomic.items():
-            if cr.get("source") == "manual_poly":
-                keys = list(cr.keys())
-                print(f"  cid={cid}  keys={keys}")
-                print(f"    mask_bbox={cr.get('mask_bbox')}")
-                print(f"    mask_crop shape={np.shape(cr.get('mask_crop'))}")
-
-        # Optional: preview JSON snapshot
-        try:
-            print("[SUMMARY FULL] JSON preview:")
-            print(json.dumps({"atomic_cracks": atomic}, indent=2)[:800] + " ...")
-        except Exception as e:
-            print(f"[WARN FULL] couldn't preview json: {e}")
  
     # in select_save_end_points
     def select_save_end_points(self):

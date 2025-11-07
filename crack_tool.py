@@ -2570,73 +2570,179 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         print(f"[metrics] ⏱ total runtime = {elapsed_total:.2f} sec "
             f"(auto={t_phase_auto:.2f}s, midline={t_phase_midline:.2f}s, mask/width={t_phase_maskwidth:.2f}s)")'''
-            
+                
+    def dump_global_midline_and_mask_overlays(self, thickness_px=3):
+        """
+        Reconstruct full-image debug masks and overlays (strict, edges-only):
+        - GT mask = self.current_mask (if loaded)
+        - midlines = from crack['midline']
+        - edge mask = polygon filled from geodesic_edges only
+        Writes under Outputs/metrics/<base>/.
+        """
+        import os, json, numpy as np, cv2
+        from helpers.metrics import reconstruct_manual_mask_from_edges, merged_metric_atomic
+
+        base_name = os.path.splitext(os.path.basename(self.name))[0]
+        image_dir = os.path.join(self.save_folder, "metrics", base_name)
+        os.makedirs(image_dir, exist_ok=True)
+
+        H, W = self.original_image.shape[:2]
+
+        # --- Authoring + merged (with per-cid edges) ---
+        authoring_atomic = (self.annotation or {}).get("annotations", {}).get("atomic_cracks", {}) or {}
+        atomic = merged_metric_atomic(authoring_atomic, self.save_folder, base_name)
+        print(f"[DBG global] reconstructing strict overlays for {len(atomic)} cracks (H={H}, W={W})")
+
+        # --- Initialize canvases ---
+        gt_mask      = np.zeros((H, W), np.uint8)
+        midline_mask = np.zeros((H, W), np.uint8)
+        edge_mask    = np.zeros((H, W), np.uint8)
+
+        # --- Load ground truth mask if present ---
+        if getattr(self, "current_mask", None) is not None:
+            gt_mask = ((self.current_mask > 0).astype(np.uint8) * 255)
+            print(f"[DBG global] GT nnz={int(np.count_nonzero(gt_mask))}")
+        else:
+            print(f"[DBG global] ⚠ no self.current_mask, GT empty")
+
+        # --- Draw midlines + edges ---
+        def _draw_midline(mask, pts, thick):
+            arr = np.asarray(pts, float)
+            arr = arr[np.isfinite(arr).all(axis=1)]
+            if len(arr) >= 2:
+                cv2.polylines(mask, [arr.astype(np.int32)], False, 255, thick, lineType=cv2.LINE_AA)
+
+        for cid, crack in atomic.items():
+            src = (crack.get("source") or "").lower()
+            ml  = crack.get("midline", []) or crack.get("midline_segments", [])
+            ge  = crack.get("geodesic_edges", {})
+            print(f"  cid={str(cid):>3s} src={src:12s} edge_keys={list(ge.keys()) if ge else []}")
+
+            # midlines
+            try:
+                if ml:
+                    if isinstance(ml[0], (list, tuple)) and isinstance(ml[0][0], (list, tuple)):
+                        for seg in ml:
+                            _draw_midline(midline_mask, seg, thickness_px)
+                    else:
+                        _draw_midline(midline_mask, ml, thickness_px)
+            except Exception as e:
+                print(f"    [midline] fail: {e}")
+
+            # strictly edge polygon fill
+            try:
+                m_edge = reconstruct_manual_mask_from_edges(crack, H, W)
+                edge_mask |= (m_edge > 0).astype(np.uint8) * 255
+            except Exception as e:
+                print(f"    [edges] fail: {e}")
+
+        # --- Save binary masks ---
+        cv2.imwrite(os.path.join(image_dir, "global_gt_mask.png"), gt_mask)
+        cv2.imwrite(os.path.join(image_dir, "global_midlines_mask.png"), midline_mask)
+        cv2.imwrite(os.path.join(image_dir, "global_edge_mask.png"), edge_mask)
+
+        # --- Overlays ---
+        rgb = self.original_image
+        if rgb.ndim == 2:
+            rgb = cv2.cvtColor(rgb, cv2.COLOR_GRAY2BGR)
+
+        def _colorize(mask, bgr):
+            c = np.zeros_like(rgb)
+            c[mask > 0] = bgr
+            return c
+
+        gt_rgb   = _colorize(gt_mask,   (0, 0, 255))     # red
+        mid_rgb  = _colorize(midline_mask, (255, 255, 0)) # cyan
+        edge_rgb = _colorize(edge_mask, (0, 255, 0))     # green
+
+        ov_mid  = cv2.addWeighted(rgb, 0.65, gt_rgb, 0.45, 0)
+        ov_mid  = cv2.addWeighted(ov_mid, 1.00, mid_rgb, 0.70, 0)
+        ov_edge = cv2.addWeighted(rgb, 0.65, gt_rgb, 0.45, 0)
+        ov_edge = cv2.addWeighted(ov_edge, 1.00, edge_rgb, 0.70, 0)
+
+        cv2.imwrite(os.path.join(image_dir, "overlay_gt_vs_midlines.png"), ov_mid)
+        cv2.imwrite(os.path.join(image_dir, "overlay_gt_vs_edge_masks.png"), ov_edge)
+
+        print(f"[DBG global] nnz(gt)={int(np.count_nonzero(gt_mask))} "
+            f"nnz(mid)={int(np.count_nonzero(midline_mask))} "
+            f"nnz(edge)={int(np.count_nonzero(edge_mask))}")
+        print(f"[DBG global] ✅ wrote overlays + masks → {image_dir}")
+
     def smoke_test_edges_for_manual(self, crack_id, edge_params=None, color_channel=None):
         """
-        Minimal edge sanity: load cid snapshot, crop, run edge_param_worker once,
-        persist geodesic_edges + normal_edge_points, and dump multiple preview PNGs.
-        Includes visual debug overlays for quick inspection.
+        Strict edge sanity for ONE manual crack:
+        1) Load per-crack snapshot & validate bbox/midline.
+        2) Crop via update_image_crop(), build local track.
+        3) Run edge worker once, persist geodesic_edges and a NON-EMPTY mask_crop
+        rasterized from the polygon between edges.
+        4) Dump debug overlays.
         """
         import os, numpy as np, traceback, cv2
         from edge_workers import edge_param_worker, _debug_plot_edge_worker
         from helpers.metrics import (
-            metric_atomic_path_for, safe_read_json, safe_write_json,
-            set_tracked_edges_for_crack, debug_plot_gt_preview,
-            metric_image_dir
+            metric_atomic_path_for, safe_read_json,
+            set_tracked_edges_for_crack, debug_plot_gt_preview, metric_image_dir
         )
 
         base = self._image_base()
         p = metric_atomic_path_for(self.save_folder, base, crack_id)
         cr = safe_read_json(p, {})
         if not cr:
-            print(f"[smoke] no snapshot for cid={crack_id}")
+            print(f"[smoke] ❌ no snapshot for cid={crack_id}")
             return False
 
-        x, y, w, h = map(int, cr.get("mask_bbox", [0, 0, 0, 0]))
+        H, W = self.original_image.shape[:2]
+
+        # --- validate bbox + midline ---
+        bb = cr.get("mask_bbox", None)
+        if not (isinstance(bb, (list, tuple)) and len(bb) == 4):
+            print(f"[smoke] ❌ cid{crack_id}: invalid mask_bbox in JSON: {bb}")
+            return False
+        x, y, w, h = map(int, bb)
         if w <= 0 or h <= 0:
-            print(f"[smoke] cid{crack_id} missing bbox")
+            print(f"[smoke] ❌ cid{crack_id}: non-positive bbox {bb}")
+            return False
+        xmin, ymin, xmax, ymax = x, y, x + w, y + h
+        if not (0 <= xmin < xmax <= W and 0 <= ymin < ymax <= H):
+            print(f"[smoke] ❌ cid{crack_id}: bbox out of image bounds {bb} for {W}x{H}")
             return False
 
         man_xy_g = np.asarray(cr.get("midline", []), float)
         if man_xy_g.ndim != 2 or man_xy_g.shape[1] != 2 or len(man_xy_g) < 2:
-            print(f"[smoke] cid{crack_id} invalid midline")
+            print(f"[smoke] ❌ cid{crack_id}: invalid midline")
             return False
 
-        # prep crop like pipeline
+        # --- crop like pipeline ---
         try:
-            self.active_bbox = [x, y, x + w, y + h]
+            self.active_bbox = [xmin, ymin, xmax, ymax]
             self.pts = [man_xy_g[0].copy(), man_xy_g[-1].copy()]
             self.end_points = self.pts
             self.update_image_crop()
             if getattr(self, "skip_current_segment", False):
-                print(f"[smoke] crop skipped for cid{crack_id}")
+                print(f"[smoke] ❌ crop was skipped for cid{crack_id}")
                 return False
         except Exception as e:
             traceback.print_exc()
-            print(f"[smoke] crop stage failed cid{crack_id}: {e}")
+            print(f"[smoke] ❌ crop stage failed cid{crack_id}: {e}")
             return False
 
         if color_channel is None:
-            color_channel = (
-                0
-                if self.edge_track_color_box.currentText() == "R"
-                else 1
-                if self.edge_track_color_box.currentText() == "B"
-                else 2
-            )
+            color_channel = (0 if self.edge_track_color_box.currentText()=="R"
+                            else 1 if self.edge_track_color_box.currentText()=="B"
+                            else 2)
 
         gray = self.image_crop[:, :, color_channel].astype(np.float32)
-        track_local_yx = np.vstack([man_xy_g[:, 1] - y, man_xy_g[:, 0] - x])  # [2,N] yx in crop
-        # ensure start ~ p0
-        d0 = np.linalg.norm(track_local_yx[:, 0][::-1] - self.pts_crop[0])
-        d1 = np.linalg.norm(track_local_yx[:, 0][::-1] - self.pts_crop[1])
+
+        # local yx track
+        track_local_yx = np.vstack([man_xy_g[:,1]-ymin, man_xy_g[:,0]-xmin])  # [2,N]
+        d0 = np.linalg.norm(track_local_yx[:,0][::-1] - self.pts_crop[0])
+        d1 = np.linalg.norm(track_local_yx[:,0][::-1] - self.pts_crop[1])
         if d1 < d0:
             track_local_yx = track_local_yx[:, ::-1]
 
         if edge_params is None:
-            edge_params = {"window_half_size": 45, "mu": 0, "l": 5, "p": 14}
+            edge_params = {"window_half_size":45, "mu":0.0, "l":5, "p":14}
 
-        # === Build payload for worker ===
         payload = dict(
             image_crop_gray=gray,
             pts_crop=self.pts_crop,
@@ -2646,41 +2752,83 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             bbox=(x, y, w, h),
             manual_normals_crop=None,
             params=edge_params,
-            save_folder=self.save_folder,        # ✅ worker needs this for path creation
-            image_base=self._image_base(),        # optional, helps naming consistency
-            crack_id=str(crack_id),               # ✅ NEW: ensures “cid?” becomes “cid0”
+            save_folder=self.save_folder,
+            image_base=base,
+            crack_id=str(crack_id),
         )
 
-        # === Run edge tracking worker ===
         ew = edge_param_worker(payload)
         if not isinstance(ew, dict):
-            print(f"[smoke] edge worker returned empty for cid{crack_id}")
+            print(f"[smoke] ❌ edge worker returned empty for cid{crack_id}")
             return False
 
-        # persist results
-        set_tracked_edges_for_crack(self.save_folder, base, crack_id, ew, mask_crop=ew.get("mask_crop"))
+        # --- NEW: always create a non-empty mask_crop from geodesic edges (in crop frame) ---
+        try:
+            e1g = np.asarray(ew.get("geodesic_edges", {}).get("edge1", []), float)
+            e2g = np.asarray(ew.get("geodesic_edges", {}).get("edge2", []), float)
+            mask_crop = np.zeros((h, w), np.uint8)
+            ok_poly = False
+            if e1g.ndim == 2 and e2g.ndim == 2 and len(e1g) >= 2 and len(e2g) >= 2:
+                # convert global -> local crop coords
+                e1c = np.column_stack([e1g[:,0]-xmin, e1g[:,1]-ymin])
+                e2c = np.column_stack([e2g[:,0]-xmin, e2g[:,1]-ymin])
+                poly = np.vstack([e1c, e2c[::-1]])
+                poly = np.round(poly).astype(np.int32)
+                # clip to crop
+                poly[:,0] = np.clip(poly[:,0], 0, w-1)
+                poly[:,1] = np.clip(poly[:,1], 0, h-1)
+                cv2.fillPoly(mask_crop, [poly], 255)
+                ok_poly = np.count_nonzero(mask_crop) > 0
 
-        # === Debug plot 1: edge-worker overlay ===
+            # fallback: if no polygon, try worker's own mask (if any)
+            if (not ok_poly) and isinstance(ew.get("mask_crop"), (list, np.ndarray)):
+                mc = np.array(ew["mask_crop"])
+                if mc.shape == (h, w):
+                    mask_crop = ((mc > 0) * 255).astype(np.uint8)
+                    ok_poly = np.count_nonzero(mask_crop) > 0
+
+            # ensure we persist a binary crop (0/1) not 0/255
+            ew["mask_crop"] = (mask_crop > 0).astype(np.uint8).tolist()
+        except Exception as e:
+            print(f"[smoke] warn: polygon->mask failed for cid{crack_id}: {e}")
+
+        # persist to JSON
+        set_tracked_edges_for_crack(self.save_folder, base, crack_id, ew, mask_crop=ew.get("mask_crop"))
+        print(f"[smoke] 🔍 edge_param_worker wrote to {self.save_folder}/metrics/{base}/cid/{crack_id}.json?")
+        import os, json
+        # NEW (flat filename)
+        cid_path = os.path.join(self.save_folder, "metrics", base, f"cid{crack_id}.json")
+
+        if os.path.exists(cid_path):
+            print(f"[smoke] ✅ found snapshot {cid_path}")
+            with open(cid_path, "r") as f:
+                data = json.load(f)
+            print(f"[smoke] snapshot keys={list(data.keys())}")
+            if "geodesic_edges" in data:
+                print(f"[smoke] edge1_len={len(data['geodesic_edges'].get('edge1',[]))} "
+                    f"edge2_len={len(data['geodesic_edges'].get('edge2',[]))}")
+            else:
+                print(f"[smoke] ❌ no geodesic_edges in snapshot")
+        else:
+            print(f"[smoke] ❌ expected cid file not found at {cid_path}")
+
+        # reload after write
+        cr = safe_read_json(p, {})
+
+        # local worker overlay
         try:
             e1 = np.array(ew.get("geodesic_edges", {}).get("edge1", []), float)
             e2 = np.array(ew.get("geodesic_edges", {}).get("edge2", []), float)
-            params = payload["params"]
-            tag = f"cid{crack_id}_smoke"
             _debug_plot_edge_worker(
-                gray,
-                np.zeros_like(gray),
-                np.zeros_like(gray),
+                gray, np.zeros_like(gray), np.zeros_like(gray),
                 np.column_stack([track_local_yx[1], track_local_yx[0]]),
-                e1,
-                e2,
-                params,
-                tag=tag,
+                e1, e2, edge_params, tag=f"cid{crack_id}_smoke",
             )
             print(f"[smoke] wrote edge-worker debug plot for cid{crack_id}")
         except Exception as e:
-            print(f"[smoke] debug plot failed: {e}")
+            print(f"[smoke] overlay(local) failed: {e}")
 
-        # === Debug plot 2: combined overlay of edges ===
+        # full-image edges overlay
         try:
             ge = cr.get("geodesic_edges", {})
             overlay = self.original_image.copy()
@@ -2690,43 +2838,46 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 arr = np.array(arr, float)
                 if arr.ndim == 2 and len(arr) >= 2:
                     color = (0, 0, 255) if "edge1" in key else (0, 255, 0)
-                    cv2.polylines(overlay, [arr.astype(np.int32)], False, color, 1)
+                    cv2.polylines(overlay, [arr.astype(np.int32)], False, color, 1, lineType=cv2.LINE_AA)
             save_dir = os.path.join(self.save_folder, "debug_outputs")
             os.makedirs(save_dir, exist_ok=True)
-            out_path = os.path.join(save_dir, f"{self._image_base()}_cid{crack_id}_edges_overlay.png")
+            out_path = os.path.join(save_dir, f"{base}_cid{crack_id}_edges_overlay.png")
             cv2.imwrite(out_path, overlay)
             print(f"[smoke] saved combined overlay → {out_path}")
         except Exception as e:
-            print(f"[smoke] overlay plot failed: {e}")
+            print(f"[smoke] overlay(full) failed: {e}")
 
-        # === Debug plot 3: GT/mask preview ===
+        # paste-back overlay (sanity for IoU path)
         try:
-            from helpers.metrics import _reconstruct_full_mask
+            mc = cr.get("mask_crop", None)
+            if mc is not None:
+                mc = (np.array(mc, dtype=np.uint8) > 0).astype(np.uint8)
+                if mc.shape == (h, w):
+                    full = np.zeros((H, W), np.uint8)
+                    full[ymin:ymin+h, xmin:xmin+w] = mc * 255
+                    vis = self.original_image.copy()
+                    if vis.ndim == 2:
+                        vis = cv2.cvtColor(vis, cv2.COLOR_GRAY2BGR)
+                    vis = cv2.addWeighted(vis, 0.7, cv2.cvtColor(full, cv2.COLOR_GRAY2BGR), 0.4, 0.0)
+                    out_path = os.path.join(self.save_folder, "debug_outputs", f"{base}_cid{crack_id}_mask_paste_overlay.png")
+                    cv2.imwrite(out_path, vis)
+                    print(f"[smoke] saved mask-paste overlay → {out_path}")
+        except Exception as e:
+            print(f"[smoke] overlay(mask-paste) failed: {e}")
+
+        # optional GT preview
+        try:
+            from helpers.metrics import metric_image_dir, debug_plot_gt_preview
             H, W = self.original_image.shape[:2]
-            mask_bin = (
-                (self.current_mask > 0).astype(np.uint8)
-                if getattr(self, "current_mask", None) is not None
-                else None
-            )
-            ge = safe_read_json(p, {}).get("geodesic_edges", {})
+            mask_bin = (self.current_mask > 0).astype(np.uint8) if getattr(self, "current_mask", None) is not None else None
+            ge = cr.get("geodesic_edges", {})
             e1 = np.asarray(ge.get("edge1", []), float)
             e2 = np.asarray(ge.get("edge2", []), float)
-            out_png = os.path.join(
-                metric_image_dir(self.save_folder, base), f"cid{crack_id}", "smoke_gt_preview.png"
-            )
+            out_png = os.path.join(metric_image_dir(self.save_folder, base), f"cid{crack_id}", "smoke_gt_preview.png")
             if mask_bin is None:
-                debug_plot_gt_preview(
-                    np.zeros((H, W), np.uint8),
-                    man_xy_g,
-                    e1,
-                    e2,
-                    out_png,
-                    title=f"Edges cid{crack_id}",
-                )
+                debug_plot_gt_preview(np.zeros((H, W), np.uint8), man_xy_g, e1, e2, out_png, title=f"Edges cid{crack_id}")
             else:
-                debug_plot_gt_preview(
-                    mask_bin, man_xy_g, e1, e2, out_png, title=f"GT/edges — cid{crack_id}"
-                )
+                debug_plot_gt_preview(mask_bin, man_xy_g, e1, e2, out_png, title=f"GT/edges — cid{crack_id}")
             print(f"[smoke] wrote preview → {out_png}")
         except Exception as e:
             print(f"[smoke] preview failed: {e}")
@@ -2740,9 +2891,11 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         • sync snapshot (atomics only)
         • ensure edge tracking (once per manual crack)
         • compute mask/width metrics (manual only)
+        Adds debug overlays for mask IoU visualization.
         Keeps full signature for GUI button compatibility.
         """
-        import os, time, numpy as np, traceback
+        import os, time, numpy as np, traceback, cv2
+        from helpers.metrics import reconstruct_manual_mask_from_edges
 
         if not getattr(self, "name", None):
             print("[metrics] ⚠ no image loaded — aborting smoke test.")
@@ -2753,7 +2906,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         os.makedirs(image_dir, exist_ok=True)
 
         print(f"\n[SMOKE] ===== running minimal metrics for {base_name} =====")
-
         t_total_start = time.perf_counter()
 
         # --- 1) Load snapshot (manual atomics only) ---
@@ -2802,6 +2954,30 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             traceback.print_exc()
             print(f"[SMOKE] mask/width stage failed: {e}")
 
+        # --- 4) NEW: Dump quick mask overlay for IoU debug ---
+        try:
+            from helpers.metrics import _reconstruct_full_mask
+            H, W = self.original_image.shape[:2]
+            ann = self._metric_atomic()
+            for cid, crack in ann.items():
+                src = (crack.get("source") or "").lower()
+                if src.startswith("auto") or src == "combined":
+                    continue
+                m_manual = reconstruct_manual_mask_from_edges(crack, H, W)
+                overlay = self.original_image.copy()
+                if overlay.ndim == 2:
+                    overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2BGR)
+                mask_vis = (m_manual > 0).astype(np.uint8) * 255
+                overlay = cv2.addWeighted(
+                    overlay, 0.7, cv2.cvtColor(mask_vis, cv2.COLOR_GRAY2BGR), 0.4, 0
+                )
+                out_dbg = os.path.join(image_dir, f"debug_mask_overlay_cid{cid}.png")
+                cv2.imwrite(out_dbg, overlay)
+                print(f"[SMOKE] wrote mask overlay → {out_dbg}")
+        except Exception as e:
+            print(f"[SMOKE] overlay debug failed: {e}")
+
+        self.dump_global_midline_and_mask_overlays(thickness_px=3)
         total_time = time.perf_counter() - t_total_start
         print(f"[SMOKE] ✅ completed minimal metrics in {total_time:.2f}s\n")
           
@@ -2917,83 +3093,104 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         
     def compute_mask_and_width_metrics_for_image(self, display=False, export_supervision=False):
         """
-        Snapshot-only driver with normals reuse + verbose debug.
-        Prints per-stage debug so we know exactly where/why it fails.
+        Snapshot-only driver with verbose debug.
+        Rewritten for strict edge-based masks (no mask_crop dependency).
         """
-        self._ensure_metrics_cache()
-        import os, json, numpy as np, pandas as pd, traceback
-        from helpers.metrics import _reconstruct_full_mask, mask_iou, safe_read_json, compare_widths_for_cracks
+        import os, json, numpy as np, pandas as pd, traceback, cv2
+        from helpers.metrics import (
+            merged_metric_atomic,
+            manual_mask_from_crack,
+            mask_iou,
+            compare_widths_for_cracks,
+        )
 
         print(f"[DEBUG METRICS] ===== START for {getattr(self, 'name', '?')} =====")
 
         if getattr(self, "current_mask", None) is None:
-            print("[DEBUG METRICS] no GT mask loaded")
+            print("[DEBUG METRICS] ⚠ no GT mask loaded")
             return {}
 
+        # --- Prep output directories ---
         base_name   = self._image_base()
         metrics_dir = self._metrics_dir()
         os.makedirs(metrics_dir, exist_ok=True)
 
-        # cheap gate
+        # --- Verify authoring JSON ---
         ann_path = getattr(self, "ann_name", None)
-        if ann_path and os.path.exists(ann_path):
-            try:
-                with open(ann_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                has_manual = any(
-                    len(v.get("midline", [])) > 1 and not str(v.get("source","")).startswith("auto")
-                    for v in (data.get("annotations", {}) or {}).get("atomic_cracks", {}).values()
-                )
-                if not has_manual:
-                    print(f"[DEBUG METRICS] {base_name}: no manual midlines → skip")
-                    return {}
-            except Exception as e:
-                print(f"[DEBUG METRICS] could not read {ann_path}: {e}")
-                return {}
+        if not ann_path or not os.path.exists(ann_path):
+            print(f"[DEBUG METRICS] ⚠ no annotation found for {base_name}")
+            return {}
 
         try:
-            print("[DEBUG METRICS] syncing snapshot ...")
-            self._sync_metrics_snapshot_from_authoring(refresh_combine=True, persist=True)
+            with open(ann_path, "r", encoding="utf-8") as f:
+                ann_json = json.load(f)
+            authoring_atomic = (ann_json.get("annotations", {}) or {}).get("atomic_cracks", {}) or {}
         except Exception as e:
-            print(f"[DEBUG METRICS] snapshot sync failed: {e}")
-            traceback.print_exc()
+            print(f"[DEBUG METRICS] ❌ could not read {ann_path}: {e}")
+            return {}
 
-        atomic    = self._metric_atomic()
-        combined  = self._metric_combined()
-        auto_best = self._metric_auto_best()
-        H, W      = self.original_image.shape[:2]
+        # --- Merge in per-cid edge snapshots so geodesic_edges exist ---
+        atomic = merged_metric_atomic(authoring_atomic, self.save_folder, base_name)
+        print(f"[DEBUG METRICS] merged {len(atomic)} atomic cracks after edge snapshots merge")
 
-        # ---------- MASK IoU ----------
+        H, W = self.original_image.shape[:2]
+        gt = (self.current_mask > 0).astype(np.uint8)
+
+        # ===============================================================
+        # MASK IoU section (edge-based reconstruction)
+        # ===============================================================
         mask_rows = []
-        print(f"[DEBUG METRICS] computing mask IoU for {len(atomic)} atomic cracks ...")
-        for cid, crack in atomic.items():
-            try:
-                src = (crack.get("source") or "").lower()
-                if src.startswith("auto"):
-                    continue
-                m_manual = _reconstruct_full_mask(crack, H, W)
-                row = {"image": base_name, "crack_id": cid}
-                row["iou_manual_vs_gt"] = mask_iou(m_manual, self.current_mask)
+        print(f"[DEBUG METRICS] computing edge-based mask IoU for {len(atomic)} cracks...")
 
-                if cid in auto_best:
-                    mm = _reconstruct_full_mask(auto_best[cid], H, W)
-                    row["iou_auto_vs_gt"] = mask_iou(mm, self.current_mask)
+        for cid, crack in atomic.items():
+            src = (crack.get("source") or "").lower()
+            if src.startswith("auto") or src == "combined":
+                continue
+
+            try:
+                m_manual = manual_mask_from_crack(crack, H, W)
+                iou_val = mask_iou(m_manual, gt)
+                nnz_manual = int(np.count_nonzero(m_manual))
+                nnz_gt = int(np.count_nonzero(gt))
+
+                row = {
+                    "image": base_name,
+                    "crack_id": cid,
+                    "src": src,
+                    "nnz_manual": nnz_manual,
+                    "nnz_gt": nnz_gt,
+                    "iou_manual_vs_gt": iou_val,
+                }
                 mask_rows.append(row)
+
+                # --- Debug visualization for sanity ---
+                vis = np.zeros((H, W, 3), np.uint8)
+                vis[..., 2] = gt * 255        # GT in red
+                vis[..., 1] = m_manual * 255  # Manual/edges in green
+                out_dbg = os.path.join(metrics_dir, f"cid{cid}_iou_tile.png")
+                cv2.imwrite(out_dbg, vis)
+                print(f"[DEBUG MASK] cid={cid} IoU={iou_val:.4f} nnz(man)={nnz_manual} nnz(gt)={nnz_gt}")
             except Exception as e:
                 print(f"[DEBUG METRICS] IoU failed for cid={cid}: {e}")
                 traceback.print_exc()
-        if mask_rows:
-            pd.DataFrame(mask_rows).to_csv(os.path.join(metrics_dir, "mask_metrics.csv"), index=False)
 
-        # ---------- WIDTHS + NORMALS ----------
+        if mask_rows:
+            out_csv = os.path.join(metrics_dir, "mask_metrics.csv")
+            pd.DataFrame(mask_rows).to_csv(out_csv, index=False)
+            print(f"[DEBUG METRICS] wrote IoU metrics → {out_csv}")
+
+        # ===============================================================
+        # WIDTHS + NORMALS (unchanged logic)
+        # ===============================================================
         normals_dir = os.path.join(metrics_dir, "gt_normals")
+        os.makedirs(normals_dir, exist_ok=True)
         width_rows_manual = width_rows_auto = width_rows_combined = []
         normals_manual = None
 
         print("[DEBUG METRICS] running compare_widths_for_cracks (manual)...")
         try:
             ret = compare_widths_for_cracks(
-                {"atomic_cracks": atomic}, self.current_mask, base_name, metrics_dir,
+                {"atomic_cracks": atomic}, gt, base_name, metrics_dir,
                 display=display, tag="manual",
                 return_normals=True, normals_plot=True, normals_dir=normals_dir
             )
@@ -3009,8 +3206,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         print("[DEBUG METRICS] running compare_widths_for_cracks (auto)...")
         try:
+            auto_best = self._metric_auto_best()
             ret = compare_widths_for_cracks(
-                {"atomic_cracks": auto_best}, self.current_mask, base_name, metrics_dir,
+                {"atomic_cracks": auto_best}, gt, base_name, metrics_dir,
                 display=display, tag="auto",
                 return_normals=False, normals_plot=False
             )
@@ -3022,8 +3220,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         print("[DEBUG METRICS] running compare_widths_for_cracks (combined)...")
         try:
+            combined = self._metric_combined()
             ret = compare_widths_for_cracks(
-                {"atomic_cracks": combined}, self.current_mask, base_name, metrics_dir,
+                {"atomic_cracks": combined}, gt, base_name, metrics_dir,
                 display=display, tag="combined",
                 return_normals=False, normals_plot=False
             )
@@ -3033,7 +3232,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print(f"[DEBUG METRICS] combined compare_widths failed: {e}")
             traceback.print_exc()
 
-        # ---------- Supervision ----------
+        # ===============================================================
+        # Supervision (optional)
+        # ===============================================================
         if export_supervision:
             print("[DEBUG METRICS] exporting supervision (snapshot)...")
             try:
