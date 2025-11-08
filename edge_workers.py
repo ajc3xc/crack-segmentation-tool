@@ -353,16 +353,88 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         track_e1_global = np.column_stack([track_e1[:, 0] + x, track_e1[:, 1] + y])
         track_e2_global = np.column_stack([track_e2[:, 0] + x, track_e2[:, 1] + y])
 
-        # --- optional debug overlay ---
+
+        # --- unified visualization: 2 clean overlays ---
         DEBUG_SAVE = True
         if DEBUG_SAVE:
             dbg_dir = os.path.join(payload["save_folder"], "metrics", base_name, f"cid{crack_id}")
             os.makedirs(dbg_dir, exist_ok=True)
-            overlay = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR)
-            cv2.polylines(overlay, [track_e1.astype(np.int32)], False, (0, 0, 255), 1)
-            cv2.polylines(overlay, [track_e2.astype(np.int32)], False, (0, 255, 0), 1)
-            cv2.imwrite(os.path.join(dbg_dir, "auto_preview.png"), overlay)
-            cv2.imwrite(os.path.join(dbg_dir, "auto_mask.png"), (mask_crop * 255).astype(np.uint8))
+
+            # ========== (1) Geometry overlay ==========
+            vis_geom = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR)
+
+            # draw edges
+            cv2.polylines(vis_geom, [track_e1.astype(np.int32)], False, (0, 255, 0), 1, lineType=8)
+            cv2.polylines(vis_geom, [track_e2.astype(np.int32)], False, (0, 255, 0), 1, lineType=8)
+
+            # midline (white)
+            try:
+                n = min(len(track_e1), len(track_e2))
+                auto_midline = 0.5 * (track_e1[:n] + track_e2[:n])
+                cv2.polylines(vis_geom, [auto_midline.astype(np.int32)], False, (255, 255, 255), 1, lineType=8)
+            except Exception:
+                pass
+
+            # --- draw true computed normals from edge_tracking (sampled & filtered) ---
+            normals_full = res.get("normal_edge_points_full") or res.get("normal_edge_points")
+            if isinstance(normals_full, dict):
+                e1 = np.asarray(normals_full.get("edge1", []), float)
+                e2 = np.asarray(normals_full.get("edge2", []), float)
+
+                if e1.ndim == 2 and e2.ndim == 2 and len(e1) > 1 and len(e2) > 1:
+                    m = min(len(e1), len(e2))
+                    e1, e2 = e1[:m], e2[:m]
+                    print(f'm = {len(m)}')
+
+                    # subsample so you see only every ~Nth vector
+                    step = max(1, m // 50)
+                    # optional length sanity clamp
+                    lengths = np.linalg.norm(e1 - e2, axis=1)
+                    median_len = np.median(lengths[np.isfinite(lengths)])
+                    good = (lengths < 3 * median_len) & np.isfinite(lengths)
+
+                    for i in range(0, m, step):
+                        if not good[i]:
+                            continue
+                        p1 = tuple(np.round(e1[i]).astype(int))
+                        p2 = tuple(np.round(e2[i]).astype(int))
+                        cv2.line(vis_geom, p1, p2, (255, 255, 0), 1, lineType=cv2.LINE_AA)
+            else:
+                print("There are literally no normals man!")
+
+            import matplotlib.pyplot as plt
+
+            # --- render via matplotlib for high-quality anti-aliased output ---
+            out_geom = os.path.join(dbg_dir, "edges_midlines_normals.png")
+
+            plt.figure(figsize=(6, 6), dpi=600)
+            plt.imshow(cv2.cvtColor(vis_geom, cv2.COLOR_BGR2RGB))
+            plt.axis("off")
+            plt.tight_layout(pad=0)
+            plt.savefig(out_geom, dpi=600, bbox_inches="tight", pad_inches=0)
+            plt.close()
+
+            print(f"[DEBUG VIS] saved high-quality matplotlib render → {out_geom}")
+
+            # ========== (2) GT vs manual mask overlay ==========
+            gt_crop = payload.get("gt_crop", None)
+            vis_iou = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR)
+            pred_mask = (mask_crop > 0).astype(np.uint8)
+            if gt_crop is not None:
+                gt_bin = (np.asarray(gt_crop, dtype=np.uint8) > 0).astype(np.uint8)
+                intersect = np.logical_and(gt_bin, pred_mask)
+                pred_only = np.logical_and(pred_mask, np.logical_not(gt_bin))
+                gt_only   = np.logical_and(gt_bin, np.logical_not(pred_mask))
+
+                vis_iou[gt_only]   = (0, 0, 255)      # red GT only
+                vis_iou[pred_only] = (0, 255, 255)    # yellow pred only
+                vis_iou[intersect] = (255, 255, 255)  # white intersection
+
+            vis_iou_large = cv2.resize(vis_iou, None, fx=3, fy=3, interpolation=cv2.INTER_NEAREST)
+            out_iou = os.path.join(dbg_dir, "gt_vs_manual_mask.png")
+            cv2.imwrite(out_iou, vis_iou_large)
+
+            print(f"[DEBUG VIS] wrote → {out_geom} and {out_iou}")
 
         # --- midline comparison metrics (crop-local) ---
         try:

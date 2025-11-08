@@ -13,7 +13,7 @@ from agd import AutomaticDifferentiation as ad
 norm_infinity = ad.Optimization.norm_infinity
 import scipy.ndimage
     
-def edge_masks(image_gray, track, window_half_size=40):
+'''def edge_masks(image_gray, track, window_half_size=40):
     import numpy as np
     import scipy.ndimage
 
@@ -94,6 +94,86 @@ def edge_masks(image_gray, track, window_half_size=40):
 
     edge_mask1 = edge_mask - np.min(edge_mask)
     edge_mask2 = -edge_mask1 - np.min(-edge_mask1)
+    return edge_mask1, edge_mask2'''
+    
+def edge_masks(image_gray, track, window_half_size=40):
+    """
+    Faithful GPU version of original V1:
+    - Same local rotation-aligned Gaussian+Sobel pipeline
+    - Optional CuPy acceleration per patch (identical geometry)
+    """
+    import numpy as np, scipy.ndimage as ndi
+    try:
+        import cupy as cp, cupyx.scipy.ndimage as cndi
+        use_gpu = True
+    except Exception:
+        cp = np; cndi = ndi; use_gpu = False
+
+    img_h, img_w = image_gray.shape
+    edge_mask = np.zeros_like(image_gray, dtype=float)
+    center_line_length = 3
+    n_skipped = 0
+
+    for i in range(track.shape[1] - 1):
+        y0 = float(track[0, i])
+        x0 = float(track[1, i])
+        if i < track.shape[1] - center_line_length:
+            y1 = float(track[0, i + center_line_length])
+            x1 = float(track[1, i + center_line_length])
+            flip = False
+        else:
+            y1 = float(track[0, i - center_line_length])
+            x1 = float(track[1, i - center_line_length])
+            flip = True
+
+        if y0 == y1 and x0 == x1:
+            n_skipped += 1
+            continue
+
+        try:
+            from cracktools.tracking import tang_len
+            ddx, ddy, _ = tang_len(x0, y0, x1, y1)
+        except Exception:
+            ddy = y1 - y0
+            ddx = x1 - x0
+        if flip:
+            ddx, ddy = -ddx, -ddy
+
+        angle = np.degrees(np.arctan2(ddx, ddy))
+        half_r = int(min(window_half_size, y0, img_h - y0 - 1))
+        half_c = int(min(window_half_size, x0, img_w - x0 - 1))
+        r1, r2 = int(round(y0 - half_r)), int(round(y0 + half_r))
+        c1, c2 = int(round(x0 - half_c)), int(round(x0 + half_c))
+        if r1 < 0 or r2 > img_h or c1 < 0 or c2 > img_w:
+            continue
+        window = image_gray[r1:r2, c1:c2]
+        if window.shape[0] < 3 or window.shape[1] < 3:
+            continue
+
+        try:
+            patch = window.astype(float) / 255.0
+            if use_gpu:
+                patch = cp.asarray(patch)
+                grad_y = cndi.gaussian_filter(patch, sigma=1, order=(1, 0), mode='reflect')
+                grad_x = cndi.gaussian_filter(patch, sigma=1, order=(0, 1), mode='reflect')
+                grad_y, grad_x = cp.asnumpy(grad_y), cp.asnumpy(grad_x)
+            else:
+                grad_y = ndi.gaussian_filter(patch, sigma=1, order=(1, 0), mode='reflect')
+                grad_x = ndi.gaussian_filter(patch, sigma=1, order=(0, 1), mode='reflect')
+
+            projected = grad_x * (-ddy) + grad_y * ddx
+            m = max(1, int(min(half_r, half_c) / 5))
+            projected[:m,:] = projected[-m:,:] = 0
+            projected[:,:m] = projected[:,-m:] = 0
+            edge_mask[r1:r2, c1:c2] += projected
+        except Exception as e:
+            print(f"Failed at i={i}: {e}")
+            continue
+
+    print(f"[edge_mask] skipped {n_skipped} zero-length segments")
+    edge_mask1 = edge_mask - np.min(edge_mask)
+    edge_mask2 = -edge_mask1 - np.min(-edge_mask1)
+    print(f"[edge_mask] done (GPU per-patch={'yes' if use_gpu else 'no'})")
     return edge_mask1, edge_mask2
 
 import numpy as np
@@ -270,7 +350,7 @@ from agd.Metrics import Riemann
 from shapely.ops import nearest_points
 from shapely.geometry import LineString, Point, MultiPoint
 
-def _run_geodesic(metric_array, seeds, tips, sides, dims, strict=True):
+'''def _run_geodesic(metric_array, seeds, tips, sides, dims, strict=True):
     """Run geodesic; retry with softened metric if path deviates."""
     metric = Riemann(metric_array)
     hfmIn = Eikonal.dictIn({
@@ -291,80 +371,84 @@ def _run_geodesic(metric_array, seeds, tips, sides, dims, strict=True):
             print(f"[WARN] Geodesic missed tip by {d_tip:.1f}px → retry with softened metric")
             softened = np.power(metric_array, 0.5)  # flatten penalties
             return _run_geodesic(softened, seeds, tips, sides, dims, strict=False)
-    return track
-
-'''def edges_tracking(
-    image_crop, pts_cropp,
-    edge_mask1_cropp, edge_mask2_cropp,
-    midline=None, mu=5, l=2, p=6,
-    return_normal_edges=True
-):
-    """
-    Robust edge tracking: uses normalized masks, safer parameters,
-    and geodesic retry if path deviates.
-    """
-    seeds = np.array([*pts_cropp[0][::-1]])  # (y,x)
-    tips  = np.array([*pts_cropp[1][::-1]])  # (y,x)
-    b = np.array([0, image_crop.shape[0]])
-    c = np.array([0, image_crop.shape[1]])
-    sides = np.array([b, c])
-    dims = np.array([image_crop.shape[0], image_crop.shape[1]])
-
-    DxZ, DyZ = np.gradient(image_crop)
-    a11 = scipy.ndimage.gaussian_filter(mu * DxZ**2, 1)
-    a12 = scipy.ndimage.gaussian_filter(mu * DxZ * DyZ, 1)
-    a21 = scipy.ndimage.gaussian_filter(mu * DxZ * DyZ, 1)
-    a22 = scipy.ndimage.gaussian_filter(mu * DyZ**2, 1)
-    df = np.array([[1 + a11, a12], [a21, 1 + a22]])
-
-    # --- normalize edge masks
-    def norm_mask(m):
-        m = m.astype(float)
-        m = m - m.min()
-        return m / (m.max() + 1e-9)
-
-    em1 = norm_mask(edge_mask1_cropp.squeeze())
-    em2 = norm_mask(edge_mask2_cropp.squeeze())
-
-    metric1 = (1 + em1 * l) ** p * df
-    metric2 = (1 + em2 * l) ** p * df
-
-    # --- geodesics
-    track_e1 = _run_geodesic(metric1, seeds, tips, sides, dims)
-    track_e2 = _run_geodesic(metric2, seeds, tips, sides, dims)
-
-    # convert to (x,y)
-    track_e1 = np.stack([track_e1[:,1], track_e1[:,0]], axis=1)
-    track_e2 = np.stack([track_e2[:,1], track_e2[:,0]], axis=1)
-
-    normal_edges = None
-    normal_edges_clipped = None
-
-    if return_normal_edges and midline is not None:
-        from .segmentation import find_normal_pair  # import your existing function
-        m = np.asarray(midline)
-        if m.ndim == 2 and m.shape[1] == 2:
-            mid_x, mid_y = m[:,0], m[:,1]
-        elif m.ndim == 2 and m.shape[0] == 2:
-            mid_x, mid_y = m[0], m[1]
-        else:
-            raise ValueError("midline must be (N,2) or (2,N)")
-
-        e1x, e1y, e2x, e2y = find_normal_pair(mid_x, mid_y, track_e1, track_e2)
-        normal_edges = [[e1x.copy(), e1y.copy()], [e2x.copy(), e2y.copy()]]
-        e1x_clip = np.clip(e1x, 0, image_crop.shape[1]-1)
-        e1y_clip = np.clip(e1y, 0, image_crop.shape[0]-1)
-        e2x_clip = np.clip(e2x, 0, image_crop.shape[1]-1)
-        e2y_clip = np.clip(e2y, 0, image_crop.shape[0]-1)
-        normal_edges_clipped = [[e1x_clip, e1y_clip], [e2x_clip, e2y_clip]]
-
-    return {
-        "geodesic_edges": [track_e1, track_e2],
-        "normal_edge_points": normal_edges,
-        "normal_edge_points_clipped": normal_edges_clipped,
-    }'''
+    return track'''
     
-def edges_tracking(
+# --- add near the top of segmentation.py (after numpy imports) ---
+try:
+    import cupy as cp
+    _CUPY = True
+except Exception:
+    cp = None
+    _CUPY = False
+
+
+def _to_xp(a, xp, dtype=None, order='C'):
+    """Send array to NumPy/CuPy with dtype/order; no copy if already correct."""
+    if xp is np:
+        return np.asarray(a, dtype=dtype or getattr(a, 'dtype', np.float64), order=order)
+    return xp.asarray(a, dtype=dtype or getattr(a, 'dtype', xp.float64), order=order)
+
+
+def _run_geodesic(metric_array, seeds, tips, sides, dims, strict=True, prefer_gpu=True):
+    """
+    Run a Riemann2 geodesic; if prefer_gpu and CuPy available, do it on GPU and
+    return NumPy (y,x) track. Soft-retry with flattened metric if tip miss > tol.
+    """
+    use_gpu = bool(prefer_gpu and _CUPY)
+    xp = cp if use_gpu else np
+
+    # Keep FP64 to preserve results 1:1 with CPU
+    metric_xp = _to_xp(metric_array, xp, dtype=(xp.float64 if use_gpu else np.float64))
+
+    # seeds/tips/sides/dims can stay on CPU (binding handles mixed host/device)
+    hfm_args = {
+        'model'        : 'Riemann2',
+        'seeds'        : np.expand_dims(seeds, axis=0),
+        'arrayOrdering': 'RowMajor',
+        'tips'         : np.expand_dims(tips, axis=0),
+        'metric'       : Riemann(metric_xp),
+        'verbosity'    : 0,
+    }
+    if use_gpu:
+        hfm_args['mode'] = 'gpu'
+
+    hfmIn = Eikonal.dictIn(hfm_args)
+    hfmIn.SetRect(sides=sides, dims=dims)
+
+    try:
+        hfmOut = hfmIn.Run()
+    except Exception as e:
+        # Hard fallback to CPU if GPU build is missing / OOM / etc.
+        if use_gpu:
+            try:
+                cp.get_default_memory_pool().free_all_blocks()
+                cp.get_default_pinned_memory_pool().free_all_blocks()
+            except Exception:
+                pass
+        hfmIn = Eikonal.dictIn({
+            'model'        : 'Riemann2',
+            'seeds'        : np.expand_dims(seeds, axis=0),
+            'arrayOrdering': 'RowMajor',
+            'tips'         : np.expand_dims(tips, axis=0),
+            'metric'       : Riemann(np.asarray(metric_array, dtype=np.float64)),
+            'verbosity'    : 0,
+        })
+        hfmIn.SetRect(sides=sides, dims=dims)
+        hfmOut = hfmIn.Run()
+
+    track_yx = [g.T for g in hfmOut['geodesics']][0]  # (N,2), (y,x)
+    # Ensure NumPy for downstream code
+    if _CUPY and isinstance(track_yx, cp.ndarray):
+        track_yx = cp.asnumpy(track_yx)
+
+    if strict:
+        d_tip = np.linalg.norm(track_yx[-1] - tips[::-1])  # compare (y,x)
+        if d_tip > 10:  # px tolerance
+            softened = np.power(np.asarray(metric_array, dtype=np.float64), 0.5)
+            return _run_geodesic(softened, seeds, tips, sides, dims, strict=False, prefer_gpu=prefer_gpu)
+    return track_yx
+    
+'''def edges_tracking(
     image_crop, pts_cropp,
     edge_mask1_cropp, edge_mask2_cropp,
     midline=None, mu=5, l=2, p=6,
@@ -452,7 +536,96 @@ def edges_tracking(
         "geodesic_edges": [track_e1, track_e2],
         "normal_edge_points": normal_edges,
         "normal_edge_points_clipped": normal_edges_clipped,
+    }'''
+    
+def edges_tracking(
+    image_crop, pts_cropp,
+    edge_mask1_cropp, edge_mask2_cropp,
+    midline=None, mu=5, l=2, p=6,
+    return_normal_edges=True,
+    prefer_gpu=True
+):
+    """
+    Robust edge tracking with optional GPU geodesics.
+    - Keeps original signature/return shape.
+    - Assumes edge masks are already 'good'; we only build a simple Riemann2 metric
+      and solve two geodesics (one per edge mask).
+    """
+    # seeds/tips provided in (x,y) — convert to (y,x) for the solver
+    seeds_yx = np.array([pts_cropp[0][1], pts_cropp[0][0]], dtype=float)
+    tips_yx  = np.array([pts_cropp[1][1], pts_cropp[1][0]], dtype=float)
+
+    H, W = image_crop.shape[:2]
+    sides = np.array([[0, H], [0, W]])
+    dims  = np.array([H, W])
+
+    # lightweight structure tensor from intensity gradient (stays on CPU)
+    Dx, Dy = np.gradient(image_crop.astype(np.float64))
+    a11 = scipy.ndimage.gaussian_filter(mu * Dx*Dx, 1)
+    a22 = scipy.ndimage.gaussian_filter(mu * Dy*Dy, 1)
+    a12 = scipy.ndimage.gaussian_filter(mu * Dx*Dy, 1)
+    a21 = a12
+    a12 = a21 = 0.5 * (a12 + a21)
+
+    # positive-definite 2x2 (per-pixel)
+    df = np.abs(np.array([[1.0 + a11, a12],
+                          [a21, 1.0 + a22]], dtype=object))  # (2,2,H,W)
+
+    def _norm01(m):
+        m = m.astype(np.float64, copy=False)
+        m -= m.min()
+        mx = m.max()
+        return (m / (mx + 1e-12)) if mx > 0 else m
+
+    e1 = _norm01(np.squeeze(edge_mask1_cropp))
+    e2 = _norm01(np.squeeze(edge_mask2_cropp))
+
+    # stabilize exponent; p>4 gives exploding ranges without benefit
+    pp = min(int(p), 4)
+    metric1 = (1.0 + e1 * l)**pp * df
+    metric2 = (1.0 + e2 * l)**pp * df
+
+    # --- run two geodesics (GPU if available) ---
+    track1_yx = _run_geodesic(metric1, seeds_yx, tips_yx, sides, dims, prefer_gpu=prefer_gpu)
+    track2_yx = _run_geodesic(metric2, seeds_yx, tips_yx, sides, dims, prefer_gpu=prefer_gpu)
+
+    # convert back to (x,y)
+    track_e1 = np.stack([track1_yx[:, 1], track1_yx[:, 0]], axis=1)
+    track_e2 = np.stack([track2_yx[:, 1], track2_yx[:, 0]], axis=1)
+
+    normal_edges = None
+    normal_edges_clipped = None
+
+    if return_normal_edges and (midline is not None):
+        # Reuse your existing normal pairing routine
+        try:
+            from .segmentation import find_normal_pair  # keep your path
+        except Exception:
+            # fallback import if your project structure differs
+            from segmentation import find_normal_pair
+
+        m = np.asarray(midline)
+        if m.ndim == 2 and m.shape[1] == 2:
+            mid_x, mid_y = m[:, 0], m[:, 1]
+        elif m.ndim == 2 and m.shape[0] == 2:
+            mid_x, mid_y = m[0], m[1]
+        else:
+            raise ValueError("midline must be (N,2) or (2,N)")
+
+        e1x, e1y, e2x, e2y = find_normal_pair(mid_x, mid_y, track_e1, track_e2)
+        normal_edges = [[e1x.copy(), e1y.copy()], [e2x.copy(), e2y.copy()]]
+
+        # clip to crop bounds for safety
+        e1x_c = np.clip(e1x, 0, W - 1); e1y_c = np.clip(e1y, 0, H - 1)
+        e2x_c = np.clip(e2x, 0, W - 1); e2y_c = np.clip(e2y, 0, H - 1)
+        normal_edges_clipped = [[e1x_c, e1y_c], [e2x_c, e2y_c]]
+
+    return {
+        "geodesic_edges": [track_e1, track_e2],                 # two polylines (crop coords)
+        "normal_edge_points": normal_edges,                      # [[e1x,e1y],[e2x,e2y]] (crop)
+        "normal_edge_points_clipped": normal_edges_clipped,      # same but clipped to crop
     }
+    
 
 import numpy as np
 import cv2

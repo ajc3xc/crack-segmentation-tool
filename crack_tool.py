@@ -396,8 +396,14 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
                         # Geodesic edges & masks for this pair
                         self.current_source = src
+                        start_time = time()
                         self.edge_mask()
+                        edgemask_time = time()
+                        print()
+                        print(f"[TIME] Edge mask time: {edgemask_time - start_time}")
                         self.edge_tracking()
+                        print()
+                        print(f"[TIME] Edge tracking time: {time() - edgemask_time}")
 
                         # Pair-local globals so save_current_segment writes them into that crack
                         self.user_points = pair_user_points
@@ -414,7 +420,10 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                         #return
 
                         # Save segment (midline + edges + mask + per-crack endpoints)
+                        savetime = time()
                         self.save_current_segment()
+                        print()
+                        print(f"[TIME] Save current segment time: {time() - savetime}")
 
                         # Clear pair-local globals so next crack doesn't inherit them
                         self.user_points = None
@@ -2743,6 +2752,14 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         if edge_params is None:
             edge_params = {"window_half_size":45, "mu":0.0, "l":5, "p":14}
 
+                # --- build GT crop (if a GT mask is loaded) ---
+        gt_crop = None
+        if getattr(self, "current_mask", None) is not None:
+            gt_crop = ((self.current_mask[y:y+h, x:x+w]) > 0).astype(np.uint8)
+
+        if edge_params is None:
+            edge_params = {"window_half_size":45, "mu":0.0, "l":5, "p":14}
+
         payload = dict(
             image_crop_gray=gray,
             pts_crop=self.pts_crop,
@@ -2755,6 +2772,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             save_folder=self.save_folder,
             image_base=base,
             crack_id=str(crack_id),
+            # NEW: pass GT crop so the worker can colorize intersection/pred-only/gt-only
+            gt_crop=gt_crop,
         )
 
         ew = edge_param_worker(payload)
@@ -2865,22 +2884,55 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         except Exception as e:
             print(f"[smoke] overlay(mask-paste) failed: {e}")
 
-        # optional GT preview
-        try:
-            from helpers.metrics import metric_image_dir, debug_plot_gt_preview
-            H, W = self.original_image.shape[:2]
-            mask_bin = (self.current_mask > 0).astype(np.uint8) if getattr(self, "current_mask", None) is not None else None
-            ge = cr.get("geodesic_edges", {})
-            e1 = np.asarray(ge.get("edge1", []), float)
-            e2 = np.asarray(ge.get("edge2", []), float)
-            out_png = os.path.join(metric_image_dir(self.save_folder, base), f"cid{crack_id}", "smoke_gt_preview.png")
-            if mask_bin is None:
-                debug_plot_gt_preview(np.zeros((H, W), np.uint8), man_xy_g, e1, e2, out_png, title=f"Edges cid{crack_id}")
-            else:
-                debug_plot_gt_preview(mask_bin, man_xy_g, e1, e2, out_png, title=f"GT/edges — cid{crack_id}")
-            print(f"[smoke] wrote preview → {out_png}")
-        except Exception as e:
-            print(f"[smoke] preview failed: {e}")
+            # ---------- Better GT/edges preview (zoomed crop + global) ----------
+            try:
+                from helpers.metrics import metric_image_dir
+                import matplotlib.pyplot as plt
+                H, W = self.original_image.shape[:2]
+                mask_bin = (self.current_mask > 0).astype(np.uint8) if getattr(self, "current_mask", None) is not None else np.zeros((H, W), np.uint8)
+                ge = cr.get("geodesic_edges", {})
+                e1 = np.asarray(ge.get("edge1", []), float)
+                e2 = np.asarray(ge.get("edge2", []), float)
+
+                out_dir = os.path.join(metric_image_dir(self.save_folder, base), f"cid{crack_id}")
+                os.makedirs(out_dir, exist_ok=True)
+
+                def _plot(mask, title, fname, crop=None):
+                    fig, ax = plt.subplots(figsize=(8, 8), dpi=300)
+                    ax.imshow(mask, cmap="gray", origin="upper")
+                    if e1.ndim == 2 and len(e1) >= 2:
+                        ax.plot(e1[:,0], e1[:,1], "g-", lw=0.8, alpha=0.9, label="edge1")
+                    if e2.ndim == 2 and len(e2) >= 2:
+                        ax.plot(e2[:,0], e2[:,1], "g-", lw=0.8, alpha=0.9)
+                    ax.plot(man_xy_g[:,0], man_xy_g[:,1], "w-", lw=0.9, alpha=0.9, label="midline")
+                    if crop is not None:
+                        x0, y0, x1, y1 = crop
+                        ax.set_xlim(max(0, x0), min(W, x1))
+                        ax.set_ylim(min(H, y1), max(0, y0))
+                    ax.set_title(title, fontsize=11)
+                    ax.axis("equal"); plt.tight_layout()
+                    plt.savefig(os.path.join(out_dir, fname), dpi=300)
+                    plt.close()
+
+                # GLOBAL
+                _plot(mask_bin, f"GT/edges — cid{crack_id} (global)", "smoke_gt_preview_global.png", crop=None)
+
+                # ZOOM around true bbox with generous margin
+                margin = max(20, int(0.2 * max(xmax - xmin, ymax - ymin)))
+                x0 = max(0, xmin - margin)
+                y0 = max(0, ymin - margin)
+                x1 = min(W, xmax + margin)
+                y1 = min(H, ymax + margin)
+                _plot(
+                    mask_bin,
+                    f"GT/edges — cid{crack_id} (zoom)",
+                    "smoke_gt_preview_zoom.png",
+                    crop=(x0, y0, x1, y1)
+                )
+
+                print(f"[smoke] wrote previews → {out_dir}")
+            except Exception as e:
+                print(f"[smoke] preview failed: {e}")
 
         print(f"[smoke] ✅ edges ok for cid{crack_id}")
         return True
@@ -3137,10 +3189,10 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         gt = (self.current_mask > 0).astype(np.uint8)
 
         # ===============================================================
-        # MASK IoU section (edge-based reconstruction)
+        # MASK IoU section (edge-based reconstruction, local + global)
         # ===============================================================
         mask_rows = []
-        print(f"[DEBUG METRICS] computing edge-based mask IoU for {len(atomic)} cracks...")
+        print(f"[DEBUG METRICS] computing edge-based mask IoU (local + global) for {len(atomic)} cracks...")
 
         for cid, crack in atomic.items():
             src = (crack.get("source") or "").lower()
@@ -3148,28 +3200,77 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 continue
 
             try:
-                m_manual = manual_mask_from_crack(crack, H, W)
-                iou_val = mask_iou(m_manual, gt)
-                nnz_manual = int(np.count_nonzero(m_manual))
+                # --- reconstruct full (global) manual mask ---
+                m_manual_full = manual_mask_from_crack(crack, H, W)
+                nnz_manual = int(np.count_nonzero(m_manual_full))
                 nnz_gt = int(np.count_nonzero(gt))
+                iou_global = mask_iou(m_manual_full, gt)
 
+                # --- local (bbox-cropped) IoU ---
+                bbox = crack.get("bbox") or crack.get("mask_bbox") or [0, 0, W, H]
+                xmin, ymin, w, h = map(int, bbox)
+                xmax, ymax = xmin + w, ymin + h
+
+                # clamp in-bounds
+                xmin = max(0, xmin); ymin = max(0, ymin)
+                xmax = min(W, xmax); ymax = min(H, ymax)
+
+                gt_crop = gt[ymin:ymax, xmin:xmax]
+                man_crop = m_manual_full[ymin:ymax, xmin:xmax]
+                iou_local = mask_iou(man_crop, gt_crop)
+
+                # --- record metrics row ---
                 row = {
                     "image": base_name,
                     "crack_id": cid,
                     "src": src,
                     "nnz_manual": nnz_manual,
                     "nnz_gt": nnz_gt,
-                    "iou_manual_vs_gt": iou_val,
+                    "iou_manual_vs_gt_local": iou_local,
+                    "iou_manual_vs_gt_global": iou_global,
+                    "bbox_x": xmin,
+                    "bbox_y": ymin,
+                    "bbox_w": w,
+                    "bbox_h": h,
                 }
                 mask_rows.append(row)
 
-                # --- Debug visualization for sanity ---
-                vis = np.zeros((H, W, 3), np.uint8)
-                vis[..., 2] = gt * 255        # GT in red
-                vis[..., 1] = m_manual * 255  # Manual/edges in green
-                out_dbg = os.path.join(metrics_dir, f"cid{cid}_iou_tile.png")
-                cv2.imwrite(out_dbg, vis)
-                print(f"[DEBUG MASK] cid={cid} IoU={iou_val:.4f} nnz(man)={nnz_manual} nnz(gt)={nnz_gt}")
+                # ===========================================================
+                # Unified Overlay Visualization
+                # ===========================================================
+                overlay = np.zeros((H, W, 3), np.uint8)
+
+                # regions
+                intersect = np.logical_and(gt > 0, m_manual_full > 0)
+                pred_only = np.logical_and(m_manual_full > 0, gt == 0)
+                gt_only   = np.logical_and(gt > 0, m_manual_full == 0)
+
+                # color encode
+                overlay[gt_only]   = (0, 0, 255)      # red (GT only)
+                overlay[pred_only] = (0, 255, 255)    # yellow (Pred only)
+                overlay[intersect] = (255, 255, 255)  # white (intersection)
+
+                # draw bbox in blue
+                cv2.rectangle(overlay, (xmin, ymin), (xmax, ymax), (255, 0, 0), 1)
+
+                out_overlay = os.path.join(metrics_dir, f"cid{cid}_overlay.png")
+                cv2.imwrite(out_overlay, overlay)
+
+                # --- optional blended overlay on original image ---
+                try:
+                    base_vis = self.original_image.copy()
+                    if base_vis.ndim == 2:
+                        base_vis = cv2.cvtColor(base_vis, cv2.COLOR_GRAY2BGR)
+                    blend = cv2.addWeighted(base_vis, 0.6, overlay, 0.7, 0)
+                    out_blend = os.path.join(metrics_dir, f"cid{cid}_overlay_blend.png")
+                    cv2.imwrite(out_blend, blend)
+                except Exception as e_blend:
+                    print(f"[DEBUG VIS] blend overlay failed for cid={cid}: {e_blend}")
+
+                print(f"[DEBUG MASK] cid={cid} IoU(local)={iou_local:.4f} IoU(global)={iou_global:.4f} "
+                    f"bbox=({xmin},{ymin},{w},{h}) nnz(man)={nnz_manual} nnz(gt)={nnz_gt}")
+                print(f"[DEBUG VIS] wrote unified overlay → {out_overlay}")
+
             except Exception as e:
                 print(f"[DEBUG METRICS] IoU failed for cid={cid}: {e}")
                 traceback.print_exc()

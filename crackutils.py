@@ -591,13 +591,16 @@ class CrackUtils:
             if not selected_indices:
                 self.change_image()
                 return
+
             for idx in sorted(selected_indices, reverse=True):
                 del box_dict[keys[idx]]
             self.annotation['annotations']['box'] = box_dict
-            # Save file and reload
-            with open(self.ann_name, 'w') as fp:
-                json.dump(self.annotation, fp)
-            print(f"Deleted {len(selected_indices)} bounding box(es).")
+
+            try:
+                self.save_annotation()
+                print(f"Deleted {len(selected_indices)} bounding box(es).")
+            except Exception as e:
+                error(f"[clear_boxes] Failed to save annotation: {e}")
             self.change_image()
         else:
             self.change_image()
