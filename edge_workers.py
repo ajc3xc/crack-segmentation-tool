@@ -311,6 +311,22 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             return_normal_edges=True,
         )
 
+        if not isinstance(res, dict):
+            print(f"[edge_worker] ⚠️ edges_tracking returned {type(res)} — expected dict.")
+            return {"status": "fail_invalid_return", **P}
+
+        print(f"[edge_worker] keys(res) = {list(res.keys())}")
+        for k, v in res.items():
+            if hasattr(v, "__len__"):
+                try:
+                    print(f"  {k}: len={len(v)}")
+                except Exception:
+                    print(f"  {k}: type={type(v)} (no len)")
+
+        if not res.get("geodesic_edges"):
+            print(f"[edge_worker] ❌ No geodesic_edges in result — res keys = {list(res.keys())}")
+            return {"status": "fail_no_edges", **P}
+
         track_e1, track_e2 = res.get("geodesic_edges", (None, None))
         if track_e1 is None or track_e2 is None:
             print(f"[edge_worker] ❌ no geodesic edges returned for {P}")
@@ -376,31 +392,65 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 pass
 
             # --- draw true computed normals from edge_tracking (sampled & filtered) ---
-            normals_full = res.get("normal_edge_points_full") or res.get("normal_edge_points")
-            if isinstance(normals_full, dict):
-                e1 = np.asarray(normals_full.get("edge1", []), float)
-                e2 = np.asarray(normals_full.get("edge2", []), float)
+            normals_full = (
+                res.get("normal_edge_points_full")
+                or res.get("normal_edge_points_clipped")
+                or res.get("normal_edge_points")
+            )
+
+            if normals_full is not None:
+                # handle dict or tuple/list uniformly
+                if isinstance(normals_full, dict):
+                    e1 = np.asarray(normals_full.get("edge1", []), float)
+                    e2 = np.asarray(normals_full.get("edge2", []), float)
+                elif isinstance(normals_full, (list, tuple)) and len(normals_full) == 2:
+                    e1, e2 = map(lambda v: np.asarray(v, float), normals_full)
+                else:
+                    e1 = e2 = np.zeros((0, 2))
+
+                # --- normalize shapes ---
+                def _to_nx2(arr):
+                    a = np.asarray(arr, float)
+                    if a.ndim == 1:
+                        return a.reshape(-1, 1) if a.size == 2 else np.zeros((0, 2))
+                    if a.ndim == 2:
+                        if a.shape[0] == 2 and a.shape[1] != 2:
+                            a = a.T
+                        if a.shape[1] != 2:
+                            a = a.reshape(-1, 2)
+                    else:
+                        a = a.reshape(-1, 2)
+                    return a
+
+                e1 = _to_nx2(e1)
+                e2 = _to_nx2(e2)
 
                 if e1.ndim == 2 and e2.ndim == 2 and len(e1) > 1 and len(e2) > 1:
                     m = min(len(e1), len(e2))
                     e1, e2 = e1[:m], e2[:m]
-                    print(f'm = {len(m)}')
+                    print(f"[edge_worker] normals m={m}")
 
                     # subsample so you see only every ~Nth vector
                     step = max(1, m // 50)
+
                     # optional length sanity clamp
                     lengths = np.linalg.norm(e1 - e2, axis=1)
-                    median_len = np.median(lengths[np.isfinite(lengths)])
+                    median_len = np.median(lengths[np.isfinite(lengths)]) if np.isfinite(lengths).any() else 0
                     good = (lengths < 3 * median_len) & np.isfinite(lengths)
 
                     for i in range(0, m, step):
                         if not good[i]:
                             continue
-                        p1 = tuple(np.round(e1[i]).astype(int))
-                        p2 = tuple(np.round(e2[i]).astype(int))
-                        cv2.line(vis_geom, p1, p2, (255, 255, 0), 1, lineType=cv2.LINE_AA)
+                        p1 = tuple(np.round(e1[i]).astype(int).tolist())
+                        p2 = tuple(np.round(e2[i]).astype(int).tolist())
+                        if len(p1) == 2 and len(p2) == 2:
+                            cv2.line(vis_geom, p1, p2, (255, 255, 0), 1, lineType=cv2.LINE_AA)
+                        else:
+                            print(f"[edge_worker] ⚠️ bad pt shape: p1={p1}, p2={p2}")
+                else:
+                    print(f"[edge_worker] ⚠️ Normals arrays empty: e1={e1.shape}, e2={e2.shape}")
             else:
-                print("There are literally no normals man!")
+                print(f"[edge_worker] ⚠️ Literally no normals man! in res.keys()={list(res.keys())}")
 
             import matplotlib.pyplot as plt
 

@@ -1624,11 +1624,16 @@ def safe_read_json(path, default=None):
     except Exception:
         return default
 
+# in helpers/metrics.py
+from helpers.metrics import _to_py   # if not already in the same file
+
 def safe_write_json(path, data):
+    """Drop-in replacement that auto-converts NumPy arrays."""
+    import json, os
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(_to_py(data), f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
 # --- snapshot assembly / persistence ------------------------------------------
@@ -1683,6 +1688,7 @@ def split_snapshot_to_files(snapshot, save_folder, image_base, merge_if_exists=T
                 if k in old and k not in cr:
                     cr[k] = old[k]
         safe_write_json(p, cr)
+        #safe_json_dump(cnew, cpath)
 
     # combined
     cpath = metric_combined_path(save_folder, image_base)
@@ -1693,6 +1699,7 @@ def split_snapshot_to_files(snapshot, save_folder, image_base, merge_if_exists=T
         if k in cnew and isinstance(v, dict) and "auto" in v and "auto" not in cnew[k]:
             cnew[k]["auto"] = v["auto"]
     safe_write_json(cpath, cnew)
+    #safe_json_dump(cnew, cpath)
 
 '''def load_snapshot_from_files(save_folder, image_base):
     """Reassemble an in-memory snapshot dict by reading per-crack JSON + combined.json files."""

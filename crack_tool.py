@@ -3697,7 +3697,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                             print(f"[DEBUG edges] recovered edges from auto_best.{keyname} (len={len(e1)})")
                             cr["geodesic_edges"] = {"edge1": e1, "edge2": e2}
                             set_geodesic_edges_for_crack(self.save_folder, base, crack_id, cr["geodesic_edges"])
-                            safe_write_json(p, cr)
+                            #safe_write_json(p, cr)
+                            safe_json_dump(cr, p)
                             has_e1 = has_e2 = True
                             break
 
