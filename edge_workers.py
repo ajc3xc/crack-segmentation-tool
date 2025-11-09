@@ -244,13 +244,27 @@ def plot_widths_colormap_on_crop(gt_vs_manual_rgb, e1, e2, track_e1=None, track_
     if track_e1 is not None and len(track_e1) > 1:
         ax.plot(track_e1[:, 0], track_e1[:, 1], '-', lw=1.4, color='lime', alpha=0.9, label='Edge 1')
     if track_e2 is not None and len(track_e2) > 1:
-        ax.plot(track_e2[:, 0], track_e2[:, 1], '-', lw=1.4, color='red', alpha=0.9, label='Edge 2')
+        ax.plot(track_e2[:, 0], track_e2[:, 1], '-', lw=1.4, color='magenta', alpha=0.9, label='Edge 2')
 
     # --- colorbar
     sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cb = plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.02)
     cb.set_label('Estimated width (px)', fontsize=9)
+    
+        # --- legend for edges + overlay context ---
+    handles = []
+    if track_e1 is not None and len(track_e1) > 1:
+        handles.append(mpl.lines.Line2D([], [], color='magenta', lw=1.8, label='Edge 1 (Left)'))
+    if track_e2 is not None and len(track_e2) > 1:
+        handles.append(mpl.lines.Line2D([], [], color='lime', lw=1.8, label='Edge 2 (Right)'))
+    handles.append(mpl.lines.Line2D([], [], color='white', lw=2.4, label='Midline (width map)'))
+    handles.append(mpl.patches.Patch(facecolor='white', edgecolor='gray', label='Overlap (IoU)'))
+    handles.append(mpl.patches.Patch(facecolor='yellow', edgecolor='gray', label='Manual only'))
+    handles.append(mpl.patches.Patch(facecolor='red', edgecolor='gray', label='GT only'))
+
+    ax.legend(handles=handles, loc='lower right', fontsize=6, frameon=True,
+              framealpha=0.8, handlelength=2.5, handletextpad=0.6)
 
     ax.set_xlim(0, W)
     ax.set_ylim(H, 0)
@@ -346,17 +360,25 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             pred_only = np.logical_and(pred_mask, np.logical_not(gt_bin))
             gt_only   = np.logical_and(gt_bin, np.logical_not(pred_mask))
 
-            # base grayscale crop (retain brightness texture)
+            # --- GT vs Manual Mask Overlay (presentation-optimized and RGB-safe) ---
             vis_gray = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR).astype(np.float32) / 255.0
 
-            # color overlay (BGR order for OpenCV)
-            overlay = vis_gray.copy()
-            overlay[gt_only == 1]   = (0.1, 0.0, 0.8)   # deep red (GT only)
-            overlay[pred_only == 1] = (0.8, 0.8, 0.0)   # yellow (manual only)
-            overlay[intersect == 1] = (1.0, 1.0, 1.0)   # white overlap
+            # darker neutral base
+            dark_base = np.clip(vis_gray * 0.35, 0, 1.0)
 
-            # blend to darken background slightly
-            blended = cv2.addWeighted(overlay, 0.8, vis_gray * 0.3, 0.2, 0)
+            overlay = dark_base.copy()
+
+            # note: use RGB order for clarity (OpenCV stores in BGR)
+            # final colors after conversion → red/yellow/white visible correctly
+            overlay[gt_only == 1]   = (.2, 0.2, 1)   # bright red → GT only
+            overlay[pred_only == 1] = (.2, 1.0, 1)   # yellow → manual only
+            overlay[intersect == 1] = (0.95, 0.95, 0.95)  # white overlap
+
+            # blend slightly to retain surface structure
+            blended = cv2.addWeighted(overlay, 0.85, dark_base, 0.15, 0)
+
+            # convert back to 8-bit for saving
+            blended_uint8 = np.clip(blended * 255, 0, 255).astype(np.uint8)
 
             # safe crop
             H, W = blended.shape[:2]
