@@ -98,16 +98,25 @@ import scipy.ndimage
     
 def edge_masks(image_gray, track, window_half_size=40):
     """
-    Faithful GPU version of original V1:
-    - Same local rotation-aligned Gaussian+Sobel pipeline
-    - Optional CuPy acceleration per patch (identical geometry)
+    Faithful GPU/CPU hybrid:
+    - Uses CuPy if a CUDA device is available
+    - Falls back to pure NumPy/SciPy if not
     """
     import numpy as np, scipy.ndimage as ndi
+
+    # Try to import CuPy and test for an actual GPU
     try:
         import cupy as cp, cupyx.scipy.ndimage as cndi
-        use_gpu = True
+        try:
+            n_devices = cp.cuda.runtime.getDeviceCount()
+            use_gpu = n_devices > 0
+        except Exception:
+            use_gpu = False
     except Exception:
-        cp = np; cndi = ndi; use_gpu = False
+        cp, cndi, use_gpu = np, ndi, False
+
+    if not use_gpu:
+        print("[edge_mask] ⚙️ running in CPU mode (no CUDA device detected)")
 
     img_h, img_w = image_gray.shape
     edge_mask = np.zeros_like(image_gray, dtype=float)

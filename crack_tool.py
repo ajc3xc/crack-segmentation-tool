@@ -41,6 +41,8 @@ from edge_workers import *
 
 from rs3_split import run_rs3_variants_split
 from edge_workers import *
+
+
 #from crackutils import CrackUtils
 DEBUG_SAVE_LIGHT = True   # True → only high-res compact outputs
 from helpers.endpoint_annotator import CrackAnnotator
@@ -2786,6 +2788,15 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         except Exception as e:
             print(f"[DEBUG METRICS] ❌ could not read {ann_path}: {e}")
             return {}
+        
+        # --- COMBINED DEBUG (pre-refresh) ---
+        try:
+            from helpers.combine_debug import diag_combine_table
+            # use the *authoring* view to debug what the user actually drew
+            out_dbg_csv = os.path.join(metrics_dir, "combine_candidates_pre.csv")
+            diag_combine_table(ann_json, (H,W), out_dbg_csv, px_thresh=10.0)
+        except Exception as e:
+            print(f"[COMBINE_DBG] pre-refresh diag failed: {e}")
 
         atomic = merged_metric_atomic(authoring_atomic, self.save_folder, base_name)
         print(f"[DEBUG METRICS] merged {len(atomic)} atomic cracks after edge snapshots merge")
@@ -2996,6 +3007,25 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     plt.tight_layout(); fig.savefig(os.path.join(metrics_dir, "iou_by_segment_bar.png")); plt.close(fig)
             except Exception:
                 pass
+            
+            '''try:
+                from helpers.present_plots import build_deck_plots_for_image
+                build_deck_plots_for_image(metrics_dir, base_name)
+            except Exception as e:
+                print(f"[PRESENT] deck plots failed: {e}")
+
+            try:
+                from helpers.present_plots import export_gt_normals_for_image
+                # manual atomic cracks for GT normals → use your already-merged 'atomic' dict
+                export_gt_normals_for_image(
+                    gt_mask_u8=(gt_full*1).astype(np.uint8),
+                    atomic_cracks=atomic,                   # manual atomics only (you already filtered autos)
+                    image_hw=(H, W),
+                    out_dir=metrics_dir,
+                    step=2, max_radius=50
+                )
+            except Exception as e:
+                print(f"[GT-NORMALS] export failed: {e}")'''
 
         except Exception as e:
             print(f"[DEBUG PLOT] summary plots failed: {e}")
