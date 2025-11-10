@@ -267,7 +267,10 @@ def save_cropped_overlay(img_full_bgr, bbox, mask_or_rgb, out_png, margin=0):
 # ---------------------------------------------------------------------
 def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     import numpy as np, cv2, os, json
-    from helpers.metrics import compute_midline_metrics, set_tracked_edges_for_crack
+    from helpers.metrics import (
+        compute_midline_metrics, set_tracked_edges_for_crack,
+        compute_mask_metrics, boundary_fscore, assd_hd95
+    )
 
     img = payload["image_crop_gray"]
     pts_crop = payload["pts_crop"]
@@ -324,6 +327,19 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         # --- GT vs Manual Mask Overlay (restored grayscale + blended colors) ---
         gt_crop = payload.get("gt_crop", None)
+        
+        # --- Region + boundary + surface metrics (persisted to JSON) ---
+        metrics_all = {}
+        if gt_crop is not None:
+            gt_bin   = (np.asarray(gt_crop) > 0).astype(np.uint8)
+            pred_bin = (mask_crop > 0).astype(np.uint8)
+
+            base = compute_mask_metrics(gt_bin, pred_bin)                 # precision/recall/f1/iou + tp/fp/fn/tn
+            bnd  = boundary_fscore(gt_bin, pred_bin, tau=2.0)             # boundary_precision/recall/f1
+            surf = assd_hd95(gt_bin, pred_bin)                            # ASSD, HD95
+            metrics_all = {**base, **bnd, **surf}
+
+        
         gt_vs_manual_overlay = None
         if gt_crop is not None:
             gt_bin = (np.asarray(gt_crop, dtype=np.uint8) > 0).astype(np.uint8)
@@ -422,7 +438,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             "mask_crop": mask_crop.tolist(),
             "geodesic_edges": {"edge1": track_e1_global.tolist(), "edge2": track_e2_global.tolist()},
             "normal_edge_points_full": {"edge1": normals_e1.tolist(), "edge2": normals_e2.tolist()},
-            **P, **metrics
+            **P, **metrics, **metrics_all
         }
         set_tracked_edges_for_crack(payload["save_folder"], base_name, crack_id, result)
         return result

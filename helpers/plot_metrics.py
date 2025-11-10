@@ -111,51 +111,46 @@ def plot_gt_normals_for_crack(crack: dict, gt_full_u8: np.ndarray,
     
 def save_gt_vs_manual_overlay(H, W, gt_full, man_full, out_png, bbox=None, original_image=None):
     """
-    Overlay GT vs manual mask on a background.
-      white  = overlap
-      yellow = manual-only
-      red    = GT-only
-    If original_image (HxWx{1,3}) is passed, blend on it; else render on black.
-    If bbox is given, crop to bbox (global view still uses full-image coordinates).
+    Overlay GT vs manual mask, rendered on top of the full original image.
+      - white   = overlap (GT ∩ MANUAL)
+      - yellow  = manual-only
+      - red     = GT-only
+    If `original_image` (HxWx{1,3}) is provided, it is used as a dimmed background
+    so structure is still visible. Otherwise, a black background is used.
     """
     import numpy as np, cv2
 
-    # --- base background
+    # --- base background ---
     if original_image is not None:
         base = original_image.copy()
         if base.ndim == 2:
             base = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
         base = base.astype(np.float32) / 255.0
+        base = (base * 0.35)  # slightly darken to make overlays pop
     else:
-        base = np.zeros((H, W, 3), np.float32)
+        base = np.zeros((H, W, 3), dtype=np.float32)
 
-    # --- color classes
+    # --- classes ---
+    gt_bin   = (np.asarray(gt_full,  dtype=np.uint8) > 0)
+    man_bin  = (np.asarray(man_full, dtype=np.uint8) > 0)
+    inter    = np.logical_and(gt_bin, man_bin)
+    pred_only= np.logical_and(man_bin, np.logical_not(gt_bin))
+    gt_only  = np.logical_and(gt_bin, np.logical_not(man_bin))
+
+    # NOTE: colors expressed in RGB here then converted to BGR for cv2
     overlay = base.copy()
-    intersect = (gt_full.astype(bool) & man_full.astype(bool))
-    pred_only = (man_full.astype(bool) & ~gt_full.astype(bool))
-    gt_only   = (gt_full.astype(bool) & ~man_full.astype(bool))
+    overlay[gt_only]    = (1.0, 0.20, 0.20)  # red
+    overlay[pred_only]  = (1.0, 1.00, 0.20)  # yellow
+    overlay[inter]      = (0.97, 0.97, 0.97) # white
 
-    # RGB (OpenCV is BGR in memory but we’re writing via cv2.imwrite so pass BGR):
-    # We’ll set in BGR directly to avoid confusion
-    # white (255,255,255), yellow (0,255,255), red (0,0,255)
-    mask = np.zeros_like(overlay, np.float32)
-    mask[intersect] = (1.0, 1.0, 1.0)
-    mask[pred_only] = (0.0, 1.0, 1.0)
-    mask[gt_only]   = (0.0, 0.0, 1.0)
+    out = np.clip(overlay * 255.0, 0, 255).astype(np.uint8)
 
-    # blend to keep scene structure
-    blended = cv2.addWeighted(mask, 0.85, base, 0.15, 0)
-
-    # optional bbox crop
+    # optional bbox rectangle
     if bbox is not None:
         x, y, w, h = map(int, bbox)
-        x0 = max(0, x); y0 = max(0, y)
-        x1 = min(W, x + max(1, w)); y1 = min(H, y + max(1, h))
-        blended = blended[y0:y1, x0:x1]
+        cv2.rectangle(out, (x, y), (x + w, y + h), (255, 128, 0), 1, cv2.LINE_AA)
 
-    out_u8 = np.clip(blended * 255.0, 0, 255).astype(np.uint8)
-    cv2.imwrite(out_png, out_u8)
-
+    cv2.imwrite(out_png, out)
 
 
 # --- minimal geometry utils (existing from your metrics) ----------------------

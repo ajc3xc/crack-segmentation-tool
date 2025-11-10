@@ -2678,17 +2678,92 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         print(f"[DEBUG METRICS] ===== END for {base_name} =====\n")'''
 
+    def export_midline_edge_metrics(self, base_name, metrics_dir):
+        import os, json, numpy as np, pandas as pd, matplotlib.pyplot as plt
+
+        rows = []
+        atomic = self._metric_atomic() or {}
+        combined = self._metric_combined() or {}
+        members_in_combined = {str(m) for cmb in combined.values() for m in (cmb.get("members", []) or [])}
+
+        # only atomics NOT in a combined (to avoid double counting)
+        for cid in sorted(atomic.keys(), key=lambda z: int(z)):
+            scid = str(cid)
+            if scid in members_in_combined:
+                continue
+            path = os.path.join(self.save_folder, "metrics", base_name, f"cid{scid}.json")
+            if not os.path.exists(path): 
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                continue
+            if not isinstance(data, dict): 
+                continue
+
+            row = {
+                "image": base_name,
+                "crack_type": "atomic",
+                "crack_id": scid,
+                "win": data.get("window_half_size"),
+                "mu": data.get("mu"),
+                "l": data.get("l"),
+                "p": data.get("p"),
+                "chamfer_mean": data.get("chamfer_mean"),
+                "hausdorff": data.get("hausdorff"),
+                "angle_err_deg": data.get("angle_err_deg"),
+                "coverage": data.get("coverage"),
+                "directional_bias": data.get("directional_bias"),
+                "curvature_rms_ratio": data.get("curvature_rms_ratio"),
+                "local_thickness_corr": data.get("local_thickness_corr"),
+            }
+            rows.append(row)
+
+        if not rows:
+            return
+
+        df = pd.DataFrame(rows)
+        out_csv = os.path.join(metrics_dir, f"{base_name}_midline_edge_metrics.csv")
+        df.to_csv(out_csv, index=False)
+
+        # quick summary by crack_type
+        g = df.groupby("crack_type").agg(["mean", "std"])
+        out_sum = os.path.join(metrics_dir, f"{base_name}_midline_edge_metrics_summary.csv")
+        g.to_csv(out_sum)
+
+        # tiny bar chart of a few key metrics (mean ± std)
+        try:
+            metrics_pick = ["chamfer_mean", "hausdorff", "angle_err_deg", "coverage"]
+            means = df[metrics_pick].mean()
+            stds  = df[metrics_pick].std()
+            plt.figure(figsize=(7,4), dpi=200)
+            x = np.arange(len(metrics_pick))
+            plt.bar(x, means.values, yerr=stds.values)
+            plt.xticks(x, metrics_pick, rotation=15)
+            plt.tight_layout()
+            plt.savefig(os.path.join(metrics_dir, f"{base_name}_midline_edge_metrics_barchart.png"), dpi=200)
+            plt.close()
+        except Exception:
+            pass
+    
     def compute_mask_and_width_metrics_for_image(self, display=False, export_supervision=False):
         """
         Snapshot-only driver (strict edges). Writes:
         - metrics/<base>/cid{X}/gt_vs_manual_mask.png
         - metrics/<base>/cid{X}/gt_normals.png (with midline)
         - metrics/<base>/combined{C}_{members}/... same two files
-        - metrics/<base>/mask_metrics.csv  (local IoU per-crack + TOTAL)
+        - metrics/<base>/mask_metrics.csv  (per-crack + TOTAL with IoU/PRF1 + boundary F1 + ASSD/HD95)
+        - metrics/<base>/total_metrics_bar.png
+        - metrics/<base>/per_segment_iou_bf1.png
         - metrics/<base>/width_summary_{manual,auto,combined}.csv
         - metrics/<base>/manual_width_diffs_overlay.png  (image-sized)
         """
         import os, json, numpy as np, pandas as pd, traceback, cv2
+        from helpers.metrics import (
+            compute_mask_metrics, boundary_fscore, assd_hd95,  # new
+            mask_iou  # kept for legacy TOTAL print (optional)
+        )
 
         print(f"[DEBUG METRICS] ===== START for {getattr(self, 'name', '?')} =====")
         if getattr(self, "current_mask", None) is None:
@@ -2722,11 +2797,13 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         combined_map = self._metric_combined() or {}
         members_in_combined = {str(m) for cmb in combined_map.values() for m in (cmb.get("members", []) or [])}
 
-        # IoU rows + union mask
+        # rows for CSV + union mask for TOTAL
         mask_rows = []
         agg_manual = np.zeros((H, W), np.uint8)
 
-        # ----- atomics NOT in combined -----
+        # =========================
+        # Atomics NOT in combined
+        # =========================
         for cid, crack in atomic.items():
             scid = str(cid)
             src = (crack.get("source") or "").lower()
@@ -2745,7 +2822,11 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
                 gt_crop  = gt_full[y:y+h, x:x+w]
                 man_crop = m_full[y:y+h, x:x+w]
-                iou_val = mask_iou(man_crop, gt_crop)
+
+                # region + boundary + surface metrics
+                base = compute_mask_metrics(gt_crop, man_crop)          # precision, recall, f1, iou, tp/fp/fn/tn
+                bnd  = boundary_fscore(gt_crop, man_crop, tau=2.0)      # boundary_precision, boundary_recall, boundary_f1
+                surf = assd_hd95(gt_crop, man_crop)                     # ASSD, HD95
 
                 cid_dir = os.path.join(metrics_dir, f"cid{scid}")
                 os.makedirs(cid_dir, exist_ok=True)
@@ -2759,7 +2840,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     crack, (gt_full*255).astype(np.uint8), cid_dir, "gt_normals.png", bbox=[x,y,w,h]
                 )
 
-                # draw midline on normals
+                # draw midline on normals (if available)
                 try:
                     ml = np.asarray(crack.get("midline", []), float)
                     if ml.ndim == 2 and len(ml) > 1:
@@ -2770,17 +2851,20 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 except Exception:
                     pass
 
-                mask_rows.append({
-                    "image": base_name, "crack_type": "atomic", "crack_id": scid,
-                    "members": "", "iou": float(iou_val)
-                })
-                print(f"[DEBUG MASK] atomic cid={scid} IoU={iou_val:.4f}")
+                row = {
+                    "image": base_name, "crack_type": "atomic", "crack_id": scid, "members": ""
+                }
+                row.update(base); row.update(bnd); row.update(surf)
+                mask_rows.append(row)
+                print(f"[DEBUG MASK] atomic cid={scid} IoU={base['iou']:.4f} bF1={bnd['boundary_f1']:.4f}")
 
             except Exception as e:
                 print(f"[DEBUG METRICS] atomic cid={scid} failed: {e}")
                 traceback.print_exc()
 
-        # ----- combined -----
+        # ==============
+        # Combined
+        # ==============
         for ccid, cmb in (combined_map or {}).items():
             try:
                 m_full = manual_mask_from_crack(cmb, H, W)
@@ -2792,7 +2876,10 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
                 gt_crop  = gt_full[y:y+h, x:x+w]
                 man_crop = m_full[y:y+h, x:x+w]
-                iou_val = mask_iou(man_crop, gt_crop)
+
+                base = compute_mask_metrics(gt_crop, man_crop)
+                bnd  = boundary_fscore(gt_crop, man_crop, tau=2.0)
+                surf = assd_hd95(gt_crop, man_crop)
 
                 members = "_".join(str(m) for m in (cmb.get("members", []) or []))
                 cmb_dir = os.path.join(metrics_dir, f"combined{ccid}_{members or 'none'}")
@@ -2807,7 +2894,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     cmb, (gt_full*255).astype(np.uint8), cmb_dir, "gt_normals.png", bbox=[x,y,w,h]
                 )
 
-                # draw midline
                 try:
                     ml = np.asarray(cmb.get("midline", []), float)
                     if ml.ndim == 2 and len(ml) > 1:
@@ -2818,73 +2904,105 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 except Exception:
                     pass
 
-                mask_rows.append({
-                    "image": base_name, "crack_type": "combined", "crack_id": str(ccid),
-                    "members": members, "iou": float(iou_val)
-                })
-                print(f"[DEBUG MASK] combined id={ccid}({members}) IoU={iou_val:.4f}")
+                row = {
+                    "image": base_name, "crack_type": "combined", "crack_id": str(ccid), "members": members
+                }
+                row.update(base); row.update(bnd); row.update(surf)
+                mask_rows.append(row)
+                print(f"[DEBUG MASK] combined id={ccid}({members}) IoU={base['iou']:.4f} bF1={bnd['boundary_f1']:.4f}")
 
             except Exception as e:
                 print(f"[DEBUG METRICS] combined id={ccid} failed: {e}")
                 traceback.print_exc()
 
-        # ----- TOTAL IoU (union of evaluated)
-        total_iou = mask_iou(agg_manual, gt_full)
+        # ======================
+        # TOTAL (union evaluated)
+        # ======================
+        base_total = compute_mask_metrics(gt_full, agg_manual)
+        bnd_total  = boundary_fscore(gt_full, agg_manual, tau=2.0)
+        surf_total = assd_hd95(gt_full, agg_manual)
         mask_rows.append({
             "image": base_name, "crack_type": "TOTAL", "crack_id": "", "members": "",
-            "iou": float(total_iou), "iou_total": float(total_iou)
+            **base_total, **bnd_total, **surf_total
         })
 
         out_csv = os.path.join(metrics_dir, "mask_metrics.csv")
         pd.DataFrame(mask_rows).to_csv(out_csv, index=False)
-        print(f"[DEBUG MASK] TOTAL IoU (union) = {total_iou:.4f}")
-        print(f"[DEBUG METRICS] wrote IoU metrics → {out_csv}")
-        
-        # ----- summary plots -----
+        # (optional legacy print)
+        print(f"[DEBUG MASK] TOTAL IoU (union) = {mask_iou(agg_manual, gt_full):.4f}")
+        print(f"[DEBUG METRICS] wrote IoU/Boundary/Surface metrics → {out_csv}")
+
+        # ==================
+        # Summary plots
+        # ==================
         try:
             import matplotlib.pyplot as plt
-            import pandas as pd
+            import numpy as _np
+            df = pd.read_csv(out_csv)
 
-            df = pd.read_csv(os.path.join(metrics_dir, "mask_metrics.csv"))
-
-            # a) TOTAL IoU bar
-            fig, ax = plt.subplots(figsize=(5,4), dpi=160)
-            total = float(df.loc[df["crack_type"]=="TOTAL", "iou"].values[0])
-            ax.bar(["TOTAL IoU"], [total])
-            ax.set_ylim(0,1)
-            ax.set_ylabel("IoU")
-            ax.set_title(f"Total IoU — {base_name}")
+            # (A) TOTAL — multi-metric bar
+            fig, ax = plt.subplots(figsize=(6,4), dpi=160)
+            tot = df[df["crack_type"]=="TOTAL"].iloc[0]
+            names = ["IoU","bF1","Precision","Recall"]
+            vals  = [float(tot["iou"]), float(tot["boundary_f1"]),
+                    float(tot["precision"]), float(tot["recall"])]
+            ax.bar(names, vals)
+            ax.set_ylim(0,1); ax.set_title(f"Total metrics — {base_name}")
+            for i,v in enumerate(vals): ax.text(i, v+0.02, f"{v:.2f}", ha="center", fontsize=8)
             plt.tight_layout()
-            fig.savefig(os.path.join(metrics_dir, "iou_total_bar.png"))
-            plt.close(fig)
+            fig.savefig(os.path.join(metrics_dir,"total_metrics_bar.png")); plt.close(fig)
 
-            # b) per-CID IoU bars (atomics + combined)
+            # (B) per-segment bars: IoU and boundary-F1 side-by-side
             dfi = df[df["crack_type"].isin(["atomic","combined"])].copy()
             if not dfi.empty:
-                # Build label: atomic:cID or combined:cID(members)
                 def _lab(r):
                     if r["crack_type"] == "atomic":
                         return f"a:{r['crack_id']}"
                     m = (r.get("members") or "")
-                    if isinstance(m, float): m = ""  # NaN
+                    if isinstance(m, float): m = ""
                     return f"c:{r['crack_id']}({m})" if m else f"c:{r['crack_id']}"
                 dfi["label"] = dfi.apply(_lab, axis=1)
 
-                fig, ax = plt.subplots(figsize=(max(6, 0.35*len(dfi)), 4), dpi=160)
-                ax.bar(dfi["label"], dfi["iou"])
-                ax.set_ylim(0,1)
-                ax.set_ylabel("IoU")
-                ax.set_title(f"IoU by segment — {base_name}")
-                ax.tick_params(axis='x', rotation=60)
+                labels = list(dfi["label"])
+                iou = dfi["iou"].astype(float).values
+                bf1 = dfi["boundary_f1"].astype(float).values
+
+                x = _np.arange(len(labels))
+                w = 0.4
+                fig, ax = plt.subplots(figsize=(max(7, 0.5*len(labels)), 4), dpi=160)
+                ax.bar(x - w/2, iou,  width=w, label="IoU")
+                ax.bar(x + w/2, bf1,  width=w, label="Boundary F1")
+                ax.set_ylim(0,1); ax.set_ylabel("score"); ax.set_title(f"Per-segment metrics — {base_name}")
+                ax.set_xticks(x); ax.set_xticklabels(labels, rotation=60, ha="right")
+                ax.legend()
                 plt.tight_layout()
-                fig.savefig(os.path.join(metrics_dir, "iou_by_segment_bar.png"))
+                fig.savefig(os.path.join(metrics_dir, "per_segment_iou_bf1.png"))
                 plt.close(fig)
+
+            # (Optional) keep your legacy quick plots
+            try:
+                # TOTAL IoU only (legacy)
+                fig, ax = plt.subplots(figsize=(5,4), dpi=160)
+                ax.bar(["TOTAL IoU"], [float(tot["iou"])])
+                ax.set_ylim(0,1); ax.set_ylabel("IoU"); ax.set_title(f"Total IoU — {base_name}")
+                plt.tight_layout(); fig.savefig(os.path.join(metrics_dir, "iou_total_bar.png")); plt.close(fig)
+
+                # per-CID IoU only (legacy)
+                if not dfi.empty:
+                    fig, ax = plt.subplots(figsize=(max(6, 0.35*len(dfi)), 4), dpi=160)
+                    ax.bar(dfi["label"], dfi["iou"])
+                    ax.set_ylim(0,1); ax.set_ylabel("IoU"); ax.set_title(f"IoU by segment — {base_name}")
+                    ax.tick_params(axis='x', rotation=60)
+                    plt.tight_layout(); fig.savefig(os.path.join(metrics_dir, "iou_by_segment_bar.png")); plt.close(fig)
+            except Exception:
+                pass
 
         except Exception as e:
             print(f"[DEBUG PLOT] summary plots failed: {e}")
 
-
-        # ----- widths (rows) -----
+        # ==================
+        # Width comparisons
+        # ==================
         width_rows_manual = width_rows_auto = width_rows_combined = []
         print("[DEBUG METRICS] running compare_widths_for_cracks (manual)...")
         try:
@@ -2918,7 +3036,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         except Exception as e:
             print(f"[DEBUG METRICS] combined compare_widths failed: {e}")
 
-        # ----- width summaries + global diff overlay (manual)
+        # width summaries + global diff overlay (manual)
         try:
             width_summary_to_csv(metrics_dir, base_name, width_rows_manual,  "manual")
             width_summary_to_csv(metrics_dir, base_name, width_rows_auto,    "auto")
@@ -2927,9 +3045,18 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print(f"[DEBUG WIDTH] summary failed: {e}")
 
         try:
-            write_width_diff_overlay(H, W, width_rows_manual, os.path.join(metrics_dir, "manual_width_diffs_overlay.png"), vlim=8.0)
+            write_width_diff_overlay(H, W, width_rows_manual,
+                                    os.path.join(metrics_dir, "manual_width_diffs_overlay.png"),
+                                    vlim=8.0)
         except Exception as e:
             print(f"[DEBUG WIDTH] overlay image failed: {e}")
+
+        # midline/edge metrics CSV (from cid*.json)
+        try:
+            print("[DEBUG METRICS] exporting midline/edge metrics …")
+            self.export_midline_edge_metrics(base_name, metrics_dir)
+        except Exception as e:
+            print(f"[DEBUG METRICS] edge metrics export failed: {e}")
 
         print(f"[DEBUG METRICS] ===== END for {base_name} =====\n")
 
