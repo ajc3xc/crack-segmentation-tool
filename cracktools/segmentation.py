@@ -383,11 +383,15 @@ from shapely.geometry import LineString, Point, MultiPoint
     return track'''
     
 # --- add near the top of segmentation.py (after numpy imports) ---
+# --- Safe CuPy detection ---
 try:
     import cupy as cp
-    _CUPY = True
+    n_devices = cp.cuda.runtime.getDeviceCount()
+    _CUPY = n_devices > 0
+    if not _CUPY:
+        print("[geodesic] ⚙️ CuPy found but no CUDA devices; using CPU fallback.")
 except Exception:
-    cp = None
+    import numpy as cp
     _CUPY = False
 
 
