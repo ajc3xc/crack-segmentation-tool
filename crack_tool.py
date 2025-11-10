@@ -28,8 +28,10 @@ from crackutils import *
 from manual_drawing import *
 from track_segment_pipeline import *
 from helpers.crackhelpers import *
+#from helpers import *
+from helpers import plot_metrics
 from helpers import metrics
-from helpers.metrics import *
+from helpers import save_load_files
 from combine_clear_segments import *
 import cracktools as ct
 
@@ -2687,14 +2689,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         - metrics/<base>/manual_width_diffs_overlay.png  (image-sized)
         """
         import os, json, numpy as np, pandas as pd, traceback, cv2
-        from helpers.metrics import (
-            merged_metric_atomic,
-            manual_mask_from_crack,
-            mask_iou,
-            compare_widths_for_cracks,
-            _plot_gt_normals_for_crack, _save_gt_vs_manual_overlay, _bbox_from_mask,
-            width_summary_to_csv, write_width_diff_overlay
-        )
 
         print(f"[DEBUG METRICS] ===== START for {getattr(self, 'name', '?')} =====")
         if getattr(self, "current_mask", None) is None:
@@ -2736,27 +2730,36 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         for cid, crack in atomic.items():
             scid = str(cid)
             src = (crack.get("source") or "").lower()
-            if src.startswith("auto") or src == "combined":  # skip auto/combined in this block
+            if src.startswith("auto") or src == "combined":
                 continue
             if scid in members_in_combined:
                 continue
 
             try:
-                m_full = manual_mask_from_crack(crack, H, W); agg_manual |= (m_full > 0).astype(np.uint8)
-                bbox = _bbox_from_mask(m_full) or crack.get("bbox") or crack.get("mask_bbox") or [0,0,W,H]
+                m_full = manual_mask_from_crack(crack, H, W)
+                agg_manual |= (m_full > 0).astype(np.uint8)
+
+                bbox = plot_metrics.bbox_from_mask(m_full) or crack.get("bbox") or crack.get("mask_bbox") or [0,0,W,H]
                 x,y,w,h = map(int, bbox)
                 x = max(0,x); y=max(0,y); w=max(1,min(W-x,w)); h=max(1,min(H-y,h))
+
                 gt_crop  = gt_full[y:y+h, x:x+w]
                 man_crop = m_full[y:y+h, x:x+w]
-                iou_local = mask_iou(man_crop, gt_crop)
+                iou_val = mask_iou(man_crop, gt_crop)
 
                 cid_dir = os.path.join(metrics_dir, f"cid{scid}")
                 os.makedirs(cid_dir, exist_ok=True)
 
-                _save_gt_vs_manual_overlay(H, W, gt_full, m_full, os.path.join(cid_dir, "Stuff_vs_manual_mask.png"), bbox=[x,y,w,h])
-                _plot_gt_normals_for_crack(crack, (gt_full*255).astype(np.uint8), cid_dir, "gt_normals.png", bbox=[x,y,w,h])
+                save_gt_vs_manual_overlay(
+                    H, W, gt_full, m_full,
+                    os.path.join(cid_dir, "gt_vs_manual_mask_global.png"),
+                    bbox=[x, y, w, h], original_image=self.original_image
+                )
+                plot_metrics.plot_gt_normals_for_crack(
+                    crack, (gt_full*255).astype(np.uint8), cid_dir, "gt_normals.png", bbox=[x,y,w,h]
+                )
 
-                # draw midline on top of normals
+                # draw midline on normals
                 try:
                     ml = np.asarray(crack.get("midline", []), float)
                     if ml.ndim == 2 and len(ml) > 1:
@@ -2767,8 +2770,11 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 except Exception:
                     pass
 
-                mask_rows.append({"image": base_name, "crack_type": "atomic", "crack_id": scid, "members": "", "iou_local": float(iou_local)})
-                print(f"[DEBUG MASK] atomic cid={scid} IoU(local)={iou_local:.4f}")
+                mask_rows.append({
+                    "image": base_name, "crack_type": "atomic", "crack_id": scid,
+                    "members": "", "iou": float(iou_val)
+                })
+                print(f"[DEBUG MASK] atomic cid={scid} IoU={iou_val:.4f}")
 
             except Exception as e:
                 print(f"[DEBUG METRICS] atomic cid={scid} failed: {e}")
@@ -2777,21 +2783,29 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         # ----- combined -----
         for ccid, cmb in (combined_map or {}).items():
             try:
-                m_full = manual_mask_from_crack(cmb, H, W); agg_manual |= (m_full > 0).astype(np.uint8)
-                bbox = _bbox_from_mask(m_full) or [0,0,W,H]
+                m_full = manual_mask_from_crack(cmb, H, W)
+                agg_manual |= (m_full > 0).astype(np.uint8)
+
+                bbox = plot_metrics._bbox_from_mask(m_full) or [0,0,W,H]
                 x,y,w,h = map(int, bbox)
                 x = max(0,x); y=max(0,y); w=max(1,min(W-x,w)); h=max(1,min(H-y,h))
 
                 gt_crop  = gt_full[y:y+h, x:x+w]
                 man_crop = m_full[y:y+h, x:x+w]
-                iou_local = mask_iou(man_crop, gt_crop)
+                iou_val = mask_iou(man_crop, gt_crop)
 
                 members = "_".join(str(m) for m in (cmb.get("members", []) or []))
                 cmb_dir = os.path.join(metrics_dir, f"combined{ccid}_{members or 'none'}")
                 os.makedirs(cmb_dir, exist_ok=True)
 
-                _save_gt_vs_manual_overlay(H, W, gt_full, m_full, os.path.join(cmb_dir, "gt_vs_manual_mask_global.png"), bbox=[x,y,w,h])
-                _plot_gt_normals_for_crack(cmb, (gt_full*255).astype(np.uint8), cmb_dir, "gt_normals.png", bbox=[x,y,w,h])
+                save_gt_vs_manual_overlay(
+                    H, W, gt_full, m_full,
+                    os.path.join(cmb_dir, "gt_vs_manual_mask_global.png"),
+                    bbox=[x, y, w, h], original_image=self.original_image
+                )
+                plot_gt_normals_for_crack(
+                    cmb, (gt_full*255).astype(np.uint8), cmb_dir, "gt_normals.png", bbox=[x,y,w,h]
+                )
 
                 # draw midline
                 try:
@@ -2804,8 +2818,11 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 except Exception:
                     pass
 
-                mask_rows.append({"image": base_name, "crack_type": "combined", "crack_id": str(ccid), "members": members, "iou_local": float(iou_local)})
-                print(f"[DEBUG MASK] combined id={ccid}({members}) IoU(local)={iou_local:.4f}")
+                mask_rows.append({
+                    "image": base_name, "crack_type": "combined", "crack_id": str(ccid),
+                    "members": members, "iou": float(iou_val)
+                })
+                print(f"[DEBUG MASK] combined id={ccid}({members}) IoU={iou_val:.4f}")
 
             except Exception as e:
                 print(f"[DEBUG METRICS] combined id={ccid} failed: {e}")
@@ -2813,11 +2830,59 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         # ----- TOTAL IoU (union of evaluated)
         total_iou = mask_iou(agg_manual, gt_full)
-        mask_rows.append({"image": base_name, "crack_type": "TOTAL", "crack_id": "", "members": "", "iou_local": float(total_iou)})
+        mask_rows.append({
+            "image": base_name, "crack_type": "TOTAL", "crack_id": "", "members": "",
+            "iou": float(total_iou), "iou_total": float(total_iou)
+        })
+
         out_csv = os.path.join(metrics_dir, "mask_metrics.csv")
         pd.DataFrame(mask_rows).to_csv(out_csv, index=False)
         print(f"[DEBUG MASK] TOTAL IoU (union) = {total_iou:.4f}")
         print(f"[DEBUG METRICS] wrote IoU metrics → {out_csv}")
+        
+        # ----- summary plots -----
+        try:
+            import matplotlib.pyplot as plt
+            import pandas as pd
+
+            df = pd.read_csv(os.path.join(metrics_dir, "mask_metrics.csv"))
+
+            # a) TOTAL IoU bar
+            fig, ax = plt.subplots(figsize=(5,4), dpi=160)
+            total = float(df.loc[df["crack_type"]=="TOTAL", "iou"].values[0])
+            ax.bar(["TOTAL IoU"], [total])
+            ax.set_ylim(0,1)
+            ax.set_ylabel("IoU")
+            ax.set_title(f"Total IoU — {base_name}")
+            plt.tight_layout()
+            fig.savefig(os.path.join(metrics_dir, "iou_total_bar.png"))
+            plt.close(fig)
+
+            # b) per-CID IoU bars (atomics + combined)
+            dfi = df[df["crack_type"].isin(["atomic","combined"])].copy()
+            if not dfi.empty:
+                # Build label: atomic:cID or combined:cID(members)
+                def _lab(r):
+                    if r["crack_type"] == "atomic":
+                        return f"a:{r['crack_id']}"
+                    m = (r.get("members") or "")
+                    if isinstance(m, float): m = ""  # NaN
+                    return f"c:{r['crack_id']}({m})" if m else f"c:{r['crack_id']}"
+                dfi["label"] = dfi.apply(_lab, axis=1)
+
+                fig, ax = plt.subplots(figsize=(max(6, 0.35*len(dfi)), 4), dpi=160)
+                ax.bar(dfi["label"], dfi["iou"])
+                ax.set_ylim(0,1)
+                ax.set_ylabel("IoU")
+                ax.set_title(f"IoU by segment — {base_name}")
+                ax.tick_params(axis='x', rotation=60)
+                plt.tight_layout()
+                fig.savefig(os.path.join(metrics_dir, "iou_by_segment_bar.png"))
+                plt.close(fig)
+
+        except Exception as e:
+            print(f"[DEBUG PLOT] summary plots failed: {e}")
+
 
         # ----- widths (rows) -----
         width_rows_manual = width_rows_auto = width_rows_combined = []
@@ -2874,10 +2939,10 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
     def smoke_test_edges_for_manual(self, crack_id, edge_params=None, color_channel=None):
         import os, numpy as np, traceback, cv2
         from edge_workers import edge_param_worker, _debug_plot_edge_worker
-        from helpers.metrics import (
-            metric_atomic_path_for, safe_read_json,
-            set_tracked_edges_for_crack, metric_image_dir
-        )
+        #from helpers.metrics import (
+        #    metric_atomic_path_for, safe_read_json,
+        #    set_tracked_edges_for_crack, metric_image_dir
+        #)
         base = self._image_base()
         p = metric_atomic_path_for(self.save_folder, base, crack_id)
         cr = safe_read_json(p, {})
@@ -2977,115 +3042,57 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         print(f"[smoke] ✅ edges ok for cid{crack_id}")
         return True
     
-    '''def run_midline_and_mask_metrics(self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True):
-        """
-        Bare-minimum smoke test for manual cracks:
-        • sync snapshot (atomics only)
-        • ensure edge tracking (once per manual crack)
-        • compute mask/width metrics (manual only)
-        Adds debug overlays for mask IoU visualization.
-        Keeps full signature for GUI button compatibility.
-        """
-        import os, time, numpy as np, traceback, cv2
-        from helpers.metrics import reconstruct_manual_mask_from_edges
+    def smoke_test_edges_for_combined(self, ccid: int, cmb: dict, edge_params=None, color_channel=None):
+        import os, numpy as np, cv2
+        from edge_workers import edge_param_worker
+        from helpers.save_load_files import safe_read_json, safe_write_json, metric_combined_path
 
-        if not getattr(self, "name", None):
-            print("[metrics] ⚠ no image loaded — aborting smoke test.")
-            return
+        base = self._image_base()
+        H, W = self.original_image.shape[:2]
+        ml = np.asarray(cmb.get("midline", []), float)
+        if ml.ndim != 2 or len(ml) < 2:
+            return False
 
-        base_name = os.path.splitext(os.path.basename(self.name))[0]
-        image_dir = os.path.join(self.save_folder, "metrics", base_name)
-        os.makedirs(image_dir, exist_ok=True)
+        # bbox
+        bbox = cmb.get("mask_bbox")
+        if not bbox:
+            m_full = manual_mask_from_crack(cmb, H, W)
+            bbox = plot_metrics._bbox_from_mask(m_full) or [0,0,W,H]
+        x,y,w,h = map(int, bbox)
 
-        print(f"\n[SMOKE] ===== running minimal metrics for {base_name} =====")
-        t_total_start = time.perf_counter()
+        if color_channel is None:
+            color_channel = 0 if self.edge_track_color_box.currentText()=="R" else 1 if self.edge_track_color_box.currentText()=="B" else 2
+        gray = self.original_image[:, :, color_channel].astype(np.float32)
+        crop = gray[y:y+h, x:x+w]
+        track_local_yx = np.vstack([ml[:,1]-y, ml[:,0]-x])
 
-        # --- 1) Load snapshot (manual atomics only) ---
-        try:
-            self._sync_metrics_snapshot_from_authoring(refresh_combine=False, persist=True)
-        except Exception as e:
-            traceback.print_exc()
-            print(f"[SMOKE] snapshot sync failed: {e}")
-            return
+        payload = dict(
+            image_crop_gray=crop,
+            pts_crop=[ml[0]-[x,y], ml[-1]-[x,y]],
+            adjusted_track=track_local_yx,
+            manual_midline_global=ml,
+            bbox=(x,y,w,h),
+            params=edge_params or {"window_half_size":45, "mu":0.0, "l":5, "p":14},
+            save_folder=self.save_folder,
+            image_base=base,
+            crack_id=f"combined{ccid}",
+            gt_crop=((self.current_mask[y:y+h, x:x+w]) > 0).astype(np.uint8) if getattr(self,"current_mask",None) is not None else None,
+        )
 
-        atomic = self._metric_atomic()
-        if not atomic:
-            print("[SMOKE] ❌ no cracks found in snapshot")
-            return
+        res = edge_param_worker(payload)
+        if not isinstance(res, dict) or res.get("status")!="ok":
+            return False
 
-        best_edge = {"window_half_size":45, "mu":0.0, "l":5, "p":14}
-
-        # --- 2) Edge smoke test for manual cracks ---
-        need_ids = []
-        for cid, cr in atomic.items():
-            src = (cr.get("source") or "").lower()
-            if src.startswith("auto") or src == "combined":
-                continue
-            mid = np.asarray(cr.get("midline", []), float)
-            if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 2:
-                continue
-            ge = cr.get("geodesic_edges", {}) or {}
-            has_e1 = isinstance(ge.get("edge1"), list) and len(ge.get("edge1")) > 1
-            has_e2 = isinstance(ge.get("edge2"), list) and len(ge.get("edge2")) > 1
-            if not (has_e1 and has_e2):
-                need_ids.append(cid)
-
-        print(f"[SMOKE] manual cracks needing edges: {need_ids}")
-        for cid in need_ids:
-            try:
-                self.smoke_test_edges_for_manual(cid, edge_params=best_edge)
-            except Exception as e:
-                traceback.print_exc()
-                print(f"[SMOKE] ❌ edge smoke failed for cid={cid}: {e}")
-
-        # --- 3) Compute mask/width metrics (manual only) ---
-        try:
-            print("[SMOKE] running mask/width metrics ...")
-            self.compute_mask_and_width_metrics_for_image(display=display, export_supervision=False)
-        except Exception as e:
-            traceback.print_exc()
-            print(f"[SMOKE] mask/width stage failed: {e}")
-
-        # --- 4) NEW: Dump quick mask overlay for IoU debug ---
-        try:
-            from helpers.metrics import _reconstruct_full_mask, manual_mask_from_crack
-            H, W = self.original_image.shape[:2]
-            gt = (self.current_mask > 0).astype(np.uint8) if getattr(self, "current_mask", None) is not None else np.zeros((H, W), np.uint8)
-            ann = self._metric_atomic()
-
-            for cid, crack in ann.items():
-                src = (crack.get("source") or "").lower()
-                if src.startswith("auto") or src == "combined":
-                    continue
-
-                m_manual = reconstruct_manual_mask_from_edges(crack, H, W)
-                pred_mask = (m_manual > 0).astype(np.uint8)
-                gt_mask = gt.copy().astype(np.uint8)
-
-                intersect = np.logical_and(gt_mask, pred_mask)
-                pred_only = np.logical_and(pred_mask, np.logical_not(gt_mask))
-                gt_only   = np.logical_and(gt_mask, np.logical_not(pred_mask))
-
-                vis = cv2.cvtColor(self.original_image, cv2.COLOR_GRAY2BGR) if self.original_image.ndim == 2 else self.original_image.copy()
-                vis = vis.astype(np.float32) / 255.0
-
-                overlay = np.zeros_like(vis, np.float32)
-                overlay[gt_only]   = (0, 0, 1.0)      # red = GT only
-                overlay[pred_only] = (0, 1.0, 1.0)    # yellow = pred only
-                overlay[intersect] = (1.0, 1.0, 1.0)  # white = overlap
-
-                blended = cv2.addWeighted(overlay, 0.7, vis, 0.3, 0)
-                blended = np.clip(blended * 255.0, 0, 255).astype(np.uint8)
-
-                out_dbg = os.path.join(image_dir, f"debug_mask_overlay_cid{cid}.png")
-                cv2.imwrite(out_dbg, blended)
-                print(f"[SMOKE] wrote mask overlay → {out_dbg}")
-        except Exception as e:
-            print(f"[SMOKE] overlay debug failed: {e}")
-
-        self.dump_global_midline_and_mask_overlays(thickness_px=3)
-        total_time = time.perf_counter() - t_total_start
-        print(f"[SMOKE] ✅ completed minimal metrics in {total_time:.2f}s\n")'''
+        # persist to combined.json
+        cpath = metric_combined_path(self.save_folder, base)
+        cdata = safe_read_json(cpath, {}) or {}
+        rec = cdata.get(str(ccid), {})
+        rec["geodesic_edges"] = res.get("geodesic_edges", {})
+        rec["mask_crop"] = res.get("mask_crop", None)
+        rec["mask_bbox"] = [x,y,w,h]
+        cdata[str(ccid)] = rec
+        safe_write_json(cpath, cdata)
+        return True
         
     def run_midline_and_mask_metrics(self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True):
         """
@@ -3203,11 +3210,10 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print(f"[SMOKE] overlay debug failed: {e}")
 
         # --- 5) run existing midline metric CSV (in helpers.metrics) ---
-        try:
-            from helpers.metrics import compute_midline_metrics_for_image
-            compute_midline_metrics_for_image(self)
-        except Exception as e:
-            print(f"[SMOKE] midline metrics failed: {e}")
+        #try:
+        #    compute_midline_metrics_for_image(self)
+        #except Exception as e:
+        #    print(f"[SMOKE] midline metrics failed: {e}")
 
         self.dump_global_midline_and_mask_overlays(thickness_px=3)
         total_time = time.perf_counter() - t_total_start

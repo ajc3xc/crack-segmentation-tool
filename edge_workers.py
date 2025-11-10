@@ -7,8 +7,9 @@ import os
 import matplotlib.pyplot as plt
 
 from cracktools.segmentation import edge_masks, edges_tracking
-from helpers import metrics
-from helpers.metrics import *
+#from helpers import metrics
+from helpers import *
+from helpers import plot_metrics
 
 # ---------------------------------------------------------------------
 # Helper: mini diagnostic plot for failed or weird edge cases
@@ -67,33 +68,6 @@ def _compare_reference_debug(payload, track_local_yx):
     d1 = np.linalg.norm(txy1 - pts_crop[1])
     print(f"Δ_start_to_p0={d0:.2f}px, Δ_end_to_p1={d1:.2f}px (should both ≈0)")
     print("===========================================\n")
-
-
-# ---------------------------------------------------------------------
-# Helper: build binary mask from two edges or fallback ribbon
-# ---------------------------------------------------------------------
-'''def _crop_mask_from_edges(hc, wc, e1, e2, midline_xy=None, min_area=0.5, ribbon_px=4):
-    mask = np.zeros((hc, wc), np.uint8)
-    if e1 is None or e2 is None or len(e1) < 2 or len(e2) < 2:
-        # fallback to ribbon if missing
-        if midline_xy is not None and len(midline_xy) >= 2:
-            pts = np.round(midline_xy).astype(np.int32).reshape(-1, 1, 2)
-            cv2.polylines(mask, [pts], False, 1,
-                          thickness=max(3, ribbon_px), lineType=cv2.LINE_AA)
-        return mask
-
-    ex = np.concatenate([e1[:, 0][::-1], e2[:, 0]])
-    ey = np.concatenate([e1[:, 1][::-1], e2[:, 1]])
-    area = 0.5 * abs(np.dot(ex, np.roll(ey, -1)) - np.dot(ey, np.roll(ex, -1)))
-
-    if area > min_area:
-        poly = np.round(np.column_stack([ex, ey])).astype(np.int32)
-        cv2.fillPoly(mask, [poly], 1, lineType=cv2.LINE_AA)
-    elif midline_xy is not None and len(midline_xy) >= 2:
-        pts = np.round(midline_xy).astype(np.int32).reshape(-1, 1, 2)
-        cv2.polylines(mask, [pts], False, 1,
-                      thickness=max(3, ribbon_px), lineType=cv2.LINE_AA)
-    return mask'''
     
 def _crop_mask_from_edges(hc, wc, e1, e2, midline_xy=None, min_area=0.5, ribbon_px=4, debug_save=False, debug_dir="./debug_compare", tag=""):
     """
@@ -421,8 +395,8 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             (e1x, e1y, e2x, e2y, _), _ = normals_from_mask_for_midline(midline_xy_crop, gt_mask_u8 > 0, max_radius=50)
             e1 = np.column_stack([e1x, e1y])
             e2 = np.column_stack([e2x, e2y])
-            from helpers.metrics import _plot_gt_normals_on_gtbw
-            _plot_gt_normals_on_gtbw(gt_mask_u8, midline_xy_crop, e1, e2,
+            #from helpers.metrics import _plot_gt_normals_on_gtbw
+            plot_metrics.plot_gt_normals_on_gtbw(gt_mask_u8, midline_xy_crop, e1, e2,
                                      os.path.join(dbg_dir, "gt_normals.png"))
             print(f"[DEBUG VIS] wrote → gt_normals.png")
         except Exception as e:
@@ -458,131 +432,3 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         out = {"status": "fail_exception", "error": str(e)}
         out.update(P)
         return out
-
-# ---------------------------------------------------------------------
-# Worker: edge mask → edge tracking → mask creation → midline metrics
-# ---------------------------------------------------------------------
-'''from typing import Dict, Any
-import numpy as np, cv2, os
-from cracktools.segmentation import edge_masks, edges_tracking
-
-def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
-    from helpers.metrics import compute_midline_metrics, set_tracked_edges_for_crack
-    from edge_workers import _crop_mask_from_edges, extract_normals_from_res, plot_normals_pretty, plot_widths_colormap_on_crop
-
-    img = payload["image_crop_gray"]
-    pts_crop = payload["pts_crop"]
-    track_local_yx = payload["adjusted_track"]  # (2,N) [y,x]
-    man_xy_g = np.asarray(payload["manual_midline_global"], float)
-    x, y, w, h = map(int, payload["bbox"])
-    P = payload["params"]
-    crack_id = str(payload.get("crack_id", "?"))
-    base_name = payload.get("image_base", "unknown")
-
-    try:
-        img_norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-        em1, em2 = edge_masks(img_norm, track_local_yx, window_half_size=int(P["window_half_size"]))
-
-        # crop-local midline in (x,y)
-        midline_xy_crop = np.column_stack([track_local_yx[1], track_local_yx[0]])
-
-        res = edges_tracking(
-            image_crop=img_norm,
-            pts_cropp=pts_crop,
-            edge_mask1_cropp=em1, edge_mask2_cropp=em2,
-            midline=midline_xy_crop,
-            mu=int(P["mu"]), l=int(P["l"]), p=int(P["p"]),
-            return_normal_edges=True,
-        )
-        if not isinstance(res, dict):
-            print(f"[edge_worker] ⚠️ edges_tracking returned {type(res)} — expected dict.")
-            return {"status": "fail_invalid_return", **P}
-
-        track_e1, track_e2 = res.get("geodesic_edges", (None, None))
-        if track_e1 is None or track_e2 is None:
-            print(f"[edge_worker] ❌ no geodesic edges returned for {P}")
-            return {"status": "fail_no_edges", **P}
-
-        track_e1 = np.asarray(track_e1, float)
-        track_e2 = np.asarray(track_e2, float)
-
-        hc, wc = img.shape[:2]
-        mask_crop = _crop_mask_from_edges(hc, wc, track_e1, track_e2, midline_xy=midline_xy_crop)
-
-        # normals (crop) + (global)
-        normals_e1, normals_e2 = extract_normals_from_res(res)          # Nx2 crop
-        n1_full = normals_e1 + np.array([x, y], float) if len(normals_e1) else normals_e1
-        n2_full = normals_e2 + np.array([x, y], float) if len(normals_e2) else normals_e2
-
-        track_e1_global = np.column_stack([track_e1[:,0]+x, track_e1[:,1]+y])
-        track_e2_global = np.column_stack([track_e2[:,0]+x, track_e2[:,1]+y])
-
-        # --- save light, pretty viz under per-CID folder
-        dbg_dir = os.path.join(payload["save_folder"], "metrics", base_name, f"cid{crack_id}")
-        os.makedirs(dbg_dir, exist_ok=True)
-
-        pretty_path = os.path.join(dbg_dir, "edges_midlines_normals_pretty.png")
-        widths_path = os.path.join(dbg_dir, "widths_colormap_on_crop.png")
-        plot_normals_pretty(img_norm, track_e1, track_e2, midline_xy_crop,
-                            normals_e1, normals_e2, pretty_path)
-        plot_widths_colormap_on_crop(img_norm, normals_e1, normals_e2, widths_path)
-        print(f"[DEBUG VIS-LIGHT] wrote → {pretty_path} and {widths_path}")
-
-        # --- classic red/white/yellow GT overlay (per-CID), name preserved
-        gt_crop = payload.get("gt_crop", None)
-        if gt_crop is not None:
-            gt_bin = (np.asarray(gt_crop, dtype=np.uint8) > 0).astype(np.uint8)
-            pred_mask = (mask_crop > 0).astype(np.uint8)
-            intersect = np.logical_and(gt_bin, pred_mask)
-            pred_only = np.logical_and(pred_mask, np.logical_not(gt_bin))
-            gt_only   = np.logical_and(gt_bin, np.logical_not(pred_mask))
-
-            vis = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR).astype(np.float32) / 255.0
-            overlay = np.zeros_like(vis, np.float32)
-            overlay[gt_only]   = (0, 0, 1.0)     # red = GT only
-            overlay[pred_only] = (0, 1.0, 1.0)   # yellow = pred only
-            overlay[intersect] = (1.0, 1.0, 1.0) # white = overlap
-            blended = cv2.addWeighted(overlay, 0.7, vis, 0.3, 0)
-
-            H, W = blended.shape[:2]
-            x0 = max(0, x); y0 = max(0, y)
-            x1 = min(W, x + max(w, 1)); y1 = min(H, y + max(h, 1))
-            vis_crop = blended[y0:y1, x0:x1]
-            if vis_crop.size == 0:
-                print(f"[DEBUG VIS] ⚠️ empty bbox crop, using full image for IoU overlay")
-                vis_crop = blended
-            vis_large = cv2.resize(vis_crop, None, fx=3, fy=3, interpolation=cv2.INTER_NEAREST)
-            vis_large = np.clip(vis_large * 255.0, 0, 255).astype(np.uint8)
-            out_iou = os.path.join(dbg_dir, "gt_vs_manual_mask.png")
-            cv2.imwrite(out_iou, vis_large)
-            print(f"[DEBUG VIS] wrote → {out_iou}")
-
-        # --- midline comparison (crop-local)
-        try:
-            n = min(len(track_e1), len(track_e2))
-            auto_midline = 0.5*(track_e1[:n] + track_e2[:n])
-            man_midline  = man_xy_g - np.array([x, y], float)
-            mid_metrics  = compute_midline_metrics(auto_midline, man_midline, tau=3.0)
-        except Exception as e:
-            print(f"[edge_worker] ⚠️ midline metrics failed: {e}")
-            mid_metrics = {k: np.nan for k in [
-                "chamfer_mean","hausdorff","angle_err_deg","coverage",
-                "directional_bias","curvature_rms_ratio","local_thickness_corr"
-            ]}
-
-        result = {
-            "status":"ok",
-            "bbox":[x,y,w,h],
-            "mask_bbox":[x,y,w,h],
-            "mask_crop":mask_crop.tolist(),
-            "geodesic_edges":{"edge1":track_e1_global.tolist(),"edge2":track_e2_global.tolist()},
-            "normal_edge_points":      {"edge1":normals_e1.tolist(), "edge2":normals_e2.tolist()},  # crop
-            "normal_edge_points_full": {"edge1":n1_full.tolist(),    "edge2":n2_full.tolist()},     # global
-            **P, **mid_metrics
-        }
-        set_tracked_edges_for_crack(payload["save_folder"], base_name, crack_id, result)
-        return result
-
-    except Exception as e:
-        print(f"[edge_worker] ❌ unexpected failure for params={P}: {e}")
-        out = {"status":"fail_exception","error":str(e)}; out.update(P); return out'''
