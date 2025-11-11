@@ -12,6 +12,7 @@ import os
 def bbox_from_mask(mask: np.ndarray):
     ys, xs = np.where(mask > 0)
     if len(xs) == 0:
+        print("Empty mask for bbox_from_mask call")
         return None
     x0, x1 = int(xs.min()), int(xs.max())
     y0, y1 = int(ys.min()), int(ys.max())
