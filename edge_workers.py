@@ -448,3 +448,187 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         out = {"status": "fail_exception", "error": str(e)}
         out.update(P)
         return out
+        
+def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
+    import numpy as np, cv2, os, json
+    from helpers.metrics import (
+        compute_midline_metrics, set_tracked_edges_for_crack,
+        compute_mask_metrics, boundary_fscore, assd_hd95
+    )
+
+    img = payload["image_crop_gray"]
+    pts_crop = payload["pts_crop"]
+    track_local_yx = payload["adjusted_track"]  # (2,N) [y,x]
+    man_xy_g = np.asarray(payload["manual_midline_global"], float)
+    x, y, w, h = map(int, payload["bbox"])
+    P = payload["params"]
+    crack_id = payload.get("crack_id", "?")
+    base_name = payload.get("image_base", "unknown")
+
+    try:
+        img_norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        em1, em2 = edge_masks(img_norm, track_local_yx, window_half_size=int(P["window_half_size"]))
+
+        midline_xy_crop = np.column_stack([track_local_yx[1], track_local_yx[0]])
+
+        res = edges_tracking(
+            image_crop=img_norm,
+            pts_cropp=pts_crop,
+            edge_mask1_cropp=em1, edge_mask2_cropp=em2,
+            midline=midline_xy_crop,
+            mu=int(P["mu"]), l=int(P["l"]), p=int(P["p"]),
+            return_normal_edges=True,
+        )
+
+        if not isinstance(res, dict):
+            print(f"[edge_worker] ⚠️ edges_tracking returned {type(res)} — expected dict.")
+            return {"status": "fail_invalid_return", **P}
+
+        track_e1, track_e2 = res.get("geodesic_edges", (None, None))
+        if track_e1 is None or track_e2 is None:
+            print(f"[edge_worker] ❌ no geodesic edges returned for {P}")
+            return {"status": "fail_no_edges", **P}
+
+        track_e1 = np.asarray(track_e1, float)
+        track_e2 = np.asarray(track_e2, float)
+
+        hc, wc = img.shape[:2]
+        mask_crop = _crop_mask_from_edges(hc, wc, track_e1, track_e2, midline_xy=midline_xy_crop)
+
+        # --- Normal conversion ---
+        normals_e1, normals_e2 = extract_normals_from_res(res)
+        track_e1_global = np.column_stack([track_e1[:,0]+x, track_e1[:,1]+y])
+        track_e2_global = np.column_stack([track_e2[:,0]+x, track_e2[:,1]+y])
+
+        # === OUTPUT SETUP ===
+        dbg_dir = os.path.join(payload["save_folder"], "metrics", base_name, f"cid{crack_id}")
+        os.makedirs(dbg_dir, exist_ok=True)
+
+        # --- Pretty RTX-on visualizations (edges + normals) ---
+        pretty_path = os.path.join(dbg_dir, "edges_midlines_normals_pretty.png")
+        plot_normals_pretty(img_norm, track_e1, track_e2, midline_xy_crop,
+                            normals_e1, normals_e2, pretty_path)
+
+        # --- GT vs Manual Mask Overlay (restored grayscale + blended colors) ---
+        gt_crop = payload.get("gt_crop", None)
+        
+        # --- Region + boundary + surface metrics (persisted to JSON) ---
+        metrics_all = {}
+        if gt_crop is not None:
+            gt_bin   = (np.asarray(gt_crop) > 0).astype(np.uint8)
+            pred_bin = (mask_crop > 0).astype(np.uint8)
+
+            base = compute_mask_metrics(gt_bin, pred_bin)                 # precision/recall/f1/iou + tp/fp/fn/tn
+            bnd  = boundary_fscore(gt_bin, pred_bin, tau=2.0)             # boundary_precision/recall/f1
+            surf = assd_hd95(gt_bin, pred_bin)                            # ASSD, HD95
+            metrics_all = {**base, **bnd, **surf}
+
+        
+        gt_vs_manual_overlay = None
+        if gt_crop is not None:
+            gt_bin = (np.asarray(gt_crop, dtype=np.uint8) > 0).astype(np.uint8)
+            pred_mask = (mask_crop > 0).astype(np.uint8)
+
+            # compute overlap classes
+            intersect = np.logical_and(gt_bin, pred_mask)
+            pred_only = np.logical_and(pred_mask, np.logical_not(gt_bin))
+            gt_only   = np.logical_and(gt_bin, np.logical_not(pred_mask))
+
+            # --- GT vs Manual Mask Overlay (presentation-optimized and RGB-safe) ---
+            vis_gray = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR).astype(np.float32) / 255.0
+
+            # darker neutral base
+            dark_base = np.clip(vis_gray * 0.35, 0, 1.0)
+
+            overlay = dark_base.copy()
+
+            # note: use RGB order for clarity (OpenCV stores in BGR)
+            # final colors after conversion → red/yellow/white visible correctly
+            overlay[gt_only == 1]   = (.2, 0.2, 1)   # bright red → GT only
+            overlay[pred_only == 1] = (.2, 1.0, 1)   # yellow → manual only
+            overlay[intersect == 1] = (0.95, 0.95, 0.95)  # white overlap
+
+            # blend slightly to retain surface structure
+            blended = cv2.addWeighted(overlay, 0.85, dark_base, 0.15, 0)
+
+            # convert back to 8-bit for saving
+            blended_uint8 = np.clip(blended * 255, 0, 255).astype(np.uint8)
+
+            # safe crop
+            H, W = blended.shape[:2]
+            x0, y0 = max(0, x), max(0, y)
+            x1, y1 = min(W, x + max(w, 1)), min(H, y + max(h, 1))
+            vis_crop = blended[y0:y1, x0:x1]
+            if vis_crop.size == 0:
+                print(f"[DEBUG VIS] ⚠️ empty bbox crop, using full image for IoU overlay")
+                vis_crop = blended
+
+            # upscale
+            vis_large = cv2.resize(vis_crop, None, fx=3, fy=3, interpolation=cv2.INTER_NEAREST)
+            vis_large = np.clip(vis_large * 255.0, 0, 255).astype(np.uint8)
+            gt_vs_manual_overlay = vis_large
+
+            out_iou = os.path.join(dbg_dir, "gt_vs_manual_mask.png")
+            cv2.imwrite(out_iou, vis_large)
+            print(f"[DEBUG VIS] wrote → {out_iou}")
+
+        # --- Continuous width colormap overlay (GT mask background if available) ---
+        widths_path = os.path.join(dbg_dir, "widths_colormap_on_crop.png")
+        if gt_vs_manual_overlay is not None:
+            scale = 3.0
+            plot_widths_colormap_on_crop(
+                gt_vs_manual_overlay,
+                normals_e1 * scale, normals_e2 * scale,          # width geometry
+                track_e1 * scale, track_e2 * scale,              # geodesic edges
+                os.path.join(dbg_dir, "widths_colormap_on_crop.png")
+            )
+
+        else:
+            plot_widths_colormap_on_crop(img_norm, normals_e1, normals_e2, widths_path)
+
+        print(f"[DEBUG VIS-LIGHT] wrote → {pretty_path} and {widths_path}")
+
+        # --- GT Normals visualization (overlay on GT mask for debug) ---
+        try:
+            from helpers.metrics import normals_from_mask_for_midline
+            gt_mask_u8 = (gt_crop * 255).astype(np.uint8) if gt_crop is not None else np.zeros_like(img_norm)
+            (e1x, e1y, e2x, e2y, _), _ = normals_from_mask_for_midline(midline_xy_crop, gt_mask_u8 > 0, max_radius=50)
+            e1 = np.column_stack([e1x, e1y])
+            e2 = np.column_stack([e2x, e2y])
+            #from helpers.metrics import _plot_gt_normals_on_gtbw
+            plot_metrics.plot_gt_normals_on_gtbw(gt_mask_u8, midline_xy_crop, e1, e2,
+                                     os.path.join(dbg_dir, "gt_normals.png"))
+            print(f"[DEBUG VIS] wrote → gt_normals.png")
+        except Exception as e:
+            print(f"[DEBUG VIS] ⚠️ gt_normals plotting failed: {e}")
+
+        # --- Midline metrics ---
+        try:
+            n = min(len(track_e1), len(track_e2))
+            auto_midline = 0.5 * (track_e1[:n] + track_e2[:n])
+            man_midline = man_xy_g - np.array([x, y], float)
+            metrics = compute_midline_metrics(auto_midline, man_midline, tau=3.0)
+        except Exception as e:
+            print(f"[edge_worker] ⚠️ midline metrics failed: {e}")
+            metrics = {k: np.nan for k in [
+                "chamfer_mean","hausdorff","angle_err_deg","coverage",
+                "directional_bias","curvature_rms_ratio","local_thickness_corr"
+            ]}
+
+        result = {
+            "status": "ok",
+            "bbox": [x, y, w, h],
+            "mask_bbox": [x, y, w, h],
+            "mask_crop": mask_crop.tolist(),
+            "geodesic_edges": {"edge1": track_e1_global.tolist(), "edge2": track_e2_global.tolist()},
+            "normal_edge_points_full": {"edge1": normals_e1.tolist(), "edge2": normals_e2.tolist()},
+            **P, **metrics, **metrics_all
+        }
+        set_tracked_edges_for_crack(payload["save_folder"], base_name, crack_id, result)
+        return result
+
+    except Exception as e:
+        print(f"[edge_worker] ❌ unexpected failure for params={P}: {e}")
+        out = {"status": "fail_exception", "error": str(e)}
+        out.update(P)
+        return out

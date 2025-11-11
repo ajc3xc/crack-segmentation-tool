@@ -157,6 +157,61 @@ def _ribbon_mask_from_midline(H, W, S_xy, thickness_px=4):
     cv2.polylines(mask, [pts], isClosed=False, color=255, thickness=thickness_px, lineType=cv2.LINE_AA)
     return mask
 
+# put these near the top of your module (same file as compute_mask_and_width_metrics_for_image)
+
+def read_authoring_combined(ann_json: dict) -> dict:
+    """Accept both new and legacy locations of combined annotations."""
+    ann = (ann_json.get("annotations", {}) or {})
+    cmb = ann.get("combined_cracks", None)
+    if not cmb:
+        cmb = ann.get("combined", None)
+    return cmb or {}
+
+def auto_groups_from_atomic(authoring_atomic: dict, px_thresh: float = 12.0) -> dict:
+    """
+    Extremely simple fallback: group atomics whose endpoints are close.
+    Returns a dict like {"0": {"members":[...]} , "1": {"members":[...]}, ...}
+    If nothing groups, returns one group with all atomics.
+    """
+    import numpy as np
+    # extract endpoints from each atomic midline
+    def _endpoints(mid):
+        m = np.asarray(mid, float)
+        if m.ndim != 2 or m.shape[0] < 2: return None
+        return m[0], m[-1]
+
+    ids = [str(k) for k in authoring_atomic.keys()]
+    eps = {}
+    for k in ids:
+        mid = authoring_atomic[k].get("midline", [])
+        ep = _endpoints(mid)
+        if ep is not None:
+            eps[k] = ep
+
+    used = set()
+    groups = []
+    for i in ids:
+        if i in used or i not in eps:
+            continue
+        g = [i]; used.add(i)
+        a0, a1 = eps[i]
+        for j in ids:
+            if j in used or j not in eps: 
+                continue
+            b0, b1 = eps[j]
+            d = min(
+                np.linalg.norm(a0 - b0), np.linalg.norm(a0 - b1),
+                np.linalg.norm(a1 - b0), np.linalg.norm(a1 - b1),
+            )
+            if d <= px_thresh:
+                g.append(j); used.add(j)
+        groups.append(g)
+
+    # if everything was skipped or all singletons → make one big group
+    if not groups or all(len(g) == 1 for g in groups):
+        groups = [ids] if ids else []
+
+    return {str(idx): {"members": g} for idx, g in enumerate(groups)}
 
 def build_combined_crack_stateless(
     original_image: np.ndarray,
@@ -169,169 +224,194 @@ def build_combined_crack_stateless(
     p: int = 14,
     color_channel: int = 0,     # 0/1/2 = R/B/G as in your GUI mapping
     pad: int = 10,
-    prefer_gpu: bool = True
+    prefer_gpu: bool = True,
+    save_folder: str = None,
+    image_base: str = None
 ) -> dict:
     """
-    Stateless “metrics-safe” combine:
-      1) stitches member midlines using user endpoints
-      2) per stitched segment: crops, makes edge masks, runs edges_tracking
-      3) unions per-seg polygon/ribbon masks → final crop + bbox
-      4) returns a combined crack dict ready to be written to combined.json
-
-    Returns: {source, members, midline(_segments), geodesic_edges, normal_edge_points,
-              mask_crop, mask_bbox, combined_length, mean_width}
+    Stateless “metrics-safe” combiner:
+      - stitches member midlines using user endpoints
+      - for each segment, calls edge_param_worker (GPU/CPU) to get geodesic edges + mask
+      - unions per-seg masks and returns combined record
     """
-    img = original_image
-    H, W = img.shape[:2]
-    # pick channel if BGR image
-    if img.ndim == 3:
-        # your prior mapping: R→0, B→1, else G→2; but image is BGR in OpenCV.
-        # Keep the same behavior: color_channel=0 means "R from your GUI" which is actually index 2 in BGR
-        bgr_idx = {0:2, 1:0, 2:1}.get(color_channel, 2)
-        gray_full = img[:, :, bgr_idx].astype(np.float32)
-    else:
-        gray_full = img.astype(np.float32)
+    import numpy as np, cv2, math, os, traceback
+    from shapely.geometry import LineString
+    from edge_workers import edge_param_worker
 
-    # stitch member midlines
-    stitched = _stitch_lines_by_user(member_ids, authoring_atomic)
-    stitched.sort(key=_linestring_length, reverse=True)
+    H, W = original_image.shape[:2]
 
-    # dominant-buffer carve as in your class method
-    try:
-        from shapely.geometry import LineString
-        from shapely.ops import unary_union
-        use_shapely = True
-    except Exception:
-        use_shapely = False
+    # --- helpers ---
+    def _finite_xy(arr):
+        if arr is None or len(arr) == 0:
+            return np.empty((0, 2), float)
+        a = np.asarray(arr, float)
+        if a.ndim != 2 or a.shape[1] != 2:
+            return np.empty((0, 2), float)
+        ok = np.isfinite(a).all(axis=1)
+        a = a[ok]
+        if len(a) <= 1:
+            return a
+        keep = [0]
+        for i in range(1, len(a)):
+            if not (abs(a[i, 0] - a[i-1, 0]) < 1e-9 and abs(a[i, 1] - a[i-1, 1]) < 1e-9):
+                keep.append(i)
+        return a[keep]
 
-    kept_segs, dom_buffer = [], None
-    overlap_px   = max(6, int(window_half_size * 0.6))
-    min_keep_len = max(8.0, 0.6 * window_half_size)
+    def _shoelace_area(xs, ys):
+        return 0.5 * abs(np.dot(xs, np.roll(ys, -1)) - np.dot(ys, np.roll(xs, -1)))
 
-    if use_shapely:
-        for S in stitched:
-            g = LineString(S)
-            if dom_buffer is None:
-                kept_segs.append(S)
-                dom_buffer = g.buffer(overlap_px, cap_style=2, join_style=2)
-            else:
-                remainder = g.difference(dom_buffer)
-                if remainder.is_empty: continue
-                for piece in _split_lines(remainder):
-                    if piece.length >= min_keep_len:
-                        kept_segs.append(np.asarray(piece.coords, float))
-                dom_buffer = unary_union([dom_buffer, g.buffer(overlap_px, cap_style=2, join_style=2)])
-        segs = kept_segs if kept_segs else stitched
-    else:
-        segs = stitched
+    # --- gather member midlines ---
+    stitched = []
+    for mid in member_ids:
+        crack = authoring_atomic.get(mid)
+        if not crack:
+            continue
+        ml = crack.get("midline", []) or []
+        if len(ml) < 2:
+            continue
+        stitched.append(np.array(ml, float))
+    if not stitched:
+        return {}
 
     edge1_segs, edge2_segs = [], []
     norm1_segs, norm2_segs = [], []
     union_mask = np.zeros((H, W), np.uint8)
     all_widths = []
 
-    for S in segs:
-        if S is None or len(S) < 2: continue
+    # --- color channel mapping (BGR safe) ---
+    bgr_idx = {0: 2, 1: 0, 2: 1}.get(color_channel, 2)
 
-        x0 = max(0, int(np.floor(S[:,0].min()) - pad))
-        x1 = min(W, int(np.ceil(S[:,0].max()) + pad))
-        y0 = max(0, int(np.floor(S[:,1].min()) - pad))
-        y1 = min(H, int(np.ceil(S[:,1].max()) + pad))
-        if x1-x0 < 2 or y1-y0 < 2: continue
+    for idx, S in enumerate(stitched):
+        if S is None or len(S) < 2:
+            continue
+        try:
+            x0 = max(0, int(np.floor(S[:, 0].min()) - pad))
+            x1 = min(W, int(np.ceil(S[:, 0].max()) + pad))
+            y0 = max(0, int(np.floor(S[:, 1].min()) - pad))
+            y1 = min(H, int(np.ceil(S[:, 1].max()) + pad))
+            if x1 - x0 < 2 or y1 - y0 < 2:
+                continue
 
-        crop = gray_full[y0:y1, x0:x1]
-        track_local_yx = np.vstack([S[:,1]-y0, S[:,0]-x0])  # (2,N) [y,x]
-        pts_crop = [S[0]-[x0,y0], S[-1]-[x0,y0]]
+            crop = original_image[y0:y1, x0:x1]
+            crop_gray = crop[:, :, bgr_idx] if crop.ndim == 3 else crop
 
-        # edge masks (pure)
-        em1, em2 = edge_masks(crop.astype(np.uint8), track_local_yx, window_half_size=window_half_size)
+            # --- corrected payload fields (JSON safe + atomic compatible) ---
+            pts_crop = [
+                [float(S[0, 0] - x0), float(S[0, 1] - y0)],
+                [float(S[-1, 0] - x0), float(S[-1, 1] - y0)]
+            ]
 
-        # edges
-        midline_xy_crop = np.column_stack([track_local_yx[1], track_local_yx[0]])
-        res = edges_tracking(
-            image_crop=crop,
-            pts_cropp=pts_crop,
-            edge_mask1_cropp=em1, edge_mask2_cropp=em2,
-            midline=midline_xy_crop, mu=int(mu), l=int(l), p=int(p),
-            return_normal_edges=True,
-            prefer_gpu=prefer_gpu
-        )
-        if not isinstance(res, dict): 
+            track_local_yx = np.vstack([S[:, 1] - y0, S[:, 0] - x0]).astype(float)
+            bbox = [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
+
+            payload = dict(
+                image_crop_gray=crop_gray.astype(np.uint8),
+                pts_crop=pts_crop,
+                adjusted_track=track_local_yx,
+                manual_midline_global=S.astype(float),
+                bbox=bbox,
+                params={
+                    "window_half_size": int(window_half_size),
+                    "mu": float(mu),
+                    "l": int(l),
+                    "p": int(p)
+                },
+                save_folder=save_folder or ".",
+                image_base=os.path.basename(image_base or "unknown"),
+                crack_id=f"cmbseg{idx}"
+            )
+
+            result = edge_param_worker(payload)
+            if not isinstance(result, dict):
+                continue
+
+            ge = result.get("geodesic_edges", [None, None])
+            if not ge or not isinstance(ge, (list, tuple)) or len(ge) != 2:
+                continue
+
+            e1, e2 = ge
+            if e1 is None or e2 is None or len(e1) < 2 or len(e2) < 2:
+                continue
+
+            e1 = np.asarray(e1, float)
+            e2 = np.asarray(e2, float)
+            e1_full = _finite_xy(np.column_stack([e1[:, 0] + x0, e1[:, 1] + y0]))
+            e2_full = _finite_xy(np.column_stack([e2[:, 0] + x0, e2[:, 1] + y0]))
+            if len(e1_full) < 2 or len(e2_full) < 2:
+                continue
+
+            edge1_segs.append(e1_full)
+            edge2_segs.append(e2_full)
+
+            normals = result.get("normal_edge_points")
+            if normals is not None:
+                (e1x, e1y), (e2x, e2y) = normals
+                n1_full = _finite_xy(np.column_stack([np.asarray(e1x) + x0, np.asarray(e1y) + y0]))
+                n2_full = _finite_xy(np.column_stack([np.asarray(e2x) + x0, np.asarray(e2y) + y0]))
+                norm1_segs.append(n1_full)
+                norm2_segs.append(n2_full)
+                m = min(len(n1_full), len(n2_full))
+                if m >= 2:
+                    d = np.sqrt(np.sum((n1_full[:m] - n2_full[:m]) ** 2, axis=1))
+                    if d.size:
+                        all_widths.append(d[np.isfinite(d)])
+            else:
+                norm1_segs.append(np.empty((0, 2)))
+                norm2_segs.append(np.empty((0, 2)))
+
+            # --- mask assembly ---
+            mask_crop = result.get("mask_crop")
+            if mask_crop is not None:
+                mask_seg = np.array(mask_crop, np.uint8)
+                x, y, w, h = bbox
+                union_mask[y:y + h, x:x + w] |= (mask_seg > 0).astype(np.uint8)
+            else:
+                ex = np.concatenate((e1_full[:, 0][::-1], e2_full[:, 0]))
+                ey = np.concatenate((e1_full[:, 1][::-1], e2_full[:, 1]))
+                exc, eyc = np.clip(ex, 0, W - 1), np.clip(ey, 0, H - 1)
+                area = _shoelace_area(exc, eyc)
+                if area > 0.5:
+                    poly = np.stack([exc, eyc], axis=1).astype(np.int32).reshape(-1, 1, 2)
+                    cv2.fillPoly(union_mask, [poly], 255, lineType=cv2.LINE_AA)
+
+        except Exception as e:
+            print(f"[COMBINE_SEG] seg idx={idx} failed: {e}")
+            traceback.print_exc()
             continue
 
-        ge = res.get("geodesic_edges", [None, None])
-        if ge is None or len(ge) != 2: 
-            continue
-        e1, e2 = ge
-        if e1 is None or e2 is None or len(e1) < 2 or len(e2) < 2:
-            continue
-
-        e1 = np.asarray(e1, float); e2 = np.asarray(e2, float)
-        e1_full = _finite_xy(np.column_stack([e1[:,0]+x0, e1[:,1]+y0]))
-        e2_full = _finite_xy(np.column_stack([e2[:,0]+x0, e2[:,1]+y0]))
-        if len(e1_full) < 2 or len(e2_full) < 2: 
-            continue
-
-        e1_full = _align_edge_to_midline(S, e1_full)
-        e2_full = _align_edge_to_midline(S, e2_full)
-
-        # normals & widths
-        normals = res.get("normal_edge_points")
-        if normals is not None:
-            (e1x, e1y), (e2x, e2y) = normals
-            n1_full = _finite_xy(np.column_stack([np.asarray(e1x)+x0, np.asarray(e1y)+y0]))
-            n2_full = _finite_xy(np.column_stack([np.asarray(e2x)+x0, np.asarray(e2y)+y0]))
-            m = min(len(n1_full), len(n2_full))
-            if m >= 2:
-                d = np.sqrt(np.sum((n1_full[:m] - n2_full[:m])**2, axis=1))
-                if d.size: all_widths.append(d[np.isfinite(d)])
-        else:
-            n1_full = np.empty((0,2)); n2_full = np.empty((0,2))
-
-        edge1_segs.append(e1_full)
-        edge2_segs.append(e2_full)
-        norm1_segs.append(n1_full)
-        norm2_segs.append(n2_full)
-
-        # polygonal mask via edges if area is decent; else a ribbon around midline
-        ex = np.concatenate((e1_full[:,0][::-1], e2_full[:,0]))
-        ey = np.concatenate((e1_full[:,1][::-1], e2_full[:,1]))
-        exc, eyc = np.clip(ex, 0, W-1), np.clip(ey, 0, H-1)
-        area = _shoelace_area(exc, eyc)
-        if area > 0.5:
-            poly = np.stack([exc, eyc], axis=1).astype(np.int32).reshape(-1,1,2)
-            mask_seg = np.zeros((H, W), np.uint8)
-            cv2.fillPoly(mask_seg, [poly], 255, lineType=cv2.LINE_AA)
-        else:
-            mask_seg = _ribbon_mask_from_midline(H, W, S, thickness_px=max(3, window_half_size//3))
-        union_mask |= (mask_seg > 0).astype(np.uint8)
-
+    # --- final crop/bbox ---
     if np.any(union_mask):
-        x, y, w, h = bbox_from_mask(union_mask) or [0,0,W,H]
-        crop = union_mask[y:y+h, x:x+w].astype(np.uint8)
+        ys, xs = np.where(union_mask > 0)
+        Y0, Y1 = int(ys.min()), int(ys.max() + 1)
+        X0, X1 = int(xs.min()), int(xs.max() + 1)
+        crop = union_mask[Y0:Y1, X0:X1].astype(np.uint8)
+        mask_bbox = [int(X0), int(Y0), int(X1 - X0), int(Y1 - Y0)]
     else:
-        x=y=0; w=h=1; crop = np.zeros((1,1), np.uint8)
+        crop = np.zeros((1, 1), np.uint8)
+        mask_bbox = [0, 0, 1, 1]
 
     def _flatten(seg_list):
-        out=[]
+        out = []
         for i, arr in enumerate(seg_list):
-            out.extend([[float(xx), float(yy)] for xx,yy in arr])
-            if i < len(seg_list)-1:
-                out.append([None,None])
+            out.extend([[float(xx), float(yy)] for xx, yy in arr])
+            if i < len(seg_list) - 1:
+                out.append([None, None])
         return out
 
-    combined_length = float(sum(_linestring_length(s) for s in segs))
     mean_width = float(np.nanmean(np.concatenate(all_widths))) if len(all_widths) else None
+    combined_length = float(sum(LineString(s).length for s in edge1_segs if len(s) >= 2))
 
     return {
         "source": "combined",
         "members": [str(m) for m in member_ids],
-        "midline_segments": [ [[float(xx), float(yy)] for (xx,yy) in s] for s in segs ],
-        "midline": _flatten(segs),
+        "midline_segments": [[[float(xx), float(yy)] for (xx, yy) in s] for s in stitched],
+        "midline": _flatten(stitched),
         "geodesic_edges": {"edge1": _flatten(edge1_segs), "edge2": _flatten(edge2_segs)},
         "normal_edge_points": {"edge1": _flatten(norm1_segs), "edge2": _flatten(norm2_segs)},
         "mask_crop": crop.tolist(),
-        "mask_bbox": [int(x), int(y), int(w), int(h)],
+        "mask_bbox": mask_bbox,
         "combined_length": combined_length,
         "mean_width": mean_width,
     }
+
+

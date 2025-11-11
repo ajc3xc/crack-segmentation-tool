@@ -2815,7 +2815,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print(f"[DEBUG METRICS] ⚠️ atomics missing mask/midline: {missing}")
 
         # --- rebuild combined cracks statelessly for metrics ---
-        rebuilt_combined = {}
+        '''rebuilt_combined = {}
         if authoring_combined:
             print(f"[COMBINE_DBG] rebuilding {len(authoring_combined)} combined cracks statelessly...")
             for ccid, cmb in authoring_combined.items():
@@ -2830,20 +2830,61 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     except Exception:
                         color_idx = 0
 
+
                     rebuilt = build_combined_crack_stateless(
                         original_image=self.original_image,
                         authoring_atomic=atomic,
                         member_ids=[str(m) for m in members],
                         window_half_size=45, mu=0.0, l=5, p=14,
-                        color_channel=color_idx, pad=10, prefer_gpu=True
+                        color_channel=color_idx, pad=10, prefer_gpu=True,
+                        save_folder=self.save_folder,
+                        image_base=base_name
                     )
                     rebuilt_combined[str(ccid)] = rebuilt
                 except Exception as e:
                     print(f"[COMBINE_DBG] rebuild combined {ccid} failed: {e}")
                     traceback.print_exc()
         else:
-            print("[COMBINE_DBG] (info) no authoring combined cracks found in JSON.")
+            print("[COMBINE_DBG] (info) no authoring combined cracks found in JSON.")'''
+        # --- rebuild combined cracks statelessly for metrics ---
+        rebuilt_combined = {}
+        authoring_combined = read_authoring_combined(ann_json)
 
+        if not authoring_combined:
+            print("[COMBINE_DBG] (info) no authoring combined in JSON → synthesizing groups from atomics…")
+            authoring_combined = auto_groups_from_atomic(atomic, px_thresh=12.0)
+
+        if authoring_combined:
+            print(f"[COMBINE_DBG] rebuilding {len(authoring_combined)} combined cracks statelessly...")
+            for ccid, cmb in authoring_combined.items():
+                members = cmb.get("members", []) or []
+                if not members:
+                    continue
+                try:
+                    try:
+                        gui_c = self.edge_track_color_box.currentText()
+                        color_idx = 0 if gui_c == "R" else 1 if gui_c == "B" else 2
+                    except Exception:
+                        color_idx = 0
+
+                    rebuilt = build_combined_crack_stateless(
+                        original_image=self.original_image,
+                        authoring_atomic=atomic,
+                        member_ids=[str(m) for m in members],
+                        window_half_size=45, mu=0.0, l=5, p=14,
+                        color_channel=color_idx, pad=10, prefer_gpu=True,
+                        save_folder=self.save_folder,
+                        image_base=base_name
+                    )
+                    if rebuilt and (rebuilt.get("mask_crop") or rebuilt.get("geodesic_edges")):
+                        rebuilt_combined[str(ccid)] = rebuilt
+                except Exception as e:
+                    print(f"[COMBINE_DBG] rebuild combined {ccid} failed: {e}")
+                    import traceback; traceback.print_exc()
+        else:
+            print("[COMBINE_DBG] (info) no combined cracks after synthesis.")
+                        
+            
         combined_map = rebuilt_combined
         members_in_combined = {
             str(m) for cmb in combined_map.values() for m in (cmb.get("members", []) or [])
