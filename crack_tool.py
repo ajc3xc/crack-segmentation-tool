@@ -2753,10 +2753,12 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
     def compute_mask_and_width_metrics_for_image(self, display=False, export_supervision=False):
         """
         Snapshot-only driver (strict edges). Writes:
-        - metrics/<base>/cid{X}/gt_vs_manual_mask.png
+        - metrics/<base>/cid{X}/gt_vs_manual_mask_global.png
         - metrics/<base>/cid{X}/gt_normals.png (with midline)
-        - metrics/<base>/combined{C}_{members}/... same two files
+        - metrics/<base>/combined{C}_{members}/gt_vs_manual_mask_global.png
+        - metrics/<base>/combined{C}_{members}/gt_normals.png
         - metrics/<base>/mask_metrics.csv  (per-crack + TOTAL)
+        - metrics/<base>/snapshot/combined.json (persist stateless combined used)
         """
         import os, json, numpy as np, pandas as pd, traceback, cv2
         from helpers.metrics import (
@@ -2766,6 +2768,41 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         from helpers.combine_debug import _mask_from_crack
         from helpers.combine_debug import auto_groups_from_atomic
         from combiner import build_combined_crack_stateless
+
+        # ---- tiny local helpers -------------------------------------------------
+        def _bbox_from_mask_full(mask):
+            ys, xs = np.where(mask > 0)
+            if xs.size == 0 or ys.size == 0:
+                return None
+            x0, x1 = int(xs.min()), int(xs.max()) + 1
+            y0, y1 = int(ys.min()), int(ys.max()) + 1
+            return [x0, y0, x1 - x0, y1 - y0]
+
+        def _write_overlay(H, W, gt_full, man_full, out_path, bbox=None, original_image=None):
+            # global overlay (no crop), optionally emphasize bbox region
+            vis = original_image.copy()
+            if vis.ndim == 2:
+                vis = cv2.cvtColor(vis, cv2.COLOR_GRAY2BGR)
+            vis = vis.astype(np.float32) / 255.0
+
+            gt = (gt_full > 0)
+            pr = (man_full > 0)
+            inter = gt & pr
+            gt_only = gt & (~pr)
+            pr_only = pr & (~gt)
+
+            overlay = np.zeros_like(vis, np.float32)
+            overlay[gt_only] = (0, 0, 1.0)       # blue = GT only (BGR)
+            overlay[pr_only] = (0, 1.0, 1.0)     # yellow/cyan-ish = pred only (BGR)
+            overlay[inter]  = (1.0, 1.0, 1.0)    # white = overlap
+
+            blended = cv2.addWeighted(overlay, 0.7, vis, 0.3, 0)
+            if bbox:
+                x,y,w,h = map(int, bbox)
+                cv2.rectangle(blended, (x,y), (x+w, y+h), (0,0,255), 1, lineType=cv2.LINE_AA)
+            blended = np.clip(blended * 255.0, 0, 255).astype(np.uint8)
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            cv2.imwrite(out_path, blended)
 
         print(f"[DEBUG METRICS] ===== START for {getattr(self, 'name', '?')} =====")
         if getattr(self, "current_mask", None) is None:
@@ -2789,27 +2826,18 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print(f"[DEBUG METRICS] ❌ could not read {ann_path}: {e}")
             return {}
 
-        H, W = self.original_image.shape[:2]
+        H, W   = self.original_image.shape[:2]
         gt_full = (self.current_mask > 0).astype(np.uint8)
 
-        # --- merge atomics from metrics snapshots (edge workers)
+        # --- merge atomics from snapshots
         atomic = merged_metric_atomic(authoring_atomic, self.save_folder, base_name)
         print(f"[DEBUG METRICS] merged {len(atomic)} atomic cracks after edge snapshots merge")
 
-        # --- repair any missing/empty crops from geodesic edges, then persist ---
-        def _bbox_from_mask_full(mask):
-            ys, xs = np.where(mask > 0)
-            if xs.size == 0 or ys.size == 0:
-                return None
-            x0, x1 = int(xs.min()), int(xs.max()) + 1
-            y0, y1 = int(ys.min()), int(ys.max()) + 1
-            return [x0, y0, x1 - x0, y1 - y0]
-
+        # --- repair missing crops from edges & persist
         repaired = []
         for cid, cr in atomic.items():
             m = _mask_from_crack(cr, H, W)
             if int(m.sum()) == 0:
-                # rebuild from edges
                 m2 = reconstruct_manual_mask_from_edges(cr, H, W)
                 if m2 is not None and int(m2.sum()) > 0:
                     bb = _bbox_from_mask_full(m2)
@@ -2822,11 +2850,11 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         if repaired:
             print(f"[COMBINE_DBG] repaired mask_crop/bbox for: {sorted(repaired)}")
 
-        # --- synthesize combined groups automatically from merged atomics ---
+        # --- auto-group using merged+repaired atomics
         authoring_combined = auto_groups_from_atomic(atomic, image_hw=(H, W), px_thresh=10.0)
         print(f"[COMBINE_DBG] synthesized {len(authoring_combined)} combined groups automatically.")
 
-        # --- rebuild combined cracks statelessly for metrics ---
+        # --- rebuild combined cracks statelessly
         rebuilt_combined = {}
         if authoring_combined:
             print(f"[COMBINE_DBG] rebuilding {len(authoring_combined)} combined cracks statelessly...")
@@ -2835,20 +2863,30 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 if not members:
                     continue
                 try:
-                    color_idx = 0
                     rebuilt = build_combined_crack_stateless(
                         original_image=self.original_image,
                         authoring_atomic=atomic,
                         member_ids=[str(m) for m in members],
                         window_half_size=45, mu=0.0, l=5, p=14,
-                        color_channel=color_idx, pad=10, prefer_gpu=True
+                        color_channel=0, pad=10, prefer_gpu=True
                     )
+                    # ensure members field is kept
+                    rebuilt["members"] = members
                     rebuilt_combined[str(ccid)] = rebuilt
                 except Exception as e:
                     print(f"[COMBINE_DBG] rebuild combined {ccid} failed: {e}")
                     traceback.print_exc()
         else:
             print("[COMBINE_DBG] (info) no combined cracks found after auto-grouping.")
+
+        # --- persist combined snapshot used for metrics
+        try:
+            cpath_snapshot = metric_combined_path(self.save_folder, base_name)
+            # metric_combined_path points to metrics/<base>/snapshot/combined.json
+            safe_write_json(cpath_snapshot, rebuilt_combined)
+            print(f"[COMBINE_DBG] persisted combined snapshot → {cpath_snapshot}")
+        except Exception as e:
+            print(f"[COMBINE_DBG] persist combined snapshot failed: {e}")
 
         combined_map = rebuilt_combined
         members_in_combined = {
@@ -2858,9 +2896,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         mask_rows = []
         agg_manual = np.zeros((H, W), np.uint8)
 
-        # =========================
-        # Atomic Cracks
-        # =========================
+        # ========================= ATOMIC =========================
         for cid, crack in atomic.items():
             scid = str(cid)
             src = (crack.get("source") or "").lower()
@@ -2875,18 +2911,27 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     continue
                 agg_manual |= (m_full > 0).astype(np.uint8)
 
-                bbox = [0,0,W,H]
-                x, y, w, h = map(int, bbox)
-                gt_crop, man_crop = gt_full[y:y+h, x:x+w], m_full[y:y+h, x:x+w]
-
+                # metrics (global crop)
+                gt_crop, man_crop = gt_full, m_full
                 base = compute_mask_metrics(gt_crop, man_crop)
-                bnd = boundary_fscore(gt_crop, man_crop, tau=2.0)
+                bnd  = boundary_fscore(gt_crop, man_crop, tau=2.0)
                 surf = assd_hd95(gt_crop, man_crop)
 
-                row = {
-                    "image": base_name, "crack_type": "atomic",
-                    "crack_id": scid, "members": ""
-                }
+                # write overlays
+                cid_dir = os.path.join(metrics_dir, f"cid{scid}")
+                os.makedirs(cid_dir, exist_ok=True)
+                bb = _bbox_from_mask_full(m_full) or [0,0,W,H]
+                _write_overlay(H, W, gt_full, m_full, os.path.join(cid_dir, "gt_vs_manual_mask_global.png"),
+                            bbox=bb, original_image=self.original_image)
+                try:
+                    # if you have helpers.plot_metrics.plot_gt_normals_for_crack
+                    from helpers import plot_metrics as _pm
+                    _pm.plot_gt_normals_for_crack(crack, (gt_full * 255).astype(np.uint8),
+                                                cid_dir, "gt_normals.png", bbox=bb)
+                except Exception:
+                    pass
+
+                row = {"image": base_name, "crack_type": "atomic", "crack_id": scid, "members": ""}
                 row.update(base); row.update(bnd); row.update(surf)
                 mask_rows.append(row)
                 print(f"[DEBUG MASK] atomic cid={scid} IoU={base['iou']:.4f} bF1={bnd['boundary_f1']:.4f}")
@@ -2894,7 +2939,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 print(f"[DEBUG METRICS] atomic cid={scid} failed: {e}")
                 traceback.print_exc()
 
-        # ============== Combined Cracks ==============
+        # ======================== COMBINED ========================
         if not combined_map:
             print("[COMBINE_DBG] (info) no combined cracks after stateless rebuild.")
         for ccid, cmb in (combined_map or {}).items():
@@ -2904,19 +2949,26 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     continue
                 agg_manual |= (m_full > 0).astype(np.uint8)
 
-                bbox = [0,0,W,H]
-                x, y, w, h = map(int, bbox)
-                gt_crop, man_crop = gt_full[y:y+h, x:x+w], m_full[y:y+h, x:x+w]
-
+                # metrics (global)
+                gt_crop, man_crop = gt_full, m_full
                 base = compute_mask_metrics(gt_crop, man_crop)
-                bnd = boundary_fscore(gt_crop, man_crop, tau=2.0)
+                bnd  = boundary_fscore(gt_crop, man_crop, tau=2.0)
                 surf = assd_hd95(gt_crop, man_crop)
 
                 members = "_".join(str(m) for m in (cmb.get("members", []) or []))
-                row = {
-                    "image": base_name, "crack_type": "combined",
-                    "crack_id": str(ccid), "members": members
-                }
+                cmb_dir = os.path.join(metrics_dir, f"combined{ccid}_{members or 'none'}")
+                os.makedirs(cmb_dir, exist_ok=True)
+                bb = _bbox_from_mask_full(m_full) or [0,0,W,H]
+                _write_overlay(H, W, gt_full, m_full, os.path.join(cmb_dir, "gt_vs_manual_mask_global.png"),
+                            bbox=bb, original_image=self.original_image)
+                try:
+                    from helpers import plot_metrics as _pm
+                    _pm.plot_gt_normals_for_crack(cmb, (gt_full * 255).astype(np.uint8),
+                                                cmb_dir, "gt_normals.png", bbox=bb)
+                except Exception:
+                    pass
+
+                row = {"image": base_name, "crack_type": "combined", "crack_id": str(ccid), "members": members}
                 row.update(base); row.update(bnd); row.update(surf)
                 mask_rows.append(row)
                 print(f"[DEBUG MASK] combined id={ccid}({members}) IoU={base['iou']:.4f} bF1={bnd['boundary_f1']:.4f}")
@@ -2937,9 +2989,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         pd.DataFrame(mask_rows).to_csv(out_csv, index=False)
         print(f"[DEBUG MASK] TOTAL IoU (union) = {mask_iou(agg_manual, gt_full):.4f}")
         print(f"[DEBUG METRICS] wrote IoU/Boundary/Surface metrics → {out_csv}")
-
         print(f"[DEBUG METRICS] ===== END for {base_name} =====\n")
-        
+    
     # ===============================================================
     # === Smoke test edge worker (cropped + light aware) ===
     # ===============================================================
