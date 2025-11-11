@@ -1146,3 +1146,20 @@ def merged_metric_atomic(authoring_atomic: dict, save_folder: str, image_base: s
                 except Exception as e:
                     print(f"[merge] ⚠ failed {p}: {e}")
     return merged
+
+
+def has_valid_mask(crack: dict) -> bool:
+    """
+    Returns True if a crack dictionary has a valid mask (crop+bbox) or midline.
+    Protects combine/metrics from ghost cracks.
+    """
+    try:
+        mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
+        ml = crack.get("midline")
+        if mc is not None and bb is not None and len(mc) and len(bb) == 4:
+            return True
+        if isinstance(ml, (list, tuple)) and len(ml) >= 2:
+            return True
+        return False
+    except Exception:
+        return False

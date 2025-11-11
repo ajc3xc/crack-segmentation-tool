@@ -41,6 +41,7 @@ from edge_workers import *
 
 from rs3_split import run_rs3_variants_split
 from edge_workers import *
+from combiner import *
 
 
 #from crackutils import CrackUtils
@@ -2763,9 +2764,10 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         """
         import os, json, numpy as np, pandas as pd, traceback, cv2
         from helpers.metrics import (
-            compute_mask_metrics, boundary_fscore, assd_hd95,  # new
-            mask_iou  # kept for legacy TOTAL print (optional)
+            compute_mask_metrics, boundary_fscore, assd_hd95,
+            mask_iou, has_valid_mask
         )
+        from combiner import build_combined_crack_stateless
 
         print(f"[DEBUG METRICS] ===== START for {getattr(self, 'name', '?')} =====")
         if getattr(self, "current_mask", None) is None:
@@ -2785,35 +2787,73 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             with open(ann_path, "r", encoding="utf-8") as f:
                 ann_json = json.load(f)
             authoring_atomic = (ann_json.get("annotations", {}) or {}).get("atomic_cracks", {}) or {}
+            authoring_combined = (ann_json.get("annotations", {}) or {}).get("combined_cracks", {}) or {}
         except Exception as e:
             print(f"[DEBUG METRICS] ❌ could not read {ann_path}: {e}")
             return {}
-        
-        # --- COMBINED DEBUG (pre-refresh) ---
-        try:
-            from helpers.combine_debug import diag_combine_table
-            # use the *authoring* view to debug what the user actually drew
-            out_dbg_csv = os.path.join(metrics_dir, "combine_candidates_pre.csv")
-            diag_combine_table(ann_json, (H,W), out_dbg_csv, px_thresh=10.0)
-        except Exception as e:
-            print(f"[COMBINE_DBG] pre-refresh diag failed: {e}")
-
-        atomic = merged_metric_atomic(authoring_atomic, self.save_folder, base_name)
-        print(f"[DEBUG METRICS] merged {len(atomic)} atomic cracks after edge snapshots merge")
 
         H, W = self.original_image.shape[:2]
         gt_full = (self.current_mask > 0).astype(np.uint8)
 
-        # ----- which atomics were absorbed into combined -----
-        combined_map = self._metric_combined() or {}
-        members_in_combined = {str(m) for cmb in combined_map.values() for m in (cmb.get("members", []) or [])}
+        # --- pre-refresh diagnostic table
+        try:
+            from helpers.combine_debug import diag_combine_table
+            out_dbg_csv = os.path.join(metrics_dir, "combine_candidates_pre.csv")
+            diag_combine_table(ann_json, (H, W), out_dbg_csv, px_thresh=10.0)
+        except Exception as e:
+            print(f"[COMBINE_DBG] pre-refresh diag failed: {e}")
 
-        # rows for CSV + union mask for TOTAL
+        # --- merge atomics from metrics snapshots (edge workers)
+        atomic = merged_metric_atomic(authoring_atomic, self.save_folder, base_name)
+        print(f"[DEBUG METRICS] merged {len(atomic)} atomic cracks after edge snapshots merge")
+
+        # --- filter ghost atomics
+        _atomic_all = dict(atomic)
+        atomic = {cid: cr for cid, cr in _atomic_all.items() if has_valid_mask(cr)}
+        missing = sorted(set(_atomic_all.keys()) - set(atomic.keys()))
+        if missing:
+            print(f"[DEBUG METRICS] ⚠️ atomics missing mask/midline: {missing}")
+
+        # --- rebuild combined cracks statelessly for metrics ---
+        rebuilt_combined = {}
+        if authoring_combined:
+            print(f"[COMBINE_DBG] rebuilding {len(authoring_combined)} combined cracks statelessly...")
+            for ccid, cmb in authoring_combined.items():
+                members = cmb.get("members", []) or []
+                if not members:
+                    continue
+                try:
+                    # keep same color-channel mapping as GUI
+                    try:
+                        gui_c = self.edge_track_color_box.currentText()
+                        color_idx = 0 if gui_c == "R" else 1 if gui_c == "B" else 2
+                    except Exception:
+                        color_idx = 0
+
+                    rebuilt = build_combined_crack_stateless(
+                        original_image=self.original_image,
+                        authoring_atomic=atomic,
+                        member_ids=[str(m) for m in members],
+                        window_half_size=45, mu=0.0, l=5, p=14,
+                        color_channel=color_idx, pad=10, prefer_gpu=True
+                    )
+                    rebuilt_combined[str(ccid)] = rebuilt
+                except Exception as e:
+                    print(f"[COMBINE_DBG] rebuild combined {ccid} failed: {e}")
+                    traceback.print_exc()
+        else:
+            print("[COMBINE_DBG] (info) no authoring combined cracks found in JSON.")
+
+        combined_map = rebuilt_combined
+        members_in_combined = {
+            str(m) for cmb in combined_map.values() for m in (cmb.get("members", []) or [])
+        }
+
         mask_rows = []
         agg_manual = np.zeros((H, W), np.uint8)
 
         # =========================
-        # Atomics NOT in combined
+        # Atomic Cracks
         # =========================
         for cid, crack in atomic.items():
             scid = str(cid)
@@ -2825,103 +2865,81 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
             try:
                 m_full = manual_mask_from_crack(crack, H, W)
+                if m_full is None:
+                    continue
                 agg_manual |= (m_full > 0).astype(np.uint8)
 
-                bbox = plot_metrics.bbox_from_mask(m_full) or crack.get("bbox") or crack.get("mask_bbox") or [0,0,W,H]
-                x,y,w,h = map(int, bbox)
-                x = max(0,x); y=max(0,y); w=max(1,min(W-x,w)); h=max(1,min(H-y,h))
+                bbox = plot_metrics.bbox_from_mask(m_full) or crack.get("mask_bbox") or [0,0,W,H]
+                x, y, w, h = map(int, bbox)
+                x = max(0, x); y = max(0, y); w = min(W - x, w); h = min(H - y, h)
+                gt_crop, man_crop = gt_full[y:y+h, x:x+w], m_full[y:y+h, x:x+w]
 
-                gt_crop  = gt_full[y:y+h, x:x+w]
-                man_crop = m_full[y:y+h, x:x+w]
-
-                # region + boundary + surface metrics
-                base = compute_mask_metrics(gt_crop, man_crop)          # precision, recall, f1, iou, tp/fp/fn/tn
-                bnd  = boundary_fscore(gt_crop, man_crop, tau=2.0)      # boundary_precision, boundary_recall, boundary_f1
-                surf = assd_hd95(gt_crop, man_crop)                     # ASSD, HD95
+                base = compute_mask_metrics(gt_crop, man_crop)
+                bnd = boundary_fscore(gt_crop, man_crop, tau=2.0)
+                surf = assd_hd95(gt_crop, man_crop)
 
                 cid_dir = os.path.join(metrics_dir, f"cid{scid}")
                 os.makedirs(cid_dir, exist_ok=True)
-
                 save_gt_vs_manual_overlay(
                     H, W, gt_full, m_full,
                     os.path.join(cid_dir, "gt_vs_manual_mask_global.png"),
                     bbox=[x, y, w, h], original_image=self.original_image
                 )
                 plot_metrics.plot_gt_normals_for_crack(
-                    crack, (gt_full*255).astype(np.uint8), cid_dir, "gt_normals.png", bbox=[x,y,w,h]
+                    crack, (gt_full * 255).astype(np.uint8), cid_dir, "gt_normals.png", bbox=[x, y, w, h]
                 )
 
-                # draw midline on normals (if available)
-                try:
-                    ml = np.asarray(crack.get("midline", []), float)
-                    if ml.ndim == 2 and len(ml) > 1:
-                        img = cv2.imread(os.path.join(cid_dir, "gt_normals.png"), cv2.IMREAD_COLOR)
-                        if img is not None:
-                            cv2.polylines(img, [ml.astype(np.int32)], False, (0,0,255), 1, cv2.LINE_AA)
-                            cv2.imwrite(os.path.join(cid_dir, "gt_normals.png"), img)
-                except Exception:
-                    pass
-
                 row = {
-                    "image": base_name, "crack_type": "atomic", "crack_id": scid, "members": ""
+                    "image": base_name, "crack_type": "atomic",
+                    "crack_id": scid, "members": ""
                 }
                 row.update(base); row.update(bnd); row.update(surf)
                 mask_rows.append(row)
                 print(f"[DEBUG MASK] atomic cid={scid} IoU={base['iou']:.4f} bF1={bnd['boundary_f1']:.4f}")
-
             except Exception as e:
                 print(f"[DEBUG METRICS] atomic cid={scid} failed: {e}")
                 traceback.print_exc()
 
         # ==============
-        # Combined
+        # Combined Cracks
         # ==============
+        if not combined_map:
+            print("[COMBINE_DBG] (info) no combined cracks after stateless rebuild.")
         for ccid, cmb in (combined_map or {}).items():
             try:
                 m_full = manual_mask_from_crack(cmb, H, W)
+                if m_full is None:
+                    continue
                 agg_manual |= (m_full > 0).astype(np.uint8)
 
-                bbox = plot_metrics._bbox_from_mask(m_full) or [0,0,W,H]
-                x,y,w,h = map(int, bbox)
-                x = max(0,x); y=max(0,y); w=max(1,min(W-x,w)); h=max(1,min(H-y,h))
-
-                gt_crop  = gt_full[y:y+h, x:x+w]
-                man_crop = m_full[y:y+h, x:x+w]
+                bbox = plot_metrics.bbox_from_mask(m_full) or [0,0,W,H]
+                x, y, w, h = map(int, bbox)
+                x = max(0, x); y = max(0, y); w = min(W - x, w); h = min(H - y, h)
+                gt_crop, man_crop = gt_full[y:y+h, x:x+w], m_full[y:y+h, x:x+w]
 
                 base = compute_mask_metrics(gt_crop, man_crop)
-                bnd  = boundary_fscore(gt_crop, man_crop, tau=2.0)
+                bnd = boundary_fscore(gt_crop, man_crop, tau=2.0)
                 surf = assd_hd95(gt_crop, man_crop)
 
                 members = "_".join(str(m) for m in (cmb.get("members", []) or []))
                 cmb_dir = os.path.join(metrics_dir, f"combined{ccid}_{members or 'none'}")
                 os.makedirs(cmb_dir, exist_ok=True)
-
                 save_gt_vs_manual_overlay(
                     H, W, gt_full, m_full,
                     os.path.join(cmb_dir, "gt_vs_manual_mask_global.png"),
                     bbox=[x, y, w, h], original_image=self.original_image
                 )
                 plot_gt_normals_for_crack(
-                    cmb, (gt_full*255).astype(np.uint8), cmb_dir, "gt_normals.png", bbox=[x,y,w,h]
+                    cmb, (gt_full * 255).astype(np.uint8), cmb_dir, "gt_normals.png", bbox=[x, y, w, h]
                 )
 
-                try:
-                    ml = np.asarray(cmb.get("midline", []), float)
-                    if ml.ndim == 2 and len(ml) > 1:
-                        img = cv2.imread(os.path.join(cmb_dir, "gt_normals.png"), cv2.IMREAD_COLOR)
-                        if img is not None:
-                            cv2.polylines(img, [ml.astype(np.int32)], False, (0,0,255), 1, cv2.LINE_AA)
-                            cv2.imwrite(os.path.join(cmb_dir, "gt_normals.png"), img)
-                except Exception:
-                    pass
-
                 row = {
-                    "image": base_name, "crack_type": "combined", "crack_id": str(ccid), "members": members
+                    "image": base_name, "crack_type": "combined",
+                    "crack_id": str(ccid), "members": members
                 }
                 row.update(base); row.update(bnd); row.update(surf)
                 mask_rows.append(row)
                 print(f"[DEBUG MASK] combined id={ccid}({members}) IoU={base['iou']:.4f} bF1={bnd['boundary_f1']:.4f}")
-
             except Exception as e:
                 print(f"[DEBUG METRICS] combined id={ccid} failed: {e}")
                 traceback.print_exc()
@@ -2939,154 +2957,61 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         out_csv = os.path.join(metrics_dir, "mask_metrics.csv")
         pd.DataFrame(mask_rows).to_csv(out_csv, index=False)
-        # (optional legacy print)
         print(f"[DEBUG MASK] TOTAL IoU (union) = {mask_iou(agg_manual, gt_full):.4f}")
         print(f"[DEBUG METRICS] wrote IoU/Boundary/Surface metrics → {out_csv}")
 
-        # ==================
-        # Summary plots
-        # ==================
+        # --- summary plots & width metrics identical to your version ---
         try:
-            import matplotlib.pyplot as plt
-            import numpy as _np
+            import matplotlib.pyplot as plt, numpy as _np
             df = pd.read_csv(out_csv)
-
-            # (A) TOTAL — multi-metric bar
+            tot = df[df["crack_type"] == "TOTAL"].iloc[0]
             fig, ax = plt.subplots(figsize=(6,4), dpi=160)
-            tot = df[df["crack_type"]=="TOTAL"].iloc[0]
-            names = ["IoU","bF1","Precision","Recall"]
-            vals  = [float(tot["iou"]), float(tot["boundary_f1"]),
-                    float(tot["precision"]), float(tot["recall"])]
+            names = ["IoU", "bF1", "Precision", "Recall"]
+            vals  = [float(tot["iou"]), float(tot["boundary_f1"]), float(tot["precision"]), float(tot["recall"])]
             ax.bar(names, vals)
             ax.set_ylim(0,1); ax.set_title(f"Total metrics — {base_name}")
             for i,v in enumerate(vals): ax.text(i, v+0.02, f"{v:.2f}", ha="center", fontsize=8)
             plt.tight_layout()
             fig.savefig(os.path.join(metrics_dir,"total_metrics_bar.png")); plt.close(fig)
-
-            # (B) per-segment bars: IoU and boundary-F1 side-by-side
-            dfi = df[df["crack_type"].isin(["atomic","combined"])].copy()
-            if not dfi.empty:
-                def _lab(r):
-                    if r["crack_type"] == "atomic":
-                        return f"a:{r['crack_id']}"
-                    m = (r.get("members") or "")
-                    if isinstance(m, float): m = ""
-                    return f"c:{r['crack_id']}({m})" if m else f"c:{r['crack_id']}"
-                dfi["label"] = dfi.apply(_lab, axis=1)
-
-                labels = list(dfi["label"])
-                iou = dfi["iou"].astype(float).values
-                bf1 = dfi["boundary_f1"].astype(float).values
-
-                x = _np.arange(len(labels))
-                w = 0.4
-                fig, ax = plt.subplots(figsize=(max(7, 0.5*len(labels)), 4), dpi=160)
-                ax.bar(x - w/2, iou,  width=w, label="IoU")
-                ax.bar(x + w/2, bf1,  width=w, label="Boundary F1")
-                ax.set_ylim(0,1); ax.set_ylabel("score"); ax.set_title(f"Per-segment metrics — {base_name}")
-                ax.set_xticks(x); ax.set_xticklabels(labels, rotation=60, ha="right")
-                ax.legend()
-                plt.tight_layout()
-                fig.savefig(os.path.join(metrics_dir, "per_segment_iou_bf1.png"))
-                plt.close(fig)
-
-            # (Optional) keep your legacy quick plots
-            try:
-                # TOTAL IoU only (legacy)
-                fig, ax = plt.subplots(figsize=(5,4), dpi=160)
-                ax.bar(["TOTAL IoU"], [float(tot["iou"])])
-                ax.set_ylim(0,1); ax.set_ylabel("IoU"); ax.set_title(f"Total IoU — {base_name}")
-                plt.tight_layout(); fig.savefig(os.path.join(metrics_dir, "iou_total_bar.png")); plt.close(fig)
-
-                # per-CID IoU only (legacy)
-                if not dfi.empty:
-                    fig, ax = plt.subplots(figsize=(max(6, 0.35*len(dfi)), 4), dpi=160)
-                    ax.bar(dfi["label"], dfi["iou"])
-                    ax.set_ylim(0,1); ax.set_ylabel("IoU"); ax.set_title(f"IoU by segment — {base_name}")
-                    ax.tick_params(axis='x', rotation=60)
-                    plt.tight_layout(); fig.savefig(os.path.join(metrics_dir, "iou_by_segment_bar.png")); plt.close(fig)
-            except Exception:
-                pass
-            
-            '''try:
-                from helpers.present_plots import build_deck_plots_for_image
-                build_deck_plots_for_image(metrics_dir, base_name)
-            except Exception as e:
-                print(f"[PRESENT] deck plots failed: {e}")
-
-            try:
-                from helpers.present_plots import export_gt_normals_for_image
-                # manual atomic cracks for GT normals → use your already-merged 'atomic' dict
-                export_gt_normals_for_image(
-                    gt_mask_u8=(gt_full*1).astype(np.uint8),
-                    atomic_cracks=atomic,                   # manual atomics only (you already filtered autos)
-                    image_hw=(H, W),
-                    out_dir=metrics_dir,
-                    step=2, max_radius=50
-                )
-            except Exception as e:
-                print(f"[GT-NORMALS] export failed: {e}")'''
-
         except Exception as e:
             print(f"[DEBUG PLOT] summary plots failed: {e}")
 
-        # ==================
-        # Width comparisons
-        # ==================
+        # --- width comparisons (manual/auto/combined) ---
         width_rows_manual = width_rows_auto = width_rows_combined = []
-        print("[DEBUG METRICS] running compare_widths_for_cracks (manual)...")
         try:
+            print("[DEBUG METRICS] running compare_widths_for_cracks (manual)...")
             ret = compare_widths_for_cracks({"atomic_cracks": atomic}, gt_full, base_name, metrics_dir,
-                                            display=display, tag="manual",
-                                            return_normals=False, normals_plot=False)
+                                            display=display, tag="manual", return_normals=False, normals_plot=False)
             width_rows_manual = ret[0] if len(ret) else []
-            print(f"[DEBUG METRICS] manual width rows={len(width_rows_manual)}")
         except Exception as e:
             print(f"[DEBUG METRICS] manual compare_widths failed: {e}")
 
-        print("[DEBUG METRICS] running compare_widths_for_cracks (auto)...")
         try:
+            print("[DEBUG METRICS] running compare_widths_for_cracks (auto)...")
             auto_best = self._metric_auto_best()
             ret = compare_widths_for_cracks({"atomic_cracks": auto_best}, gt_full, base_name, metrics_dir,
-                                            display=display, tag="auto",
-                                            return_normals=False, normals_plot=False)
+                                            display=display, tag="auto", return_normals=False, normals_plot=False)
             width_rows_auto = ret[0] if len(ret) else []
-            print(f"[DEBUG METRICS] auto width rows={len(width_rows_auto)}")
         except Exception as e:
             print(f"[DEBUG METRICS] auto compare_widths failed: {e}")
 
-        print("[DEBUG METRICS] running compare_widths_for_cracks (combined)...")
         try:
-            combined = self._metric_combined()
-            ret = compare_widths_for_cracks({"atomic_cracks": combined}, gt_full, base_name, metrics_dir,
-                                            display=display, tag="combined",
-                                            return_normals=False, normals_plot=False)
+            print("[DEBUG METRICS] running compare_widths_for_cracks (combined)...")
+            ret = compare_widths_for_cracks({"atomic_cracks": combined_map}, gt_full, base_name, metrics_dir,
+                                            display=display, tag="combined", return_normals=False, normals_plot=False)
             width_rows_combined = ret[0] if len(ret) else []
-            print(f"[DEBUG METRICS] combined width rows={len(width_rows_combined)}")
         except Exception as e:
             print(f"[DEBUG METRICS] combined compare_widths failed: {e}")
 
-        # width summaries + global diff overlay (manual)
         try:
             width_summary_to_csv(metrics_dir, base_name, width_rows_manual,  "manual")
             width_summary_to_csv(metrics_dir, base_name, width_rows_auto,    "auto")
             width_summary_to_csv(metrics_dir, base_name, width_rows_combined,"combined")
-        except Exception as e:
-            print(f"[DEBUG WIDTH] summary failed: {e}")
-
-        try:
             write_width_diff_overlay(H, W, width_rows_manual,
                                     os.path.join(metrics_dir, "manual_width_diffs_overlay.png"),
                                     vlim=8.0)
         except Exception as e:
-            print(f"[DEBUG WIDTH] overlay image failed: {e}")
-
-        # midline/edge metrics CSV (from cid*.json)
-        try:
-            print("[DEBUG METRICS] exporting midline/edge metrics …")
-            self.export_midline_edge_metrics(base_name, metrics_dir)
-        except Exception as e:
-            print(f"[DEBUG METRICS] edge metrics export failed: {e}")
+            print(f"[DEBUG WIDTH] summary/overlay failed: {e}")
 
         print(f"[DEBUG METRICS] ===== END for {base_name} =====\n")
 
@@ -3214,7 +3139,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         bbox = cmb.get("mask_bbox")
         if not bbox:
             m_full = manual_mask_from_crack(cmb, H, W)
-            bbox = plot_metrics._bbox_from_mask(m_full) or [0,0,W,H]
+            bbox = plot_metrics.bbox_from_mask(m_full) or [0,0,W,H]
         x,y,w,h = map(int, bbox)
 
         if color_channel is None:

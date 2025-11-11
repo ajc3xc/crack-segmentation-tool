@@ -139,8 +139,8 @@ def save_gt_vs_manual_overlay(H, W, gt_full, man_full, out_png, bbox=None, origi
 
     # NOTE: colors expressed in RGB here then converted to BGR for cv2
     overlay = base.copy()
-    overlay[gt_only]    = (1.0, 0.20, 0.20)  # red
-    overlay[pred_only]  = (1.0, 1.00, 0.20)  # yellow
+    overlay[gt_only]    = (.2, 0.20, 1)  # red
+    overlay[pred_only]  = (.2, 1.00, 1)  # yellow
     overlay[inter]      = (0.97, 0.97, 0.97) # white
 
     out = np.clip(overlay * 255.0, 0, 255).astype(np.uint8)
