@@ -2814,8 +2814,17 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         if missing:
             print(f"[DEBUG METRICS] ⚠️ atomics missing mask/midline: {missing}")
 
+        # Optional: synthesize groups automatically when none exist
+        if not authoring_combined:
+            try:
+                from helpers.combine_debug import auto_groups_from_atomic
+                authoring_combined = auto_groups_from_atomic(ann_json, (H, W), px_thresh=10.0)
+                print(f"[COMBINE_DBG] synthesized {len(authoring_combined)} combined groups automatically.")
+            except Exception as e:
+                print(f"[COMBINE_DBG] auto-grouping failed: {e}")
+                authoring_combined = {}
         # --- rebuild combined cracks statelessly for metrics ---
-        '''rebuilt_combined = {}
+        rebuilt_combined = {}
         if authoring_combined:
             print(f"[COMBINE_DBG] rebuilding {len(authoring_combined)} combined cracks statelessly...")
             for ccid, cmb in authoring_combined.items():
@@ -2830,61 +2839,20 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     except Exception:
                         color_idx = 0
 
-
                     rebuilt = build_combined_crack_stateless(
                         original_image=self.original_image,
                         authoring_atomic=atomic,
                         member_ids=[str(m) for m in members],
                         window_half_size=45, mu=0.0, l=5, p=14,
-                        color_channel=color_idx, pad=10, prefer_gpu=True,
-                        save_folder=self.save_folder,
-                        image_base=base_name
+                        color_channel=color_idx, pad=10, prefer_gpu=True
                     )
                     rebuilt_combined[str(ccid)] = rebuilt
                 except Exception as e:
                     print(f"[COMBINE_DBG] rebuild combined {ccid} failed: {e}")
                     traceback.print_exc()
         else:
-            print("[COMBINE_DBG] (info) no authoring combined cracks found in JSON.")'''
-        # --- rebuild combined cracks statelessly for metrics ---
-        rebuilt_combined = {}
-        authoring_combined = read_authoring_combined(ann_json)
+            print("[COMBINE_DBG] (info) no authoring combined cracks found in JSON.")
 
-        if not authoring_combined:
-            print("[COMBINE_DBG] (info) no authoring combined in JSON → synthesizing groups from atomics…")
-            authoring_combined = auto_groups_from_atomic(atomic, px_thresh=12.0)
-
-        if authoring_combined:
-            print(f"[COMBINE_DBG] rebuilding {len(authoring_combined)} combined cracks statelessly...")
-            for ccid, cmb in authoring_combined.items():
-                members = cmb.get("members", []) or []
-                if not members:
-                    continue
-                try:
-                    try:
-                        gui_c = self.edge_track_color_box.currentText()
-                        color_idx = 0 if gui_c == "R" else 1 if gui_c == "B" else 2
-                    except Exception:
-                        color_idx = 0
-
-                    rebuilt = build_combined_crack_stateless(
-                        original_image=self.original_image,
-                        authoring_atomic=atomic,
-                        member_ids=[str(m) for m in members],
-                        window_half_size=45, mu=0.0, l=5, p=14,
-                        color_channel=color_idx, pad=10, prefer_gpu=True,
-                        save_folder=self.save_folder,
-                        image_base=base_name
-                    )
-                    if rebuilt and (rebuilt.get("mask_crop") or rebuilt.get("geodesic_edges")):
-                        rebuilt_combined[str(ccid)] = rebuilt
-                except Exception as e:
-                    print(f"[COMBINE_DBG] rebuild combined {ccid} failed: {e}")
-                    import traceback; traceback.print_exc()
-        else:
-            print("[COMBINE_DBG] (info) no combined cracks after synthesis.")
-                        
-            
         combined_map = rebuilt_combined
         members_in_combined = {
             str(m) for cmb in combined_map.values() for m in (cmb.get("members", []) or [])
@@ -3055,7 +3023,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print(f"[DEBUG WIDTH] summary/overlay failed: {e}")
 
         print(f"[DEBUG METRICS] ===== END for {base_name} =====\n")
-
+        
     # ===============================================================
     # === Smoke test edge worker (cropped + light aware) ===
     # ===============================================================
@@ -3242,11 +3210,29 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         # --- 1) refresh combined snapshot ---
         try:
-            self._sync_metrics_snapshot_from_authoring(refresh_combine=True, persist=True)
+            self._sync_metrics_snapshot_from_authoring(refresh_combine=True, persist=False)
         except Exception as e:
             traceback.print_exc()
             print(f"[SMOKE] snapshot sync failed: {e}")
             return
+
+        # 🔍 ADD THIS ↓↓↓
+        print("[DEBUG SNAPSHOT] after sync:")
+        try:
+            ann_json_path = os.path.join(self.save_folder, f"{base_name}.json")
+            print(f"[DEBUG SNAPSHOT] expected annotation path: {ann_json_path}")
+            if os.path.exists(ann_json_path):
+                with open(ann_json_path, "r") as f:
+                    ann_json = json.load(f)
+                print(f"[DEBUG SNAPSHOT] top-level keys: {list(ann_json.keys())}")
+                anns = ann_json.get("annotations", {})
+                print(f"[DEBUG SNAPSHOT] annotations keys: {list(anns.keys())}")
+                print(f"[DEBUG SNAPSHOT] combined_cracks len = {len(anns.get('combined_cracks', {}))}")
+                print(f"[DEBUG SNAPSHOT] combined len = {len(anns.get('combined', {}))}")
+            else:
+                print("[DEBUG SNAPSHOT] ❌ no annotation JSON found at path")
+        except Exception as e:
+            print(f"[DEBUG SNAPSHOT] failed to read JSON: {e}")
 
         atomic = self._metric_atomic()
         if not atomic:
@@ -3390,54 +3376,49 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         except Exception:
             return False
 
-    def _sync_metrics_snapshot_from_authoring(self, refresh_combine=False, persist=True):
+    def _sync_metrics_snapshot_from_authoring(self, refresh_combine=False, persist=False):
         """
-        Build per-crack files from self.annotation (read-only inputs only),
+        Build per-crack metric snapshot files from self.annotation (read-only inputs only),
         then load self.metric_annotations from those files.
-        Never mutates self.annotation. Combined is computed in-memory (optional persist).
+
+        Does NOT call any GUI builders or mutate self.annotation.
+        Combined cracks are never recomputed here — only membership lists are preserved.
         """
         import os
-        #from helpers.metrics import (snapshot_from_authoring, split_snapshot_to_files,
-        #                    load_snapshot_from_files, metric_combined_path, safe_write_json)
+        from helpers.metrics import snapshot_from_authoring, split_snapshot_to_files, load_snapshot_from_files
 
         base = self._image_base()
-        # --- derive a minimal authoring view (no variants) ---
         authoring = (self.annotation or {}).get("annotations", {}) or {}
 
-        # optional: rebuild combined *in memory* without touching authoring json
+        # Optional refresh of combined membership structure (no geometry)
         if refresh_combine:
             try:
-                # read atomic from authoring, compute combined NEW dict, and only use it here:
                 ann_atomic = dict(authoring.get("atomic_cracks", {}) or {})
-                combined_new = {}
-                # If you rely on your existing builder, use it per membership set if present:
-                # If there is already combined in authoring, refresh its geometry without writing back
-                for k, cmb in (authoring.get("combined_cracks", {}) or {}).items():
-                    members = [m for m in cmb.get("members", []) if str(m) in ann_atomic]
-                    if not members: continue
-                    try:
-                        combined_new[k] = self._build_combined_crack(members)  # in-memory
-                        combined_new[k]["members"] = members
-                    except Exception:
-                        pass
-                # clone authoring and swap combined to the fresh in-memory set
-                authoring = dict(authoring)
-                authoring["combined_cracks"] = combined_new
-            except Exception as e:
-                print(f"[metrics/snapshot] in-memory combined refresh failed: {e}")
+                combined_existing = dict(authoring.get("combined_cracks", {}) or {})
+                combined_clean = {}
 
+                for k, cmb in combined_existing.items():
+                    # Keep only members that still exist in atomics
+                    members = [m for m in cmb.get("members", []) if str(m) in ann_atomic]
+                    if not members:
+                        continue
+                    # Copy only membership info; do NOT rebuild geometry here
+                    combined_clean[k] = {"members": members}
+
+                authoring = dict(authoring)
+                authoring["combined_cracks"] = combined_clean
+            except Exception as e:
+                print(f"[metrics/snapshot] ⚠ combined membership refresh failed: {e}")
+
+        # --- Snapshot → Disk ---
         snap = snapshot_from_authoring(authoring, cache_key=None)
         split_snapshot_to_files(snap, self.save_folder, base, merge_if_exists=True)
 
-        # If we computed combined in-memory and want it persisted for reproducibility:
+        # (persist flag kept for compatibility; actual persistence is handled by split_snapshot_to_files)
         if refresh_combine and persist:
-            try:
-                # combined already placed by split_snapshot_to_files via snap
-                pass
-            except Exception:
-                pass
+            pass
 
-        # Now load the active working snapshot from per-crack files
+        # --- Reload active working snapshot ---
         self.metric_annotations = load_snapshot_from_files(self.save_folder, base)
 
     def _metric_atomic(self):

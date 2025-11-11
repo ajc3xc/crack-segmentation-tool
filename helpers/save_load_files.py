@@ -264,7 +264,7 @@ def split_snapshot_to_files(snapshot, save_folder, image_base, merge_if_exists=T
     safe_write_json(cpath, cnew)
     #safe_json_dump(cnew, cpath)
     
-def load_snapshot_from_files(save_folder, base_name):
+'''def load_snapshot_from_files(save_folder, base_name):
     """Load all cid*.json under metrics/<base> into a dict."""
     root = metric_image_dir(save_folder, base_name)
     out = {"atomic_cracks": {}, "combined_cracks": {}, "auto_best": {}}
@@ -285,6 +285,43 @@ def load_snapshot_from_files(save_folder, base_name):
         out["atomic_cracks"][cid] = rec
         if "auto_best" in rec and rec["auto_best"]:
             out["auto_best"][cid] = rec["auto_best"]
+    return out'''
+    
+# metrics.py  --- add this inside load_snapshot_from_files(...)
+def load_snapshot_from_files(save_folder, base_name):
+    """Load all cid*.json under metrics/<base> + the combined snapshot."""
+    root = metric_image_dir(save_folder, base_name)
+    out = {"atomic_cracks": {}, "combined_cracks": {}, "auto_best": {}}
+    if not os.path.isdir(root):
+        return out
+
+    # --- NEW: pull in combined snapshot ---
+    try:
+        cpath = metric_combined_path(save_folder, base_name)
+        combined = safe_read_json(cpath, {}) or {}
+        if isinstance(combined, dict):
+            out["combined_cracks"] = combined
+        else:
+            print(f"[LOAD] ⚠ combined.json not a dict → ignoring ({type(combined)})")
+    except Exception as e:
+        print(f"[LOAD] ⚠ failed reading combined snapshot: {e}")
+
+    # --- existing loop for atomic cid*.json ---
+    for fn in os.listdir(root):
+        if not fn.startswith("cid") or not fn.endswith(".json"):
+            continue
+        p = os.path.join(root, fn)
+        rec = safe_read_json(p, {})
+        if not rec:
+            continue
+        cid = rec.get("crack_id")
+        if cid is None:
+            try: cid = int(fn[3:-5])
+            except: continue
+        out["atomic_cracks"][cid] = rec
+        if "auto_best" in rec and rec["auto_best"]:
+            out.setdefault("auto_best", {})[cid] = rec["auto_best"]
+
     return out
 
 def snapshot_fingerprint(snapshot):
