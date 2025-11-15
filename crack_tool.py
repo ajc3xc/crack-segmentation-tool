@@ -2983,10 +2983,45 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             write_width_diff_overlay(H,W,width_rows_manual,
                                     os.path.join(metrics_dir,"manual_width_diffs_overlay.png"),vlim=8.0)
             
+            # --- Build synthetic per-combined cracks with merged midline + edges ---
+            combined_for_width = {}
+            for ccid, cmb in combined_map.items():
+                members = cmb.get("members", [])
+                mid_all, e1_all, e2_all = [], [], []
+                for m in members:
+                    cr = atomic.get(str(m))
+                    if not cr:
+                        continue
+                    ml = np.asarray(cr.get("midline", []), float)
+                    if ml.ndim == 2 and len(ml) >= 2:
+                        mid_all.append(ml)
+                    ge = cr.get("geodesic_edges", {}) or {}
+                    if "edge1" in ge and "edge2" in ge:
+                        e1_all.append(np.asarray(ge["edge1"], float))
+                        e2_all.append(np.asarray(ge["edge2"], float))
+                if mid_all:
+                    mid_merge = np.vstack(mid_all)
+                else:
+                    mid_merge = np.zeros((0, 2))
+                e1_merge = np.vstack(e1_all) if e1_all else np.zeros((0, 2))
+                e2_merge = np.vstack(e2_all) if e2_all else np.zeros((0, 2))
+
+                combined_for_width[str(ccid)] = {
+                    "midline": mid_merge.tolist(),
+                    "geodesic_edges": {"edge1": e1_merge.tolist(), "edge2": e2_merge.tolist()},
+                    "members": members,
+                }
+
+            # --- now run comparison using the synthetic set
+            retc = compare_widths_for_cracks({"atomic_cracks": combined_for_width},
+                                            gt_full, base_name, metrics_dir,
+                                            display=display, tag="combined",
+                                            return_normals=False, normals_plot=False)
+
             
             # Combined width diffs
-            retc = compare_widths_for_cracks({"atomic_cracks": combined_map}, gt_full, base_name, metrics_dir,
-                                            display=display, tag="combined", return_normals=False, normals_plot=False)
+            #retc = compare_widths_for_cracks({"atomic_cracks": combined_map}, gt_full, base_name, metrics_dir,
+            #                                display=display, tag="combined", return_normals=False, normals_plot=False)
             if len(retc):
                 width_summary_to_csv(metrics_dir, base_name, retc[0], "combined")
                 write_width_diff_overlay(H, W, retc[0],

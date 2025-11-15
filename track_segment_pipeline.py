@@ -10,7 +10,7 @@ import cracktools as ct
 from helpers.layout import Ui_MainWindow
 from time import time
 from helpers.crackhelpers import *
-from helpers import metrics
+from helpers import metrics, save_load_files
 
 #This class is for the main tracking / segmentation pipeline for generating the automatic midline and edge tracking submodules
 #This is effectively the 'core' of the entire program's outer function wrappers
@@ -526,7 +526,7 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
                 "user_connections": getattr(self, "user_connections", []),
             }
 
-            crack_entry = metrics._to_py(crack_entry)
+            crack_entry = save_load_files._to_py(crack_entry)
             atomic_cracks[str(self.current_crack_id)] = crack_entry
             print(f"[DEBUG] atomic_cracks updated for id={self.current_crack_id}")
             
