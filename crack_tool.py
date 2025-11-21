@@ -3028,6 +3028,14 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                                         os.path.join(metrics_dir, "combined_width_diffs_overlay.png"), vlim=8.0)
         except Exception as e:
             print(f"[DEBUG WIDTH] failed: {e}")
+            
+        # === FINAL SUMMARY / PRESENTATION PLOTS ===
+        try:
+            from helpers.present_plots import build_deck_plots_for_image
+            print("[DEBUG PLOT] building deck-ready summary plots ...")
+            build_deck_plots_for_image(metrics_dir, base_name)
+        except Exception as e:
+            print(f"[DEBUG PLOT] deck plots failed: {e}")
 
         print(f"[DEBUG METRICS] ===== END for {base_name} =====")
     

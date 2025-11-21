@@ -512,8 +512,10 @@ class CrackUtils:
             next_idx += 1
 
         # Write to file
-        with open(self.ann_name, 'w') as f:
-            json.dump(self.annotation, f)
+        from save_load_files import safe_write_json
+
+        safe_write_json(self.ann_name, self.annotation)
+
         print(f'Saved {len(self.bb_pts_list)} box(es).')
 
         # Clear pending after save!
