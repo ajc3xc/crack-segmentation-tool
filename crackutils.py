@@ -512,7 +512,7 @@ class CrackUtils:
             next_idx += 1
 
         # Write to file
-        from save_load_files import safe_write_json
+        from helpers.save_load_files import safe_write_json
 
         safe_write_json(self.ann_name, self.annotation)
 
@@ -778,10 +778,44 @@ class CrackUtils:
             except Exception:
                 pass
 
-    
     def change_image(self):
         import os, json, cv2
         import numpy as np
+
+        # ------------------------------------------------------------
+        # A) ID NORMALIZER (LOCAL, SAFE, ONLY TOUCHES LOADED DATA)
+        # ------------------------------------------------------------
+        def _normalize_ann_ids(ann_root):
+            """
+            Normalize atomic + combined IDs and member lists so that:
+            - all atomic_cracks keys are strings
+            - all combined_cracks keys are strings
+            - all combined members are strings
+            This prevents KeyError('1') vs KeyError(1).
+            """
+            if not isinstance(ann_root, dict):
+                return
+
+            atomic = ann_root.setdefault("atomic_cracks", {})
+            combined = ann_root.setdefault("combined_cracks", {})
+
+            # normalize atomic keys
+            new_atomic = {}
+            for k, v in atomic.items():
+                sk = str(k)
+                new_atomic[sk] = v
+            ann_root["atomic_cracks"] = new_atomic
+
+            # normalize combined keys + members
+            new_combined = {}
+            for k, cmb in combined.items():
+                sk = str(k)
+                if isinstance(cmb, dict) and "members" in cmb:
+                    cmb["members"] = [str(m) for m in cmb["members"]]
+                new_combined[sk] = cmb
+            ann_root["combined_cracks"] = new_combined
+
+        # ------------------------------------------------------------
 
         if not hasattr(self, "image_names") or not self.image_names:
             error("No images loaded. Please load images before using change_image().")
@@ -791,7 +825,6 @@ class CrackUtils:
         self._reset_edit_state()
 
         # ---------------------------------------------------------------------------
-
         self.update_selected_item(os.path.basename(self.image_names[self.n]))
         self.name = self.image_names[self.n]
         self.image = cv2.imread(self.name)[:, :, ::-1].astype(np.uint8)
@@ -828,23 +861,30 @@ class CrackUtils:
         if os.path.exists(self.ann_name):
             with open(self.ann_name, encoding="utf-8") as f:
                 self.annotation = json.load(f)
-            ann = self.annotation.get('annotations', {}) or {}
+
+            ann = self.annotation.setdefault('annotations', {})
+
+            # ------------------------------------------------------------
+            # B) *** APPLY ID NORMALIZATION RIGHT AFTER LOADING ***
+            # ------------------------------------------------------------
+            _normalize_ann_ids(ann)
+            # ------------------------------------------------------------
+
             atomic = ann.get("atomic_cracks", {}) or {}
             combined = ann.get("combined_cracks", {}) or {}
 
             # ==== Build read-only midline overlays with tags/colors ====
-            # manual (processed vs unprocessed) and auto-best (if cached)
+            self.readonly_midlines = {}
             for cid, crack in atomic.items():
                 src = str(crack.get("source") or crack.get("src") or "").lower()
                 mid = crack.get("midline", [])
                 if isinstance(mid, list) and len(mid) >= 2:
                     has_auto = bool(crack.get("variants", {}).get("auto", {}))
                     tag = "unprocessed" if src.startswith("manual") and not has_auto else "manual"
-                    # orange for unprocessed manual, cyan for processed manual
                     color = (255, 165, 0) if tag == "unprocessed" else (0, 200, 255)
                     self.readonly_midlines[f"manual_{cid}"] = {"poly": mid, "color": color, "tag": tag}
 
-                # pick best auto variant (if present)
+                # auto variants
                 vroot = crack.get("variants", {}).get("auto", {})
                 for ck, pack in vroot.items():
                     bid = pack.get("best_variant_id")
@@ -857,7 +897,7 @@ class CrackUtils:
                         }
                         break
 
-            # ---- Bounding boxes (optional, unchanged) ----
+            # ---- Bounding boxes (optional) ----
             if 'box' in ann:
                 for key, box_data in ann['box'].items():
                     bb_pts = np.array(box_data['bounding_box'])
@@ -868,46 +908,51 @@ class CrackUtils:
 
             drawn_atomic = set()
 
-            # ---- Combined cracks (normalize then draw) ----
-            for crack_id, crack in (ann.get("combined_cracks", {}) or {}).items():
+            # ---- Combined cracks ----
+            for crack_id, crack in combined.items():
                 for m in crack.get("members", []):
                     drawn_atomic.add(m)
 
                 geodesic_edges = crack.get("geodesic_edges", [])
                 if isinstance(geodesic_edges, dict):
                     geodesic_edges = list(geodesic_edges.values())
+
                 flat = []
                 for e in geodesic_edges:
                     if isinstance(e, dict): flat.extend(list(e.values()))
-                    elif isinstance(e, (list, tuple)) and len(e) > 0: flat.append(e)
-                crack["geodesic_edges"] = [np.array(x, dtype=float) for x in flat if len(x) >= 2]
+                    elif isinstance(e, (list, tuple)) and len(e)>0: flat.append(e)
+                crack["geodesic_edges"] = [np.array(x, dtype=float) for x in flat if len(x)>=2]
 
                 normal_edges = crack.get("normal_edge_points", [])
                 if isinstance(normal_edges, dict):
                     normal_edges = list(normal_edges.values())
-                elif isinstance(normal_edges, list) and len(normal_edges) == 2 and isinstance(normal_edges[0], (list, tuple)):
-                    normal_edges = [np.array(n, dtype=float) for n in normal_edges]
+                elif (isinstance(normal_edges, list) and len(normal_edges)==2 and
+                    isinstance(normal_edges[0], (list,tuple))):
+                    normal_edges = [np.array(n, float) for n in normal_edges]
                 crack["normal_edge_points"] = normal_edges
 
                 im, _ = self._draw_crack(
                     im, crack,
-                    color_mask=(0, 0, 0),
-                    color_midline=(0, 0, 255),
-                    color_edges=(255, 255, 0),
-                    color_points=(255, 0, 0)
+                    color_mask=(0,0,0),
+                    color_midline=(0,0,255),
+                    color_edges=(255,255,0),
+                    color_points=(255,0,0)
                 )
 
-            # ---- Atomic cracks (non-combined) ----
-            for crack_id, crack in (ann.get("atomic_cracks", {}) or {}).items():
-                if any(crack_id in c.get("members", []) for c in (ann.get("combined_cracks", {}) or {}).values()):
+            # ---- Atomic cracks ----
+            for crack_id, crack in atomic.items():
+                if any(crack_id in c.get("members", []) for c in combined.values()):
                     continue
                 im, mask_full = self._draw_crack(im, crack)
                 if mask_full is not None:
                     self.mask.append(mask_full)
 
-        # ---- Render main image to screen ----
+        # ---- Render to main display ----
         _, pixmap = numpy_to_qimage_and_scaled_pixmap(
-            im.astype(np.uint8), self.ImageScreen.width(), self.ImageScreen.height(), is_gray=False
+            im.astype(np.uint8),
+            self.ImageScreen.width(),
+            self.ImageScreen.height(),
+            is_gray=False
         )
         self.ImageScreen.setPixmap(pixmap)
 
@@ -922,15 +967,14 @@ class CrackUtils:
         full_mask_display[full_mask_display > 0] = 1
 
         _, pixmap_mask = numpy_to_qimage_and_scaled_pixmap(
-            (full_mask_display * 255).astype(np.uint8),
+            (full_mask_display*255).astype(np.uint8),
             self.all_segments_display.width(),
             self.all_segments_display.height(),
             is_gray=True
         )
         self.all_segments_display.setPixmap(pixmap_mask)
-        
 
-    def _build_combined_crack(self, member_ids, pad=10):
+    '''def _build_combined_crack(self, member_ids, pad=10):
         """
         Combined crack builder (user-endpoint chaining + dominant trimming):
         - chain polylines by explicit user endpoints (user_points/user_connections)
@@ -1379,7 +1423,28 @@ class CrackUtils:
             # --- new derived fields ---
             "all_user_points": derived_points,
             "all_user_connections": derived_conns,
-        }
+        }'''
+        
+    def _build_combined_crack(self, member_ids, pad=10):
+        from combiner import build_combined_crack_stateless
+
+        atomic = self.annotation["annotations"]["atomic_cracks"]
+
+        result = build_combined_crack_stateless(
+            original_image=self.original_image,
+            authoring_atomic=atomic,
+            member_ids=member_ids,
+            window_half_size=self.window_half_size_box.value(),
+            mu=self.mu_box.value(),
+            l=self.l_box.value(),
+            p=self.p_box.value(),
+            color_channel=0 if self.edge_track_color_box.currentText()=='R'
+                            else 1 if self.edge_track_color_box.currentText()=='B'
+                            else 2,
+            prefer_gpu=True
+        )
+
+        return result
         
     def draw_existing_cracks(self, im):
         """Overlay existing cracks (atomic + combined) in red onto a copy of the image."""
