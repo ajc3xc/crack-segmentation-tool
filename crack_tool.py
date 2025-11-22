@@ -2850,12 +2850,13 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     combined_id=ccid,
                     member_ids=members,
                     segs=dbg["segs"],
-                    edge1=dbg["edge1"],
-                    edge2=dbg["edge2"],
-                    normals1=dbg["normals1"],
-                    normals2=dbg["normals2"],
-                    union_mask=dbg.get("union_mask")
+                    edge1_segs=dbg["edge1"],
+                    edge2_segs=dbg["edge2"],
+                    norm1_segs=dbg["normals1"],
+                    norm2_segs=dbg["normals2"],
+                    union_mask=dbg["union_mask"],
                 )
+
             )
 
             rebuilt["members"] = members
