@@ -737,108 +737,7 @@ def compare_widths_for_cracks(
         cmap = plt.get_cmap("coolwarm")
 
 
-        # -------- plot function ----------
-        '''def _plot_on_gt_background(coords_list, diffs_list, out_path, zoom=False):
-            """
-            Clean + stable version of the old polyline width plot:
-            • no spline interpolation
-            • no gaussian filters
-            • sorted along arc-length
-            • robust against duplicate points
-            • fully continuous colored polyline
-            • identical behavior in global + zoom modes
-            """
-            import numpy as np
-            import matplotlib.pyplot as plt
-            from matplotlib.colors import TwoSlopeNorm
-
-            # ---- Build background (GT mask only, simple + stable) ----
-            H, W = crack_mask.shape
-            bg = (crack_mask > 0).astype(np.uint8) * 255
-            bg = np.stack([bg]*3, axis=-1)
-
-            # ---- flatten all coords/diffs together ----
-            coords = []
-            diffs  = []
-            for c, d in zip(coords_list, diffs_list):
-                c = np.asarray(c, float)
-                d = np.asarray(d, float)
-                m = min(len(c), len(d))
-                if m < 2:
-                    continue
-
-                coords.append(c[:m])
-                diffs.append(d[:m])
-
-            if not coords:
-                print("[DEBUG WIDTH] no coords to plot")
-                return
-
-            coords = np.concatenate(coords, axis=0)
-            diffs  = np.concatenate(diffs,  axis=0)
-            if len(coords) < 3:
-                print("[DEBUG WIDTH] too few coords")
-                return
-
-            # ---- ARC-LENGTH SORTING (robust, no interpolation) ----
-            # Remove exact duplicates to avoid zero-distance steps
-            _, unique_idx = np.unique(coords, axis=0, return_index=True)
-            coords = coords[np.sort(unique_idx)]
-            diffs  = diffs[np.sort(unique_idx)]
-
-            if len(coords) < 3:
-                print("[DEBUG WIDTH] degenerate after dedup")
-                return
-
-            d = np.sqrt(np.sum(np.diff(coords, axis=0)**2, axis=1))
-            s = np.concatenate([[0], np.cumsum(d)])
-            order = np.argsort(s)
-
-            coords = coords[order]
-            diffs  = diffs[order]
-
-            # ---- Color normalization (symmetric) ----
-            norm = TwoSlopeNorm(vmin=-8, vcenter=0, vmax=8)
-            cmap = plt.get_cmap("coolwarm")
-
-            # ---- PLOT ----
-            fig, ax = plt.subplots(figsize=(8, 8), dpi=200)
-            ax.imshow(bg, cmap="gray", interpolation="nearest")
-
-            # Draw the polyline segment-by-segment
-            for i in range(len(coords) - 1):
-                x0, y0 = coords[i]
-                x1, y1 = coords[i+1]
-                ax.plot([x0, x1], [y0, y1],
-                        color=cmap(norm(diffs[i])),
-                        linewidth=2.2,
-                        solid_capstyle="round")
-
-            # ---- AXIS ----
-            if zoom:
-                x0, x1 = np.nanpercentile(coords[:,0], [1, 99])
-                y0, y1 = np.nanpercentile(coords[:,1], [1, 99])
-                pad = 0.05 * max(x1-x0, y1-y0)
-                ax.set_xlim(x0-pad, x1+pad)
-                ax.set_ylim(y1+pad, y0-pad)
-            else:
-                ax.set_xlim(0, W)
-                ax.set_ylim(H, 0)
-
-            ax.set_aspect("equal", adjustable="box")
-            ax.set_title(f"Width diffs{' (zoom)' if zoom else ''} — {ctype}")
-            ax.axis("off")
-
-            # ---- COLORBAR ----
-            sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-            sm.set_array([])
-            cb = plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.02)
-            cb.set_label("geodesic − GT (px)")
-
-            plt.tight_layout()
-            fig.savefig(out_path, dpi=200, bbox_inches="tight", pad_inches=0)
-            plt.close(fig)'''
-            
+        # -------- plot function ----------            
         def _plot_on_gt_background(coords_list, diffs_list, out_path, zoom=False):
             """
             NEW VERSION:
@@ -983,10 +882,38 @@ def compare_widths_for_cracks(
             f"{base_name}_width_summary{('_'+str(tag)) if tag else ''}.csv"),
             index=False)
 
-    if not df_d.empty:
+    '''if not df_d.empty:
         df_d.to_csv(os.path.join(metrics_dir,
             f"{base_name}_width_diffs{('_'+str(tag)) if tag else ''}.csv"),
-            index=False)
+            index=False)'''
+            
+    # --- COMPUTE SUMMARY STATS FOR TRIPLET PLOT ---
+    if not df_d.empty:
+        diffs = df_d["width_diff_px"].to_numpy().astype(float)
+
+        mae  = np.nanmean(np.abs(diffs))
+        rmse = np.sqrt(np.nanmean(diffs**2))
+        bias = np.nanmean(diffs)
+
+        # geodesic width vs gt width correlation
+        # but only valid when both values exist
+        # we reconstruct from diffs + gt width
+        # (requires w_mask earlier)
+        corr = np.nan
+
+        out_summary = pd.DataFrame([{
+            "method": tag,
+            "mae_px":  mae,
+            "rmse_px": rmse,
+            "bias_px": bias,
+            "corr":    corr
+        }])
+
+        out_summary.to_csv(
+            os.path.join(metrics_dir, f"{base_name}_width_summary_{tag}.csv"),
+            index=False
+        )
+
 
     if return_normals:
         return width_rows, diffs_rows, normals_dict
@@ -994,7 +921,7 @@ def compare_widths_for_cracks(
  
 # ==== WIDTH SUMMARY + IMAGE-SIZED OVERLAY (no matplotlib) ======================
 
-def width_summary_to_csv(metrics_dir, base_name, rows, tag):
+'''def width_summary_to_csv(metrics_dir, base_name, rows, tag):
     """
     rows: list of dicts with fields including either
       - 'diff' or 'diff_px', OR
@@ -1031,7 +958,54 @@ def width_summary_to_csv(metrics_dir, base_name, rows, tag):
     p = os.path.join(metrics_dir, f"width_summary_{tag}.csv")
     out.to_csv(p, index=False)
     print(f"[DEBUG WIDTH] wrote summary → {p}")
-    return p
+    return p'''
+    
+def width_summary_to_csv(metrics_dir, base_name, width_rows, tag):
+    """
+    Writes width-summary CSV containing:
+        mae_px, rmse_px, bias_px, corr
+
+    width_rows: list of dicts FROM compare_widths_for_cracks (the raw diffs)
+    """
+    import numpy as np, pandas as pd, os
+
+    if not width_rows:
+        print("[WIDTH SUMMARY] no data to write")
+        return
+
+    # width_rows contain only diff_mean, diff_std — NOT enough.
+    # We must re-load the actual width diffs.
+    df = pd.DataFrame(width_rows)
+
+    # We must aggregate all diffs for this tag!
+    # diffs_rows CSV was already written earlier in compare_widths_for_cracks().
+    diffs_file = os.path.join(metrics_dir, f"{base_name}_width_diffs_{tag}.csv")
+    if not os.path.exists(diffs_file):
+        print(f"[WIDTH SUMMARY] missing diffs file: {diffs_file}")
+        return
+
+    df_d = pd.read_csv(diffs_file)
+    diffs = df_d["width_diff_px"].values.astype(float)
+
+    if len(diffs) == 0:
+        return
+
+    mae  = float(np.nanmean(np.abs(diffs)))
+    rmse = float(np.sqrt(np.nanmean(diffs**2)))
+    bias = float(np.nanmean(diffs))
+    corr = float(np.corrcoef(diffs, np.arange(len(diffs)))[0,1]) if len(diffs) > 1 else np.nan
+
+    out = pd.DataFrame([{
+        "method": tag,
+        "mae_px": mae,
+        "rmse_px": rmse,
+        "bias_px": bias,
+        "corr": corr
+    }])
+
+    out_csv = os.path.join(metrics_dir, f"{base_name}_width_summary_{tag}.csv")
+    out.to_csv(out_csv, index=False)
+    print("[WIDTH SUMMARY] wrote:", out_csv)
 
 
 def write_width_diff_overlay(H, W, rows, out_png, vlim=8.0):
