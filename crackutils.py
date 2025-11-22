@@ -1538,30 +1538,27 @@ class CrackUtils:
                 segs2.append(arr[start:])
             return segs2 if segs2 else [arr]
 
-        # midlines
+        # midline
         for S in segs:
-            for segp in split(S, 40):
-                ax.plot(segp[:, 0], segp[:, 1], 'g-', lw=1)
+            for segp in split(S,40):
+                ax.plot(segp[:,0], segp[:,1],'g-',lw=0.6)
 
         # edges
         for e in edge1_segs:
-            for segp in split(e, 40):
-                ax.plot(segp[:, 0], segp[:, 1], 'r-', lw=0.7)
-
+            for segp in split(e,40):
+                ax.plot(segp[:,0], segp[:,1],'r-',lw=0.4)
         for e in edge2_segs:
-            for segp in split(e, 40):
-                ax.plot(segp[:, 0], segp[:, 1], 'b-', lw=0.7)
+            for segp in split(e,40):
+                ax.plot(segp[:,0], segp[:,1],'b-',lw=0.4)
 
         # normals
-        for n1, n2 in zip(norm1_segs, norm2_segs):
+        for n1,n2 in zip(norm1_segs,norm2_segs):
             if len(n1) and len(n2):
-                m = min(len(n1), len(n2))
-                step = max(1, m // 70)
-                for i in range(0, m, step):
-                    ax.plot([n1[i,0], n2[i,0]],
-                            [n1[i,1], n2[i,1]],
-                            color='cyan', lw=0.6)
-
+                m=min(len(n1),len(n2))
+                step=max(1,m//70)
+                for i in range(0,m,step):
+                    ax.plot([n1[i,0],n2[i,0]],[n1[i,1],n2[i,1]],
+                            color='cyan',lw=0.5,alpha=0.8)
         pad = 15
         ax.set_xlim(max(0, x0 - pad), min(W, x1 + pad))
         ax.set_ylim(min(H, y1 + pad), max(0, y0 - pad))

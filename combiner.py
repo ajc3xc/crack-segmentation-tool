@@ -397,17 +397,15 @@ def build_combined_crack_stateless(
     if callable(debug_callback):
         try:
             debug_callback(
-                image_rgb=img,              # <-- ADD THIS
+                image_rgb=original_image,
                 segs=segs,
-                edge1=edge1_segs,
-                edge2=edge2_segs,
-                normals1=norm1_segs,
-                normals2=norm2_segs,
-                member_ids=member_ids,
-                union_mask=union_mask,
-                mask_bbox=[int(x), int(y), int(w), int(h)]
+                edge1_segs=edge1_segs,
+                edge2_segs=edge2_segs,
+                norm1_segs=norm1_segs,
+                norm2_segs=norm2_segs,
+                mask_bbox=[int(x), int(y), int(w), int(h)],
+                member_ids=member_ids
             )
-
         except Exception as e:
             print("[STATLESS_DEBUG] error:", e)
 
