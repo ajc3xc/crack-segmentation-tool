@@ -191,7 +191,7 @@ def debug_plot_gt_preview(mask_bin, mid_xy, e1_xy=None, e2_xy=None, out_png=None
     else:
         plt.show()
         
-def normals_from_mask_for_midline(midline_xy, mask, max_radius=50):
+'''def normals_from_mask_for_midline(midline_xy, mask, max_radius=50):
     """
     Pixel-accurate version:
     - Polygonizes the mask into exact pixel-boundary polygons using rasterio.
@@ -225,19 +225,39 @@ def normals_from_mask_for_midline(midline_xy, mask, max_radius=50):
     for geom, val in rasterio.features.shapes(mask_bin, mask=mask_bin):
         if val == 1:
             poly = shape(geom)
-            # shift by -0.5 in both x and y
             poly = shapely.affinity.translate(poly, xoff=-0.5, yoff=-0.5)
             polygons.append(poly)
     edges = [poly.boundary for poly in polygons]
+
+    # --- helper: clamp midline point to nearest polygon if outside ---
+    def clamp_to_polygon(p):
+        """Ensure p lies on/in the polygon (returns closest point on boundary if outside)."""
+        for poly in polygons:
+            if poly.contains(Point(p[0], p[1])):
+                return p  # already valid
+        # otherwise clamp to nearest boundary
+        dmin = float("inf")
+        best = p
+        for edge in edges:
+            proj = edge.interpolate(edge.project(Point(p[0], p[1])))
+            d = proj.distance(Point(p[0], p[1]))
+            if d < dmin:
+                dmin = d
+                best = (proj.x, proj.y)
+        return np.asarray(best, float)
 
     N = len(midline_xy)
     e1x = np.full(N, np.nan); e1y = np.full(N, np.nan)
     e2x = np.full(N, np.nan); e2y = np.full(N, np.nan)
     widths_mask = np.full(N, np.nan)
 
-    for i, (p, nvec) in enumerate(zip(midline_xy, nor)):
-        if not np.all(np.isfinite(p)) or not np.all(np.isfinite(nvec)):
+    for i, (p_raw, nvec) in enumerate(zip(midline_xy, nor)):
+        if not np.all(np.isfinite(p_raw)) or not np.all(np.isfinite(nvec)):
             continue
+
+        # ----- KEY FIX HERE -----
+        p = clamp_to_polygon(p_raw)   # ensures normals ALWAYS intersect mask
+        # -------------------------
 
         # build long ray
         A = (p[0] - max_radius * nvec[0], p[1] - max_radius * nvec[1])
@@ -268,6 +288,173 @@ def normals_from_mask_for_midline(midline_xy, mask, max_radius=50):
                 e1x[i], e1y[i] = lp
                 e2x[i], e2y[i] = rp
                 widths_mask[i] = np.hypot(rp[0]-lp[0], rp[1]-lp[1])
+
+    return (e1x, e1y, e2x, e2y, widths_mask), polygons'''
+    
+def normals_from_mask_for_midline(midline_xy, mask, max_radius=50):
+    """
+    Pixel-accurate version:
+    - Polygonizes the mask into exact pixel-boundary polygons using rasterio.
+    - Shifts coords by -0.5 so edges align with imshow pixel grid.
+    - Intersects midline normals with those polygons so endpoints lie exactly on the mask edge.
+    Robustified to avoid NaNs / zero-length edges.
+    """
+    import numpy as np
+    import shapely
+    from shapely.geometry import shape, LineString, Point, MultiPoint
+    import rasterio.features
+
+    H, W = mask.shape
+    midline_xy = np.asarray(midline_xy, float)
+    if midline_xy.ndim != 2 or midline_xy.shape[1] != 2 or len(midline_xy) < 2:
+        n = len(midline_xy) if midline_xy.ndim > 0 else 0
+        return (np.full(n, np.nan),) * 5, []
+
+    # ---- tangent + normals ----
+    try:
+        from cracktools.segmentation import compute_smooth_tangent_normals
+        _, nor = compute_smooth_tangent_normals(midline_xy[:, 0], midline_xy[:, 1])
+    except Exception:
+        dx, dy = np.gradient(midline_xy[:, 0]), np.gradient(midline_xy[:, 1])
+        nrm = np.hypot(dx, dy) + 1e-12
+        tan = np.stack([dx / nrm, dy / nrm], axis=1)
+        nor = np.stack([-tan[:, 1], tan[:, 0]], axis=1)
+
+    # ---- polygonize mask -> shapely polygons ----
+    mask_bin = (mask > 0).astype(np.uint8)
+    polygons = []
+    for geom, val in rasterio.features.shapes(mask_bin, mask=mask_bin):
+        if val == 1:
+            poly = shape(geom)
+            # shift by -0.5 so edges align with imshow pixel grid
+            poly = shapely.affinity.translate(poly, xoff=-0.5, yoff=-0.5)
+            polygons.append(poly)
+
+    if not polygons:
+        # empty mask: nothing we can do safely
+        N = len(midline_xy)
+        return (np.full(N, np.nan),) * 5, []
+
+    edges = [poly.boundary for poly in polygons]
+
+    # ---- helper: clamp midline point to nearest polygon boundary if outside ----
+    from math import inf
+
+    def clamp_to_polygon(p):
+        """Ensure p lies on/in the mask: returns closest point on any polygon boundary."""
+        P = Point(p[0], p[1])
+        # already inside some polygon
+        for poly in polygons:
+            if poly.contains(P) or poly.touches(P):
+                return np.asarray(p, float)
+
+        best = None
+        best_d = inf
+        for edge in edges:
+            # nearest point on this boundary
+            proj = edge.interpolate(edge.project(P))
+            d = proj.distance(P)
+            if d < best_d:
+                best_d = d
+                best = (proj.x, proj.y)
+
+        if best is None:
+            # fall back to original point (will be skipped later if invalid)
+            return np.asarray(p, float)
+        return np.asarray(best, float)
+
+    N = len(midline_xy)
+    e1x = np.full(N, np.nan); e1y = np.full(N, np.nan)
+    e2x = np.full(N, np.nan); e2y = np.full(N, np.nan)
+    widths_mask = np.full(N, np.nan)
+
+    eps = 1e-6
+
+    for i, (p_raw, nvec) in enumerate(zip(midline_xy, nor)):
+        # basic sanity checks
+        if not np.all(np.isfinite(p_raw)) or not np.all(np.isfinite(nvec)):
+            continue
+
+        nlen = float(np.hypot(nvec[0], nvec[1]))
+        if nlen < eps:
+            # direction is undefined here; skip
+            continue
+        nvec = nvec / nlen
+
+        # clamp midline point to polygon if it's outside
+        p = clamp_to_polygon(p_raw)
+        if not np.all(np.isfinite(p)):
+            continue
+
+        # build long ray
+        A = (p[0] - max_radius * nvec[0], p[1] - max_radius * nvec[1])
+        B = (p[0] + max_radius * nvec[0], p[1] + max_radius * nvec[1])
+        if not (np.all(np.isfinite(A)) and np.all(np.isfinite(B))):
+            continue
+
+        ray = LineString([A, B])
+
+        hits = []
+        for edge in edges:
+            inter = edge.intersection(ray)
+            if inter.is_empty:
+                continue
+            if isinstance(inter, Point):
+                hits.append((inter.x, inter.y))
+            elif isinstance(inter, MultiPoint):
+                for g in inter.geoms:
+                    hits.append((g.x, g.y))
+            elif inter.geom_type == "LineString":
+                coords = np.asarray(inter.coords, float)
+                if len(coords) >= 1:
+                    hits.append(tuple(coords[0]))
+                if len(coords) >= 2:
+                    hits.append(tuple(coords[-1]))
+
+        if len(hits) < 2:
+            # cannot define a width here
+            continue
+
+        # remove exact duplicates among hits
+        hits_arr = np.asarray(hits, float)
+        hits_arr = np.unique(hits_arr, axis=0)
+        if len(hits_arr) < 2:
+            continue
+        hits = [tuple(h) for h in hits_arr]
+
+        # project hits along the normal direction
+        dists = [np.dot([hx - p[0], hy - p[1]], nvec) for (hx, hy) in hits]
+
+        # classify as "left" (negative side) / "right" (positive side)
+        left_pts  = [(hx, hy, d) for (hx, hy), d in zip(hits, dists) if d < -eps]
+        right_pts = [(hx, hy, d) for (hx, hy), d in zip(hits, dists) if d > eps]
+
+        if not left_pts or not right_pts:
+            # ray didn't properly cross the crack
+            continue
+
+        # choose the closest in magnitude on each side
+        # choose closest point on the negative side
+        lp, _ = min(
+            (((hx, hy), abs(d)) for (hx, hy, d) in left_pts),
+            key=lambda t: t[1]
+        )
+
+        # choose closest point on the positive side
+        rp, _ = min(
+            (((hx, hy), abs(d)) for (hx, hy, d) in right_pts),
+            key=lambda t: t[1]
+        )
+
+
+        # avoid zero-length normals (which later cause "Edge direction cannot be determined")
+        w = np.hypot(rp[0] - lp[0], rp[1] - lp[1])
+        if not np.isfinite(w) or w < eps:
+            continue
+
+        e1x[i], e1y[i] = lp
+        e2x[i], e2y[i] = rp
+        widths_mask[i] = w
 
     return (e1x, e1y, e2x, e2y, widths_mask), polygons
 

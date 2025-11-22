@@ -574,13 +574,11 @@ def compare_widths_for_cracks(
     max_radius=50
 ):
     """
-    Compare geodesic widths (from crack['normal_edge_points{_full}']) against GT
-    widths (normals_from_mask_for_midline). Produces:
-      - <metrics_dir>/<base>_width_summary[_tag].csv
-      - <metrics_dir>/<base>_width_diffs[_tag].csv   (per-sample)
-      - <metrics_dir>/<base>_{atomic,combined}_all[_tag]_width_diffs_global.png
-      - <metrics_dir>/<base>_{atomic,combined}_all[_tag]_width_diffs_zoom.png
-    Returns (width_rows, diffs_rows[, normals_dict]).
+    Clean, stable width-difference evaluator with:
+      - GT normals
+      - Geodesic normals
+      - Smooth width-colored midline plots (global + zoom)
+      - Zero-dim, duplicate, malformed-array protection
     """
     import os, numpy as np, pandas as pd, matplotlib.pyplot as plt
     from matplotlib.colors import TwoSlopeNorm
@@ -589,36 +587,13 @@ def compare_widths_for_cracks(
     if normals_plot and normals_dir:
         os.makedirs(normals_dir, exist_ok=True)
 
-    # Lazy cache of mask+midline → GT normals
+    # --- cache of GT normals to avoid recomputation
     global _NORMALS_CACHE
     try:
         _NORMALS_CACHE
     except NameError:
         _NORMALS_CACHE = {}
 
-    # Local helper to plot GT normals if requested (no external deps).
-    def _plot_gt_normals(mask_bin, midline_xy, e1_xy, e2_xy, out_png, title):
-        import matplotlib.pyplot as plt
-        if mask_bin.ndim == 2:
-            bg = np.dstack([mask_bin*255]*3).astype(np.uint8)
-        else:
-            bg = mask_bin
-        H, W = mask_bin.shape[:2]
-        fig, ax = plt.subplots(figsize=(6,6), dpi=220)
-        ax.imshow(bg, cmap='gray', interpolation='nearest')
-        if len(midline_xy) >= 2:
-            ax.plot(midline_xy[:,0], midline_xy[:,1], '-', lw=1.2, color='white', alpha=.9, label='midline')
-        if len(e1_xy) >= 2:
-            ax.plot(e1_xy[:,0], e1_xy[:,1], '-', lw=1.0, color='lime', alpha=.9, label='edge1')
-        if len(e2_xy) >= 2:
-            ax.plot(e2_xy[:,0], e2_xy[:,1], '-', lw=1.0, color='red', alpha=.9, label='edge2')
-        ax.set_xlim(0, W); ax.set_ylim(H, 0); ax.axis('off')
-        ax.set_title(title, fontsize=9)
-        plt.tight_layout(pad=0.0)
-        fig.savefig(out_png, dpi=220, bbox_inches='tight', pad_inches=0)
-        plt.close(fig)
-
-    # External primitive you already have in helpers.metrics
     from helpers.metrics import normals_from_mask_for_midline
 
     H, W = crack_mask.shape
@@ -627,72 +602,78 @@ def compare_widths_for_cracks(
     atomic   = ann.get("atomic_cracks", {}) or {}
     combined = ann.get("combined_cracks", {}) or {}
 
-    # Don’t double-count atomics that belong to combined
-    atomics_in_combined = {str(m) for cmb in combined.values() for m in (cmb.get("members", []) or [])}
-
-    agg = {
-        "atomic":   {"coords": [], "diff": []},
-        "combined": {"coords": [], "diff": []},
+    atomics_in_combined = {
+        str(m)
+        for cmb in combined.values()
+        for m in (cmb.get("members", []) or [])
     }
+
+    agg = {"atomic": {"coords": [], "diff": []},
+           "combined": {"coords": [], "diff": []}}
+
     width_rows, diffs_rows = [], []
     normals_dict = {} if return_normals else None
 
     def _to_xy(v):
-        # Accepts dict-of-arrays [[x...],[y...]] or Nx2 list/array
         import numpy as np
         if isinstance(v, list) and len(v) == 2 and isinstance(v[0], (list, tuple, np.ndarray)):
             return np.column_stack([v[0], v[1]]).astype(float)
         return np.asarray(v, float)
 
-    # build the list we’ll iterate
-    all_cracks = [("atomic",   str(cid), c) for cid, c in atomic.items() if str(cid) not in atomics_in_combined]
-    all_cracks += [("combined", str(cid), c) for cid, c in combined.items()]
+    # ---------------------------------------------------------------
+    # Collect width curves for all cracks
+    # ---------------------------------------------------------------
+    all_cracks = [
+        ("atomic", str(cid), c)
+        for cid, c in atomic.items()
+        if str(cid) not in atomics_in_combined
+    ]
+    all_cracks += [
+        ("combined", str(cid), c)
+        for cid, c in combined.items()
+    ]
 
     for ctype, cid, crack in all_cracks:
+
         midline = np.asarray(crack.get("midline", []), float)
         if midline.ndim != 2 or midline.shape[1] != 2 or len(midline) < 3:
             continue
 
-        # ---------- GT normals/widths along this midline ----------
-        key = (id(mask_bin), midline.shape[0], float(midline[0,0]), float(midline[0,1]))
+        key = (id(mask_bin), midline.shape[0], float(midline[0, 0]), float(midline[0, 1]))
+
         if key in _NORMALS_CACHE:
             e1x, e1y, e2x, e2y, w_mask = _NORMALS_CACHE[key]
         else:
-            (e1x, e1y, e2x, e2y, w_mask), _ = normals_from_mask_for_midline(midline, mask_bin, max_radius=max_radius)
+            (e1x, e1y, e2x, e2y, w_mask), _ = normals_from_mask_for_midline(
+                midline, mask_bin, max_radius=max_radius
+            )
             _NORMALS_CACHE[key] = (e1x, e1y, e2x, e2y, w_mask)
-
-        gt_e1 = np.column_stack([e1x, e1y])
-        gt_e2 = np.column_stack([e2x, e2y])
 
         if return_normals:
             normals_dict[f"{ctype}:{cid}"] = {
-                "edge1": gt_e1, "edge2": gt_e2, "widths": np.asarray(w_mask, float), "midline": midline
+                "edge1": np.column_stack([e1x, e1y]),
+                "edge2": np.column_stack([e2x, e2y]),
+                "widths": np.asarray(w_mask, float),
+                "midline": midline
             }
 
-        if normals_plot and normals_dir:
-            members = "_".join(str(m) for m in (crack.get("members", []) or [])) if ctype == "combined" else ""
-            tag_title = f" ({tag})" if tag else ""
-            title = f"GT normals — {ctype} {cid}{(' ['+members+']') if members else ''}{tag_title}"
-            out_png = os.path.join(normals_dir, f"{ctype}{cid}{('_'+members) if members else ''}_gt_normals.png")
-            _plot_gt_normals(mask_bin, midline, gt_e1, gt_e2, out_png, title)
-
-        # ---------- compare to geodesic normals if present ----------
         geo = crack.get("normal_edge_points_full") or crack.get("normal_edge_points")
         if not geo:
             continue
 
         if isinstance(geo, dict):
-            ge1 = _to_xy(geo.get("edge1", [])); ge2 = _to_xy(geo.get("edge2", []))
+            ge1 = _to_xy(geo.get("edge1", []))
+            ge2 = _to_xy(geo.get("edge2", []))
         elif isinstance(geo, (list, tuple)) and len(geo) == 2:
             ge1, ge2 = _to_xy(geo[0]), _to_xy(geo[1])
         else:
-            ge1 = ge2 = np.zeros((0,2), float)
+            continue
 
         n = min(len(ge1), len(ge2))
         if n < 2:
             continue
 
-        ge_width = np.linalg.norm(ge1[:n] - ge2[:n], axis=1)  # geodesic width along samples
+        ge_width = np.linalg.norm(ge1[:n] - ge2[:n], axis=1)
         m = min(n, len(w_mask))
         if m < 2:
             continue
@@ -715,69 +696,185 @@ def compare_widths_for_cracks(
                 "sample_idx": int(k), "width_diff_px": float(dv)
             })
 
-        # ---- aggregated plots per category (same as before, but with GT backdrop) ----
-        for ctype in ("atomic", "combined"):
-            if not agg[ctype]["coords"]:
-                continue
-            coords = np.concatenate(agg[ctype]["coords"], axis=0)
-            diffs  = np.concatenate(agg[ctype]["diff"],  axis=0)
-            if len(coords) < 2:
-                continue
+    # ---------------------------------------------------------------
+    # SMOOTH MIDLINE PLOTS — robust, no crashes
+    # ---------------------------------------------------------------
+    from scipy.ndimage import gaussian_filter1d
 
+    for ctype in ("atomic", "combined"):
+
+        raw_coords = agg[ctype]["coords"]
+        raw_diffs  = agg[ctype]["diff"]
+        if not raw_coords:
+            continue
+
+        # -------- sanitize bad entries ----------
+        coords_list, diffs_list = [], []
+        for c, d in zip(raw_coords, raw_diffs):
+            c = np.asarray(c, float)
+            d = np.asarray(d, float)
+            if c.ndim != 2 or c.shape[1] != 2:
+                continue
+            if len(c) < 2 or len(d) < 2:
+                continue
+            m = min(len(c), len(d))
+            if m < 2:
+                continue
+            coords_list.append(c[:m])
+            diffs_list.append(d[:m])
+
+        if not coords_list:
+            continue
+
+        all_diffs = np.concatenate(diffs_list, axis=0)
+        vmin = float(np.nanpercentile(all_diffs, 5))
+        vcenter = 0.0
+        vmax = float(np.nanpercentile(all_diffs, 95))
+        if vmax <= vmin:
+            vmax = vmin + 1.0
+
+        norm = TwoSlopeNorm(vmin=vmin, vcenter=vcenter, vmax=vmax)
+        cmap = plt.get_cmap("coolwarm")
+
+
+        # -------- plot function ----------
+        def _plot_on_gt_background(coords_list, diffs_list, out_path, zoom=False):
+            """
+            Clean + stable version of the old polyline width plot:
+            • no spline interpolation
+            • no gaussian filters
+            • sorted along arc-length
+            • robust against duplicate points
+            • fully continuous colored polyline
+            • identical behavior in global + zoom modes
+            """
+            import numpy as np
             import matplotlib.pyplot as plt
             from matplotlib.colors import TwoSlopeNorm
-            import numpy as np
 
+            # ---- Build background (GT mask only, simple + stable) ----
+            H, W = crack_mask.shape
+            bg = (crack_mask > 0).astype(np.uint8) * 255
+            bg = np.stack([bg]*3, axis=-1)
+
+            # ---- flatten all coords/diffs together ----
+            coords = []
+            diffs  = []
+            for c, d in zip(coords_list, diffs_list):
+                c = np.asarray(c, float)
+                d = np.asarray(d, float)
+                m = min(len(c), len(d))
+                if m < 2:
+                    continue
+
+                coords.append(c[:m])
+                diffs.append(d[:m])
+
+            if not coords:
+                print("[DEBUG WIDTH] no coords to plot")
+                return
+
+            coords = np.concatenate(coords, axis=0)
+            diffs  = np.concatenate(diffs,  axis=0)
+            if len(coords) < 3:
+                print("[DEBUG WIDTH] too few coords")
+                return
+
+            # ---- ARC-LENGTH SORTING (robust, no interpolation) ----
+            # Remove exact duplicates to avoid zero-distance steps
+            _, unique_idx = np.unique(coords, axis=0, return_index=True)
+            coords = coords[np.sort(unique_idx)]
+            diffs  = diffs[np.sort(unique_idx)]
+
+            if len(coords) < 3:
+                print("[DEBUG WIDTH] degenerate after dedup")
+                return
+
+            d = np.sqrt(np.sum(np.diff(coords, axis=0)**2, axis=1))
+            s = np.concatenate([[0], np.cumsum(d)])
+            order = np.argsort(s)
+
+            coords = coords[order]
+            diffs  = diffs[order]
+
+            # ---- Color normalization (symmetric) ----
             norm = TwoSlopeNorm(vmin=-8, vcenter=0, vmax=8)
+            cmap = plt.get_cmap("coolwarm")
 
-            def _plot_on_gt_background(coords, diffs, out_path, zoom=False):
-                H, W = crack_mask.shape
-                gt_scaled = (crack_mask > 0).astype(np.uint8) * 255
-                bg = np.stack([gt_scaled]*3, axis=-1)
+            # ---- PLOT ----
+            fig, ax = plt.subplots(figsize=(8, 8), dpi=200)
+            ax.imshow(bg, cmap="gray", interpolation="nearest")
 
-                # --- scale line/point size depending on zoom
-                zoom_factor = 3.0 if zoom else 1.0
-                point_size = 3.0 * zoom_factor
+            # Draw the polyline segment-by-segment
+            for i in range(len(coords) - 1):
+                x0, y0 = coords[i]
+                x1, y1 = coords[i+1]
+                ax.plot([x0, x1], [y0, y1],
+                        color=cmap(norm(diffs[i])),
+                        linewidth=2.2,
+                        solid_capstyle="round")
 
-                fig, ax = plt.subplots(figsize=(8, 8), dpi=200)
-                ax.imshow(bg, cmap="gray", interpolation="nearest")
-
-                sc = ax.scatter(coords[:,0], coords[:,1], c=diffs, s=point_size,
-                                cmap="coolwarm", norm=norm, linewidths=0.2*zoom_factor, edgecolors="none")
-                ax.set_aspect("equal", adjustable="box")
+            # ---- AXIS ----
+            if zoom:
+                x0, x1 = np.nanpercentile(coords[:,0], [1, 99])
+                y0, y1 = np.nanpercentile(coords[:,1], [1, 99])
+                pad = 0.05 * max(x1-x0, y1-y0)
+                ax.set_xlim(x0-pad, x1+pad)
+                ax.set_ylim(y1+pad, y0-pad)
+            else:
                 ax.set_xlim(0, W)
                 ax.set_ylim(H, 0)
-                if zoom:
-                    x0,x1 = np.nanpercentile(coords[:,0], [1, 99])
-                    y0,y1 = np.nanpercentile(coords[:,1], [1, 99])
-                    pad = 0.05 * max(x1-x0, y1-y0)
-                    ax.set_xlim(x0-pad, x1+pad)
-                    ax.set_ylim(y1+pad, y0-pad)
-                ax.set_title(f"Width diffs{' (zoom)' if zoom else ''} — {ctype}{(' ('+tag+')') if tag else ''}")
-                cbar = plt.colorbar(sc, fraction=0.03, pad=0.02)
-                cbar.set_label("geodesic − GT (px)", fontsize=9)
-                plt.tight_layout()
-                fig.savefig(out_path, dpi=200, bbox_inches="tight", pad_inches=0)
-                plt.close(fig)
 
-            out_plot = os.path.join(metrics_dir, f"{base_name}_{ctype}_all{('_'+tag) if tag else ''}_width_diffs_global.png")
-            _plot_on_gt_background(coords, diffs, out_plot, zoom=False)
+            ax.set_aspect("equal", adjustable="box")
+            ax.set_title(f"Width diffs{' (zoom)' if zoom else ''} — {ctype}")
+            ax.axis("off")
 
-            out_plot_zoom = os.path.join(metrics_dir, f"{base_name}_{ctype}_all{('_'+tag) if tag else ''}_width_diffs_zoom.png")
-            _plot_on_gt_background(coords, diffs, out_plot_zoom, zoom=True)
+            # ---- COLORBAR ----
+            sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+            sm.set_array([])
+            cb = plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.02)
+            cb.set_label("geodesic − GT (px)")
 
-    # ---------- tables ----------
+            plt.tight_layout()
+            fig.savefig(out_path, dpi=200, bbox_inches="tight", pad_inches=0)
+            plt.close(fig)
+
+        # GLOBAL
+        _plot_on_gt_background(
+            coords_list,
+            diffs_list,
+            os.path.join(metrics_dir, f"{base_name}_{ctype}_all{('_'+tag) if tag else ''}_width_diffs_global.png"),
+            zoom=False
+        )
+
+        # ZOOM
+        _plot_on_gt_background(
+            coords_list,
+            diffs_list,
+            os.path.join(metrics_dir, f"{base_name}_{ctype}_all{('_'+tag) if tag else ''}_width_diffs_zoom.png"),
+            zoom=True
+        )
+
+    # ---------------------------------------------------------------
+    # WRITE CSVs
+    # ---------------------------------------------------------------
     df_w = pd.DataFrame(width_rows)
     df_d = pd.DataFrame(diffs_rows)
+
     if not df_w.empty:
-        df_w.to_csv(os.path.join(metrics_dir, f"{base_name}_width_summary{('_'+str(tag)) if tag else ''}.csv"), index=False)
+        df_w.to_csv(os.path.join(metrics_dir,
+            f"{base_name}_width_summary{('_'+str(tag)) if tag else ''}.csv"),
+            index=False)
+
     if not df_d.empty:
-        df_d.to_csv(os.path.join(metrics_dir, f"{base_name}_width_diffs{('_'+str(tag)) if tag else ''}.csv"), index=False)
+        df_d.to_csv(os.path.join(metrics_dir,
+            f"{base_name}_width_diffs{('_'+str(tag)) if tag else ''}.csv"),
+            index=False)
 
     if return_normals:
         return width_rows, diffs_rows, normals_dict
     return width_rows, diffs_rows
-    
+ 
 # ==== WIDTH SUMMARY + IMAGE-SIZED OVERLAY (no matplotlib) ======================
 
 def width_summary_to_csv(metrics_dir, base_name, rows, tag):
