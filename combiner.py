@@ -396,18 +396,31 @@ def build_combined_crack_stateless(
     # ---- DEBUG CALLBACK ----
     if callable(debug_callback):
         try:
+            # Build an RGB image for plotting
+            if img.ndim == 3:
+                rgb = img[:, :, ::-1]  # BGR→RGB
+            else:
+                rgb = np.stack([img]*3, axis=-1)
+
+            # Compute mask bbox
+            if np.any(union_mask):
+                x,y,w,h = bbox_from_mask(union_mask)
+            else:
+                x=y=0; w=h=1
+
             debug_callback(
-                image_rgb=original_image,
+                image_rgb=rgb,
                 segs=segs,
                 edge1_segs=edge1_segs,
                 edge2_segs=edge2_segs,
                 norm1_segs=norm1_segs,
                 norm2_segs=norm2_segs,
-                mask_bbox=[int(x), int(y), int(w), int(h)],
-                member_ids=member_ids
+                mask_bbox=[x,y,w,h],
+                member_ids=member_ids,
             )
         except Exception as e:
             print("[STATLESS_DEBUG] error:", e)
+
 
     return {
         "source": "combined",
