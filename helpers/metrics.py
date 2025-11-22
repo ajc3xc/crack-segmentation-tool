@@ -738,7 +738,7 @@ def compare_widths_for_cracks(
 
 
         # -------- plot function ----------
-        def _plot_on_gt_background(coords_list, diffs_list, out_path, zoom=False):
+        '''def _plot_on_gt_background(coords_list, diffs_list, out_path, zoom=False):
             """
             Clean + stable version of the old polyline width plot:
             • no spline interpolation
@@ -834,6 +834,123 @@ def compare_widths_for_cracks(
             sm.set_array([])
             cb = plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.02)
             cb.set_label("geodesic − GT (px)")
+
+            plt.tight_layout()
+            fig.savefig(out_path, dpi=200, bbox_inches="tight", pad_inches=0)
+            plt.close(fig)'''
+            
+        def _plot_on_gt_background(coords_list, diffs_list, out_path, zoom=False):
+            """
+            NEW VERSION:
+            • GT mask underlay (same as original)
+            • magma colormap for width differences
+            • continuous colored midline
+            • robust dedup + arc-length sorting
+            """
+
+            import numpy as np
+            import matplotlib.pyplot as plt
+            import matplotlib as mpl
+            from matplotlib.colors import TwoSlopeNorm
+
+            # ----------------------------
+            # GT mask background (same as old)
+            # ----------------------------
+            bg = (crack_mask > 0).astype(np.uint8) * 255
+            # convert to 3-channel
+            bg = np.stack([bg, bg, bg], axis=-1)
+
+            H, W = bg.shape[:2]
+
+            # ----------------------------
+            # Flatten coords and diffs
+            # ----------------------------
+            coords = []
+            diffs  = []
+
+            for c, d in zip(coords_list, diffs_list):
+                c = np.asarray(c, float)
+                d = np.asarray(d, float)
+                m = min(len(c), len(d))
+                if m > 1:
+                    coords.append(c[:m])
+                    diffs.append(d[:m])
+
+            if not coords:
+                print("[DEBUG WIDTH] nothing to plot")
+                return
+
+            coords = np.concatenate(coords, axis=0)
+            diffs  = np.concatenate(diffs,  axis=0)
+
+            # ----------------------------
+            # Deduplicate
+            # ----------------------------
+            _, uniq = np.unique(coords, axis=0, return_index=True)
+            coords = coords[np.sort(uniq)]
+            diffs  = diffs[np.sort(uniq)]
+
+            if len(coords) < 2:
+                print("[DEBUG WIDTH] degenerate coords")
+                return
+
+            # ----------------------------
+            # Arc-length ordering
+            # ----------------------------
+            d = np.sqrt(np.sum(np.diff(coords, axis=0)**2, axis=1))
+            s = np.concatenate([[0], np.cumsum(d)])
+            order = np.argsort(s)
+
+            coords = coords[order]
+            diffs  = diffs[order]
+
+            # ----------------------------
+            # Color normalization
+            # symmetric around 0 for diff
+            # ----------------------------
+            norm = TwoSlopeNorm(vmin=-8, vcenter=0, vmax=8)
+            cmap = plt.get_cmap("coolwarm")    # ← darker, higher contrast on GT
+
+            # ----------------------------
+            # Plot
+            # ----------------------------
+            fig, ax = plt.subplots(figsize=(8, 8), dpi=200)
+            ax.imshow(bg, interpolation="nearest")  # GT mask background
+
+            # colored midline
+            for i in range(len(coords) - 1):
+                x0, y0 = coords[i]
+                x1, y1 = coords[i+1]
+                ax.plot(
+                    [x0, x1], [y0, y1],
+                    color=cmap(norm(diffs[i])),
+                    linewidth=2.5,
+                    solid_capstyle="round"
+                )
+
+            # ----------------------------
+            # Zoom or global
+            # ----------------------------
+            if zoom:
+                x0, x1 = np.nanpercentile(coords[:,0], [1, 99])
+                y0, y1 = np.nanpercentile(coords[:,1], [1, 99])
+                pad = 0.05 * max(x1 - x0, y1 - y0)
+                ax.set_xlim(x0 - pad, x1 + pad)
+                ax.set_ylim(y1 + pad, y0 - pad)
+            else:
+                ax.set_xlim(0, W)
+                ax.set_ylim(H, 0)
+
+            ax.axis("off")
+            ax.set_aspect("equal")
+
+            # ----------------------------
+            # Colorbar
+            # ----------------------------
+            sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
+            sm.set_array([])
+            cb = plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.02)
+            cb.set_label("geodesic width – GT width (px)")
 
             plt.tight_layout()
             fig.savefig(out_path, dpi=200, bbox_inches="tight", pad_inches=0)
