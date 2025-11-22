@@ -1547,18 +1547,18 @@ class CrackUtils:
         # -----------------------------------------
         for S in segs:
             for segp in split(S):
-                ax.plot(segp[:,0]-x0p, segp[:,1]-y0p, "g-", lw=0.9)
+                ax.plot(segp[:,0]-x0p, segp[:,1]-y0p, "g-", lw=1)
 
         # -----------------------------------------
         # 6. Edges (red = edge1, blue = edge2)
         # -----------------------------------------
         for E in edge1_segs:
             for segp in split(E):
-                ax.plot(segp[:,0]-x0p, segp[:,1]-y0p, "r-", lw=.9)
+                ax.plot(segp[:,0]-x0p, segp[:,1]-y0p, "r-", lw=1)
 
         for E in edge2_segs:
             for segp in split(E):
-                ax.plot(segp[:,0]-x0p, segp[:,1]-y0p, "b-", lw=0.9)
+                ax.plot(segp[:,0]-x0p, segp[:,1]-y0p, "b-", lw=1)
 
         # -----------------------------------------
         # 7. Normals (cyan) — constant stride of 100 px
@@ -1576,13 +1576,14 @@ class CrackUtils:
                 ax.plot(
                     [p1[0]-x0p, p2[0]-x0p],
                     [p1[1]-y0p, p2[1]-y0p],
-                    color="cyan", lw=0.9
+                    color="cyan", lw=1
                 )
 
         # -----------------------------------------
         # final touches
         # -----------------------------------------
-        ax.set_title("Combined Crack Debug")
+        title = f"Combined Crack (members: {', '.join(member_ids)})"
+        ax.set_title(title, fontsize=14)
         ax.axis("off")
         fig.savefig(fname, dpi=350, bbox_inches="tight")
         plt.close(fig)
