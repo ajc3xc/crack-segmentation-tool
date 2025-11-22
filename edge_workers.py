@@ -265,7 +265,7 @@ def save_cropped_overlay(img_full_bgr, bbox, mask_or_rgb, out_png, margin=0):
 # ---------------------------------------------------------------------
 # Worker: edge mask → edge tracking → mask creation → midline metrics
 # ---------------------------------------------------------------------
-def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
+'''def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     import numpy as np, cv2, os, json
     from helpers.metrics import (
         compute_midline_metrics, set_tracked_edges_for_crack,
@@ -447,7 +447,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         print(f"[edge_worker] ❌ unexpected failure for params={P}: {e}")
         out = {"status": "fail_exception", "error": str(e)}
         out.update(P)
-        return out
+        return out'''
         
 def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     import numpy as np, cv2, os, json

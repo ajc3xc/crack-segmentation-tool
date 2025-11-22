@@ -3305,11 +3305,12 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             mid = np.asarray(cr.get("midline", []), float)
             if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 2:
                 continue
-            ge = cr.get("geodesic_edges", {}) or {}
-            has_e1 = isinstance(ge.get("edge1"), list) and len(ge.get("edge1")) > 1
-            has_e2 = isinstance(ge.get("edge2"), list) and len(ge.get("edge2")) > 1
-            if not (has_e1 and has_e2):
-                need_ids.append(cid)
+            #ge = cr.get("geodesic_edges", {}) or {}
+            #has_e1 = isinstance(ge.get("edge1"), list) and len(ge.get("edge1")) > 1
+            #has_e2 = isinstance(ge.get("edge2"), list) and len(ge.get("edge2")) > 1
+            #if not (has_e1 and has_e2):
+            #    need_ids.append(cid)
+            need_ids.append(cid)
 
         print(f"[SMOKE] manual cracks needing edges: {need_ids}")
         for cid in need_ids:
