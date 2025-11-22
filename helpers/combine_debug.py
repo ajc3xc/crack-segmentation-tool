@@ -62,7 +62,11 @@ def diag_combine_table(annotation_dict: dict, image_hw: tuple,
     pd.DataFrame(rows).to_csv(out_csv, index=False)
     print(f"[COMBINE_DBG] wrote pairwise table → {out_csv}")
 
-def auto_groups_from_atomic(annotation_dict_or_atomic, image_hw=None, px_thresh: float = 10.0) -> dict:
+def auto_groups_from_atomic(annotation_dict_or_atomic,
+                            image_hw=None,
+                            px_thresh: float = 10.0,
+                            debug_root: str = None) -> dict:
+
     """
     Connected-component grouping with full diagnostics:
     - prints per-pair shared/prox/overlap + mask sizes
@@ -92,8 +96,16 @@ def auto_groups_from_atomic(annotation_dict_or_atomic, image_hw=None, px_thresh:
 
     adj = {cid: set() for cid in ids}
     debug_rows = []
-    overlay_dir = os.path.join("combine_debug", "mask_overlays")
+    base_dir = save_folder if save_folder else "."
+    # default to current working directory if nothing passed
+    if debug_root is None:
+        debug_root = "combine_debug"
+
+    overlay_dir = os.path.join(debug_root, "mask_overlays")
     os.makedirs(overlay_dir, exist_ok=True)
+
+    out_csv = os.path.join(debug_root, "pairwise_debug.csv")
+
 
     from helpers.combine_debug import _mask_from_crack
     for i in range(len(ids)):
@@ -173,7 +185,7 @@ def auto_groups_from_atomic(annotation_dict_or_atomic, image_hw=None, px_thresh:
 
     df_dbg = pd.DataFrame(debug_rows)
     print(df_dbg.to_string(index=False))
-    out_csv = os.path.join("combine_debug", "pairwise_debug.csv")
+    out_csv = os.path.join(debug_root, "pairwise_debug.csv")
     df_dbg.to_csv(out_csv, index=False)
     print(f"[COMBINE_DBG] detailed pairwise debug table → {out_csv}")
 

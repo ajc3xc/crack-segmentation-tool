@@ -2838,7 +2838,14 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print(f"[COMBINE_DBG] repaired mask_crop/bbox for: {sorted(repaired)}")
 
         # --- grouping + rebuild
-        authoring_combined = auto_groups_from_atomic(atomic, image_hw=(H, W), px_thresh=10.0)
+        combine_debug_root = os.path.join(metrics_dir, "combine_debug")
+
+        authoring_combined = auto_groups_from_atomic(
+            atomic,
+            image_hw=(H, W),
+            px_thresh=10.0,
+            debug_root=combine_debug_root
+        )
         print(f"[COMBINE_DBG] synthesized {len(authoring_combined)} combined groups automatically.")
 
         rebuilt_combined = {}

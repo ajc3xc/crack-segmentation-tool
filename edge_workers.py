@@ -165,9 +165,9 @@ def plot_normals_pretty(image_gray, track_e1, track_e2, midline_xy, e1, e2, out_
     fig, ax = plt.subplots(figsize=(7, 7), dpi=320)
     ax.imshow(image_gray, cmap='gray', interpolation='bilinear')
     if isinstance(track_e1, np.ndarray) and track_e1.ndim == 2 and len(track_e1) >= 2:
-        ax.plot(track_e1[:,0], track_e1[:,1], '-', lw=1.3, color='lime', alpha=.9, label='edge_left')
+        ax.plot(track_e1[:,0], track_e1[:,1], '-', lw=1.3, color='red', alpha=.9, label='edge_left')
     if isinstance(track_e2, np.ndarray) and track_e2.ndim == 2 and len(track_e2) >= 2:
-        ax.plot(track_e2[:,0], track_e2[:,1], '-', lw=1.3, color='red', alpha=.9, label='edge_right')
+        ax.plot(track_e2[:,0], track_e2[:,1], '-', lw=1.3, color='green', alpha=.9, label='edge_right')
     if isinstance(midline_xy, np.ndarray) and midline_xy.ndim == 2 and len(midline_xy) >= 2:
         ax.plot(midline_xy[:,0], midline_xy[:,1], '-', lw=1.2, color='white', alpha=.95, label='midline')
 

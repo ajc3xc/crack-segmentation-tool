@@ -1547,7 +1547,7 @@ class CrackUtils:
         # -----------------------------------------
         for S in segs:
             for segp in split(S):
-                ax.plot(segp[:,0]-x0p, segp[:,1]-y0p, "g-", lw=1)
+                ax.plot(segp[:,0]-x0p, segp[:,1]-y0p, "w-", lw=1)
 
         # -----------------------------------------
         # 6. Edges (red = edge1, blue = edge2)
@@ -1558,7 +1558,7 @@ class CrackUtils:
 
         for E in edge2_segs:
             for segp in split(E):
-                ax.plot(segp[:,0]-x0p, segp[:,1]-y0p, "b-", lw=1)
+                ax.plot(segp[:,0]-x0p, segp[:,1]-y0p, "g-", lw=1)
 
         # -----------------------------------------
         # 7. Normals (cyan) — constant stride of 100 px
