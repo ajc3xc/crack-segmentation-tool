@@ -3012,21 +3012,27 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 print(f"[DEBUG METRICS] combined id={ccid} failed: {e}")
                 traceback.print_exc()'''
         
-        # --- COMBINED METRICS (true bbox union for all members) ---
+        # ------------------------------------------------------------------------
+        # --- COMBINED METRICS (true bbox union for all members)
+        # ------------------------------------------------------------------------
         for ccid, cmb in (combined_map or {}).items():
             try:
                 members = cmb.get("members", []) or []
                 if not members:
                     continue
 
-                # Build full combined mask
+                # -------------------------------------------------------------
+                # 1. Build combined mask
+                # -------------------------------------------------------------
                 combined_mask = np.zeros((H, W), np.uint8)
                 member_bboxes = []
+
                 for m in members:
                     cr = atomic.get(str(m))
                     if cr:
                         mm = _mask_from_crack(cr, H, W)
                         combined_mask |= (mm > 0).astype(np.uint8)
+
                         if np.any(mm):
                             yx = np.argwhere(mm)
                             y0, x0 = yx.min(axis=0)
@@ -3037,19 +3043,27 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     print(f"[COMBINE_DBG] ⚠️ combined {ccid} empty — skipping.")
                     continue
 
-                # unified bbox
+                # -------------------------------------------------------------
+                # 2. Unified bbox for cropping
+                # -------------------------------------------------------------
                 if member_bboxes:
                     xmins, ymins, xmaxs, ymaxs = zip(*member_bboxes)
-                    x0, y0 = max(min(xmins)-5, 0), max(min(ymins)-5, 0)
-                    x1, y1 = min(max(xmaxs)+5, W), min(max(ymaxs)+5, H)
+                    x0 = max(min(xmins) - 5, 0)
+                    y0 = max(min(ymins) - 5, 0)
+                    x1 = min(max(xmaxs) + 5, W)
+                    y1 = min(max(ymaxs) + 5, H)
                 else:
                     x0, y0, x1, y1 = 0, 0, W, H
 
-                # mask crops
+                # -------------------------------------------------------------
+                # 3. Cropped GT + predicted
+                # -------------------------------------------------------------
                 gt_crop  = gt_full[y0:y1, x0:x1]
                 man_crop = combined_mask[y0:y1, x0:x1]
 
-                # metrics
+                # -------------------------------------------------------------
+                # 4. Compute metrics
+                # -------------------------------------------------------------
                 base = compute_mask_metrics(gt_crop, man_crop)
                 bnd  = boundary_fscore(gt_crop, man_crop, tau=2.0)
                 surf = assd_hd95(gt_crop, man_crop)
@@ -3058,54 +3072,144 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 cmb_dir = os.path.join(metrics_dir, f"combined{ccid}_{members_str}")
                 os.makedirs(cmb_dir, exist_ok=True)
 
-                # =====================================================
-                # GT-vs-manual overlay
-                # =====================================================
+                # -------------------------------------------------------------
+                # 5. GT-vs-manual mask overlay (exact atomic style)
+                # -------------------------------------------------------------
+                # Reuse existing helper
                 from helpers.plot_metrics import save_gt_vs_manual_overlay
+
                 save_gt_vs_manual_overlay(
-                    H, W, gt_full, combined_mask,
+                    H,
+                    W,
+                    gt_full,
+                    combined_mask,
                     os.path.join(cmb_dir, "gt_vs_manual_mask_global.png"),
-                    bbox=[x0, y0, x1-x0, y1-y0],
+                    bbox=[x0, y0, x1 - x0, y1 - y0],
                     original_image=self.original_image,
                 )
 
-                # =====================================================
-                # NEW: True combined gt_normals using *existing* helper
-                # =====================================================
+                # -------------------------------------------------------------
+                # 6. Compute midline + normals using canonical helpers
+                # -------------------------------------------------------------
                 try:
-                    import numpy as np
                     from helpers.metrics import normals_from_mask_for_midline
                     from helpers import plot_metrics
 
-                    # 1. mask crop (uint8)
-                    gt_mask_u8 = (man_crop * 255).astype(np.uint8)
-
-                    # 2. combined midline crop
+                    # ---- Combined midline (global → local crop)
                     mid_global = np.asarray(cmb.get("midline", []), float)
                     mid_crop = mid_global.copy()
                     mid_crop[:, 0] -= x0
                     mid_crop[:, 1] -= y0
 
-                    # 3. compute normals from GT mask + combined midline
+                    # ---- Mask crop for normals
+                    gt_mask_u8 = (man_crop * 255).astype(np.uint8)
+
+                    # ---- Normals from mask + midline
                     (e1x, e1y, e2x, e2y, _), _ = normals_from_mask_for_midline(
                         mid_crop, gt_mask_u8 > 0, max_radius=50
                     )
-                    e1 = np.column_stack([e1x, e1y])
-                    e2 = np.column_stack([e2x, e2y])
+                    normals_e1 = np.column_stack([e1x, e1y])
+                    normals_e2 = np.column_stack([e2x, e2y])
 
-                    # 4. call your canonical plot function
+                    # ---- Canonical gt_normals plot
+                    out_normals = os.path.join(cmb_dir, "gt_normals.png")
                     plot_metrics.plot_gt_normals_on_gtbw(
                         gt_mask_u8,
                         mid_crop,
-                        e1,
-                        e2,
-                        os.path.join(cmb_dir, "gt_normals.png")
+                        normals_e1,
+                        normals_e2,
+                        out_normals
                     )
-
-                    print(f"[COMBINE_DBG] wrote → {cmb_dir}/gt_normals.png")
+                    print(f"[COMBINE_DBG] wrote → {out_normals}")
 
                 except Exception as e:
                     print(f"[COMBINE_DBG] combined gt_normals failed: {e}")
+                    normals_e1 = normals_e2 = None
+
+                # -------------------------------------------------------------
+                # 7. PRETTY GT-vs-manual CROP + WIDTH MAP
+                # -------------------------------------------------------------
+                try:
+                    import cv2
+                    from edge_workers import plot_widths_colormap_on_crop
+
+                    # ---- Build pretty IoU overlay like atomic edge worker ----
+                    img_norm = cv2.cvtColor(
+                        self.original_image[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY
+                    )
+
+                    gt_bin   = (gt_crop > 0).astype(np.uint8)
+                    pred_bin = (man_crop > 0).astype(np.uint8)
+
+                    intersect = np.logical_and(gt_bin, pred_bin)
+                    pred_only = np.logical_and(pred_bin, np.logical_not(gt_bin))
+                    gt_only   = np.logical_and(gt_bin, np.logical_not(pred_bin))
+
+                    vis_gray  = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2RGB).astype(np.float32) / 255.0
+                    dark_base = np.clip(vis_gray * 0.35, 0, 1.0)
+                    overlay   = dark_base.copy()
+
+                    overlay[gt_only == 1]   = (.2, 0.2, 1.0)
+                    overlay[pred_only == 1] = (.2, 1.0, 1.0)
+                    overlay[intersect == 1] = (0.95, 0.95, 0.95)
+
+                    blended  = cv2.addWeighted(overlay, 0.85, dark_base, 0.15, 0)
+                    blended  = np.clip(blended * 255.0, 0, 255).astype(np.uint8)
+
+                    # ---- upscale for width map
+                    vis_large = cv2.resize(blended, None, fx=3, fy=3, interpolation=cv2.INTER_NEAREST)
+
+                    out_iou = os.path.join(cmb_dir, "gt_vs_manual_mask.png")
+                    cv2.imwrite(out_iou, vis_large)
+                    print(f"[COMBINE_DBG] wrote → {out_iou}")
+
+                    # ---------------------------------------------------------
+                    # WIDTH PLOT
+                    # ---------------------------------------------------------
+                    if normals_e1 is not None and normals_e2 is not None:
+                        S = 3.0  # scaling for upsampled overlay
+
+                        # midline_crop was in local coordinates
+                        mid_scaled = mid_crop * S
+                        e1_scaled  = normals_e1 * S
+                        e2_scaled  = normals_e2 * S
+
+                        out_width = os.path.join(cmb_dir, "widths_colormap_on_crop.png")
+
+                        plot_widths_colormap_on_crop(
+                            gt_vs_manual_rgb = vis_large,
+                            e1               = e1_scaled,
+                            e2               = e2_scaled,
+                            midline_xy       = mid_scaled,
+                            track_e1         = None,     # No geodesic tracking for combined
+                            track_e2         = None,
+                            out_png          = out_width,
+                        )
+                        print(f"[COMBINE_DBG] wrote → {out_width}")
+
+                except Exception as e:
+                    print(f"[COMBINE_DBG] pretty/width overlay failed: {e}")
+
+                # -------------------------------------------------------------
+                # 8. Record metrics row
+                # -------------------------------------------------------------
+                row = {
+                    "image": base_name,
+                    "crack_type": "combined",
+                    "crack_id": str(ccid),
+                    "members": members_str,
+                    **base, **bnd, **surf,
+                }
+                mask_rows.append(row)
+
+                print(f"[DEBUG MASK] combined id={ccid}({members_str}) "
+                    f"IoU={base['iou']:.4f} bF1={bnd['boundary_f1']:.4f}")
+
+                agg_manual |= (combined_mask > 0).astype(np.uint8)
+
+            except Exception as e:
+                print(f"[DEBUG METRICS] combined id={ccid} failed: {e}")
+                traceback.print_exc()
 
                 # save metrics row
                 row = {
@@ -3478,35 +3582,56 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         # --- 4) move per-CID overlay into its folder + redraw midline on gt_normals ---
         try:
             H, W = self.original_image.shape[:2]
-            gt = (self.current_mask > 0).astype(np.uint8) if getattr(self, "current_mask", None) is not None else np.zeros((H, W), np.uint8)
+            gt_full = (self.current_mask > 0).astype(np.uint8) if getattr(self, "current_mask", None) is not None else np.zeros((H, W), np.uint8)
             ann = self._metric_atomic()
+
+            from helpers.plot_metrics import save_gt_vs_manual_overlay
 
             for cid, crack in ann.items():
                 src = (crack.get("source") or "").lower()
                 if src.startswith("auto") or src == "combined":
                     continue
 
-                m_manual = reconstruct_manual_mask_from_edges(crack, H, W)
-                pred_mask = (m_manual > 0).astype(np.uint8)
-                gt_mask = gt.copy()
+                # ---------------------------------------------------------
+                # 1. Get full predicted mask for this atomic crack
+                # ---------------------------------------------------------
+                pred_mask_full = reconstruct_manual_mask_from_edges(crack, H, W)
+                if pred_mask_full is None:
+                    continue
+                pred_mask_full = (pred_mask_full > 0).astype(np.uint8)
 
-                intersect = np.logical_and(gt_mask, pred_mask)
-                pred_only = np.logical_and(pred_mask, np.logical_not(gt_mask))
-                gt_only   = np.logical_and(gt_mask, np.logical_not(pred_mask))
+                # ---------------------------------------------------------
+                # 2. Compute the true atomic bbox (same logic as combined)
+                # ---------------------------------------------------------
+                ys, xs = np.where(pred_mask_full > 0)
+                if xs.size == 0:
+                    continue
 
-                vis = cv2.cvtColor(self.original_image, cv2.COLOR_GRAY2BGR) if self.original_image.ndim == 2 else self.original_image.copy()
-                vis = vis.astype(np.float32) / 255.0
-                overlay = np.zeros_like(vis, np.float32)
-                overlay[gt_only]   = (0, 0, 1.0)
-                overlay[pred_only] = (0, 1.0, 1.0)
-                overlay[intersect] = (1.0, 1.0, 1.0)
-                blended = cv2.addWeighted(overlay, 0.7, vis, 0.3, 0)
-                blended = np.clip(blended * 255.0, 0, 255).astype(np.uint8)
+                x0 = max(xs.min() - 5, 0)
+                y0 = max(ys.min() - 5, 0)
+                x1 = min(xs.max() + 5, W)
+                y1 = min(ys.max() + 5, H)
 
+                bbox = [x0, y0, x1 - x0, y1 - y0]
+
+                # ---------------------------------------------------------
+                # 3. Save into cidXX directory
+                # ---------------------------------------------------------
                 cid_dir = os.path.join(image_dir, f"cid{cid}")
                 os.makedirs(cid_dir, exist_ok=True)
-                out_dbg = os.path.join(cid_dir, "debug_mask_overlay.png")
-                cv2.imwrite(out_dbg, blended)
+
+                # ---------------------------------------------------------
+                # 4. Unified overlay helper (identical to combined)
+                # ---------------------------------------------------------
+                save_gt_vs_manual_overlay(
+                    H,
+                    W,
+                    gt_full,             # full GT mask
+                    pred_mask_full,      # full predicted mask
+                    os.path.join(cid_dir, "gt_vs_manual_mask_global.png"),
+                    bbox=bbox,           # <<< SAME BEHAVIOR AS COMBINED
+                    original_image=self.original_image,
+                )
 
                 # add midline to gt_normals if it exists
                 normals_path = os.path.join(cid_dir, "gt_normals.png")
