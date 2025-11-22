@@ -2829,13 +2829,35 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             members = cmb.get("members", []) or []
             if not members:
                 continue
-            rebuilt = build_combined_crack_stateless(
+            '''rebuilt = build_combined_crack_stateless(
                 original_image=self.original_image,
                 authoring_atomic=atomic,
                 member_ids=[str(m) for m in members],
                 window_half_size=45, mu=0.0, l=5, p=14,
                 color_channel=0, pad=10, prefer_gpu=True
+            )'''
+            rebuilt = build_combined_crack_stateless(
+                original_image=self.original_image,
+                authoring_atomic=atomic,
+                member_ids=[str(m) for m in members],
+                window_half_size=45, mu=0.0, l=5, p=14,
+                color_channel=0, pad=10, prefer_gpu=True,
+
+                # NEW: inline debug callback using metrics helper
+                debug_callback=lambda **dbg: metrics_combined_debug_plot(
+                    original_image=self.original_image,
+                    metrics_dir=metrics_dir,
+                    combined_id=ccid,
+                    member_ids=members,
+                    segs=dbg["segs"],
+                    edge1=dbg["edge1"],
+                    edge2=dbg["edge2"],
+                    normals1=dbg["normals1"],
+                    normals2=dbg["normals2"],
+                    union_mask=dbg.get("union_mask")
+                )
             )
+
             rebuilt["members"] = members
             rebuilt_combined[str(ccid)] = rebuilt
         combined_map = rebuilt_combined

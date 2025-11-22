@@ -1426,26 +1426,152 @@ class CrackUtils:
         }'''
         
     def _build_combined_crack(self, member_ids, pad=10):
+        """
+        GUI-safe wrapper that forwards parameters + debug callback to stateless combiner.
+        """
         from combiner import build_combined_crack_stateless
 
         atomic = self.annotation["annotations"]["atomic_cracks"]
 
+        # ---- Safe parameter getters ----
+        def safe_val(name, default):
+            box = getattr(self, name, None)
+            if box is None:
+                return default
+            try:
+                return box.value()
+            except Exception:
+                return default
+
+        window_half = safe_val("window_half_size_box", 15)
+        mu          = safe_val("mu_box", 0.0)
+        l           = safe_val("l_box", 5)
+        p           = safe_val("p_box", 14)
+
+        # color channel
+        try:
+            mode = self.edge_track_color_box.currentText()
+            color_idx = 0 if mode == 'R' else (1 if mode == 'B' else 2)
+        except Exception:
+            color_idx = 0
+
+        # ===== NEW: provide callback to stateless builder =====
         result = build_combined_crack_stateless(
             original_image=self.original_image,
             authoring_atomic=atomic,
             member_ids=member_ids,
-            window_half_size=self.window_half_size_box.value(),
-            mu=self.mu_box.value(),
-            l=self.l_box.value(),
-            p=self.p_box.value(),
-            color_channel=0 if self.edge_track_color_box.currentText()=='R'
-                            else 1 if self.edge_track_color_box.currentText()=='B'
-                            else 2,
-            prefer_gpu=True
+            window_half_size=window_half,
+            mu=mu, l=l, p=p,
+            color_channel=color_idx,
+            pad=pad,
+            prefer_gpu=True,
+            debug_callback=lambda *args, **kwargs: self._combined_debug_plot(*args, **kwargs)
         )
 
         return result
-        
+    
+    def _combined_debug_plot(
+        self,
+        image_rgb=None,
+        segs=None,
+        edge1_segs=None,
+        edge2_segs=None,
+        norm1_segs=None,
+        norm2_segs=None,
+        mask_bbox=None,
+        member_ids=None,
+        **kwargs,                 # <-- FIX: swallow extra args like edge1=, edge2=, etc.
+    ):
+        """
+        Fully zoomed, clean combined debug plot.
+        """
+        import os
+        import numpy as np
+        import matplotlib.pyplot as plt
+
+        # unwrap kwargs if needed
+        if edge1_segs is None:
+            edge1_segs = kwargs.get("edge1", [])
+        if edge2_segs is None:
+            edge2_segs = kwargs.get("edge2", [])
+        if norm1_segs is None:
+            norm1_segs = kwargs.get("norm1", [])
+        if norm2_segs is None:
+            norm2_segs = kwargs.get("norm2", [])
+        if segs is None:
+            segs = kwargs.get("segs", [])
+
+        if mask_bbox is None:
+            mask_bbox = kwargs.get("mask_bbox", [0,0,image_rgb.shape[1],image_rgb.shape[0]])
+
+        if member_ids is None:
+            member_ids = kwargs.get("member_ids", [])
+
+        H, W = image_rgb.shape[:2]
+        x0, y0, w, h = mask_bbox
+        x1 = x0 + w
+        y1 = y0 + h
+
+        save_dir = os.path.join(self.save_folder, "debug_outputs")
+        os.makedirs(save_dir, exist_ok=True)
+        base = os.path.splitext(os.path.basename(self.name))[0]
+        fname = f"{base}_combined_{'_'.join(member_ids)}.png"
+        out = os.path.join(save_dir, fname)
+
+        fig, ax = plt.subplots(figsize=(10, 7))
+        ax.imshow(image_rgb)
+        ax.set_title("Combined Crack Debug")
+
+        def split(arr, step=50):
+            arr = np.asarray(arr)
+            if len(arr) < 2:
+                return []
+            d = np.sqrt(np.sum(np.diff(arr, axis=0)**2, axis=1))
+            br = np.where(d > step)[0]
+            segs2 = []
+            start = 0
+            for b in br:
+                if b + 1 - start >= 2:
+                    segs2.append(arr[start:b+1])
+                start = b + 1
+            if len(arr) - start >= 2:
+                segs2.append(arr[start:])
+            return segs2 if segs2 else [arr]
+
+        # midlines
+        for S in segs:
+            for segp in split(S, 40):
+                ax.plot(segp[:, 0], segp[:, 1], 'g-', lw=1)
+
+        # edges
+        for e in edge1_segs:
+            for segp in split(e, 40):
+                ax.plot(segp[:, 0], segp[:, 1], 'r-', lw=0.7)
+
+        for e in edge2_segs:
+            for segp in split(e, 40):
+                ax.plot(segp[:, 0], segp[:, 1], 'b-', lw=0.7)
+
+        # normals
+        for n1, n2 in zip(norm1_segs, norm2_segs):
+            if len(n1) and len(n2):
+                m = min(len(n1), len(n2))
+                step = max(1, m // 70)
+                for i in range(0, m, step):
+                    ax.plot([n1[i,0], n2[i,0]],
+                            [n1[i,1], n2[i,1]],
+                            color='cyan', lw=0.6)
+
+        pad = 15
+        ax.set_xlim(max(0, x0 - pad), min(W, x1 + pad))
+        ax.set_ylim(min(H, y1 + pad), max(0, y0 - pad))
+        ax.axis('equal')
+
+        plt.tight_layout()
+        plt.savefig(out, dpi=300)
+        plt.close()
+
+       
     def draw_existing_cracks(self, im):
         """Overlay existing cracks (atomic + combined) in red onto a copy of the image."""
         H, W = im.shape[:2]

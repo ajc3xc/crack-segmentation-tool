@@ -157,6 +157,85 @@ def _ribbon_mask_from_midline(H, W, S_xy, thickness_px=4):
     cv2.polylines(mask, [pts], isClosed=False, color=255, thickness=thickness_px, lineType=cv2.LINE_AA)
     return mask
 
+def metrics_combined_debug_plot(
+    *,
+    original_image,
+    metrics_dir,
+    combined_id,
+    member_ids,
+    segs,
+    edge1,
+    edge2,
+    normals1,
+    normals2,
+    union_mask
+):
+    """
+    Metrics-safe debug plot. Identical style to GUI, but saved in metrics tree.
+    """
+    import os, numpy as np, matplotlib.pyplot as plt
+    H, W = original_image.shape[:2]
+
+    member_str = "_".join(str(m) for m in member_ids)
+    out_dir = os.path.join(metrics_dir, f"combined{combined_id}_{member_str}")
+    os.makedirs(out_dir, exist_ok=True)
+
+    fname = os.path.join(out_dir, "combined_debug.png")
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+    ax.imshow(original_image)
+    ax.set_title(f"Combined Debug (metrics) cid={combined_id} members={member_str}")
+
+    def _split(arr, max_step=50.0):
+        arr = np.asarray(arr, float)
+        if len(arr) < 2:
+            return []
+        d = np.sqrt(np.sum(np.diff(arr, axis=0)**2, axis=1))
+        breaks = np.where(d > max_step)[0]
+        segs, start = [], 0
+        for b in breaks:
+            if b+1 - start >= 2:
+                segs.append(arr[start:b+1])
+            start = b+1
+        if len(arr) - start >= 2:
+            segs.append(arr[start:])
+        return segs if segs else [arr]
+
+    for S in segs:
+        for segp in _split(S):
+            ax.plot(segp[:,0], segp[:,1], "g-", lw=0.7)
+
+    for e in edge1:
+        for segp in _split(e):
+            ax.plot(segp[:,0], segp[:,1], "r-", lw=0.6)
+    for e in edge2:
+        for segp in _split(e):
+            ax.plot(segp[:,0], segp[:,1], "b-", lw=0.6)
+
+    for n1, n2 in zip(normals1, normals2):
+        if len(n1) == 0 or len(n2) == 0:
+            continue
+        m = min(len(n1), len(n2))
+        step = max(1, m // 70)
+        for i in range(0, m, step):
+            p1 = n1[i]; p2 = n2[i]
+            if np.isfinite(p1).all() and np.isfinite(p2).all():
+                ax.plot([p1[0], p2[0]], [p1[1], p2[1]],
+                        color="cyan", lw=0.3, alpha=0.7)
+
+    if union_mask is not None:
+        ys, xs = np.where(union_mask > 0)
+        if xs.size > 0:
+            ax.scatter(xs, ys, s=1, c="yellow", alpha=0.15)
+
+    ax.set_xlim(0, W)
+    ax.set_ylim(H, 0)
+    ax.axis("equal")
+
+    plt.tight_layout()
+    plt.savefig(fname, dpi=200)
+    plt.close()
+    print(f"[METRICS_COMBINED_DEBUG] wrote → {fname}")
 
 def build_combined_crack_stateless(
     original_image: np.ndarray,
@@ -167,26 +246,20 @@ def build_combined_crack_stateless(
     mu: float = 0.0,
     l: int = 5,
     p: int = 14,
-    color_channel: int = 0,     # 0/1/2 = R/B/G as in your GUI mapping
+    color_channel: int = 0,
     pad: int = 10,
-    prefer_gpu: bool = True
-) -> dict:
-    """
-    Stateless “metrics-safe” combine:
-      1) stitches member midlines using user endpoints
-      2) per stitched segment: crops, makes edge masks, runs edges_tracking
-      3) unions per-seg polygon/ribbon masks → final crop + bbox
-      4) returns a combined crack dict ready to be written to combined.json
+    prefer_gpu: bool = True,
+    debug_callback=None,
+):
 
-    Returns: {source, members, midline(_segments), geodesic_edges, normal_edge_points,
-              mask_crop, mask_bbox, combined_length, mean_width}
     """
+    Stateless “metrics-safe” combine.
+    """
+
     img = original_image
     H, W = img.shape[:2]
-    # pick channel if BGR image
+
     if img.ndim == 3:
-        # your prior mapping: R→0, B→1, else G→2; but image is BGR in OpenCV.
-        # Keep the same behavior: color_channel=0 means "R from your GUI" which is actually index 2 in BGR
         bgr_idx = {0:2, 1:0, 2:1}.get(color_channel, 2)
         gray_full = img[:, :, bgr_idx].astype(np.float32)
     else:
@@ -196,7 +269,7 @@ def build_combined_crack_stateless(
     stitched = _stitch_lines_by_user(member_ids, authoring_atomic)
     stitched.sort(key=_linestring_length, reverse=True)
 
-    # dominant-buffer carve as in your class method
+    # shapely prune
     try:
         from shapely.geometry import LineString
         from shapely.ops import unary_union
@@ -215,9 +288,9 @@ def build_combined_crack_stateless(
                 kept_segs.append(S)
                 dom_buffer = g.buffer(overlap_px, cap_style=2, join_style=2)
             else:
-                remainder = g.difference(dom_buffer)
-                if remainder.is_empty: continue
-                for piece in _split_lines(remainder):
+                rem = g.difference(dom_buffer)
+                if rem.is_empty: continue
+                for piece in _split_lines(rem):
                     if piece.length >= min_keep_len:
                         kept_segs.append(np.asarray(piece.coords, float))
                 dom_buffer = unary_union([dom_buffer, g.buffer(overlap_px, cap_style=2, join_style=2)])
@@ -232,7 +305,6 @@ def build_combined_crack_stateless(
 
     for S in segs:
         if S is None or len(S) < 2: continue
-
         x0 = max(0, int(np.floor(S[:,0].min()) - pad))
         x1 = min(W, int(np.ceil(S[:,0].max()) + pad))
         y0 = max(0, int(np.floor(S[:,1].min()) - pad))
@@ -240,51 +312,49 @@ def build_combined_crack_stateless(
         if x1-x0 < 2 or y1-y0 < 2: continue
 
         crop = gray_full[y0:y1, x0:x1]
-        track_local_yx = np.vstack([S[:,1]-y0, S[:,0]-x0])  # (2,N) [y,x]
+        track_local_yx = np.vstack([S[:,1]-y0, S[:,0]-x0])
         pts_crop = [S[0]-[x0,y0], S[-1]-[x0,y0]]
 
-        # edge masks (pure)
         em1, em2 = edge_masks(crop.astype(np.uint8), track_local_yx, window_half_size=window_half_size)
 
-        # edges
         midline_xy_crop = np.column_stack([track_local_yx[1], track_local_yx[0]])
         res = edges_tracking(
             image_crop=crop,
             pts_cropp=pts_crop,
             edge_mask1_cropp=em1, edge_mask2_cropp=em2,
-            midline=midline_xy_crop, mu=int(mu), l=int(l), p=int(p),
+            midline=midline_xy_crop,
+            mu=int(mu), l=int(l), p=int(p),
             return_normal_edges=True,
             prefer_gpu=prefer_gpu
         )
-        if not isinstance(res, dict): 
+        if not isinstance(res, dict):
             continue
 
         ge = res.get("geodesic_edges", [None, None])
-        if ge is None or len(ge) != 2: 
-            continue
+        if ge is None or len(ge) != 2: continue
         e1, e2 = ge
-        if e1 is None or e2 is None or len(e1) < 2 or len(e2) < 2:
+        if e1 is None or e2 is None or len(e1)<2 or len(e2)<2:
             continue
 
         e1 = np.asarray(e1, float); e2 = np.asarray(e2, float)
         e1_full = _finite_xy(np.column_stack([e1[:,0]+x0, e1[:,1]+y0]))
         e2_full = _finite_xy(np.column_stack([e2[:,0]+x0, e2[:,1]+y0]))
-        if len(e1_full) < 2 or len(e2_full) < 2: 
+        if len(e1_full)<2 or len(e2_full)<2:
             continue
 
         e1_full = _align_edge_to_midline(S, e1_full)
         e2_full = _align_edge_to_midline(S, e2_full)
 
-        # normals & widths
         normals = res.get("normal_edge_points")
         if normals is not None:
             (e1x, e1y), (e2x, e2y) = normals
             n1_full = _finite_xy(np.column_stack([np.asarray(e1x)+x0, np.asarray(e1y)+y0]))
             n2_full = _finite_xy(np.column_stack([np.asarray(e2x)+x0, np.asarray(e2y)+y0]))
             m = min(len(n1_full), len(n2_full))
-            if m >= 2:
+            if m>=2:
                 d = np.sqrt(np.sum((n1_full[:m] - n2_full[:m])**2, axis=1))
-                if d.size: all_widths.append(d[np.isfinite(d)])
+                if d.size:
+                    all_widths.append(d[np.isfinite(d)])
         else:
             n1_full = np.empty((0,2)); n2_full = np.empty((0,2))
 
@@ -293,21 +363,21 @@ def build_combined_crack_stateless(
         norm1_segs.append(n1_full)
         norm2_segs.append(n2_full)
 
-        # polygonal mask via edges if area is decent; else a ribbon around midline
         ex = np.concatenate((e1_full[:,0][::-1], e2_full[:,0]))
         ey = np.concatenate((e1_full[:,1][::-1], e2_full[:,1]))
         exc, eyc = np.clip(ex, 0, W-1), np.clip(ey, 0, H-1)
         area = _shoelace_area(exc, eyc)
         if area > 0.5:
             poly = np.stack([exc, eyc], axis=1).astype(np.int32).reshape(-1,1,2)
-            mask_seg = np.zeros((H, W), np.uint8)
-            cv2.fillPoly(mask_seg, [poly], 255, lineType=cv2.LINE_AA)
+            mask_seg = np.zeros((H,W), np.uint8)
+            cv2.fillPoly(mask_seg, [poly], 255)
         else:
             mask_seg = _ribbon_mask_from_midline(H, W, S, thickness_px=max(3, window_half_size//3))
+
         union_mask |= (mask_seg > 0).astype(np.uint8)
 
     if np.any(union_mask):
-        x, y, w, h = bbox_from_mask(union_mask) or [0,0,W,H]
+        x,y,w,h = bbox_from_mask(union_mask) or [0,0,W,H]
         crop = union_mask[y:y+h, x:x+w].astype(np.uint8)
     else:
         x=y=0; w=h=1; crop = np.zeros((1,1), np.uint8)
@@ -322,6 +392,24 @@ def build_combined_crack_stateless(
 
     combined_length = float(sum(_linestring_length(s) for s in segs))
     mean_width = float(np.nanmean(np.concatenate(all_widths))) if len(all_widths) else None
+
+    # ---- DEBUG CALLBACK ----
+    if callable(debug_callback):
+        try:
+            debug_callback(
+                image_rgb=img,              # <-- ADD THIS
+                segs=segs,
+                edge1=edge1_segs,
+                edge2=edge2_segs,
+                normals1=norm1_segs,
+                normals2=norm2_segs,
+                member_ids=member_ids,
+                union_mask=union_mask,
+                mask_bbox=[int(x), int(y), int(w), int(h)]
+            )
+
+        except Exception as e:
+            print("[STATLESS_DEBUG] error:", e)
 
     return {
         "source": "combined",
