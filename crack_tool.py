@@ -3642,7 +3642,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                         cv2.polylines(img, [ml.astype(np.int32)], False, (0,0,255), 1, cv2.LINE_AA)
                         cv2.imwrite(normals_path, img)
 
-                print(f"[SMOKE] wrote mask overlay → {out_dbg}")
+                print(f"[SMOKE] wrote mask overlay → {cid_dir}")
         except Exception as e:
             print(f"[SMOKE] overlay debug failed: {e}")
 
