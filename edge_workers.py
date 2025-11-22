@@ -181,7 +181,7 @@ def plot_normals_pretty(image_gray, track_e1, track_e2, midline_xy, e1, e2, out_
     fig.savefig(out_png, dpi=320, bbox_inches='tight', pad_inches=0)
     plt.close(fig)
 
-def plot_widths_colormap_on_crop(gt_vs_manual_rgb, e1, e2, track_e1=None, track_e2=None, out_png=None):
+'''def plot_widths_colormap_on_crop(gt_vs_manual_rgb, e1, e2, track_e1=None, track_e2=None, out_png=None):
     """
     Continuous width-colored midline overlay on GT-vs-manual mask background,
     plus both geodesic edges (track_e1=red, track_e2=green).
@@ -246,7 +246,106 @@ def plot_widths_colormap_on_crop(gt_vs_manual_rgb, e1, e2, track_e1=None, track_
     plt.tight_layout(pad=0)
     if out_png:
         fig.savefig(out_png, dpi=320, bbox_inches='tight', pad_inches=0)
-        plt.close(fig)
+        plt.close(fig)'''
+        
+def plot_widths_colormap_on_crop(
+    gt_vs_manual_rgb,
+    e1, e2,
+    midline_xy,
+    track_e1=None,
+    track_e2=None,
+    out_png=None
+):
+    import numpy as np, matplotlib.pyplot as plt, matplotlib as mpl
+    from scipy.ndimage import gaussian_filter1d
+
+    # ---- convert everything ----
+    e1 = np.asarray(e1, float)
+    e2 = np.asarray(e2, float)
+    mid = np.asarray(midline_xy, float)
+
+    # ---- length clamp ----
+    n = min(len(e1), len(e2), len(mid))
+    if n < 2:
+        print("[WIDTH-PLOT] ❌ not enough points")
+        return
+    e1 = e1[:n]
+    e2 = e2[:n]
+    mid = mid[:n]
+
+    # ---- widths ----
+    widths = np.linalg.norm(e1 - e2, axis=1)
+    widths_smooth = gaussian_filter1d(widths, sigma=1.2)
+
+    # ---- remove duplicate midline points ----
+    coords = mid
+    _, uniq = np.unique(coords, axis=0, return_index=True)
+    uniq = np.sort(uniq)
+    coords = coords[uniq]
+    widths_smooth = widths_smooth[uniq]
+
+    # force at least 2 samples
+    if len(coords) < 2:
+        print("[WIDTH-PLOT] ❌ unique points < 2")
+        return
+
+    # ---- arc-length sort ----
+    d = np.sqrt(np.sum(np.diff(coords, axis=0)**2, axis=1))
+    s = np.concatenate([[0], np.cumsum(d)])
+    order = np.argsort(s)
+    coords = coords[order]
+    widths_smooth = widths_smooth[order]
+
+    # ---- vmin/vmax fix ----
+    vmin, vmax = np.percentile(widths_smooth, [5, 95])
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+        vmin = float(np.min(widths_smooth))
+        vmax = float(np.max(widths_smooth))
+        if vmin == vmax:
+            vmax = vmin + 1e-6
+
+    cmap = plt.get_cmap("coolwarm")
+    norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+    colors = cmap(norm(widths_smooth))
+
+    H, W = gt_vs_manual_rgb.shape[:2]
+    fig, ax = plt.subplots(figsize=(7, 7), dpi=320)
+    ax.imshow(gt_vs_manual_rgb[..., ::-1], interpolation='bilinear')
+
+    # ---- width-colored midline ----
+    for i in range(len(coords) - 1):
+        ax.plot(
+            [coords[i,0], coords[i+1,0]],
+            [coords[i,1], coords[i+1,1]],
+            color=colors[i],
+            linewidth=2.4,
+            alpha=0.97,
+            solid_capstyle='round'
+        )
+
+    # ---- geodesic edges ----
+    if track_e1 is not None and len(track_e1) > 1:
+        te1 = np.asarray(track_e1)
+        ax.plot(te1[:,0], te1[:,1], '-', lw=1.4, color='magenta', alpha=0.9)
+
+    if track_e2 is not None and len(track_e2) > 1:
+        te2 = np.asarray(track_e2)
+        ax.plot(te2[:,0], te2[:,1], '-', lw=1.4, color='lime', alpha=0.9)
+
+    # ---- colorbar ----
+    sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.02)
+
+    ax.set_xlim(0, W)
+    ax.set_ylim(H, 0)
+    ax.axis('off')
+
+    plt.tight_layout(pad=0)
+    if out_png:
+        fig.savefig(out_png, dpi=320, bbox_inches='tight', pad_inches=0)
+
+    plt.close(fig)
 
 def save_cropped_overlay(img_full_bgr, bbox, mask_or_rgb, out_png, margin=0):
     """Crop to bbox (+margin) and save."""
@@ -573,7 +672,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             print(f"[DEBUG VIS] wrote → {out_iou}")
 
         # --- Continuous width colormap overlay (GT mask background if available) ---
-        widths_path = os.path.join(dbg_dir, "widths_colormap_on_crop.png")
+        '''widths_path = os.path.join(dbg_dir, "widths_colormap_on_crop.png")
         if gt_vs_manual_overlay is not None:
             scale = 3.0
             plot_widths_colormap_on_crop(
@@ -581,7 +680,21 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 normals_e1 * scale, normals_e2 * scale,          # width geometry
                 track_e1 * scale, track_e2 * scale,              # geodesic edges
                 os.path.join(dbg_dir, "widths_colormap_on_crop.png")
-            )
+            )'''
+        widths_path = os.path.join(dbg_dir, "widths_colormap_on_crop.png")
+        if gt_vs_manual_overlay is not None:
+            scale = 3.0
+            plot_widths_colormap_on_crop(
+            gt_vs_manual_rgb = gt_vs_manual_overlay,
+            e1               = normals_e1 * scale,
+            e2               = normals_e2 * scale,
+            midline_xy       = midline_xy_crop * scale,
+            track_e1         = track_e1 * scale,
+            track_e2         = track_e2 * scale,
+            out_png          = widths_path
+        )
+
+
 
         else:
             plot_widths_colormap_on_crop(img_norm, normals_e1, normals_e2, widths_path)
