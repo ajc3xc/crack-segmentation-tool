@@ -695,60 +695,44 @@ def plot_width_differences(midline, w_mask, w_edge, mask, contours=None,
     return diffs
 
 def plot_core_timing_bars(metrics_dir, base_name, out_png):
-    """
-    Simple bar chart of core routine runtimes for one image.
-
-    Reads <base_name>_timings_core.csv and sums:
-      - edge_masks_sec
-      - edges_tracking_sec
-      - build_combined_sec
-    """
     import os, numpy as np, pandas as pd
     import matplotlib.pyplot as plt
 
-    csv_path = os.path.join(metrics_dir, f"{base_name}_timings_core.csv")
+    csv_path=os.path.join(metrics_dir,f"{base_name}_timings_core.csv")
     if not os.path.exists(csv_path):
-        print("[TIMING_PLOT] no timing CSV:", csv_path)
+        print("[TIMING_PLOT] no timing CSV")
         return
 
-    df = pd.read_csv(csv_path)
+    df=pd.read_csv(csv_path)
 
-    stage_map = [
-        ("edge_masks_sec",    "Edge masks"),
-        ("edges_tracking_sec","Edge tracking"),
-        ("build_combined_sec","Combined crack"),
+    # Collect sums
+    cols=[c for c in df.columns if c.endswith("_sec") or c.startswith("t_")]
+
+    sums={c:np.nansum(df[c]) for c in cols}
+
+    # Group into stacks (geodesic, pairing, gradient, metric, etc.)
+    stack_order=[
+        "edge_masks_sec",
+        "t_gradients","t_norm_masks","t_metric",
+        "t_geodesic1","t_geodesic2",
+        "t_pairing",
+        "edges_tracking_sec",
+        "build_combined_sec",
     ]
+    labels=[s for s in stack_order if s in sums]
+    values=[sums[s] for s in labels]
 
-    cols, labels, vals = [], [], []
-    for col, label in stage_map:
-        if col in df.columns:
-            cols.append(col)
-            labels.append(label)
-            vals.append(np.nansum(df[col].astype(float).values))
+    fig,ax=plt.subplots(figsize=(9,4),dpi=160)
 
-    if not cols:
-        print("[TIMING_PLOT] no known timing columns found")
-        return
+    bottom=0
+    for lab,val in zip(labels,values):
+        ax.bar("total", val, bottom=bottom, label=lab.replace("_"," "))
+        bottom+=val
 
-    xs = np.arange(len(labels))
-
-    fig, ax = plt.subplots(figsize=(7, 4), dpi=160)
-    ax.bar(xs, vals)
-    ax.set_xticks(xs)
-    ax.set_xticklabels(labels, rotation=15, ha="right", fontsize=9, fontweight="bold")
+    ax.set_title("Core runtime (sum of all sub-modules)",fontsize=13,fontweight="bold")
     ax.set_ylabel("Time (s)")
-    ax.set_title("Core runtime per image", fontsize=13, fontweight="bold")
-
-    for i, v in enumerate(vals):
-        ax.text(
-            xs[i],
-            v * 1.03 if v > 0 else 0.02,
-            f"{v:.2f}",
-            ha="center",
-            va="bottom",
-            fontsize=8,
-        )
+    ax.legend(fontsize=7)
 
     plt.tight_layout()
-    plt.savefig(out_png, dpi=160, bbox_inches="tight")
-    plt.close(fig)
+    plt.savefig(out_png,dpi=160,bbox_inches="tight")
+    plt.close()
