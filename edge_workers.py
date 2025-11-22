@@ -470,7 +470,7 @@ def plot_widths_colormap_on_crop(
         if vmin == vmax:
             vmax = vmin + 1e-6
 
-    cmap = plt.get_cmap("coolwarm")
+    cmap = plt.get_cmap("inferno")
     norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
     colors = cmap(norm(widths_smooth))
 
@@ -513,8 +513,17 @@ def plot_widths_colormap_on_crop(
     from matplotlib.patches import Patch
 
     handles = [
-        Line2D([], [], color="white", lw=2.4, label="Midline (width map)")
+        
     ]
+    
+    handles.append(
+        Line2D(
+            [], [], 
+            color="gray", lw=2.4,
+            label="Midline (color bar width map)"
+        )
+    )
+
 
     if track_e1 is not None and len(track_e1) > 1:
         handles.append(Line2D([], [], color="magenta", lw=1.8, label="Edge 1 (Left)"))
