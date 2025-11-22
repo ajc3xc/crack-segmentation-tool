@@ -10,6 +10,7 @@ from cracktools.segmentation import edge_masks, edges_tracking
 #from helpers import metrics
 from helpers import *
 from helpers import plot_metrics
+from helpers.plot_metrics import *
 
 # ---------------------------------------------------------------------
 # Helper: mini diagnostic plot for failed or weird edge cases
@@ -159,27 +160,71 @@ def extract_normals_from_res(res):
     m = min(len(e1), len(e2))
     return e1[:m], e2[:m]
 
-def plot_normals_pretty(image_gray, track_e1, track_e2, midline_xy, e1, e2, out_png):
+'''def plot_normals_pretty(image_gray, track_e1, track_e2, midline_xy, e1, e2, out_png):
     """Clean, anti-aliased Matplotlib overlay (zoom-friendly)."""
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
     H, W = image_gray.shape[:2]
     fig, ax = plt.subplots(figsize=(7, 7), dpi=320)
     ax.imshow(image_gray, cmap='gray', interpolation='bilinear')
-    if isinstance(track_e1, np.ndarray) and track_e1.ndim == 2 and len(track_e1) >= 2:
-        ax.plot(track_e1[:,0], track_e1[:,1], '-', lw=1.3, color='red', alpha=.9, label='edge_left')
-    if isinstance(track_e2, np.ndarray) and track_e2.ndim == 2 and len(track_e2) >= 2:
-        ax.plot(track_e2[:,0], track_e2[:,1], '-', lw=1.3, color='green', alpha=.9, label='edge_right')
-    if isinstance(midline_xy, np.ndarray) and midline_xy.ndim == 2 and len(midline_xy) >= 2:
-        ax.plot(midline_xy[:,0], midline_xy[:,1], '-', lw=1.2, color='white', alpha=.95, label='midline')
 
+    handles = []
+
+    # ---- Edges
+    if isinstance(track_e1, np.ndarray) and track_e1.ndim == 2 and len(track_e1) >= 2:
+        ax.plot(track_e1[:,0], track_e1[:,1], '-', lw=1.3, color='red', alpha=.9)
+        handles.append(Line2D([], [], color='red', lw=1.3, label='Edge 1 (Left)'))
+
+    if isinstance(track_e2, np.ndarray) and track_e2.ndim == 2 and len(track_e2) >= 2:
+        ax.plot(track_e2[:,0], track_e2[:,1], '-', lw=1.3, color='green', alpha=.9)
+        handles.append(Line2D([], [], color='green', lw=1.3, label='Edge 2 (Right)'))
+
+    # ---- Midline
+    if isinstance(midline_xy, np.ndarray) and midline_xy.ndim == 2 and len(midline_xy) >= 2:
+        ax.plot(midline_xy[:,0], midline_xy[:,1], '-', lw=1.2, color='white', alpha=.95)
+        handles.append(Line2D([], [], color='white', lw=1.3, label='Midline'))
+
+    # ---- Normals
     if len(e1) > 1 and len(e2) > 1:
         step = max(1, len(e1)//60)
         for i in range(0, len(e1), step):
-            ax.plot([e1[i,0], e2[i,0]], [e1[i,1], e2[i,1]], '-', lw=0.9, color='cyan', alpha=0.8)
+            ax.plot([e1[i,0], e2[i,0]], [e1[i,1], e2[i,1]],
+                    '-', lw=0.9, color='cyan', alpha=0.8)
+        handles.append(Line2D([], [], color='cyan', lw=1.3, label='Normals'))
 
-    ax.set_xlim(0, W); ax.set_ylim(H, 0); ax.axis('off')
+    # ---- Legend
+    ax.legend(
+        handles=handles,
+        fontsize=10,
+        title="Legend",
+        title_fontsize=11,
+        loc='lower right',
+        framealpha=0.85,
+        title_fontproperties={'weight': 'bold', 'color': 'blue'},
+    )
+
+    ax.set_xlim(0, W)
+    ax.set_ylim(H, 0)
+    ax.axis('off')
+
     plt.tight_layout(pad=0)
-    fig.savefig(out_png, dpi=320, bbox_inches='tight', pad_inches=0)
-    plt.close(fig)
+    fig.savefig(out_png, dpi=320, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)'''
+    
+def plot_normals_pretty(image_gray, track_e1, track_e2, midline_xy, e1, e2, out_png, crack_id):
+    plot_edges_and_normals(
+        base_image=image_gray,
+        midline_segs=[midline_xy],
+        edge1_segs=[track_e1],
+        edge2_segs=[track_e2],
+        norm1_segs=[e1],
+        norm2_segs=[e2],
+        bbox=None,
+        out_png=out_png,
+        title=f"Atomic Crack {crack_id}",
+    )
 
 def plot_widths_colormap_on_crop(
     gt_vs_manual_rgb,
@@ -191,51 +236,42 @@ def plot_widths_colormap_on_crop(
 ):
     import numpy as np, matplotlib.pyplot as plt, matplotlib as mpl
     from scipy.ndimage import gaussian_filter1d
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
 
     # ---- convert arrays ----
     e1 = np.asarray(e1, float)
     e2 = np.asarray(e2, float)
     mid = np.asarray(midline_xy, float)
-    
-    print("[DEBUG] e1 nan count:", np.isnan(e1).sum())
-    print("[DEBUG] e2 nan count:", np.isnan(e2).sum())
-    print("[DEBUG] e1 shape:", e1.shape)
-    print("[DEBUG] e2 shape:", e2.shape)
-    
-    # Replace NaNs by nearest valid value along the sequence
+
+    # ---- fix NaNs (same as before) ----
     def fix_nans(arr):
         mask = ~np.isnan(arr[:,0])
         if not mask.any():
             return None
-        return np.interp(
-            np.arange(len(arr)),
-            np.where(mask)[0],
-            arr[mask][:,0]
-        ), np.interp(
-            np.arange(len(arr)),
-            np.where(mask)[0],
-            arr[mask][:,1]
+        return (
+            np.interp(np.arange(len(arr)), np.where(mask)[0], arr[mask][:,0]),
+            np.interp(np.arange(len(arr)), np.where(mask)[0], arr[mask][:,1]),
         )
 
     if np.isnan(e1).any():
-        print("[WIDTH DEBUG] fixing NaNs in e1")
         x_fixed, y_fixed = fix_nans(e1)
         e1 = np.column_stack([x_fixed, y_fixed])
 
     if np.isnan(e2).any():
-        print("[WIDTH DEBUG] fixing NaNs in e2")
         x_fixed, y_fixed = fix_nans(e2)
         e2 = np.column_stack([x_fixed, y_fixed])
 
-
-    # ---- clamp length ----
+    # ---- clamp ----
     n = min(len(e1), len(e2), len(mid))
     if n < 2:
-        print("[WIDTH-PLOT] not enough samples")
         return
-    e1 = e1[:n]; e2 = e2[:n]; mid = mid[:n]
 
-    # ---- widths ----
+    e1 = e1[:n]
+    e2 = e2[:n]
+    mid = mid[:n]
+
+    # ---- width computation ----
     widths = np.linalg.norm(e1 - e2, axis=1)
     widths_smooth = gaussian_filter1d(widths, sigma=1.2)
 
@@ -244,26 +280,22 @@ def plot_widths_colormap_on_crop(
     _, uniq = np.unique(coords, axis=0, return_index=True)
     coords = coords[np.sort(uniq)]
     widths_smooth = widths_smooth[np.sort(uniq)]
+
     if len(coords) < 2:
-        print("[WIDTH-PLOT] unique points < 2")
         return
 
-    # ---- arc-length sort ----
+    # ---- arc-length sorting ----
     d = np.sqrt(np.sum(np.diff(coords, axis=0)**2, axis=1))
     s = np.concatenate([[0], np.cumsum(d)])
-    coords = coords[np.argsort(s)]
-    widths_smooth = widths_smooth[np.argsort(s)]
-    
-    # ---- DEBUG WIDTH RANGE ----
-    print("[WIDTH DEBUG] min =", widths_smooth.min(),
-        "max =", widths_smooth.max(),
-        "mean =", widths_smooth.mean())
+    ordering = np.argsort(s)
+    coords = coords[ordering]
+    widths_smooth = widths_smooth[ordering]
 
-    # ---- normalize width range ----
+    # ---- normalize for colormap ----
     vmin, vmax = np.percentile(widths_smooth, [5, 95])
     if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
-        vmin = float(np.min(widths_smooth))
-        vmax = float(np.max(widths_smooth))
+        vmin = float(widths_smooth.min())
+        vmax = float(widths_smooth.max())
         if vmin == vmax:
             vmax = vmin + 1e-6
 
@@ -275,7 +307,7 @@ def plot_widths_colormap_on_crop(
 
     fig, ax = plt.subplots(figsize=(7, 7), dpi=320)
 
-    # Background
+    # ---- background ----
     ax.imshow(gt_vs_manual_rgb[..., ::-1], interpolation="bilinear")
 
     # ---- colored midline ----
@@ -286,46 +318,37 @@ def plot_widths_colormap_on_crop(
             color=colors[i],
             linewidth=2.4,
             alpha=0.97,
-            solid_capstyle="round"
+            solid_capstyle="round",
         )
 
     # ---- geodesic edges ----
     if track_e1 is not None and len(track_e1) > 1:
         te1 = np.asarray(track_e1)
-        ax.plot(te1[:,0], te1[:,1], "-", lw=1.4, color="magenta", alpha=0.9,
-                label="Edge 1 (Left)")
+        ax.plot(te1[:,0], te1[:,1], "-", lw=1.4,
+                color="magenta", alpha=0.9, label="Edge 1 (Left)")
     if track_e2 is not None and len(track_e2) > 1:
         te2 = np.asarray(track_e2)
-        ax.plot(te2[:,0], te2[:,1], "-", lw=1.4, color="lime", alpha=0.9,
-                label="Edge 2 (Right)")
+        ax.plot(te2[:,0], te2[:,1], "-", lw=1.4,
+                color="lime", alpha=0.9, label="Edge 2 (Right)")
 
     # ---- colorbar ----
     sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cb = plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.02)
-    cb.set_label("Estimated width (px)", fontsize=9)
+    cb.set_label("Estimated width (px)", fontsize=10, fontweight="bold")
 
-    # ---- LEGEND ----
-    from matplotlib.lines import Line2D
-    from matplotlib.patches import Patch
-
+    # ---- LEGEND (bold, blue title) ----
     handles = [
-        
+        Line2D([], [], color="gray", lw=2.4,
+               label="Midline (width color map)"),
     ]
-    
-    handles.append(
-        Line2D(
-            [], [], 
-            color="gray", lw=2.4,
-            label="Midline (color bar width map)"
-        )
-    )
-
 
     if track_e1 is not None and len(track_e1) > 1:
-        handles.append(Line2D([], [], color="magenta", lw=1.8, label="Edge 1 (Left)"))
+        handles.append(Line2D([], [], color="magenta", lw=1.8,
+                              label="Edge 1 (Left)"))
     if track_e2 is not None and len(track_e2) > 1:
-        handles.append(Line2D([], [], color="lime", lw=1.8, label="Edge 2 (Right)"))
+        handles.append(Line2D([], [], color="lime", lw=1.8,
+                              label="Edge 2 (Right)"))
 
     handles.extend([
         Patch(facecolor=(1,1,1), edgecolor="gray", label="Overlap (IoU)"),
@@ -333,20 +356,27 @@ def plot_widths_colormap_on_crop(
         Patch(facecolor=(1,0,0), edgecolor="gray", label="GT only"),
     ])
 
-    ax.legend(
+    leg = ax.legend(
         handles=handles,
         loc="lower right",
-        fontsize=6,
+        fontsize=8,
         frameon=True,
         framealpha=0.80,
         handlelength=2.8,
-        handletextpad=0.7
+        handletextpad=0.7,
+        title="Legend",
+        title_fontsize=11,
     )
+
+    # blue + bold
+    import matplotlib.pyplot as plt
+    plt.setp(leg.get_title(), color="blue", fontweight="bold")
+    for t in leg.get_texts():
+        t.set_fontweight("bold")
 
     ax.set_xlim(0, W)
     ax.set_ylim(H, 0)
     ax.axis("off")
-
     plt.tight_layout(pad=0)
 
     if out_png:
@@ -427,7 +457,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         # --- Pretty RTX-on visualizations (edges + normals) ---
         pretty_path = os.path.join(dbg_dir, "edges_midlines_normals_pretty.png")
         plot_normals_pretty(img_norm, track_e1, track_e2, midline_xy_crop,
-                            normals_e1, normals_e2, pretty_path)
+                            normals_e1, normals_e2, pretty_path, crack_id)
 
         # --- GT vs Manual Mask Overlay (restored grayscale + blended colors) ---
         gt_crop = payload.get("gt_crop", None)

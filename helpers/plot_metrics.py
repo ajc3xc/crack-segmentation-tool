@@ -7,6 +7,140 @@ import hashlib
 import time
 import os
 
+
+def plot_edges_and_normals(
+    *,
+    base_image,           # full-res image (BGR or gray)
+    midline_segs,         # list of midline segments (list of Nx2 arrays)
+    edge1_segs,           # list of Nx2 arrays
+    edge2_segs,           # list of Nx2 arrays
+    norm1_segs,           # list-of-lists of normals (Nx2 arrays)
+    norm2_segs,
+    bbox=None,            # optional [x0, y0, w, h]
+    out_png,
+    title="",
+):
+    """
+    Unified visualization for both:
+      - atomic 'pretty' plot
+      - combined debug plot
+
+    Handles:
+      - optional bbox shift
+      - gray or BGR base image
+      - edges / midline / normals
+      - publication-grade legend (blue title, bold)
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    H, W = base_image.shape[:2]
+
+    # --- resolve crop ---
+    if bbox is not None:
+        x0, y0, w, h = map(int, bbox)
+        x1, y1 = x0 + w, y0 + h
+        pad = 40
+        x0p = max(0, x0 - pad)
+        y0p = max(0, y0 - pad)
+        x1p = min(W, x1 + pad)
+        y1p = min(H, y1 + pad)
+        crop = base_image[y0p:y1p, x0p:x1p]
+        shift_x, shift_y = x0p, y0p
+    else:
+        crop = base_image.copy()
+        shift_x, shift_y = 0, 0
+
+    # convert to RGB for plotting
+    if crop.ndim == 2:
+        crop_rgb = np.stack([crop]*3, axis=-1)
+    else:
+        crop_rgb = crop[:, :, ::-1]
+
+    fig, ax = plt.subplots(figsize=(9, 9), dpi=320)
+    ax.imshow(crop_rgb)
+
+    # ------------------------------
+    # Helper for splitting long lines
+    # ------------------------------
+    def split(arr, max_step=50):
+        arr = np.asarray(arr)
+        if len(arr) < 2:
+            return []
+        d = np.sqrt(np.sum(np.diff(arr, axis=0)**2, axis=1))
+        breaks = np.where(d > max_step)[0]
+        out = []; s = 0
+        for b in breaks:
+            if b + 1 - s >= 2:
+                out.append(arr[s:b+1])
+            s = b + 1
+        if len(arr) - s >= 2:
+            out.append(arr[s:])
+        return out or [arr]
+
+    # ------------------------------
+    # Draw midline
+    # ------------------------------
+    for seg in midline_segs:
+        seg = np.asarray(seg)
+        for s in split(seg):
+            ax.plot(s[:,0]-shift_x, s[:,1]-shift_y, "w-", lw=1.2)
+
+    # ------------------------------
+    # Draw edges
+    # ------------------------------
+    for seg in edge1_segs:
+        seg = np.asarray(seg)
+        for s in split(seg):
+            ax.plot(s[:,0]-shift_x, s[:,1]-shift_y, "r-", lw=1.2)
+
+    for seg in edge2_segs:
+        seg = np.asarray(seg)
+        for s in split(seg):
+            ax.plot(s[:,0]-shift_x, s[:,1]-shift_y, "g-", lw=1.2)
+
+    # ------------------------------
+    # Draw normals (sparse)
+    # ------------------------------
+    for n1, n2 in zip(norm1_segs, norm2_segs):
+        n = min(len(n1), len(n2))
+        for i in range(0, n, 10):
+            p1 = n1[i] - [shift_x, shift_y]
+            p2 = n2[i] - [shift_x, shift_y]
+            ax.plot([p1[0], p2[0]], [p1[1], p2[1]],
+                    color="cyan", lw=1.0)
+
+    # ------------------------------
+    # Legend — blue title + bold
+    # ------------------------------
+    handles = [
+        Line2D([], [], color='white', lw=1.4, label='Midline'),
+        Line2D([], [], color='red', lw=1.4, label='Edge 1 (Left)'),
+        Line2D([], [], color='green', lw=1.4, label='Edge 2 (Right)'),
+        Line2D([], [], color='cyan', lw=1.4, label='Normals'),
+    ]
+
+    leg = ax.legend(
+        handles=handles,
+        fontsize=11,
+        loc="lower right",
+        title="Legend",
+        title_fontsize=13,
+        framealpha=0.85,
+    )
+    plt.setp(leg.get_title(), color="blue", fontweight="bold")
+    for t in leg.get_texts():
+        t.set_fontweight("bold")
+
+    if title:
+        ax.set_title(title, fontsize=14)
+
+    ax.axis("off")
+    plt.tight_layout(pad=0)
+    fig.savefig(out_png, dpi=350, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
+
 # -------------------- GT NORMALS + OVERLAY HELPERS --------------------
 
 def bbox_from_mask(mask: np.ndarray):
@@ -19,36 +153,53 @@ def bbox_from_mask(mask: np.ndarray):
     return [x0, y0, x1 - x0 + 1, y1 - y0 + 1]
 
 
-def plot_gt_normals_on_gtbw(gt_mask_u8: np.ndarray,
-                             midline_xy: np.ndarray,
-                             e1: np.ndarray, e2: np.ndarray,
-                             out_png: str,
-                             crop_bbox=None):
-    """Draw GT BW image with cyan normals and white manual midline."""
+def plot_gt_normals_on_gtbw(gt_mask_u8, midline_xy, e1, e2, out_png, crop_bbox=None):
+    import numpy as np
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
     H, W = gt_mask_u8.shape[:2]
     fig, ax = plt.subplots(figsize=(7, 7), dpi=320)
     ax.imshow(gt_mask_u8, cmap='gray', interpolation='nearest')
 
-    # midline (white)
-    if midline_xy is not None and midline_xy.ndim == 2 and len(midline_xy) >= 2:
-        ax.plot(midline_xy[:,0], midline_xy[:,1], '-', lw=1.2, color='red', alpha=0.95, zorder=3)
+    handles = []
 
-    # normals (cyan)
+    if midline_xy is not None and midline_xy.ndim == 2 and len(midline_xy) >= 2:
+        ax.plot(midline_xy[:,0], midline_xy[:,1], '-', lw=1.4, color='red', alpha=0.95)
+        handles.append(Line2D([], [], color='red', lw=1.8, label='Midline'))
+
     if e1 is not None and e2 is not None and len(e1) > 1 and len(e2) > 1:
         step = max(1, len(e1)//60)
         for i in range(0, len(e1), step):
             ax.plot([e1[i,0], e2[i,0]], [e1[i,1], e2[i,1]],
-                    '-', lw=0.9, color='cyan', alpha=0.9, zorder=2)
+                    '-', lw=1.0, color='cyan', alpha=0.9)
+        handles.append(Line2D([], [], color='cyan', lw=1.8, label='Normals'))
 
-    ax.set_xlim(0, W); ax.set_ylim(H, 0); ax.axis('off')
+    if handles:
+        leg = ax.legend(
+            handles=handles,
+            fontsize=10,
+            title="Legend",
+            title_fontsize=12,
+            loc="lower right",
+            framealpha=0.85
+        )
+        plt.setp(leg.get_title(), color="blue", fontweight="bold")
+        for t in leg.get_texts():
+            t.set_fontweight("bold")
+
+    ax.set_xlim(0, W)
+    ax.set_ylim(H, 0)
+    ax.axis("off")
+
     if crop_bbox is not None:
         x, y, w, h = map(int, crop_bbox)
-        ax.set_xlim(x, x+w); ax.set_ylim(y+h, y)
-    plt.tight_layout(pad=0)
-    fig.savefig(out_png, dpi=320, bbox_inches='tight', pad_inches=0)
-    plt.close(fig)
+        ax.set_xlim(x, x+w)
+        ax.set_ylim(y+h, y)
 
+    plt.tight_layout(pad=0)
+    fig.savefig(out_png, dpi=320, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
 
 def plot_gt_normals_for_crack(crack: dict, gt_full_u8: np.ndarray,
                                out_dir: str, fname: str, bbox=None):

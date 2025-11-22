@@ -13,6 +13,7 @@ from helpers.metrics import bbox_from_mask
 
 from shapely.geometry import LineString, MultiLineString
 from shapely.ops import unary_union
+from helpers.plot_metrics import *
 
 
 def _finite_xy(arr):
@@ -237,7 +238,7 @@ def _ribbon_mask_from_midline(H, W, S_xy, thickness_px=4):
     plt.close()
     print(f"[METRICS_COMBINED_DEBUG] wrote → {fname}")'''
 
-def plot_combined_debug(
+'''def plot_combined_debug(
     *,
     original_image,
     segs,
@@ -330,7 +331,35 @@ def plot_combined_debug(
     fig.savefig(fname_alias, dpi=350, bbox_inches="tight")
     plt.close(fig)
 
-    print(f"[COMBINED_DEBUG] wrote → {fname_main}")
+    print(f"[COMBINED_DEBUG] wrote → {fname_main}")'''
+
+def plot_combined_debug(
+    *,
+    original_image,
+    segs,
+    edge1_segs,
+    edge2_segs,
+    norm1_segs,
+    norm2_segs,
+    mask_bbox,
+    member_ids,
+    out_dir,
+):
+    os.makedirs(out_dir, exist_ok=True)
+
+    out_png = os.path.join(out_dir, "edges_midlines_normals_pretty.png")
+
+    plot_edges_and_normals(
+        base_image=original_image,
+        midline_segs=segs,
+        edge1_segs=edge1_segs,
+        edge2_segs=edge2_segs,
+        norm1_segs=norm1_segs,
+        norm2_segs=norm2_segs,
+        bbox=mask_bbox,
+        out_png=out_png,
+        title=f"Combined Crack (members={', '.join(member_ids)})",
+    )
 
 def build_combined_crack_stateless(
     original_image: np.ndarray,
