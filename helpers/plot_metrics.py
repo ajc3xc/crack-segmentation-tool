@@ -71,44 +71,6 @@ def plot_gt_normals_for_crack(crack: dict, gt_full_u8: np.ndarray,
     plot_gt_normals_on_gtbw(gt_full_u8, mid, e1, e2,
                              os.path.join(out_dir, fname), crop_bbox=bbox)
 
-
-'''def save_gt_vs_manual_overlay(H, W, gt_full, man_full, out_png, bbox=None, original_image=None):
-    """
-    Overlay GT vs manual mask (white=overlap, yellow=manual-only, red=GT-only)
-    on top of the original image background if provided.
-    """
-    import numpy as np, cv2, os
-
-    # Background: prefer original image, else black
-    if original_image is not None:
-        if original_image.ndim == 2:
-            overlay = cv2.cvtColor(original_image, cv2.COLOR_GRAY2BGR)
-        else:
-            overlay = original_image.copy()
-    else:
-        overlay = np.zeros((H, W, 3), np.uint8)
-
-    # Create boolean masks
-    gt_bin = (gt_full > 0)
-    man_bin = (man_full > 0)
-    intersect = np.logical_and(gt_bin, man_bin)
-    pred_only = np.logical_and(man_bin, np.logical_not(gt_bin))
-    gt_only   = np.logical_and(gt_bin, np.logical_not(man_bin))
-
-    # Apply colors (OpenCV = BGR)
-    overlay[gt_only]   = (0,   0, 255)   # red = GT only
-    overlay[pred_only] = (0, 255, 255)   # yellow = manual only
-    overlay[intersect] = (255, 255, 255) # white = overlap
-
-    # Optional bbox
-    if bbox is not None:
-        x, y, w, h = map(int, bbox)
-        cv2.rectangle(overlay, (x, y), (x + w, y + h), (255, 0, 0), 1)
-
-    # Save
-    os.makedirs(os.path.dirname(out_png), exist_ok=True)
-    cv2.imwrite(out_png, overlay)
-    print(f"[DEBUG OVERLAY] wrote → {out_png}")'''
     
 def save_gt_vs_manual_overlay(H, W, gt_full, man_full, out_png, bbox=None, original_image=None):
     """
@@ -149,7 +111,7 @@ def save_gt_vs_manual_overlay(H, W, gt_full, man_full, out_png, bbox=None, origi
     # optional bbox rectangle
     if bbox is not None:
         x, y, w, h = map(int, bbox)
-        cv2.rectangle(out, (x, y), (x + w, y + h), (255, 128, 0), 1, cv2.LINE_AA)
+        cv2.rectangle(out, (x, y), (x + w, y + h), (255, 128, 0), 5, cv2.LINE_AA)
 
     cv2.imwrite(out_png, out)
 
