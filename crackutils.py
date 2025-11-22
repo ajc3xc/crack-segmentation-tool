@@ -1427,9 +1427,11 @@ class CrackUtils:
         
     def _build_combined_crack(self, member_ids, pad=10):
         """
-        GUI-safe wrapper that forwards parameters + debug callback to stateless combiner.
+        GUI-safe wrapper that delegates computation to the stateless combiner,
+        and delegates DEBUG plotting to the pure helper plot function.
         """
-        from combiner import build_combined_crack_stateless
+
+        from combiner import build_combined_crack_stateless, plot_combined_debug
 
         atomic = self.annotation["annotations"]["atomic_cracks"]
 
@@ -1455,7 +1457,45 @@ class CrackUtils:
         except Exception:
             color_idx = 0
 
-        # ===== NEW: provide callback to stateless builder =====
+        # ----------------------------
+        # DEBUG CALLBACK (new, correct signature)
+        # ----------------------------
+        def _debug_cb(
+            *,
+            image_rgb,
+            segs,
+            edge1_segs,
+            edge2_segs,
+            norm1_segs,
+            norm2_segs,
+            mask_bbox,
+            member_ids,
+            union_mask   # REQUIRED
+        ):
+            """
+            Forward the stateless combined-crack output to the pure plotting helper.
+            Saves into GUI's debug_outputs folder.
+            """
+            import os
+
+            out_dir = os.path.join(self.save_folder, "debug_outputs")
+            os.makedirs(out_dir, exist_ok=True)
+
+            plot_combined_debug(
+                original_image=image_rgb,
+                segs=segs,
+                edge1_segs=edge1_segs,
+                edge2_segs=edge2_segs,
+                norm1_segs=norm1_segs,
+                norm2_segs=norm2_segs,
+                mask_bbox=mask_bbox,
+                member_ids=member_ids,
+                out_dir=out_dir
+                # NOTE: union_mask is accepted here (required by signature)
+                # but not used by plot_combined_debug(), which is fine.
+            )
+
+        # ===== CALL STATELESS BUILDER =====
         result = build_combined_crack_stateless(
             original_image=self.original_image,
             authoring_atomic=atomic,
@@ -1465,7 +1505,7 @@ class CrackUtils:
             color_channel=color_idx,
             pad=pad,
             prefer_gpu=True,
-            debug_callback=lambda *args, **kwargs: self._combined_debug_plot(*args, **kwargs)
+            debug_callback=_debug_cb,
         )
 
         return result

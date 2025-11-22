@@ -38,39 +38,6 @@ def plot_assd_hd95_box(metrics_csv, out_png):
     plt.ylabel("pixels")
     plt.title("Surface distance distribution")
     plt.tight_layout(); plt.savefig(out_png); plt.close()
-
-'''def plot_width_summary_triplet(metrics_dir, base_name, out_png):
-    paths = {
-        "manual":   os.path.join(metrics_dir, f"{base_name}_width_summary_manual.csv"),
-        "auto":     os.path.join(metrics_dir, f"{base_name}_width_summary_auto.csv"),
-        "combined": os.path.join(metrics_dir, f"{base_name}_width_summary_combined.csv"),
-    }
-    rows = []
-    for tag, p in paths.items():
-        if not os.path.exists(p): continue
-        df = pd.read_csv(p)
-        for k in ("mae_px","rmse_px","bias_px","corr"):
-            if k not in df.columns: df[k] = np.nan
-        rows.append({"method": tag,
-                     "MAE":  df["mae_px"].mean(),
-                     "RMSE": df["rmse_px"].mean(),
-                     "Bias": df["bias_px"].mean(),
-                     "Corr": df["corr"].mean()})
-    if not rows: return
-    d = pd.DataFrame(rows)
-
-    fig, ax = plt.subplots(1,2, figsize=(9,4), dpi=160)
-    d_err = d[["method","MAE","RMSE","Bias"]].set_index("method")
-    d_err.plot(kind="bar", ax=ax[0])
-    ax[0].set_title("Width errors (px)"); ax[0].set_ylabel("px")
-    ax[0].legend()
-
-    ax[1].bar(d["method"], d["Corr"])
-    ax[1].set_ylim(0,1); ax[1].set_title("Width correlation"); ax[1].set_ylabel("r")
-    for i, v in enumerate(d["Corr"]):
-        if np.isfinite(v): ax[1].text(i, v+0.02, f"{v:.2f}", ha="center", fontsize=8)
-
-    plt.tight_layout(); plt.savefig(out_png); plt.close()'''
     
 def plot_width_summary_triplet(metrics_dir, base_name, out_png):
     import os, numpy as np, pandas as pd
@@ -149,6 +116,93 @@ def plot_midline_edge_metrics_bars(midline_csv, out_png):
     plt.title("Midline/edge metrics (mean ± sd)")
     plt.tight_layout(); plt.savefig(out_png); plt.close()
 
+##################################################################
+# New Metrics Plots
+#################################################################
+
+def plot_surface_distance_histogram(metrics_csv, out_png):
+    import numpy as np, pandas as pd, matplotlib.pyplot as plt
+    if not os.path.exists(metrics_csv): return
+
+    df = pd.read_csv(metrics_csv)
+    if "assd" not in df or "hd95" not in df:
+        return
+
+    assd = df["assd"].astype(float)
+    hd95 = df["hd95"].astype(float)
+
+    plt.figure(figsize=(8,4), dpi=160)
+    plt.hist(assd, bins=30, alpha=0.6, label="ASSD")
+    plt.hist(hd95, bins=30, alpha=0.6, label="HD95")
+    plt.title("Surface distance histogram")
+    plt.xlabel("pixels")
+    plt.ylabel("count")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_png)
+    plt.close()
+
+def plot_boundary_pr_curve(metrics_csv, out_png):
+    import numpy as np, pandas as pd, matplotlib.pyplot as plt
+    if not os.path.exists(metrics_csv): return
+
+    df = pd.read_csv(metrics_csv)
+    if "boundary_precision" not in df or "boundary_recall" not in df:
+        return
+
+    prec = df["boundary_precision"].astype(float)
+    rec  = df["boundary_recall"].astype(float)
+
+    plt.figure(figsize=(5,5), dpi=160)
+    plt.plot(rec, prec, "o-", alpha=0.8)
+    plt.xlabel("Boundary Recall")
+    plt.ylabel("Boundary Precision")
+    plt.title("Boundary Precision–Recall Curve")
+    plt.xlim(0,1)
+    plt.ylim(0,1)
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(out_png)
+    plt.close()
+
+def plot_midline_angle_distribution(midline_csv, out_png):
+    import numpy as np, pandas as pd, matplotlib.pyplot as plt
+    if not os.path.exists(midline_csv): return
+    df = pd.read_csv(midline_csv)
+    if "angle_err_deg" not in df: return
+
+    ang = df["angle_err_deg"].astype(float)
+
+    plt.figure(figsize=(6,4), dpi=160)
+    plt.hist(ang, bins=40, color="royalblue", alpha=0.8)
+    plt.xlabel("Angle error (deg)")
+    plt.ylabel("count")
+    plt.title("Midline angle error distribution")
+    plt.tight_layout()
+    plt.savefig(out_png)
+    plt.close()
+
+def plot_width_error_distribution(width_diffs_csv, out_png):
+    import numpy as np, pandas as pd, matplotlib.pyplot as plt
+    if not os.path.exists(width_diffs_csv): return
+    df = pd.read_csv(width_diffs_csv)
+    if "width_diff_px" not in df: return
+
+    diffs = df["width_diff_px"].astype(float)
+
+    plt.figure(figsize=(6,4), dpi=160)
+    plt.hist(diffs, bins=50, alpha=0.8, color="salmon")
+    plt.xlabel("Geodesic width − GT width (px)")
+    plt.title("Width error distribution")
+    plt.tight_layout()
+    plt.savefig(out_png)
+    plt.close()
+
+##################################################################
+# New Metrics Plots
+#################################################################
+
+
 def build_deck_plots_for_image(metrics_dir: str, base_name: str):
     """
     Creates 4 figures in metrics_dir:
@@ -167,6 +221,27 @@ def build_deck_plots_for_image(metrics_dir: str, base_name: str):
                                    os.path.join(metrics_dir, "width_summary_triplet.png"))
     plot_midline_edge_metrics_bars(midline_csv,
                                    os.path.join(metrics_dir, "midline_edge_metrics_bars.png"))
+    
+    ###########
+    # New plots
+    ###########
+    plot_surface_distance_histogram(metrics_csv,
+    os.path.join(metrics_dir,"surface_distance_histogram.png"))
+
+    plot_boundary_pr_curve(metrics_csv,
+        os.path.join(metrics_dir,"boundary_pr_curve.png"))
+
+    plot_width_error_distribution(
+        os.path.join(metrics_dir,f"{base_name}_width_diffs_manual.csv"),
+        os.path.join(metrics_dir,"width_error_hist_manual.png"))
+
+    plot_width_error_distribution(
+        os.path.join(metrics_dir,f"{base_name}_width_diffs_combined.csv"),
+        os.path.join(metrics_dir,"width_error_hist_combined.png"))
+
+    plot_midline_angle_distribution(
+        midline_csv,
+        os.path.join(metrics_dir,"midline_angle_hist.png"))
 
 # --------------------------------------- #
 # C) EXPORT TRUE GT NORMALS (CSV + plot)  #

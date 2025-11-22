@@ -157,7 +157,7 @@ def _ribbon_mask_from_midline(H, W, S_xy, thickness_px=4):
     cv2.polylines(mask, [pts], isClosed=False, color=255, thickness=thickness_px, lineType=cv2.LINE_AA)
     return mask
 
-def metrics_combined_debug_plot(
+'''def metrics_combined_debug_plot(
     *,
     original_image,
     metrics_dir,
@@ -235,7 +235,85 @@ def metrics_combined_debug_plot(
     plt.tight_layout()
     plt.savefig(fname, dpi=200)
     plt.close()
-    print(f"[METRICS_COMBINED_DEBUG] wrote → {fname}")
+    print(f"[METRICS_COMBINED_DEBUG] wrote → {fname}")'''
+
+def plot_combined_debug(
+    *,
+    original_image,
+    segs,
+    edge1_segs,
+    edge2_segs,
+    norm1_segs,
+    norm2_segs,
+    mask_bbox,
+    member_ids,
+    out_dir
+):
+    import os
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    os.makedirs(out_dir, exist_ok=True)
+    fname = os.path.join(out_dir, "combined_debug.png")
+
+    H, W = original_image.shape[:2]
+    x0, y0, w, h = mask_bbox
+    x1, y1 = x0 + w, y0 + h
+
+    pad = 40
+    x0p = max(0, x0 - pad)
+    x1p = min(W, x1 + pad)
+    y0p = max(0, y0 - pad)
+    y1p = min(H, y1 + pad)
+
+    crop = original_image[y0p:y1p, x0p:x1p]
+    crop = crop[:, :, ::-1] if crop.ndim == 3 else np.stack([crop]*3, -1)
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.imshow(crop)
+
+    def split(arr, max_step=50):
+        arr = np.asarray(arr)
+        if len(arr) < 2: return []
+        d = np.sqrt(np.sum(np.diff(arr, axis=0)**2, axis=1))
+        breaks = np.where(d > max_step)[0]
+        out=[]; s=0
+        for b in breaks:
+            if b+1-s >= 2: out.append(arr[s:b+1])
+            s = b+1
+        if len(arr)-s >= 2: out.append(arr[s:])
+        return out or [arr]
+
+    # midline
+    for S in segs:
+        for segp in split(S):
+            ax.plot(segp[:,0]-x0p, segp[:,1]-y0p, "w-", lw=1)
+
+    # edges
+    for E in edge1_segs:
+        for segp in split(E):
+            ax.plot(segp[:,0]-x0p, segp[:,1]-y0p, "r-", lw=1)
+
+    for E in edge2_segs:
+        for segp in split(E):
+            ax.plot(segp[:,0]-x0p, segp[:,1]-y0p, "g-", lw=1)
+
+    # normals
+    STRIDE = 10
+    for n1, n2 in zip(norm1_segs, norm2_segs):
+        m = min(len(n1), len(n2))
+        for i in range(0, m, STRIDE):
+            p1, p2 = n1[i], n2[i]
+            ax.plot([p1[0]-x0p, p2[0]-x0p],
+                    [p1[1]-y0p, p2[1]-y0p],
+                    color="cyan", lw=1)
+
+    ax.set_title(f"Combined Crack (members={', '.join(member_ids)})")
+    ax.axis("off")
+
+    fig.savefig(fname, dpi=350, bbox_inches="tight")
+    plt.close()
+    print(f"[COMBINED_DEBUG] wrote → {fname}")
 
 def build_combined_crack_stateless(
     original_image: np.ndarray,
@@ -417,9 +495,13 @@ def build_combined_crack_stateless(
                 norm2_segs=norm2_segs,
                 mask_bbox=[x,y,w,h],
                 member_ids=member_ids,
+                union_mask=union_mask,   # ★★★★★ REQUIRED ★★★★★
             )
         except Exception as e:
             print("[STATLESS_DEBUG] error:", e)
+            print("[STATLESS_DEBUG] traceback follows:")
+            import traceback
+            traceback.print_exc()
 
 
     return {

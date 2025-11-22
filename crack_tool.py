@@ -2868,18 +2868,21 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 color_channel=0, pad=10, prefer_gpu=True,
 
                 # NEW: inline debug callback using metrics helper
-                debug_callback=lambda **dbg: metrics_combined_debug_plot(
+                debug_callback=lambda **dbg: plot_combined_debug(
                     original_image=self.original_image,
-                    metrics_dir=metrics_dir,
-                    combined_id=ccid,
-                    member_ids=members,
                     segs=dbg["segs"],
-                    edge1_segs=dbg["edge1"],
-                    edge2_segs=dbg["edge2"],
-                    norm1_segs=dbg["normals1"],
-                    norm2_segs=dbg["normals2"],
-                    union_mask=dbg["union_mask"],
+                    edge1_segs=dbg["edge1_segs"],
+                    edge2_segs=dbg["edge2_segs"],
+                    norm1_segs=dbg["norm1_segs"],
+                    norm2_segs=dbg["norm2_segs"],
+                    mask_bbox=dbg["mask_bbox"],
+                    member_ids=members,
+                    out_dir=os.path.join(
+                        metrics_dir,
+                        f"combined{ccid}_{'_'.join(members)}"
+                    )
                 )
+
 
             )
 
