@@ -1548,35 +1548,23 @@ class CrackUtils:
             for part in split(E):
                 ax.plot(part[:,0], part[:,1], 'b-', lw=edge_lw, antialiased=True)
 
-        # === PLOT NORMALS (sparse, uniform step) ===
-        NORMAL_STEP_PX = 100   # ← literally what you asked for
+        # --- normals per midline index ---
+        NORMAL_STEP = 25    # constant spacing, not tied to crack length
+        NORMAL_LEN  = 1.0   # scale multiplier for visibility
 
         for n1, n2 in zip(norm1_segs, norm2_segs):
-            if len(n1) == 0 or len(n2) == 0: 
-                continue
+            if len(n1) and len(n2):
+                m = min(len(n1), len(n2))
+                for i in range(0, m, NORMAL_STEP):
+                    x1, y1 = n1[i]
+                    x2, y2 = n2[i]
 
-            n1s = shift(n1)
-            n2s = shift(n2)
+                    # draw full cyan normal
+                    ax.plot([x1, x2], [y1, y2], color="cyan", lw=0.4)
 
-            # compute cumulative distance along midline
-            dx = np.diff(n1s[:,0])
-            dy = np.diff(n1s[:,1])
-            d = np.sqrt(dx*dx + dy*dy)
-            arc = np.concatenate([[0], np.cumsum(d)])
-
-            # sample every NORMAL_STEP_PX
-            targets = np.arange(0, arc[-1], NORMAL_STEP_PX)
-            idx = np.searchsorted(arc, targets)
-
-            for i in idx:
-                if i < len(n1s) and i < len(n2s):
-                    ax.plot(
-                        [n1s[i,0], n2s[i,0]],
-                        [n1s[i,1], n2s[i,1]],
-                        color='cyan',
-                        lw=normal_lw,
-                        antialiased=True
-                    )
+                    # optional: mark the endpoints
+                    ax.scatter([x1], [y1], s=4, color="red")
+                    ax.scatter([x2], [y2], s=4, color="blue")
 
         ax.set_xlim(0, crop.shape[1])
         ax.set_ylim(crop.shape[0], 0)
