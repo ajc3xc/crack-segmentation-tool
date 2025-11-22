@@ -1471,104 +1471,123 @@ class CrackUtils:
         return result
     
     def _combined_debug_plot(
-        self,
-        image_rgb=None,
-        segs=None,
-        edge1_segs=None,
-        edge2_segs=None,
-        norm1_segs=None,
-        norm2_segs=None,
-        mask_bbox=None,
-        member_ids=None,
-        **kwargs,                 # <-- FIX: swallow extra args like edge1=, edge2=, etc.
-    ):
+            self,
+            image_rgb,
+            segs,
+            edge1_segs,
+            edge2_segs,
+            norm1_segs,
+            norm2_segs,
+            mask_bbox,
+            member_ids,
+        ):
         """
-        Fully zoomed, clean combined debug plot.
+        High-res, RTX-quality combined-crack debug plot.
+        - Cropped tightly to crack bbox
+        - Thin anti-aliased lines (same thickness as old debug)
+        - Normals plotted every fixed ~100px along arc length
         """
         import os
         import numpy as np
         import matplotlib.pyplot as plt
 
-        # unwrap kwargs if needed
-        if edge1_segs is None:
-            edge1_segs = kwargs.get("edge1", [])
-        if edge2_segs is None:
-            edge2_segs = kwargs.get("edge2", [])
-        if norm1_segs is None:
-            norm1_segs = kwargs.get("norm1", [])
-        if norm2_segs is None:
-            norm2_segs = kwargs.get("norm2", [])
-        if segs is None:
-            segs = kwargs.get("segs", [])
-
-        if mask_bbox is None:
-            mask_bbox = kwargs.get("mask_bbox", [0,0,image_rgb.shape[1],image_rgb.shape[0]])
-
-        if member_ids is None:
-            member_ids = kwargs.get("member_ids", [])
-
-        H, W = image_rgb.shape[:2]
-        x0, y0, w, h = mask_bbox
-        x1 = x0 + w
-        y1 = y0 + h
-
+        # --- save path ---
         save_dir = os.path.join(self.save_folder, "debug_outputs")
         os.makedirs(save_dir, exist_ok=True)
         base = os.path.splitext(os.path.basename(self.name))[0]
         fname = f"{base}_combined_{'_'.join(member_ids)}.png"
         out = os.path.join(save_dir, fname)
 
-        fig, ax = plt.subplots(figsize=(10, 7))
-        ax.imshow(image_rgb)
-        ax.set_title("Combined Crack Debug")
+        H, W = image_rgb.shape[:2]
+        x0, y0, w, h = mask_bbox
+        x1, y1 = x0 + w, y0 + h
 
-        def split(arr, step=50):
+        # --- crop to bounding box ---
+        crop = image_rgb[y0:y1, x0:x1]
+        fig, ax = plt.subplots(figsize=(8, 8), dpi=300)
+        ax.imshow(crop)
+        ax.set_title("Combined Crack Debug", fontsize=14)
+
+        # shift coordinates into crop coordinate system
+        def shift(arr):
             arr = np.asarray(arr)
-            if len(arr) < 2:
-                return []
+            return np.column_stack([arr[:,0] - x0, arr[:,1] - y0])
+
+        # split helper
+        def split(arr, max_dist=40):
+            arr = np.asarray(arr)
+            if len(arr) < 2: return []
             d = np.sqrt(np.sum(np.diff(arr, axis=0)**2, axis=1))
-            br = np.where(d > step)[0]
-            segs2 = []
-            start = 0
+            br = np.where(d > max_dist)[0]
+            segs = []; s = 0
             for b in br:
-                if b + 1 - start >= 2:
-                    segs2.append(arr[start:b+1])
-                start = b + 1
-            if len(arr) - start >= 2:
-                segs2.append(arr[start:])
-            return segs2 if segs2 else [arr]
+                if b+1-s >= 2: segs.append(arr[s:b+1])
+                s = b+1
+            if len(arr)-s >= 2: segs.append(arr[s:])
+            return segs if segs else [arr]
 
-        # midline
+        # === thin, high-quality lines ===
+        midline_lw = 1.0
+        edge_lw = 0.9
+        normal_lw = 0.6
+
+        # === PLOT MIDLINE ===
         for S in segs:
-            for segp in split(S,40):
-                ax.plot(segp[:,0], segp[:,1],'g-',lw=0.6)
+            S2 = shift(S)
+            for segp in split(S2):
+                ax.plot(segp[:,0], segp[:,1], 'g-', lw=midline_lw, antialiased=True)
 
-        # edges
+        # === PLOT EDGES ===
         for e in edge1_segs:
-            for segp in split(e,40):
-                ax.plot(segp[:,0], segp[:,1],'r-',lw=0.4)
-        for e in edge2_segs:
-            for segp in split(e,40):
-                ax.plot(segp[:,0], segp[:,1],'b-',lw=0.4)
+            E = shift(e)
+            for part in split(E):
+                ax.plot(part[:,0], part[:,1], 'r-', lw=edge_lw, antialiased=True)
 
-        # normals
-        for n1,n2 in zip(norm1_segs,norm2_segs):
-            if len(n1) and len(n2):
-                m=min(len(n1),len(n2))
-                step=max(1,m//70)
-                for i in range(0,m,step):
-                    ax.plot([n1[i,0],n2[i,0]],[n1[i,1],n2[i,1]],
-                            color='cyan',lw=0.5,alpha=0.8)
-        pad = 15
-        ax.set_xlim(max(0, x0 - pad), min(W, x1 + pad))
-        ax.set_ylim(min(H, y1 + pad), max(0, y0 - pad))
-        ax.axis('equal')
+        for e in edge2_segs:
+            E = shift(e)
+            for part in split(E):
+                ax.plot(part[:,0], part[:,1], 'b-', lw=edge_lw, antialiased=True)
+
+        # === PLOT NORMALS (sparse, uniform step) ===
+        NORMAL_STEP_PX = 100   # ← literally what you asked for
+
+        for n1, n2 in zip(norm1_segs, norm2_segs):
+            if len(n1) == 0 or len(n2) == 0: 
+                continue
+
+            n1s = shift(n1)
+            n2s = shift(n2)
+
+            # compute cumulative distance along midline
+            dx = np.diff(n1s[:,0])
+            dy = np.diff(n1s[:,1])
+            d = np.sqrt(dx*dx + dy*dy)
+            arc = np.concatenate([[0], np.cumsum(d)])
+
+            # sample every NORMAL_STEP_PX
+            targets = np.arange(0, arc[-1], NORMAL_STEP_PX)
+            idx = np.searchsorted(arc, targets)
+
+            for i in idx:
+                if i < len(n1s) and i < len(n2s):
+                    ax.plot(
+                        [n1s[i,0], n2s[i,0]],
+                        [n1s[i,1], n2s[i,1]],
+                        color='cyan',
+                        lw=normal_lw,
+                        antialiased=True
+                    )
+
+        ax.set_xlim(0, crop.shape[1])
+        ax.set_ylim(crop.shape[0], 0)
+        ax.axis('off')
 
         plt.tight_layout()
-        plt.savefig(out, dpi=300)
+        plt.savefig(out, dpi=300, bbox_inches='tight')
         plt.close()
 
-       
+        print(f"[COMBINED DEBUG] saved → {out}")
+      
     def draw_existing_cracks(self, im):
         """Overlay existing cracks (atomic + combined) in red onto a copy of the image."""
         H, W = im.shape[:2]
