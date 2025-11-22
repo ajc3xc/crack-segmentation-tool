@@ -2376,6 +2376,15 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         # --- Authoring + merged (with per-cid edges) ---
         authoring_atomic = (self.annotation or {}).get("annotations", {}).get("atomic_cracks", {}) or {}
         atomic = merged_metric_atomic(authoring_atomic, self.save_folder, base_name)
+        def _is_manual(cr):
+            src = (cr.get("source") or "").lower()
+            # adjust this tuple if you have other manual-like sources
+            return src in ("manual", "manual_poly")
+
+        atomic_manual = {cid: cr for cid, cr in atomic.items() if _is_manual(cr)}
+        print(f"[DEBUG METRICS] using {len(atomic_manual)} manual cracks for mask/width metrics")
+        atomic = atomic_manual
+
         print(f"[DBG global] reconstructing strict overlays for {len(atomic)} cracks (H={H}, W={W})")
 
         # --- Initialize canvases ---
@@ -2793,6 +2802,14 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         # --- merge from snapshots
         atomic = merged_metric_atomic(authoring_atomic, self.save_folder, base_name)
+        def _is_manual(cr):
+            src = (cr.get("source") or "").lower()
+            # adjust this tuple if you have other manual-like sources
+            return src in ("manual", "manual_poly")
+
+        atomic_manual = {cid: cr for cid, cr in atomic.items() if _is_manual(cr)}
+        print(f"[DEBUG METRICS] using {len(atomic_manual)} manual cracks for mask/width metrics")
+        atomic = atomic_manual
         print(f"[DEBUG METRICS] merged {len(atomic)} atomic cracks after edge snapshots merge")
 
         # --- repair missing crops
