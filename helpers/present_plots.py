@@ -39,7 +39,7 @@ def plot_assd_hd95_box(metrics_csv, out_png):
     plt.title("Surface distance distribution")
     plt.tight_layout(); plt.savefig(out_png); plt.close()
     
-def plot_width_summary_triplet(metrics_dir, base_name, out_png):
+'''def plot_width_summary_triplet(metrics_dir, base_name, out_png):
     import os, numpy as np, pandas as pd
     import matplotlib.pyplot as plt
     
@@ -99,6 +99,157 @@ def plot_width_summary_triplet(metrics_dir, base_name, out_png):
 
     plt.tight_layout()
     plt.savefig(out_png)
+    plt.close()'''
+    
+def plot_width_summary_triplet(metrics_dir, base_name, out_png):
+    import os, numpy as np, pandas as pd
+    import matplotlib.pyplot as plt
+    
+    paths = {
+        "manual":   os.path.join(metrics_dir, f"{base_name}_width_summary_manual.csv"),
+        "auto":     os.path.join(metrics_dir, f"{base_name}_width_summary_auto.csv"),
+        "combined": os.path.join(metrics_dir, f"{base_name}_width_summary_combined.csv"),
+    }
+
+    rows = []
+    for tag, p in paths.items():
+        if not os.path.exists(p):
+            continue
+
+        df = pd.read_csv(p)
+
+        # normalize column names (old + new)
+        df.columns = [c.lower() for c in df.columns]
+
+        mae  = df["mae_px"].mean()  if "mae_px"  in df else np.nan
+        rmse = df["rmse_px"].mean() if "rmse_px" in df else np.nan
+        bias = df["bias_px"].mean() if "bias_px" in df else np.nan
+        corr = df["corr"].mean()    if "corr"    in df else np.nan
+
+        rows.append({
+            "method": tag,
+            "MAE":  mae,
+            "RMSE": rmse,
+            "Bias": bias,
+            "Corr": corr
+        })
+
+    if not rows:
+        print("[TRIPLET] no usable width-summary CSVs")
+        return
+
+    d = pd.DataFrame(rows)
+
+    fig, ax = plt.subplots(1, 2, figsize=(9, 4), dpi=160)
+
+    # LEFT PANEL — Errors
+    d_err = d[["method", "MAE", "RMSE", "Bias"]].set_index("method")
+    d_err.plot(kind="bar", ax=ax[0])
+    ax[0].set_title("Width errors (px)", fontsize=14, fontweight="bold")
+    ax[0].set_ylabel("px")
+    ax[0].legend()
+
+    # bold, centered method labels
+    ax[0].tick_params(axis="x", labelsize=11)
+    for lbl in ax[0].get_xticklabels():
+        lbl.set_fontweight("bold")
+        lbl.set_ha("center")
+
+    # RIGHT PANEL — Correlation
+    ax[1].bar(d["method"], d["Corr"])
+    ax[1].set_ylim(0, 1)
+    ax[1].set_title("Width correlation", fontsize=14, fontweight="bold")
+    ax[1].set_ylabel("r")
+    ax[1].tick_params(axis="x", labelsize=11)
+    for lbl in ax[1].get_xticklabels():
+        lbl.set_fontweight("bold")
+        lbl.set_ha("center")
+
+    for i, v in enumerate(d["Corr"]):
+        if np.isfinite(v):
+            ax[1].text(i, v + 0.02, f"{v:.2f}", ha="center", fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=160, bbox_inches="tight")
+    plt.close()
+
+def plot_mask_metrics_triplet(metrics_dir, base_name, out_png):
+    """
+    Region metrics, boundary metrics, and confusion counts summary plot.
+    Looks for mask_metrics.csv inside metrics_dir.
+    """
+    import os, numpy as np, pandas as pd
+    import matplotlib.pyplot as plt
+
+    csv_path = os.path.join(metrics_dir, "mask_metrics.csv")
+    if not os.path.exists(csv_path):
+        print("[MASK_TRIPLET] mask_metrics.csv not found")
+        return
+
+    df = pd.read_csv(csv_path)
+
+    # Prefer TOTAL row, fallback to mean
+    total = None
+    if "crack_type" in df.columns:
+        m = df["crack_type"].astype(str).str.upper() == "TOTAL"
+        if m.any():
+            total = df[m].iloc[0]
+
+    if total is None:
+        total = df.mean(numeric_only=True)
+
+    def get(col, default=np.nan):
+        for c in total.index:
+            if c.lower() == col.lower():
+                return float(total[c])
+        return default
+
+    region = {
+        "Precision": get("precision"),
+        "Recall":    get("recall"),
+        "F1":        get("f1"),
+        "IoU":       get("iou"),
+    }
+
+    boundary = {
+        "Boundary Precision": get("boundary_precision"),
+        "Boundary Recall":    get("boundary_recall"),
+        "Boundary F1":        get("boundary_f1"),
+    }
+
+    confusion = {
+        "TP": get("tp", 0),
+        "FP": get("fp", 0),
+        "FN": get("fn", 0),
+        "TN": get("tn", 0),
+    }
+
+    fig, axes = plt.subplots(1, 3, figsize=(12, 3.5), dpi=160)
+
+    def bar(ax, data, title, ylabel=None, ylim=None, fmt="{:.2f}"):
+        labels = list(data.keys())
+        vals = np.array(list(data.values()), float)
+        xs = np.arange(len(vals))
+        ax.bar(xs, vals)
+        ax.set_xticks(xs)
+        ax.set_xticklabels(labels, rotation=0, fontsize=8, fontweight="bold")
+        ax.set_title(title, fontsize=12, fontweight="bold")
+        if ylabel:
+            ax.set_ylabel(ylabel)
+        if ylim:
+            ax.set_ylim(*ylim)
+        for i, v in enumerate(vals):
+            if not np.isfinite(v):
+                continue
+            ax.text(xs[i], v + (0.03 if ylim else 0.03*np.max(vals)), fmt.format(v),
+                    ha="center", va="bottom", fontsize=7)
+
+    bar(axes[0], region,   "Region metrics",   "score", ylim=(0,1))
+    bar(axes[1], boundary, "Boundary metrics", "score", ylim=(0,1))
+    bar(axes[2], confusion,"Confusion counts", "count", fmt="{:.0f}")
+
+    plt.tight_layout()
+    plt.savefig(out_png, bbox_inches="tight", dpi=160)
     plt.close()
 
 def plot_midline_edge_metrics_bars(midline_csv, out_png):
@@ -202,8 +353,7 @@ def plot_width_error_distribution(width_diffs_csv, out_png):
 # New Metrics Plots
 #################################################################
 
-
-def build_deck_plots_for_image(metrics_dir: str, base_name: str):
+'''def build_deck_plots_for_image(metrics_dir: str, base_name: str):
     """
     Creates 4 figures in metrics_dir:
       - iou_vs_bf1_scatter.png
@@ -241,7 +391,28 @@ def build_deck_plots_for_image(metrics_dir: str, base_name: str):
 
     plot_midline_angle_distribution(
         midline_csv,
-        os.path.join(metrics_dir,"midline_angle_hist.png"))
+        os.path.join(metrics_dir,"midline_angle_hist.png"))'''
+        
+def build_deck_plots_for_image(metrics_dir: str, base_name: str):
+    os.makedirs(metrics_dir, exist_ok=True)
+    metrics_csv = os.path.join(metrics_dir, "mask_metrics.csv")
+    midline_csv = os.path.join(metrics_dir, f"{base_name}_midline_edge_metrics.csv")
+
+    if os.path.exists(metrics_csv):
+        plot_iou_vs_bf1_scatter(metrics_csv, os.path.join(metrics_dir, "iou_vs_bf1_scatter.png"))
+        plot_assd_hd95_box(metrics_csv,       os.path.join(metrics_dir, "assd_hd95_box.png"))
+        plot_width_summary_triplet(metrics_dir, base_name,
+                                   os.path.join(metrics_dir, "width_summary_triplet.png"))
+
+        # >>> NEW TRIPLET <<<
+        plot_mask_metrics_triplet(
+            metrics_dir,
+            base_name,
+            os.path.join(metrics_dir, "mask_metrics_triplet.png")
+        )
+
+    plot_midline_edge_metrics_bars(midline_csv,
+                                   os.path.join(metrics_dir, "midline_edge_metrics_bars.png"))
 
 # --------------------------------------- #
 # C) EXPORT TRUE GT NORMALS (CSV + plot)  #

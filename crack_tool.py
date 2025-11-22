@@ -3263,6 +3263,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         pd.DataFrame(mask_rows).to_csv(out_csv,index=False)
         print(f"[DEBUG MASK] TOTAL IoU={mask_iou(agg_manual,gt_full):.4f}")
 
+
         # === RESTORE WIDTH DIFF CHARTS ===
         try:
             print("[DEBUG METRICS] width comparisons ...")
@@ -3319,6 +3320,45 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                                         os.path.join(metrics_dir, "combined_width_diffs_overlay.png"), vlim=8.0)
         except Exception as e:
             print(f"[DEBUG WIDTH] failed: {e}")
+            
+        # === CORE RUNTIME SUMMARY (edge_masks, edge_tracking, combine) ===
+        try:
+            timing_rows = []
+
+            # atomic cracks: timing injected by edge_param_worker via set_tracked_edges_for_crack
+            for cid, cr in atomic.items():
+                tdict = cr.get("timing") or {}
+                if tdict:
+                    row = {
+                        "image": base_name,
+                        "crack_type": "atomic",
+                        "crack_id": str(cid),
+                    }
+                    row.update(tdict)
+                    timing_rows.append(row)
+
+            # combined cracks: timing from build_combined_crack_stateless
+            for ccid, cmb in (combined_map or {}).items():
+                tdict = cmb.get("timing") or {}
+                if tdict:
+                    row = {
+                        "image": base_name,
+                        "crack_type": "combined",
+                        "crack_id": str(ccid),
+                    }
+                    row.update(tdict)
+                    timing_rows.append(row)
+
+            if timing_rows:
+                timing_df = pd.DataFrame(timing_rows)
+                timing_csv = os.path.join(metrics_dir, f"{base_name}_timings_core.csv")
+                timing_df.to_csv(timing_csv, index=False)
+
+                from helpers.plot_metrics import plot_core_timing_bars
+                timing_png = os.path.join(metrics_dir, f"{base_name}_timings_core.png")
+                plot_core_timing_bars(metrics_dir, base_name, timing_png)
+        except Exception as e:
+            print(f"[DEBUG TIMING] timing summary failed: {e}")
             
         # === FINAL SUMMARY / PRESENTATION PLOTS ===
         try:

@@ -379,6 +379,9 @@ def build_combined_crack_stateless(
     """
     Stateless “metrics-safe” combine.
     """
+    import time  # NEW
+
+    t0 = time.perf_counter()  # NEW
 
     img = original_image
     H, W = img.shape[:2]
@@ -550,6 +553,21 @@ def build_combined_crack_stateless(
             traceback.print_exc()
 
 
+    '''return {
+        "source": "combined",
+        "members": [str(m) for m in member_ids],
+        "midline_segments": [ [[float(xx), float(yy)] for (xx,yy) in s] for s in segs ],
+        "midline": _flatten(segs),
+        "geodesic_edges": {"edge1": _flatten(edge1_segs), "edge2": _flatten(edge2_segs)},
+        "normal_edge_points": {"edge1": _flatten(norm1_segs), "edge2": _flatten(norm2_segs)},
+        "mask_crop": crop.tolist(),
+        "mask_bbox": [int(x), int(y), int(w), int(h)],
+        "combined_length": combined_length,
+        "mean_width": mean_width,
+    }'''
+    elapsed = float(time.perf_counter() - t0)
+    timing = {"build_combined_sec": elapsed}
+
     return {
         "source": "combined",
         "members": [str(m) for m in member_ids],
@@ -561,4 +579,5 @@ def build_combined_crack_stateless(
         "mask_bbox": [int(x), int(y), int(w), int(h)],
         "combined_length": combined_length,
         "mean_width": mean_width,
+        "timing": timing,   # NEW
     }

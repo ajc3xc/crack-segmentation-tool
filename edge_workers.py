@@ -399,7 +399,7 @@ def save_cropped_overlay(img_full_bgr, bbox, mask_or_rgb, out_png, margin=0):
 # ---------------------------------------------------------------------
 # Worker: edge mask → edge tracking → mask creation → midline metrics
 # ---------------------------------------------------------------------   
-def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
+'''def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     import numpy as np, cv2, os, json
     from helpers.metrics import (
         compute_midline_metrics, set_tracked_edges_for_crack,
@@ -457,7 +457,77 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         # --- Pretty RTX-on visualizations (edges + normals) ---
         pretty_path = os.path.join(dbg_dir, "edges_midlines_normals_pretty.png")
         plot_normals_pretty(img_norm, track_e1, track_e2, midline_xy_crop,
-                            normals_e1, normals_e2, pretty_path, crack_id)
+                            normals_e1, normals_e2, pretty_path, crack_id)'''
+                            
+def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
+    import numpy as np, cv2, os, json, time
+    from helpers.metrics import (
+        compute_midline_metrics, set_tracked_edges_for_crack,
+        compute_mask_metrics, boundary_fscore, assd_hd95
+    )
+
+    img = payload["image_crop_gray"]
+    pts_crop = payload["pts_crop"]
+    track_local_yx = payload["adjusted_track"]  # (2,N) [y,x]
+    man_xy_g = np.asarray(payload["manual_midline_global"], float)
+    x, y, w, h = map(int, payload["bbox"])
+    P = payload["params"]
+    crack_id = payload.get("crack_id", "?")
+    base_name = payload.get("image_base", "unknown")
+
+    try:
+        img_norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+        # --- timing: edge_masks ---
+        t0 = time.perf_counter()
+        em1, em2 = edge_masks(img_norm, track_local_yx, window_half_size=int(P["window_half_size"]))
+        t_edge_masks = float(time.perf_counter() - t0)
+
+        midline_xy_crop = np.column_stack([track_local_yx[1], track_local_yx[0]])
+
+        # --- timing: edges_tracking (includes geodesics + normal pairing) ---
+        t1 = time.perf_counter()
+        res = edges_tracking(
+            image_crop=img_norm,
+            pts_cropp=pts_crop,
+            edge_mask1_cropp=em1, edge_mask2_cropp=em2,
+            midline=midline_xy_crop,
+            mu=int(P["mu"]), l=int(P["l"]), p=int(P["p"]),
+            return_normal_edges=True,
+            prefer_gpu=True,
+        )
+        t_edges_tracking = float(time.perf_counter() - t1)
+
+        if not isinstance(res, dict):
+            print(f"[edge_worker] ⚠️ edges_tracking returned {type(res)} — expected dict.")
+            return {"status": "fail_invalid_return", **P}
+
+        track_e1, track_e2 = res.get("geodesic_edges", (None, None))
+        if track_e1 is None or track_e2 is None:
+            print(f"[edge_worker] ❌ no geodesic edges returned for {P}")
+            return {"status": "fail_no_edges", **P}
+
+        track_e1 = np.asarray(track_e1, float)
+        track_e2 = np.asarray(track_e2, float)
+
+        hc, wc = img.shape[:2]
+        mask_crop = _crop_mask_from_edges(hc, wc, track_e1, track_e2, midline_xy=midline_xy_crop)
+
+        # --- Normal conversion ---
+        normals_e1, normals_e2 = extract_normals_from_res(res)
+        track_e1_global = np.column_stack([track_e1[:,0]+x, track_e1[:,1]+y])
+        track_e2_global = np.column_stack([track_e2[:,0]+x, track_e2[:,1]+y])
+
+        # === OUTPUT SETUP ===
+        dbg_dir = os.path.join(payload["save_folder"], "metrics", base_name, f"cid{crack_id}")
+        os.makedirs(dbg_dir, exist_ok=True)
+
+        # --- Pretty RTX-on visualizations (edges + normals) ---
+        pretty_path = os.path.join(dbg_dir, "edges_midlines_normals_pretty.png")
+        plot_normals_pretty(
+            img_norm, track_e1, track_e2, midline_xy_crop,
+            normals_e1, normals_e2, pretty_path, crack_id
+        )
 
         # --- GT vs Manual Mask Overlay (restored grayscale + blended colors) ---
         gt_crop = payload.get("gt_crop", None)
@@ -522,16 +592,6 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             cv2.imwrite(out_iou, vis_large)
             print(f"[DEBUG VIS] wrote → {out_iou}")
 
-        # --- Continuous width colormap overlay (GT mask background if available) ---
-        '''widths_path = os.path.join(dbg_dir, "widths_colormap_on_crop.png")
-        if gt_vs_manual_overlay is not None:
-            scale = 3.0
-            plot_widths_colormap_on_crop(
-                gt_vs_manual_overlay,
-                normals_e1 * scale, normals_e2 * scale,          # width geometry
-                track_e1 * scale, track_e2 * scale,              # geodesic edges
-                os.path.join(dbg_dir, "widths_colormap_on_crop.png")
-            )'''
         widths_path = os.path.join(dbg_dir, "widths_colormap_on_crop.png")
 
         # We ALWAYS use the upscaled overlay for consistent visualization.
@@ -589,6 +649,15 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "directional_bias","curvature_rms_ratio","local_thickness_corr"
             ]}
 
+        '''result = {
+            "status": "ok",
+            "bbox": [x, y, w, h],
+            "mask_bbox": [x, y, w, h],
+            "mask_crop": mask_crop.tolist(),
+            "geodesic_edges": {"edge1": track_e1_global.tolist(), "edge2": track_e2_global.tolist()},
+            "normal_edge_points_full": {"edge1": normals_e1.tolist(), "edge2": normals_e2.tolist()},
+            **P, **metrics, **metrics_all
+        }'''
         result = {
             "status": "ok",
             "bbox": [x, y, w, h],
@@ -596,6 +665,10 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             "mask_crop": mask_crop.tolist(),
             "geodesic_edges": {"edge1": track_e1_global.tolist(), "edge2": track_e2_global.tolist()},
             "normal_edge_points_full": {"edge1": normals_e1.tolist(), "edge2": normals_e2.tolist()},
+            "timing": {        # <--- NEW
+                "edge_masks_sec": t_edge_masks,
+                "edges_tracking_sec": t_edges_tracking,
+            },
             **P, **metrics, **metrics_all
         }
         set_tracked_edges_for_crack(payload["save_folder"], base_name, crack_id, result)
