@@ -659,17 +659,37 @@ def edges_tracking(
         e2x_c = np.clip(e2x, 0, W - 1); e2y_c = np.clip(e2y, 0, H - 1)
         normal_edges_clipped = [[e1x_c, e1y_c], [e2x_c, e2y_c]]
 
+    # --- compute sum of measured subtimings
+    measured = (
+        t_grad +
+        t_tensor +
+        t_normmasks +
+        t_metric +
+        t_geo1 +
+        t_geo2 +
+        t_normals
+    )
+
+    # true wall time
     t_all = time.perf_counter() - t0_all
 
+    # enforce consistency: compute remainder explicitly
+    t_remainder = max(t_all - measured, 0.0)
+
     subtiming = {
-        "edges_gradients_sec":          float(t_grad),
-        "edges_tensor_sec":             float(t_tensor),
-        "edges_mask_norm_sec":          float(t_normmasks),
-        "edges_metric_build_sec":       float(t_metric),
-        "edges_geodesic1_sec":          float(t_geo1),
-        "edges_geodesic2_sec":          float(t_geo2),
-        "edges_pair_normals_sec":       float(t_normals),
-        "edges_total_internal_sec":     float(t_all),
+        "edges_gradients_sec":      float(t_grad),
+        "edges_tensor_sec":         float(t_tensor),
+        "edges_mask_norm_sec":      float(t_normmasks),
+        "edges_metric_build_sec":   float(t_metric),
+        "edges_geodesic1_sec":      float(t_geo1),
+        "edges_geodesic2_sec":      float(t_geo2),
+        "edges_pair_normals_sec":   float(t_normals),
+
+        # new field
+        "edges_remainder_sec":      float(t_remainder),
+
+        # total = sum of all above
+        "edges_total_internal_sec": float(measured + t_remainder),
     }
 
     return {

@@ -746,20 +746,14 @@ def plot_core_timing_bars(metrics_dir, base_name, out_png):
         plt.savefig(out_png, dpi=160, bbox_inches="tight")
         plt.close()
 
-        # ----------------------------------------------------------
-    # (B) ATOMIC EDGE-TRACKING SUBTIMINGS (separate figure)
-    #     NORMALIZED so stacked bars EXACTLY equal edges_tracking_sec
+    # ----------------------------------------------------------
+    # (B) ATOMIC EDGE-TRACKING SUBTIMINGS — MATCH edges_tracking_sec EXACTLY
     # ----------------------------------------------------------
     atomic_df = df[df["crack_type"] == "atomic"].copy()
     if len(atomic_df):
 
-        # which subtiming columns we have
-        atomic_subcols = [
-            c for c in df.columns
-            if c.startswith("edges_") and c.endswith("_sec")
-        ]
-
-        preferred = [
+        # Real internal subtimings only
+        core_cols = [
             "edges_gradients_sec",
             "edges_tensor_sec",
             "edges_mask_norm_sec",
@@ -768,10 +762,6 @@ def plot_core_timing_bars(metrics_dir, base_name, out_png):
             "edges_geodesic2_sec",
             "edges_pair_normals_sec",
         ]
-        ordered_atomic = (
-            [c for c in preferred if c in atomic_subcols] +
-            [c for c in atomic_subcols if c not in preferred]
-        )
 
         crack_ids = atomic_df["crack_id"].tolist()
         fig2, ax2 = plt.subplots(figsize=(6 + len(crack_ids)*1.5, 4), dpi=160)
@@ -780,20 +770,15 @@ def plot_core_timing_bars(metrics_dir, base_name, out_png):
         for idx, cid in enumerate(crack_ids):
             row = atomic_df.iloc[idx]
 
-            # total tracking time from wrapper
             total = float(row.get("edges_tracking_sec", 0.0))
 
-            # compute sum of explicit subtimings
-            subsum = 0.0
-            for col in ordered_atomic:
-                subsum += float(row.get(col, 0.0))
+            # compute internal timelog sum
+            internal_sum = sum(float(row.get(c, 0.0)) for c in core_cols)
 
-            # compute remainder so stacked bar matches total exactly
-            remainder = max(total - subsum, 0.0)
+            # remainder = wrapper time - internal subtimings
+            remainder = max(total - internal_sum, 0.0)
 
-            # define stack groups
-            subtiming_items = [(col, float(row.get(col, 0.0)))
-                               for col in ordered_atomic]
+            subtiming_items = [(c, float(row.get(c, 0.0))) for c in core_cols]
             subtiming_items.append(("edges_remainder_sec", remainder))
 
             bottom = 0.0
@@ -807,7 +792,7 @@ def plot_core_timing_bars(metrics_dir, base_name, out_png):
                             fontsize=10, fontweight="bold")
         ax2.set_ylabel("Time (s)")
         ax2.set_title("Atomic edges tracking breakdown (normalized subtimings)",
-                      fontsize=13, fontweight="bold")
+                    fontsize=13, fontweight="bold")
         ax2.legend(fontsize=8, bbox_to_anchor=(1.05, 1), loc="upper left")
 
         plt.tight_layout()
