@@ -375,13 +375,12 @@ def build_combined_crack_stateless(
     prefer_gpu: bool = True,
     debug_callback=None,
 ):
-
     """
-    Stateless “metrics-safe” combine.
+    Stateless “metrics-safe” combiner with stitching timing included.
     """
-    import time  # NEW
+    import time
 
-    t0 = time.perf_counter()  # NEW
+    t0 = time.perf_counter()
 
     img = original_image
     H, W = img.shape[:2]
@@ -392,11 +391,14 @@ def build_combined_crack_stateless(
     else:
         gray_full = img.astype(np.float32)
 
-    # stitch member midlines
+    # ---------------------
+    # Timing: stitching only
+    # ---------------------
+    t_stitch0 = time.perf_counter()
+
     stitched = _stitch_lines_by_user(member_ids, authoring_atomic)
     stitched.sort(key=_linestring_length, reverse=True)
 
-    # shapely prune
     try:
         from shapely.geometry import LineString
         from shapely.ops import unary_union
@@ -416,34 +418,72 @@ def build_combined_crack_stateless(
                 dom_buffer = g.buffer(overlap_px, cap_style=2, join_style=2)
             else:
                 rem = g.difference(dom_buffer)
-                if rem.is_empty: continue
+                if rem.is_empty:
+                    continue
                 for piece in _split_lines(rem):
                     if piece.length >= min_keep_len:
                         kept_segs.append(np.asarray(piece.coords, float))
-                dom_buffer = unary_union([dom_buffer, g.buffer(overlap_px, cap_style=2, join_style=2)])
+                dom_buffer = unary_union([
+                    dom_buffer,
+                    g.buffer(overlap_px, cap_style=2, join_style=2)
+                ])
         segs = kept_segs if kept_segs else stitched
     else:
         segs = stitched
 
+    t_stitch1 = time.perf_counter()
+    stitching_sec = float(t_stitch1 - t_stitch0)
+
+    # -----------------------------------------
+    # Continue normal combined-crack generation
+    # -----------------------------------------
+        # -----------------------------------------
+    # Continue normal combined-crack generation
+    # -----------------------------------------
     edge1_segs, edge2_segs = [], []
     norm1_segs, norm2_segs = [], []
     union_mask = np.zeros((H, W), np.uint8)
     all_widths = []
 
+    # NEW timers
+    t_masks_total = 0.0
+    t_edges_total = 0.0
+    t_post_total  = 0.0
+    t_loop_total  = 0.0
+
     for S in segs:
-        if S is None or len(S) < 2: continue
+        t_loop0 = time.perf_counter()
+
+        if S is None or len(S) < 2:
+            continue
+
         x0 = max(0, int(np.floor(S[:,0].min()) - pad))
         x1 = min(W, int(np.ceil(S[:,0].max()) + pad))
         y0 = max(0, int(np.floor(S[:,1].min()) - pad))
         y1 = min(H, int(np.ceil(S[:,1].max()) + pad))
-        if x1-x0 < 2 or y1-y0 < 2: continue
+        if x1-x0 < 2 or y1-y0 < 2:
+            continue
 
         crop = gray_full[y0:y1, x0:x1]
         track_local_yx = np.vstack([S[:,1]-y0, S[:,0]-x0])
         pts_crop = [S[0]-[x0,y0], S[-1]-[x0,y0]]
 
-        em1, em2 = edge_masks(crop.astype(np.uint8), track_local_yx, window_half_size=window_half_size)
+        # -------------------------
+        # edge_masks timing
+        # -------------------------
+        t_em0 = time.perf_counter()
+        em1, em2 = edge_masks(
+            crop.astype(np.uint8),
+            track_local_yx,
+            window_half_size=window_half_size
+        )
+        t_em1 = time.perf_counter()
+        t_masks_total += (t_em1 - t_em0)
 
+        # -------------------------
+        # edges_tracking timing
+        # -------------------------
+        t_et0 = time.perf_counter()
         midline_xy_crop = np.column_stack([track_local_yx[1], track_local_yx[0]])
         res = edges_tracking(
             image_crop=crop,
@@ -454,19 +494,29 @@ def build_combined_crack_stateless(
             return_normal_edges=True,
             prefer_gpu=prefer_gpu
         )
+        t_et1 = time.perf_counter()
+        t_edges_total += (t_et1 - t_et0)
+
         if not isinstance(res, dict):
             continue
 
         ge = res.get("geodesic_edges", [None, None])
-        if ge is None or len(ge) != 2: continue
+        if ge is None or len(ge) != 2:
+            continue
         e1, e2 = ge
-        if e1 is None or e2 is None or len(e1)<2 or len(e2)<2:
+        if e1 is None or e2 is None or len(e1) < 2 or len(e2) < 2:
             continue
 
-        e1 = np.asarray(e1, float); e2 = np.asarray(e2, float)
-        e1_full = _finite_xy(np.column_stack([e1[:,0]+x0, e1[:,1]+y0]))
-        e2_full = _finite_xy(np.column_stack([e2[:,0]+x0, e2[:,1]+y0]))
-        if len(e1_full)<2 or len(e2_full)<2:
+        # -------------------------
+        # post-processing timing
+        # -------------------------
+        t_post0 = time.perf_counter()
+
+        e1 = np.asarray(e1, float)
+        e2 = np.asarray(e2, float)
+        e1_full = _finite_xy(np.column_stack([e1[:,0] + x0, e1[:,1] + y0]))
+        e2_full = _finite_xy(np.column_stack([e2[:,0] + x0, e2[:,1] + y0]))
+        if len(e1_full) < 2 or len(e2_full) < 2:
             continue
 
         e1_full = _align_edge_to_midline(S, e1_full)
@@ -475,15 +525,18 @@ def build_combined_crack_stateless(
         normals = res.get("normal_edge_points")
         if normals is not None:
             (e1x, e1y), (e2x, e2y) = normals
-            n1_full = _finite_xy(np.column_stack([np.asarray(e1x)+x0, np.asarray(e1y)+y0]))
-            n2_full = _finite_xy(np.column_stack([np.asarray(e2x)+x0, np.asarray(e2y)+y0]))
+            n1_full = _finite_xy(np.column_stack([np.asarray(e1x) + x0,
+                                                  np.asarray(e1y) + y0]))
+            n2_full = _finite_xy(np.column_stack([np.asarray(e2x) + x0,
+                                                  np.asarray(e2y) + y0]))
             m = min(len(n1_full), len(n2_full))
-            if m>=2:
+            if m >= 2:
                 d = np.sqrt(np.sum((n1_full[:m] - n2_full[:m])**2, axis=1))
                 if d.size:
                     all_widths.append(d[np.isfinite(d)])
         else:
-            n1_full = np.empty((0,2)); n2_full = np.empty((0,2))
+            n1_full = np.empty((0,2))
+            n2_full = np.empty((0,2))
 
         edge1_segs.append(e1_full)
         edge2_segs.append(e2_full)
@@ -492,25 +545,35 @@ def build_combined_crack_stateless(
 
         ex = np.concatenate((e1_full[:,0][::-1], e2_full[:,0]))
         ey = np.concatenate((e1_full[:,1][::-1], e2_full[:,1]))
-        exc, eyc = np.clip(ex, 0, W-1), np.clip(ey, 0, H-1)
+        exc, eyc = np.clip(ex, 0, W - 1), np.clip(ey, 0, H - 1)
         area = _shoelace_area(exc, eyc)
+
         if area > 0.5:
-            poly = np.stack([exc, eyc], axis=1).astype(np.int32).reshape(-1,1,2)
-            mask_seg = np.zeros((H,W), np.uint8)
+            poly = np.stack([exc, eyc], axis=1).astype(np.int32).reshape(-1, 1, 2)
+            mask_seg = np.zeros((H, W), np.uint8)
             cv2.fillPoly(mask_seg, [poly], 255)
         else:
-            mask_seg = _ribbon_mask_from_midline(H, W, S, thickness_px=max(3, window_half_size//3))
+            mask_seg = _ribbon_mask_from_midline(
+                H, W, S, thickness_px=max(3, window_half_size // 3)
+            )
 
         union_mask |= (mask_seg > 0).astype(np.uint8)
 
+        t_post1 = time.perf_counter()
+        t_post_total += (t_post1 - t_post0)
+
+        # loop total
+        t_loop_total += (time.perf_counter() - t_loop0)
+
     if np.any(union_mask):
-        x,y,w,h = bbox_from_mask(union_mask) or [0,0,W,H]
+        x, y, w, h = bbox_from_mask(union_mask) or [0,0,W,H]
         crop = union_mask[y:y+h, x:x+w].astype(np.uint8)
     else:
-        x=y=0; w=h=1; crop = np.zeros((1,1), np.uint8)
+        x=y=0; w=h=1
+        crop = np.zeros((1,1), np.uint8)
 
     def _flatten(seg_list):
-        out=[]
+        out = []
         for i, arr in enumerate(seg_list):
             out.extend([[float(xx), float(yy)] for xx,yy in arr])
             if i < len(seg_list)-1:
@@ -518,66 +581,34 @@ def build_combined_crack_stateless(
         return out
 
     combined_length = float(sum(_linestring_length(s) for s in segs))
-    mean_width = float(np.nanmean(np.concatenate(all_widths))) if len(all_widths) else None
+    if len(all_widths):
+        mean_width = float(np.nanmean(np.concatenate(all_widths)))
+    else:
+        mean_width = None
 
-    # ---- DEBUG CALLBACK ----
-    if callable(debug_callback):
-        try:
-            # Build an RGB image for plotting
-            if img.ndim == 3:
-                rgb = img[:, :, ::-1]  # BGR→RGB
-            else:
-                rgb = np.stack([img]*3, axis=-1)
-
-            # Compute mask bbox
-            if np.any(union_mask):
-                x,y,w,h = bbox_from_mask(union_mask)
-            else:
-                x=y=0; w=h=1
-
-            debug_callback(
-                image_rgb=rgb,
-                segs=segs,
-                edge1_segs=edge1_segs,
-                edge2_segs=edge2_segs,
-                norm1_segs=norm1_segs,
-                norm2_segs=norm2_segs,
-                mask_bbox=[x,y,w,h],
-                member_ids=member_ids,
-                union_mask=union_mask,   # ★★★★★ REQUIRED ★★★★★
-            )
-        except Exception as e:
-            print("[STATLESS_DEBUG] error:", e)
-            print("[STATLESS_DEBUG] traceback follows:")
-            import traceback
-            traceback.print_exc()
-
-
-    '''return {
-        "source": "combined",
-        "members": [str(m) for m in member_ids],
-        "midline_segments": [ [[float(xx), float(yy)] for (xx,yy) in s] for s in segs ],
-        "midline": _flatten(segs),
-        "geodesic_edges": {"edge1": _flatten(edge1_segs), "edge2": _flatten(edge2_segs)},
-        "normal_edge_points": {"edge1": _flatten(norm1_segs), "edge2": _flatten(norm2_segs)},
-        "mask_crop": crop.tolist(),
-        "mask_bbox": [int(x), int(y), int(w), int(h)],
-        "combined_length": combined_length,
-        "mean_width": mean_width,
-    }'''
     elapsed = float(time.perf_counter() - t0)
-    timing = {"build_combined_sec": elapsed}
 
     return {
         "source": "combined",
         "members": [str(m) for m in member_ids],
-        "midline_segments": [ [[float(xx), float(yy)] for (xx,yy) in s] for s in segs ],
+        "midline_segments": [
+            [[float(xx), float(yy)] for (xx,yy) in s] for s in segs
+        ],
         "midline": _flatten(segs),
-        "geodesic_edges": {"edge1": _flatten(edge1_segs), "edge2": _flatten(edge2_segs)},
-        "normal_edge_points": {"edge1": _flatten(norm1_segs), "edge2": _flatten(norm2_segs)},
+        "geodesic_edges": {"edge1": _flatten(edge1_segs),
+                           "edge2": _flatten(edge2_segs)},
+        "normal_edge_points": {"edge1": _flatten(norm1_segs),
+                               "edge2": _flatten(norm2_segs)},
         "mask_crop": crop.tolist(),
         "mask_bbox": [int(x), int(y), int(w), int(h)],
         "combined_length": combined_length,
         "mean_width": mean_width,
-        "timing": timing,   # NEW
+        "timing": {
+            "build_combined_sec": elapsed,
+            "stitching_sec": stitching_sec,
+            "combine_edge_masks_sec": t_masks_total,
+            "combine_edge_tracking_sec": t_edges_total,
+            "combine_postprocess_sec": t_post_total,
+            "combine_loop_total_sec": t_loop_total,
+        },
     }

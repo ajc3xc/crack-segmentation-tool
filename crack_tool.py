@@ -2882,9 +2882,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                         f"combined{ccid}_{'_'.join(members)}"
                     )
                 )
-
-
             )
+            combined_timing = rebuilt.get("timing", {}).copy()
 
             rebuilt["members"] = members
             rebuilt_combined[str(ccid)] = rebuilt
@@ -2912,106 +2911,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             except Exception as e:
                 print(f"[atomic fail] {e}")
 
-        '''# --- COMBINED METRICS (true bbox union for all members) ---
-        for ccid, cmb in (combined_map or {}).items():
-            try:
-                members = cmb.get("members", []) or []
-                if not members:
-                    continue
-
-                # Build full combined mask (union of member masks)
-                combined_mask = np.zeros((H, W), np.uint8)
-                member_bboxes = []
-                for m in members:
-                    cr = atomic.get(str(m))
-                    if cr:
-                        mm = _mask_from_crack(cr, H, W)
-                        combined_mask |= (mm > 0).astype(np.uint8)
-                        # store bbox if nonzero
-                        if np.any(mm):
-                            yx = np.argwhere(mm)
-                            y0, x0 = yx.min(axis=0)
-                            y1, x1 = yx.max(axis=0)
-                            member_bboxes.append([x0, y0, x1, y1])
-
-                if not np.any(combined_mask):
-                    print(f"[COMBINE_DBG] ⚠️ combined {ccid} empty mask — skipping.")
-                    continue
-
-                # unified bbox across all members
-                if member_bboxes:
-                    xmins, ymins, xmaxs, ymaxs = zip(*member_bboxes)
-                    x0, y0 = max(min(xmins)-5, 0), max(min(ymins)-5, 0)
-                    x1, y1 = min(max(xmaxs)+5, W), min(max(ymaxs)+5, H)
-                else:
-                    x0, y0, x1, y1 = 0, 0, W, H
-
-                # apply crop for metric evaluation
-                gt_crop = gt_full[y0:y1, x0:x1]
-                man_crop = combined_mask[y0:y1, x0:x1]
-
-                # metrics within true crop
-                base = compute_mask_metrics(gt_crop, man_crop)
-                bnd  = boundary_fscore(gt_crop, man_crop, tau=2.0)
-                surf = assd_hd95(gt_crop, man_crop)
-
-                members_str = "_".join(str(m) for m in members)
-                cmb_dir = os.path.join(metrics_dir, f"combined{ccid}_{members_str or 'none'}")
-                os.makedirs(cmb_dir, exist_ok=True)
-
-                # Overlay cropped region only
-                from helpers.plot_metrics import save_gt_vs_manual_overlay
-                save_gt_vs_manual_overlay(
-                    H, W, gt_full, combined_mask,
-                    os.path.join(cmb_dir, "gt_vs_manual_mask_global.png"),
-                    bbox=[x0, y0, x1-x0, y1-y0],
-                    original_image=self.original_image,
-                )
-
-                # --- build cropped gt_normals ---
-                import matplotlib.pyplot as plt
-                fig, ax = plt.subplots(figsize=((x1-x0)/100, (y1-y0)/100), dpi=160)
-                ax.imshow(combined_mask[y0:y1, x0:x1]*255, cmap="gray", origin="upper",
-                        extent=[x0, x1, y1, y0])
-
-                for m in members:
-                    cr = atomic.get(str(m))
-                    if not cr:
-                        continue
-                    ml = np.asarray(cr.get("midline", []), float)
-                    if ml.ndim == 2 and len(ml) > 1:
-                        ax.plot(ml[:, 0], ml[:, 1], "r-", lw=1)
-                    ge = cr.get("geodesic_edges", {}) or {}
-                    for k, v in ge.items():
-                        v = np.asarray(v, float)
-                        if v.ndim == 2 and len(v) > 1:
-                            ax.plot(v[:, 0], v[:, 1], color="cyan", lw=0.5)
-                ax.set_xlim(x0, x1)
-                ax.set_ylim(y1, y0)
-                ax.axis("off")
-                plt.tight_layout(pad=0)
-                plt.savefig(os.path.join(cmb_dir, "gt_normals.png"),
-                            bbox_inches="tight", pad_inches=0)
-                plt.close(fig)
-
-                # record metrics
-                row = {
-                    "image": base_name,
-                    "crack_type": "combined",
-                    "crack_id": str(ccid),
-                    "members": members_str,
-                    **base, **bnd, **surf,
-                }
-                mask_rows.append(row)
-                print(f"[DEBUG MASK] combined id={ccid}({members_str}) IoU={base['iou']:.4f} bF1={bnd['boundary_f1']:.4f}")
-
-                # accumulate into total union
-                agg_manual |= (combined_mask > 0).astype(np.uint8)
-
-            except Exception as e:
-                print(f"[DEBUG METRICS] combined id={ccid} failed: {e}")
-                traceback.print_exc()'''
-        
         # ------------------------------------------------------------------------
         # --- COMBINED METRICS (true bbox union for all members)
         # ------------------------------------------------------------------------
@@ -3298,11 +3197,18 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 e1_merge = np.vstack(e1_all) if e1_all else np.zeros((0, 2))
                 e2_merge = np.vstack(e2_all) if e2_all else np.zeros((0, 2))
 
+                '''combined_for_width[str(ccid)] = {
+                    "midline": mid_merge.tolist(),
+                    "geodesic_edges": {"edge1": e1_merge.tolist(), "edge2": e2_merge.tolist()},
+                    "members": members,
+                }'''
                 combined_for_width[str(ccid)] = {
                     "midline": mid_merge.tolist(),
                     "geodesic_edges": {"edge1": e1_merge.tolist(), "edge2": e2_merge.tolist()},
                     "members": members,
+                    "timing": combined_timing,       # ★★★★★ RESTORED ★★★★★
                 }
+
 
             # --- now run comparison using the synthetic set
             retc = compare_widths_for_cracks({"atomic_cracks": combined_for_width},

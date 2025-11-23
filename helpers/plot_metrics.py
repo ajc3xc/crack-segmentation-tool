@@ -705,43 +705,76 @@ def plot_core_timing_bars(metrics_dir, base_name, out_png):
 
     df = pd.read_csv(csv_path)
 
-    # (A) core stage timing summary
+    # ============================================================
+    # FIX 1 — REMOVE crack_id collisions ("0" atomic vs "0" combined)
+    # ============================================================
+    def _fix_id(row):
+        if row["crack_type"] == "atomic":
+            return f"atom_{row['crack_id']}"
+        elif row["crack_type"] == "combined":
+            return f"comb_{row['crack_id']}"
+        else:
+            return f"x_{row['crack_id']}"
+
+    df["crack_id_fixed"] = df.apply(_fix_id, axis=1)
+
+    # ============================================================
+    # FIX 2 — MERGE stitching INTO build_combined_sec
+    # ============================================================
+    if "stitching_sec" in df.columns:
+        df["build_combined_sec"] = df.get("build_combined_sec", 0) + df["stitching_sec"]
+        df.drop(columns=["stitching_sec"], inplace=True, errors="ignore")
+
+    # ============================================================
+    # FIX 3 — MERGE combine_segments timing into combined entries
+    # ============================================================
+    if "combine_segments_sec" in df.columns:
+        df["build_combined_sec"] = df.get("build_combined_sec", 0) + df["combine_segments_sec"]
+
+    # ============================================================
+    # (A) — SUMMARY PLOT ACROSS ALL CRACKS
+    # Only atomic subtimings are shown separately.
+    # Combined cracks use a single aggregated bar.
+    # ============================================================
     stage_map = [
-        ("edge_masks_sec",    "Edge masks"),
-        ("edges_tracking_sec","Edge tracking"),
-        ("build_combined_sec","Combined crack"),
+        ("edge_masks_sec",       "Edge masks / atomic"),
+        ("edges_tracking_sec",   "Edge tracking / atomic"),
+        ("build_combined_sec",   "Combined crack (merged)"),
     ]
 
     labels, vals = [], []
     for col, label in stage_map:
         if col in df.columns:
+            vals.append(df[col].sum())
             labels.append(label)
-            vals.append(np.nansum(df[col]))
 
     if labels:
-        fig, ax = plt.subplots(figsize=(7, 4), dpi=160)
+        fig, ax = plt.subplots(figsize=(8, 4), dpi=160)
         xs = np.arange(len(labels))
+
         ax.bar(xs, vals)
         ax.set_xticks(xs)
-        ax.set_xticklabels(labels, rotation=15, ha="right",
-                           fontsize=9, fontweight="bold")
+        ax.set_xticklabels(labels, rotation=15, ha="right", fontsize=10, fontweight="bold")
         ax.set_ylabel("Time (s)")
-        ax.set_title("Core runtime per image (sum over all cracks)", fontsize=13, fontweight="bold")
+        ax.set_title("Core runtime per image (sum over all cracks)",
+                     fontsize=14, fontweight="bold")
 
         for i, v in enumerate(vals):
-            ax.text(xs[i], v * 1.03, f"{v:.2f}", ha="center", fontsize=8)
+            ax.text(xs[i], v * 1.03, f"{v:.2f}", ha="center", fontsize=9)
 
         plt.tight_layout()
         plt.savefig(out_png, dpi=160, bbox_inches="tight")
         plt.close()
 
-    # (B) subtimings per crack (stacked bars)
-    sub_cols = [c for c in df.columns if c.startswith("edges_") and c.endswith("_sec")]
-    if not sub_cols:
-        return
+    # ============================================================
+    # (B) — PER-CRACK STACKED SUBTIMINGS (ATOMIC + COMBINED)
+    # ============================================================
 
-    # order the subcomponents
-    preferred = [
+    # All possible subtiming columns
+    sub_cols = [c for c in df.columns if c.endswith("_sec")]
+
+    # Preferred drawing order
+    preferred_order = [
         "edges_gradients_sec",
         "edges_tensor_sec",
         "edges_mask_norm_sec",
@@ -749,29 +782,43 @@ def plot_core_timing_bars(metrics_dir, base_name, out_png):
         "edges_geodesic1_sec",
         "edges_geodesic2_sec",
         "edges_pair_normals_sec",
+        "edges_tracking_sec",
+        "edges_total_internal_sec",
+        "combine_segments_sec",
+        "build_combined_sec",
     ]
-    ordered = [c for c in preferred if c in sub_cols] + \
-              [c for c in sub_cols if c not in preferred]
 
-    crack_ids = df["crack_id"].tolist()
-    fig2, ax2 = plt.subplots(figsize=(10, 4), dpi=160)
+    ordered_cols = [c for c in preferred_order if c in sub_cols] + \
+                   [c for c in sub_cols if c not in preferred_order]
 
+    # Sorted crack order: atom_* first, then comb_*
+    df = df.sort_values("crack_id_fixed").reset_index(drop=True)
+
+    crack_ids = df["crack_id_fixed"].tolist()
     xs = np.arange(len(crack_ids))
 
+    fig2, ax2 = plt.subplots(figsize=(10 + len(crack_ids) * 1.0, 5), dpi=160)
+
+    # Draw each crack as a stacked bar
     for idx, cid in enumerate(crack_ids):
-        bottom = 0
         row = df.iloc[idx]
-        for col in ordered:
-            v = row[col]
-            ax2.bar(idx, v, bottom=bottom, label=col if idx == 0 else "")
-            bottom += v
+        bottom = 0.0
+
+        for col in ordered_cols:
+            if col in row and not pd.isna(row[col]):
+                v = float(row[col])
+                if v <= 0:
+                    continue
+                ax2.bar(idx, v, bottom=bottom, label=(col if idx == 0 else ""))
+                bottom += v
 
     ax2.set_xticks(xs)
-    ax2.set_xticklabels([f"cid {c}" for c in crack_ids], fontsize=9)
-    ax2.set_title("Edges tracking breakdown (per crack, stacked subtimings)",
-                  fontsize=12, fontweight="bold")
+    ax2.set_xticklabels(crack_ids, fontsize=10, fontweight="bold")
     ax2.set_ylabel("Time (s)")
-    ax2.legend(fontsize=7, bbox_to_anchor=(1.05, 1), loc="upper left")
+    ax2.set_title("Subtimings per crack (atomic + combined)",
+                  fontsize=13, fontweight="bold")
+
+    ax2.legend(fontsize=8, bbox_to_anchor=(1.05, 1), loc="upper left")
 
     plt.tight_layout()
     out2 = os.path.join(metrics_dir, f"{base_name}_timings_edges_tracking.png")
