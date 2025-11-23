@@ -582,6 +582,22 @@ def build_combined_crack_stateless(
         mean_width = float(np.nanmean(np.concatenate(all_widths)))
     else:
         mean_width = None
+    
+    # --------------------------------------------------------
+    # 🔍 DEBUG CALLBACK FOR COMBINED CRACK OVERLAY
+    # --------------------------------------------------------
+    if debug_callback:
+        try:
+            debug_callback(
+                segs=segs,
+                edge1_segs=edge1_segs,
+                edge2_segs=edge2_segs,
+                norm1_segs=norm1_segs,
+                norm2_segs=norm2_segs,
+                mask_bbox=[int(x), int(y), int(w), int(h)]
+            )
+        except Exception as e:
+            print(f"[COMBINE_DBG] debug_callback failed: {e}")
 
     elapsed = float(time.perf_counter() - t0)
 
