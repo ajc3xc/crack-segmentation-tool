@@ -498,6 +498,11 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         )
         t_edges_tracking = float(time.perf_counter() - t1)
 
+        geodesic_edges = res["geodesic_edges"]
+        normals_full   = res["normal_edge_points"]
+        normals_clip   = res["normal_edge_points_clipped"]
+        subtiming      = res.get("subtiming", {})
+
         if not isinstance(res, dict):
             print(f"[edge_worker] ⚠️ edges_tracking returned {type(res)} — expected dict.")
             return {"status": "fail_invalid_return", **P}
@@ -658,17 +663,26 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             "normal_edge_points_full": {"edge1": normals_e1.tolist(), "edge2": normals_e2.tolist()},
             **P, **metrics, **metrics_all
         }'''
+        timing_dict = {
+            "edge_masks_sec":      float(t_edge_masks),
+            "edges_tracking_sec":  float(t_edges_tracking),
+        }
+        timing_dict.update(subtiming)
+
         result = {
             "status": "ok",
             "bbox": [x, y, w, h],
             "mask_bbox": [x, y, w, h],
             "mask_crop": mask_crop.tolist(),
-            "geodesic_edges": {"edge1": track_e1_global.tolist(), "edge2": track_e2_global.tolist()},
-            "normal_edge_points_full": {"edge1": normals_e1.tolist(), "edge2": normals_e2.tolist()},
-            "timing": {        # <--- NEW
-                "edge_masks_sec": t_edge_masks,
-                "edges_tracking_sec": t_edges_tracking,
+            "geodesic_edges": {
+                "edge1": track_e1_global.tolist(),
+                "edge2": track_e2_global.tolist()
             },
+            "normal_edge_points_full": {
+                "edge1": normals_e1.tolist(),
+                "edge2": normals_e2.tolist()
+            },
+            "timing": timing_dict,   # <--- updated timing dict
             **P, **metrics, **metrics_all
         }
         set_tracked_edges_for_crack(payload["save_folder"], base_name, crack_id, result)

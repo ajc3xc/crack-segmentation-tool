@@ -695,44 +695,121 @@ def plot_width_differences(midline, w_mask, w_edge, mask, contours=None,
     return diffs
 
 def plot_core_timing_bars(metrics_dir, base_name, out_png):
+    """
+    Plots core routine runtimes for one image.
+
+    Reads <base_name>_timings_core.csv and:
+      (1) Makes a bar chart of:
+          - edge_masks_sec
+          - edges_tracking_sec
+          - build_combined_sec
+          each bar = SUM over all atomic + combined cracks.
+
+      (2) If sub-timing columns from edges_tracking are present
+          (edges_*_sec), also creates a second PNG with a stacked bar
+          breaking down edges_tracking into its sub-modules.
+
+          Output: <base_name>_timings_edges_tracking.png
+    """
     import os, numpy as np, pandas as pd
     import matplotlib.pyplot as plt
 
-    csv_path=os.path.join(metrics_dir,f"{base_name}_timings_core.csv")
+    csv_path = os.path.join(metrics_dir, f"{base_name}_timings_core.csv")
     if not os.path.exists(csv_path):
-        print("[TIMING_PLOT] no timing CSV")
+        print("[TIMING_PLOT] no timing CSV:", csv_path)
         return
 
-    df=pd.read_csv(csv_path)
+    df = pd.read_csv(csv_path)
 
-    # Collect sums
-    cols=[c for c in df.columns if c.endswith("_sec") or c.startswith("t_")]
-
-    sums={c:np.nansum(df[c]) for c in cols}
-
-    # Group into stacks (geodesic, pairing, gradient, metric, etc.)
-    stack_order=[
-        "edge_masks_sec",
-        "t_gradients","t_norm_masks","t_metric",
-        "t_geodesic1","t_geodesic2",
-        "t_pairing",
-        "edges_tracking_sec",
-        "build_combined_sec",
+    # ----- Figure 1: core stages (edge masks, edge tracking, combine) -----
+    stage_map = [
+        ("edge_masks_sec",    "Edge masks"),
+        ("edges_tracking_sec","Edge tracking"),
+        ("build_combined_sec","Combined crack"),
     ]
-    labels=[s for s in stack_order if s in sums]
-    values=[sums[s] for s in labels]
 
-    fig,ax=plt.subplots(figsize=(9,4),dpi=160)
+    labels, vals = [], []
+    for col, label in stage_map:
+        if col in df.columns:
+            labels.append(label)
+            vals.append(np.nansum(df[col].astype(float).values))
 
-    bottom=0
-    for lab,val in zip(labels,values):
-        ax.bar("total", val, bottom=bottom, label=lab.replace("_"," "))
-        bottom+=val
+    if labels:
+        xs = np.arange(len(labels))
 
-    ax.set_title("Core runtime (sum of all sub-modules)",fontsize=13,fontweight="bold")
-    ax.set_ylabel("Time (s)")
-    ax.legend(fontsize=7)
+        fig, ax = plt.subplots(figsize=(7, 4), dpi=160)
+        ax.bar(xs, vals)
+        ax.set_xticks(xs)
+        ax.set_xticklabels(labels, rotation=15, ha="right",
+                           fontsize=9, fontweight="bold")
+        ax.set_ylabel("Time (s)")
+        ax.set_title("Core runtime per image (sum over all cracks)",
+                     fontsize=13, fontweight="bold")
+
+        for i, v in enumerate(vals):
+            ax.text(
+                xs[i],
+                v * 1.03 if v > 0 else 0.02,
+                f"{v:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+        plt.tight_layout()
+        plt.savefig(out_png, dpi=160, bbox_inches="tight")
+        plt.close(fig)
+    else:
+        print("[TIMING_PLOT] no known core timing columns found")
+
+    # ----- Figure 2: edges_tracking sub-timing (stacked) -----
+    sub_cols = [c for c in df.columns if c.startswith("edges_") and c.endswith("_sec")]
+    if not sub_cols:
+        return
+
+    # Aggregate each sub-component across all rows
+    subtotals = {c: np.nansum(df[c].astype(float).values) for c in sub_cols}
+
+    # Keep a stable, readable order
+    preferred_order = [
+        "edges_gradients_sec",
+        "edges_tensor_sec",
+        "edges_mask_norm_sec",
+        "edges_metric_build_sec",
+        "edges_geodesic1_sec",
+        "edges_geodesic2_sec",
+        "edges_pair_normals_sec",
+    ]
+    ordered = [c for c in preferred_order if c in subtotals] + \
+              [c for c in sub_cols if c not in preferred_order]
+
+    if not ordered:
+        return
+
+    vals = [subtotals[c] for c in ordered]
+    labels = [c.replace("edges_", "").replace("_sec", "").replace("_", " ")
+              for c in ordered]
+
+    fig2, ax2 = plt.subplots(figsize=(8, 4), dpi=160)
+
+    bottom = 0.0
+    x = 0  # single bar
+    for v, lab in zip(vals, labels):
+        ax2.bar(x, v, bottom=bottom, label=lab)
+        bottom += v
+
+    ax2.set_xticks([x])
+    ax2.set_xticklabels(["edges_tracking"], fontweight="bold")
+    ax2.set_ylabel("Time (s)")
+    ax2.set_title("Edges tracking breakdown (stacked subtimings, sum over all cracks)",
+                  fontsize=12, fontweight="bold")
+    ax2.legend(fontsize=8, bbox_to_anchor=(1.05, 1), loc="upper left")
+
+    # Annotate total on top
+    ax2.text(x, bottom * 1.02 if bottom > 0 else 0.02,
+             f"{bottom:.2f}s", ha="center", va="bottom", fontsize=9)
 
     plt.tight_layout()
-    plt.savefig(out_png,dpi=160,bbox_inches="tight")
-    plt.close()
+    out_png2 = os.path.join(metrics_dir, f"{base_name}_timings_edges_tracking.png")
+    plt.savefig(out_png2, dpi=160, bbox_inches="tight")
+    plt.close(fig2)

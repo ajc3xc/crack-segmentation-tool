@@ -103,6 +103,16 @@ def plot_assd_hd95_box(metrics_csv, out_png):
     plt.close()'''
     
 def plot_width_summary_triplet(metrics_dir, base_name, out_png):
+    """
+    Plots width errors (MAE, RMSE, Bias) and correlation for
+    manual/auto/combined methods for a single image.
+
+    Expects CSVs:
+      <base_name>_width_summary_manual.csv
+      <base_name>_width_summary_auto.csv
+      <base_name>_width_summary_combined.csv
+    in metrics_dir, if present.
+    """
     import os, numpy as np, pandas as pd
     import matplotlib.pyplot as plt
 
@@ -112,65 +122,92 @@ def plot_width_summary_triplet(metrics_dir, base_name, out_png):
         "combined": os.path.join(metrics_dir, f"{base_name}_width_summary_combined.csv"),
     }
 
-    rows=[]
-    for tag,p in paths.items():
+    rows = []
+    for tag, p in paths.items():
         if not os.path.exists(p):
             continue
-        df=pd.read_csv(p)
-        df.columns=[c.lower() for c in df.columns]
+
+        df = pd.read_csv(p)
+        df.columns = [c.lower() for c in df.columns]
+
+        mae  = df["mae_px"].mean()  if "mae_px"  in df else np.nan
+        rmse = df["rmse_px"].mean() if "rmse_px" in df else np.nan
+        bias = df["bias_px"].mean() if "bias_px" in df else np.nan
+        corr = df["corr"].mean()    if "corr"    in df else np.nan
+
         rows.append({
-            "method":tag,
-            "MAE":  df["mae_px"].mean()  if "mae_px"  in df else np.nan,
-            "RMSE": df["rmse_px"].mean() if "rmse_px" in df else np.nan,
-            "Bias": df["bias_px"].mean() if "bias_px" in df else np.nan,
-            "Corr": df["corr"].mean()    if "corr"    in df else np.nan,
+            "method": tag,
+            "MAE":  mae,
+            "RMSE": rmse,
+            "Bias": bias,
+            "Corr": corr
         })
 
     if not rows:
-        print("[TRIPLET] no usable width summary")
+        print("[TRIPLET] no usable width-summary CSVs")
         return
 
-    d=pd.DataFrame(rows)
-    fig,ax=plt.subplots(1,2,figsize=(10,4),dpi=160)
+    d = pd.DataFrame(rows)
+    methods = list(d["method"])
+    x = np.arange(len(methods))
+    width = 0.25
 
-    # LEFT Errors
-    d_err=d[["method","MAE","RMSE","Bias"]].set_index("method")
-    d_err.plot(kind="bar",ax=ax[0])
-    ax[0].set_title("Width errors (px)",fontsize=14,fontweight="bold")
-    ax[0].set_ylabel("px")
-    ax[0].legend()
+    fig, ax = plt.subplots(1, 2, figsize=(9, 4), dpi=160)
 
-    for lbl in ax[0].get_xticklabels():
-        lbl.set_fontsize(11)
+    # LEFT PANEL — grouped bars for MAE / RMSE / Bias
+    ax0 = ax[0]
+    ax0.bar(x - width, d["MAE"],  width, label="MAE")
+    ax0.bar(x,         d["RMSE"], width, label="RMSE")
+    ax0.bar(x + width, d["Bias"], width, label="Bias")
+    ax0.set_xticks(x)
+    ax0.set_xticklabels(methods, fontsize=11, fontweight="bold")
+    ax0.set_title("Width errors (px)", fontsize=14, fontweight="bold")
+    ax0.set_ylabel("px")
+    ax0.legend(fontsize=9)
+
+    # Annotate bars
+    for bars in ax0.containers:
+        for b in bars:
+            h = b.get_height()
+            if np.isfinite(h):
+                ax0.text(b.get_x() + b.get_width() / 2, h + 0.05,
+                         f"{h:.2f}", ha="center", va="bottom", fontsize=7)
+
+    # RIGHT PANEL — correlation
+    ax1 = ax[1]
+    ax1.bar(methods, d["Corr"])
+    ax1.set_ylim(0, 1)
+    ax1.set_title("Width correlation", fontsize=14, fontweight="bold")
+    ax1.set_ylabel("r")
+    ax1.tick_params(axis="x", labelsize=11)
+    for lbl in ax1.get_xticklabels():
         lbl.set_fontweight("bold")
         lbl.set_ha("center")
 
-    # RIGHT Corr
-    ax[1].bar(d["method"], d["Corr"])
-    ax[1].set_ylim(0,1)
-    ax[1].set_title("Width correlation",fontsize=14,fontweight="bold")
-    ax[1].set_ylabel("r")
-
-    for lbl in ax[1].get_xticklabels():
-        lbl.set_fontsize(11)
-        lbl.set_fontweight("bold")
-        lbl.set_ha("center")
-
-    for i,v in enumerate(d["Corr"]):
+    for i, v in enumerate(d["Corr"]):
         if np.isfinite(v):
-            ax[1].text(i, v+0.02, f"{v:.2f}",ha="center",fontsize=9)
+            ax1.text(i, v + 0.02, f"{v:.2f}", ha="center", fontsize=9)
 
     plt.tight_layout()
-    plt.savefig(out_png,bbox_inches="tight",dpi=160)
+    plt.savefig(out_png, dpi=160, bbox_inches="tight")
     plt.close()
 
 def plot_mask_metrics_triplet(metrics_dir, base_name, out_png):
     """
-    Region metrics, boundary metrics, and confusion counts summary plot.
+    Region metrics, boundary metrics, counts, and confusion matrix
+    summary plot for a single image.
+
     Looks for mask_metrics.csv inside metrics_dir.
+    Produces a 2x2 grid:
+
+      [0,0] Region metrics (Precision, Recall, F1, IoU)
+      [0,1] Boundary metrics (Prec/Recall/F1)
+      [1,0] Confusion counts (TP/FP/FN/TN)
+      [1,1] Confusion matrix heatmap (GT vs Pred)
     """
     import os, numpy as np, pandas as pd
     import matplotlib.pyplot as plt
+    import seaborn as sns
 
     csv_path = os.path.join(metrics_dir, "mask_metrics.csv")
     if not os.path.exists(csv_path):
@@ -179,7 +216,7 @@ def plot_mask_metrics_triplet(metrics_dir, base_name, out_png):
 
     df = pd.read_csv(csv_path)
 
-    # Prefer TOTAL row, fallback to mean
+    # Prefer TOTAL row, fallback to mean over rows
     total = None
     if "crack_type" in df.columns:
         m = df["crack_type"].astype(str).str.upper() == "TOTAL"
@@ -192,7 +229,10 @@ def plot_mask_metrics_triplet(metrics_dir, base_name, out_png):
     def get(col, default=np.nan):
         for c in total.index:
             if c.lower() == col.lower():
-                return float(total[c])
+                try:
+                    return float(total[c])
+                except Exception:
+                    return default
         return default
 
     region = {
@@ -215,7 +255,7 @@ def plot_mask_metrics_triplet(metrics_dir, base_name, out_png):
         "TN": get("tn", 0),
     }
 
-    fig, axes = plt.subplots(1, 3, figsize=(12, 3.5), dpi=160)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 7), dpi=160)
 
     def bar(ax, data, title, ylabel=None, ylim=None, fmt="{:.2f}"):
         labels = list(data.keys())
@@ -227,21 +267,46 @@ def plot_mask_metrics_triplet(metrics_dir, base_name, out_png):
         ax.set_title(title, fontsize=12, fontweight="bold")
         if ylabel:
             ax.set_ylabel(ylabel)
-        if ylim:
+        if ylim is not None:
             ax.set_ylim(*ylim)
+        # annotate
+        maxv = np.nanmax(vals) if np.isfinite(np.nanmax(vals)) else 1.0
+        off = 0.03 * maxv if maxv > 0 else 0.03
         for i, v in enumerate(vals):
             if not np.isfinite(v):
                 continue
-            ax.text(xs[i], v + (0.03 if ylim else 0.03*np.max(vals)), fmt.format(v),
+            ax.text(xs[i], v + off, fmt.format(v),
                     ha="center", va="bottom", fontsize=7)
 
-    bar(axes[0], region,   "Region metrics",   "score", ylim=(0,1))
-    bar(axes[1], boundary, "Boundary metrics", "score", ylim=(0,1))
-    bar(axes[2], confusion,"Confusion counts", "count", fmt="{:.0f}")
+    # Region + boundary + counts
+    bar(axes[0, 0], region,   "Region metrics",   "score", ylim=(0, 1))
+    bar(axes[0, 1], boundary, "Boundary metrics", "score", ylim=(0, 1))
+    bar(axes[1, 0], confusion, "Confusion counts", "count", fmt="{:.0f}")
+
+    # Confusion matrix heatmap
+    tp = confusion["TP"]
+    fp = confusion["FP"]
+    fn = confusion["FN"]
+    tn = confusion["TN"]
+
+    cm = np.array([[tp, fn],
+                   [fp, tn]], dtype=float)
+
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt=".0f",
+        cmap="Blues",
+        cbar=True,
+        xticklabels=["Pred +", "Pred -"],
+        yticklabels=["GT +", "GT -"],
+        ax=axes[1, 1]
+    )
+    axes[1, 1].set_title("Confusion matrix", fontsize=12, fontweight="bold")
 
     plt.tight_layout()
     plt.savefig(out_png, bbox_inches="tight", dpi=160)
-    plt.close()
+    plt.close(fig)
 
 def plot_midline_edge_metrics_bars(midline_csv, out_png):
     if not os.path.exists(midline_csv): return

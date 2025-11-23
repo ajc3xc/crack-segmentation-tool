@@ -560,24 +560,18 @@ def edges_tracking(
 ):
     """
     Robust edge tracking with optional GPU geodesics.
-    Now includes detailed sub-timing instrumentation:
-
-        t_gradients   – structure tensor (Dx, Dy → a11,a22,a12)
-        t_norm_masks  – normalization of edge masks
-        t_metric      – building the Riemann metric
-        t_geodesic1   – geodesic on edge_mask1
-        t_geodesic2   – geodesic on edge_mask2
-        t_pairing     – normal pairing (find_normal_pair)
-
-    Returned under result["timing"].
+    - Keeps original signature/return shape.
+    - Assumes edge masks are already 'good'; we only build a simple Riemann2 metric
+      and solve two geodesics (one per edge mask).
+    - Adds a 'subtiming' dict with internal timings (seconds).
     """
+    import time
     import numpy as np
     import scipy.ndimage
-    import time
 
-    timing = {}
+    t0_all = time.perf_counter()
 
-    # seeds/tips in (x,y) → convert to (y,x)
+    # seeds/tips provided in (x,y) — convert to (y,x) for the solver
     seeds_yx = np.array([pts_cropp[0][1], pts_cropp[0][0]], dtype=float)
     tips_yx  = np.array([pts_cropp[1][1], pts_cropp[1][0]], dtype=float)
 
@@ -585,76 +579,65 @@ def edges_tracking(
     sides = np.array([[0, H], [0, W]])
     dims  = np.array([H, W])
 
-    # ---------------------------------------------------------
-    # 1. STRUCTURE TENSOR (timed)
-    # ---------------------------------------------------------
+    # --- gradients ---
     t0 = time.perf_counter()
-
     Dx, Dy = np.gradient(image_crop.astype(np.float64))
+    t1 = time.perf_counter()
+    t_grad = t1 - t0
+
+    # --- structure tensor / metric base ---
     a11 = scipy.ndimage.gaussian_filter(mu * Dx*Dx, 1)
     a22 = scipy.ndimage.gaussian_filter(mu * Dy*Dy, 1)
     a12 = scipy.ndimage.gaussian_filter(mu * Dx*Dy, 1)
-
-    a12 = 0.5 * (a12 + a12)   # symmetrize
     a21 = a12
+    a12 = a21 = 0.5 * (a12 + a21)
 
-    timing["t_gradients"] = float(time.perf_counter() - t0)
+    df = np.abs(np.array([[1.0 + a11, a12],
+                          [a21, 1.0 + a22]], dtype=object))  # (2,2,H,W)
+    t2 = time.perf_counter()
+    t_tensor = t2 - t1
 
-    # positive-definite 2×2 per-pixel tensor
-    df = np.abs(np.array([
-        [1.0 + a11, a12],
-        [a21,       1.0 + a22]
-    ], dtype=object))
-
-    # ---------------------------------------------------------
-    # 2. NORMALIZE EDGE MASKS (timed)
-    # ---------------------------------------------------------
+    # --- normalize edge masks ---
     def _norm01(m):
         m = m.astype(np.float64, copy=False)
         m -= m.min()
         mx = m.max()
         return (m / (mx + 1e-12)) if mx > 0 else m
 
-    t0 = time.perf_counter()
     e1 = _norm01(np.squeeze(edge_mask1_cropp))
     e2 = _norm01(np.squeeze(edge_mask2_cropp))
-    timing["t_norm_masks"] = float(time.perf_counter() - t0)
+    t3 = time.perf_counter()
+    t_normmasks = t3 - t2
 
-    # ---------------------------------------------------------
-    # 3. BUILD METRICS (timed)
-    # ---------------------------------------------------------
-    t0 = time.perf_counter()
-
-    pp = min(int(p), 4)  # stabilize exponent
+    # --- metric build ---
+    pp = min(int(p), 4)  # stabilize exponent; p>4 gives little benefit but huge dynamic range
     metric1 = (1.0 + e1 * l)**pp * df
     metric2 = (1.0 + e2 * l)**pp * df
+    t4 = time.perf_counter()
+    t_metric = t4 - t3
 
-    timing["t_metric"] = float(time.perf_counter() - t0)
+    # --- run two geodesics (GPU if available) ---
+    track1_yx = _run_geodesic(metric1, seeds_yx, tips_yx, sides, dims, prefer_gpu=prefer_gpu)
+    t5 = time.perf_counter()
+    t_geo1 = t5 - t4
 
-    # ---------------------------------------------------------
-    # 4. GEODESIC (timed)
-    # ---------------------------------------------------------
-    t0 = time.perf_counter()
-    track1_yx = _run_geodesic(metric1, seeds_yx, tips_yx, sides, dims, prefer_gpu)
-    track2_yx = _run_geodesic(metric2, seeds_yx, tips_yx, sides, dims, prefer_gpu)
-    timing["t_geodesic"] = float(time.perf_counter() - t0)
+    track2_yx = _run_geodesic(metric2, seeds_yx, tips_yx, sides, dims, prefer_gpu=prefer_gpu)
+    t6 = time.perf_counter()
+    t_geo2 = t6 - t5
 
-    # convert to (x,y)
+    # convert back to (x,y)
     track_e1 = np.stack([track1_yx[:, 1], track1_yx[:, 0]], axis=1)
     track_e2 = np.stack([track2_yx[:, 1], track2_yx[:, 0]], axis=1)
 
-    # ---------------------------------------------------------
-    # 6. NORMAL PAIRING (timed)
-    # ---------------------------------------------------------
     normal_edges = None
     normal_edges_clipped = None
+    t_normals = 0.0
 
     if return_normal_edges and (midline is not None):
-
         try:
-            from .segmentation import find_normal_pair
+            from .segmentation import find_normal_pair  # project-relative import
         except Exception:
-            from segmentation import find_normal_pair
+            from segmentation import find_normal_pair   # fallback
 
         m = np.asarray(midline)
         if m.ndim == 2 and m.shape[1] == 2:
@@ -664,32 +647,37 @@ def edges_tracking(
         else:
             raise ValueError("midline must be (N,2) or (2,N)")
 
-        t0 = time.perf_counter()
+        t_normals_start = time.perf_counter()
         e1x, e1y, e2x, e2y = find_normal_pair(mid_x, mid_y, track_e1, track_e2)
-        timing["t_pairing"] = float(time.perf_counter() - t0)
+        t_normals_end = time.perf_counter()
+        t_normals = t_normals_end - t_normals_start
 
-        normal_edges = [[e1x.copy(), e1y.copy()],
-                        [e2x.copy(), e2y.copy()]]
+        normal_edges = [[e1x.copy(), e1y.copy()], [e2x.copy(), e2y.copy()]]
 
-        # clip for safety
-        e1x_c = np.clip(e1x, 0, W - 1)
-        e1y_c = np.clip(e1y, 0, H - 1)
-        e2x_c = np.clip(e2x, 0, W - 1)
-        e2y_c = np.clip(e2y, 0, H - 1)
+        # clip to crop bounds for safety
+        e1x_c = np.clip(e1x, 0, W - 1); e1y_c = np.clip(e1y, 0, H - 1)
+        e2x_c = np.clip(e2x, 0, W - 1); e2y_c = np.clip(e2y, 0, H - 1)
+        normal_edges_clipped = [[e1x_c, e1y_c], [e2x_c, e2y_c]]
 
-        normal_edges_clipped = [[e1x_c, e1y_c],
-                                [e2x_c, e2y_c]]
+    t_all = time.perf_counter() - t0_all
 
-    # ---------------------------------------------------------
-    # RETURN RESULT
-    # ---------------------------------------------------------
-    return {
-        "geodesic_edges": [track_e1, track_e2],
-        "normal_edge_points": normal_edges,
-        "normal_edge_points_clipped": normal_edges_clipped,
-        "timing": timing,      #  <-- IMPORTANT
+    subtiming = {
+        "edges_gradients_sec":          float(t_grad),
+        "edges_tensor_sec":             float(t_tensor),
+        "edges_mask_norm_sec":          float(t_normmasks),
+        "edges_metric_build_sec":       float(t_metric),
+        "edges_geodesic1_sec":          float(t_geo1),
+        "edges_geodesic2_sec":          float(t_geo2),
+        "edges_pair_normals_sec":       float(t_normals),
+        "edges_total_internal_sec":     float(t_all),
     }
-    
+
+    return {
+        "geodesic_edges": [track_e1, track_e2],                 # two polylines (crop coords)
+        "normal_edge_points": normal_edges,                     # [[e1x,e1y],[e2x,e2y]] (crop)
+        "normal_edge_points_clipped": normal_edges_clipped,     # same but clipped to crop
+        "subtiming": subtiming,
+    }
     
 
 import numpy as np
