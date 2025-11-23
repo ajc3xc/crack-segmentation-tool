@@ -2703,7 +2703,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             scid = str(cid)
             if scid in members_in_combined:
                 continue
-            path = os.path.join(self.save_folder, "metrics", base_name, f"cid{scid}.json")
+            #path = os.path.join(self.save_folder, "metrics", base_name, f"cid{scid}.json")
+            path = metric_atomic_path_for(self.save_folder, base_name, scid)
             if not os.path.exists(path): 
                 continue
             try:
@@ -3345,7 +3346,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             return False
 
         set_tracked_edges_for_crack(self.save_folder, base, crack_id, ew, mask_crop=ew.get("mask_crop"))
-        cid_path = os.path.join(self.save_folder, "metrics", base, f"cid{crack_id}.json")
+        #cid_path = os.path.join(self.save_folder, "metrics", base, f"cid{crack_id}.json")
+        cid_path = metric_atomic_path_for(self.save_folder, base, crack_id)
         if os.path.exists(cid_path):
             print(f"[smoke] ✅ found snapshot {cid_path}")
         else:

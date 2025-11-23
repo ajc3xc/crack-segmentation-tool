@@ -1284,32 +1284,115 @@ def manual_mask_from_crack(crack: dict, H: int, W: int) -> np.ndarray:
                 if m.any():
                     return m
     return np.zeros((H, W), np.uint8)
+    
+'''def merged_metric_atomic(authoring_atomic: dict, save_folder: str, image_base: str) -> dict:
+    """
+    Merge authoring entries with per-cid snapshots.
 
-def merged_metric_atomic(authoring_atomic: dict, save_folder: str, image_base: str) -> dict:
+    Desired layout:
+        metrics/<image_base>/cid{cid}/cid{cid}.json
+
+    Legacy fallbacks:
+        metrics/<image_base>/cid/<cid>.json
+        metrics/<image_base>/cid{cid}.json
     """
-    Merge authoring entries with per-cid snapshots (supports both layouts):
-      .../metrics/<base>/cid/<cid>.json  OR  .../metrics/<base>/cid<cid>.json
-    """
+    import os, json
+
     merged = {}
     base_dir = os.path.join(save_folder, "metrics", image_base)
+    print(f"[merge] base_dir = {base_dir}")
+
     for cid, cr in (authoring_atomic or {}).items():
         merged[cid] = dict(cr)
-        path_opts = [
-            os.path.join(base_dir, "cid", f"{cid}.json"),
-            os.path.join(base_dir, f"cid{cid}.json"),
-        ]
-        for p in path_opts:
+
+        print(f"\n[merge] --- CID {cid} ---")
+
+        # NEW canonical:
+        canonical_dir  = os.path.join(base_dir, f"cid{cid}")
+        canonical_json = os.path.join(canonical_dir, f"cid{cid}.json")
+
+        print(f"[merge] canonical_dir  = {canonical_dir}")
+        print(f"[merge] canonical_json = {canonical_json}")
+
+        tried_paths = [canonical_json]
+
+        # Legacy / old paths
+        legacy_a = os.path.join(base_dir, "cid", f"{cid}.json")
+        legacy_b = os.path.join(base_dir, f"cid{cid}.json")
+
+        tried_paths.extend([legacy_a, legacy_b])
+
+        print("[merge] paths to try (in order):")
+        for p in tried_paths:
+            print("   →", p)
+
+        found = False
+        for p in tried_paths:
+            if os.path.exists(p):
+                print(f"[merge] FOUND {p} — attempting load")
+                try:
+                    with open(p, "r") as f:
+                        snap = json.load(f) or {}
+                    merged[cid].update(snap)
+                    print(f"[merge] ✓ merged from {p}")
+                    found = True
+                    break
+                except Exception as e:
+                    print(f"[merge] ⚠ failed reading {p}: {e}")
+            else:
+                print(f"[merge] (missing) {p}")
+
+        if not found:
+            print(f"[merge] No JSON found for CID {cid}, ensuring canonical directory exists...")
+            try:
+                os.makedirs(canonical_dir, exist_ok=True)
+                print(f"[merge] ✓ ensured path exists: {canonical_dir}")
+            except Exception as e:
+                print(f"[merge] ⚠ failed mkdir {canonical_dir}: {e}")
+
+    print("\n[merge] merge complete\n")
+    return merged'''
+    
+def merged_metric_atomic(authoring_atomic: dict, save_folder: str, image_base: str) -> dict:
+    """
+    Merge authoring entries with per-cid snapshots.
+    Supports nested canonical path:
+        metrics/<image_base>/cid{cid}/cid{cid}.json
+    And legacy fallback paths.
+    """
+    import os, json
+
+    merged = {}
+    base_dir = os.path.join(save_folder, "metrics", image_base)
+
+    for cid, cr in (authoring_atomic or {}).items():
+        merged[cid] = dict(cr)
+
+        # preferred new path
+        canonical_dir  = os.path.join(base_dir, f"cid{cid}")
+        canonical_json = os.path.join(canonical_dir, f"cid{cid}.json")
+
+        # legacy paths
+        legacy_a = os.path.join(base_dir, "cid", f"{cid}.json")
+        legacy_b = os.path.join(base_dir, f"cid{cid}.json")
+
+        for p in (canonical_json, legacy_a, legacy_b):
             if os.path.exists(p):
                 try:
                     with open(p, "r") as f:
                         snap = json.load(f) or {}
                     merged[cid].update(snap)
-                    print(f"[merge] ✅ merged edges from {p}")
-                    break
-                except Exception as e:
-                    print(f"[merge] ⚠ failed {p}: {e}")
-    return merged
+                except Exception:
+                    print(f"[merge] warning: failed reading {p}")
+                break
+        else:
+            # nothing found — ensure canonical folder exists
+            try:
+                os.makedirs(canonical_dir, exist_ok=True)
+            except Exception:
+                print(f"[merge] warning: could not create {canonical_dir}")
 
+    return merged
 
 def has_valid_mask(crack: dict) -> bool:
     """

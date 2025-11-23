@@ -12,6 +12,11 @@ from agd import LinearParallel as lp
 from agd import AutomaticDifferentiation as ad
 norm_infinity = ad.Optimization.norm_infinity
 import scipy.ndimage
+
+import warnings
+warnings.filterwarnings("ignore", message="divide by zero encountered", category=RuntimeWarning)
+warnings.filterwarnings("ignore", message="invalid value encountered", category=RuntimeWarning)
+
     
 '''def edge_masks(image_gray, track, window_half_size=40):
     import numpy as np

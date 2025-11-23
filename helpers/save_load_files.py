@@ -174,8 +174,19 @@ def metric_atomic_dir(save_folder, image_base):
 def metric_image_dir(save_folder, base_name):
     return os.path.join(save_folder, "metrics", base_name)
 
+'''def metric_atomic_path_for(save_folder, base_name, crack_id):
+    return os.path.join(save_folder, "metrics", base_name, f"cid{crack_id}.json")'''
+    
 def metric_atomic_path_for(save_folder, base_name, crack_id):
-    return os.path.join(save_folder, "metrics", base_name, f"cid{crack_id}.json")
+    """
+    Canonical atomic snapshot path:
+        metrics/<image_base>/cid{cid}/cid{cid}.json
+    """
+    import os
+    cid_str = str(crack_id)
+    dir_path = os.path.join(save_folder, "metrics", base_name, f"cid{cid_str}")
+    os.makedirs(dir_path, exist_ok=True)
+    return os.path.join(dir_path, f"cid{cid_str}.json")
 
 def metric_combined_path(save_folder, image_base):
     return os.path.join(metric_snapshot_root(save_folder, image_base), "combined.json")
@@ -288,39 +299,146 @@ def split_snapshot_to_files(snapshot, save_folder, image_base, merge_if_exists=T
     return out'''
     
 # metrics.py  --- add this inside load_snapshot_from_files(...)
-def load_snapshot_from_files(save_folder, base_name):
-    """Load all cid*.json under metrics/<base> + the combined snapshot."""
+'''def load_snapshot_from_files(save_folder, base_name):
+    """
+    Load snapshot for an image from disk.
+
+    Supports:
+      - NEW: metrics/<base>/cid{cid}/cid{cid}.json
+      - LEGACY: metrics/<base>/cid{cid}.json
+
+    Also loads combined snapshot from:
+      metrics/<base>/snapshot/combined.json
+    """
     root = metric_image_dir(save_folder, base_name)
-    out = {"atomic_cracks": {}, "combined_cracks": {}, "auto_best": {}}
+    out = {
+        "atomic_cracks": {},
+        "combined_cracks": {},
+        "auto_best_atomic_cracks": {},
+    }
+
     if not os.path.isdir(root):
         return out
 
-    # --- NEW: pull in combined snapshot ---
+    # --- load combined snapshot if it exists ---
     try:
         cpath = metric_combined_path(save_folder, base_name)
         combined = safe_read_json(cpath, {}) or {}
         if isinstance(combined, dict):
             out["combined_cracks"] = combined
-        else:
-            print(f"[LOAD] ⚠ combined.json not a dict → ignoring ({type(combined)})")
     except Exception as e:
-        print(f"[LOAD] ⚠ failed reading combined snapshot: {e}")
+        print(f"[snapshot] ⚠ failed loading combined snapshot: {e}")
 
-    # --- existing loop for atomic cid*.json ---
-    for fn in os.listdir(root):
-        if not fn.startswith("cid") or not fn.endswith(".json"):
+    # --- scan atomic snapshots ---
+    for entry in os.listdir(root):
+        full = os.path.join(root, entry)
+
+        # 1) NEW nested layout: metrics/<base>/cid0/cid0.json
+        if os.path.isdir(full) and entry.startswith("cid"):
+            cid_str = entry[3:]  # e.g. "0" from "cid0"
+            # first try cid0/cid0.json
+            cand1 = os.path.join(full, f"{entry}.json")
+            # fallback: cid0/0.json (in case you ever used that)
+            cand2 = os.path.join(full, f"{cid_str}.json")
+
+            for jp in (cand1, cand2):
+                rec = safe_read_json(jp, None)
+                if not (isinstance(rec, dict) and rec):
+                    continue
+
+                cid = rec.get("crack_id", cid_str)
+                cid_key = str(cid)
+
+                out["atomic_cracks"][cid_key] = rec
+                if "auto_best" in rec and rec["auto_best"]:
+                    out["auto_best_atomic_cracks"][cid_key] = rec["auto_best"]
+                break
+
+            continue  # don’t treat the directory as a flat file
+
+        # 2) LEGACY flat layout: metrics/<base>/cid0.json
+        if os.path.isfile(full) and entry.startswith("cid") and entry.endswith(".json"):
+            rec = safe_read_json(full, None)
+            if not (isinstance(rec, dict) and rec):
+                continue
+
+            cid = rec.get("crack_id")
+            if cid is None:
+                try:
+                    # strip "cid" and ".json"
+                    cid = entry[3:-5]  # keep as string; we'll normalize below
+                except Exception:
+                    continue
+
+            cid_key = str(cid)
+            out["atomic_cracks"][cid_key] = rec
+            if "auto_best" in rec and rec["auto_best"]:
+                out["auto_best_atomic_cracks"][cid_key] = rec["auto_best"]
+
+    return out'''
+    
+def load_snapshot_from_files(save_folder, base_name):
+    """
+    Load snapshot for an image from disk.
+
+    Supports:
+      - NEW: metrics/<base>/cid{cid}/cid{cid}.json
+      - LEGACY: metrics/<base>/cid{cid}.json
+    Falls back to authoring <base>.json if no cid files exist yet.
+    """
+    root = metric_image_dir(save_folder, base_name)
+    out = {
+        "atomic_cracks": {},
+        "combined_cracks": {},
+        "auto_best_atomic_cracks": {},
+    }
+
+    if not os.path.isdir(root):
+        return out
+
+    # === load nested + legacy per-cid files ===
+    for entry in os.listdir(root):
+        full = os.path.join(root, entry)
+
+        # NEW nested layout: metrics/base/cid0/cid0.json
+        if os.path.isdir(full) and entry.startswith("cid"):
+            cid_str = entry[3:]
+            cand1 = os.path.join(full, f"{entry}.json")
+            cand2 = os.path.join(full, f"{cid_str}.json")
+
+            for jp in (cand1, cand2):
+                rec = safe_read_json(jp, None)
+                if isinstance(rec, dict) and rec:
+                    cid_key = str(rec.get("crack_id", cid_str))
+                    out["atomic_cracks"][cid_key] = rec
+                    if "auto_best" in rec:
+                        out["auto_best_atomic_cracks"][cid_key] = rec["auto_best"]
+                    break
             continue
-        p = os.path.join(root, fn)
-        rec = safe_read_json(p, {})
-        if not rec:
-            continue
-        cid = rec.get("crack_id")
-        if cid is None:
-            try: cid = int(fn[3:-5])
-            except: continue
-        out["atomic_cracks"][cid] = rec
-        if "auto_best" in rec and rec["auto_best"]:
-            out.setdefault("auto_best", {})[cid] = rec["auto_best"]
+
+        # LEGACY flat layout
+        if os.path.isfile(full) and entry.startswith("cid") and entry.endswith(".json"):
+            rec = safe_read_json(full, None)
+            if isinstance(rec, dict) and rec:
+                cid = rec.get("crack_id", entry[3:-5])
+                cid_key = str(cid)
+                out["atomic_cracks"][cid_key] = rec
+                if "auto_best" in rec:
+                    out["auto_best_atomic_cracks"][cid_key] = rec["auto_best"]
+
+    # === fallback: authoring JSON ===
+    if not out["atomic_cracks"]:
+        authoring_path = os.path.join(save_folder, f"{base_name}.json")
+        ann = safe_read_json(authoring_path, {}) or {}
+        anns = ann.get("annotations", {})
+
+        atomics = anns.get("atomic_cracks", {})
+        for cid, entry in (atomics or {}).items():
+            out["atomic_cracks"][str(cid)] = entry
+
+        combined = anns.get("combined_cracks", {})
+        if combined:
+            out["combined_cracks"] = combined
 
     return out
 
