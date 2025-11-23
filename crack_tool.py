@@ -15,7 +15,17 @@ from PyQt5.QtCore import Qt
 import skimage
 import numpy as np
 import cv2
+import matplotlib
+matplotlib.use("Agg")   # fastest non-GUI backend for PNG/PDF/SVG export
+matplotlib.rcParams.update({
+    "figure.max_open_warning": 0,
+    "text.kerning_factor": 0,
+    "font.family": "DejaVu Sans",
+    "axes.unicode_minus": False,
+})
 import matplotlib.pyplot as plt
+plt.ioff()   # no interactive figure updates
+
 import json
 import os
 from skimage.segmentation import mark_boundaries
@@ -3274,6 +3284,15 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             build_deck_plots_for_image(metrics_dir, base_name)
         except Exception as e:
             print(f"[DEBUG PLOT] deck plots failed: {e}")
+            
+        from helpers.supervision import export_all_supervision
+
+        export_all_supervision(
+            atomic=atomic,
+            combined=combined_map,
+            metrics_dir=metrics_dir,
+            original_image=self.original_image
+        )
 
         print(f"[DEBUG METRICS] ===== END for {base_name} =====")
     

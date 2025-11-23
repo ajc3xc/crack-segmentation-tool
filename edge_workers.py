@@ -4,7 +4,11 @@ from typing import Dict, Any
 import numpy as np
 import cv2
 import os
+import matplotlib
+matplotlib.use("Agg")   # fastest non-GUI backend for PNG/PDF/SVG export
+
 import matplotlib.pyplot as plt
+plt.ioff()   # no interactive figure updates
 
 from cracktools.segmentation import edge_masks, edges_tracking
 #from helpers import metrics

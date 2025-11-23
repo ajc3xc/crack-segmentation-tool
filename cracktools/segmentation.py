@@ -3,7 +3,17 @@ import numpy as np
 import cracktools.tracking
 import cv2
 from skimage import measure
+import matplotlib
+matplotlib.use("Agg")   # fastest non-GUI backend for PNG/PDF/SVG export
+matplotlib.rcParams.update({
+    "figure.max_open_warning": 0,
+    "text.kerning_factor": 0,
+    "font.family": "DejaVu Sans",
+    "axes.unicode_minus": False,
+})
+
 import matplotlib.pyplot as plt
+plt.ioff()   # no interactive figure updates
 
 from agd import Eikonal
 from agd.Metrics import Riemann

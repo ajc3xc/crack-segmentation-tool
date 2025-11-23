@@ -1,6 +1,17 @@
 # helpers/present_plots.py
 import os, numpy as np, pandas as pd, cv2
+import matplotlib
+matplotlib.use("Agg")   # fastest non-GUI backend for PNG/PDF/SVG export
+matplotlib.rcParams.update({
+    "figure.max_open_warning": 0,
+    "text.kerning_factor": 0,
+    "font.family": "DejaVu Sans",
+    "axes.unicode_minus": False,
+})
+
 import matplotlib.pyplot as plt
+plt.ioff()   # no interactive figure updates
+
 import seaborn as sns
 
 # ------------------------------ #
@@ -39,68 +50,6 @@ def plot_assd_hd95_box(metrics_csv, out_png):
     plt.ylabel("pixels")
     plt.title("Surface distance distribution")
     plt.tight_layout(); plt.savefig(out_png); plt.close()
-    
-'''def plot_width_summary_triplet(metrics_dir, base_name, out_png):
-    import os, numpy as np, pandas as pd
-    import matplotlib.pyplot as plt
-    
-    paths = {
-        "manual":   os.path.join(metrics_dir, f"{base_name}_width_summary_manual.csv"),
-        "auto":     os.path.join(metrics_dir, f"{base_name}_width_summary_auto.csv"),
-        "combined": os.path.join(metrics_dir, f"{base_name}_width_summary_combined.csv"),
-    }
-
-    rows = []
-    for tag, p in paths.items():
-        if not os.path.exists(p):
-            continue
-
-        df = pd.read_csv(p)
-
-        # normalize column names (old + new)
-        df.columns = [c.lower() for c in df.columns]
-
-        mae  = df["mae_px"].mean()  if "mae_px"  in df else np.nan
-        rmse = df["rmse_px"].mean() if "rmse_px" in df else np.nan
-        bias = df["bias_px"].mean() if "bias_px" in df else np.nan
-        corr = df["corr"].mean()    if "corr"    in df else np.nan
-
-        rows.append({
-            "method": tag,
-            "MAE":  mae,
-            "RMSE": rmse,
-            "Bias": bias,
-            "Corr": corr
-        })
-
-    if not rows:
-        print("[TRIPLET] no usable width-summary CSVs")
-        return
-
-    d = pd.DataFrame(rows)
-
-    fig, ax = plt.subplots(1, 2, figsize=(9, 4), dpi=160)
-
-    # LEFT PANEL — Errors
-    d_err = d[["method", "MAE", "RMSE", "Bias"]].set_index("method")
-    d_err.plot(kind="bar", ax=ax[0])
-    ax[0].set_title("Width errors (px)")
-    ax[0].set_ylabel("px")
-    ax[0].legend()
-
-    # RIGHT PANEL — Correlation
-    ax[1].bar(d["method"], d["Corr"])
-    ax[1].set_ylim(0, 1)
-    ax[1].set_title("Width correlation")
-    ax[1].set_ylabel("r")
-
-    for i, v in enumerate(d["Corr"]):
-        if np.isfinite(v):
-            ax[1].text(i, v + 0.02, f"{v:.2f}", ha="center", fontsize=8)
-
-    plt.tight_layout()
-    plt.savefig(out_png)
-    plt.close()'''
     
 def plot_width_summary_triplet(metrics_dir, base_name, out_png):
     import os, numpy as np, pandas as pd

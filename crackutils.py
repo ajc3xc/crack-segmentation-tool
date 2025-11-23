@@ -6,8 +6,16 @@ from helpers.crackhelpers import *
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt
-
+import matplotlib
+matplotlib.use("Agg")   # fastest non-GUI backend for PNG/PDF/SVG export
+matplotlib.rcParams.update({
+    "figure.max_open_warning": 0,
+    "text.kerning_factor": 0,
+    "font.family": "DejaVu Sans",
+    "axes.unicode_minus": False,
+})
 import matplotlib.pyplot as plt
+plt.ioff()   # no interactive figure updates
 
 import numpy as np
 from math import hypot, atan2, pi
