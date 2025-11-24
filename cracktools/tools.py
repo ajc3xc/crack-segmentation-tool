@@ -247,21 +247,71 @@ class Draw():
             return finals
         
         def draw_midline_overlay(img, annotations):
-            shown = img.copy()
-            finals = get_final_cracks(annotations)
+            """
+            Overlay midlines + endpoints onto the contours drawing canvas.
 
-            for crack in finals:
+            Rules:
+            - Combined cracks → yellow midline, NO endpoints
+            - Atomic cracks not in any combined → white midline + magenta endpoints
+            - Atomic members of combined are NOT drawn
+            """
+            import cv2
+            import numpy as np
+
+            shown = img.copy()
+            atomic = (annotations or {}).get("atomic_cracks", {}) or {}
+            combined = (annotations or {}).get("combined_cracks", {}) or {}
+
+            # ---- gather all atomic IDs that are members of combined cracks ----
+            member_ids = set()
+            for cmb in combined.values():
+                members = cmb.get("members", []) or []
+                for m in members:
+                    member_ids.add(str(m))
+
+            # ================================
+            #   1) Draw combined midlines (yellow)
+            # ================================
+            for cid, crack in combined.items():
                 ml = crack.get("midline")
                 if ml and len(ml) >= 2:
                     pts = np.asarray([[p[0], p[1]] for p in ml if p is not None], np.int32)
-                    cv2.polylines(shown, [pts], False, (255, 255, 255), 2, cv2.LINE_AA)
+                    if len(pts) >= 2:
+                        cv2.polylines(
+                            shown, [pts], False,
+                            (255, 255, 0),   # yellow (RGB)
+                            2, cv2.LINE_AA
+                        )
 
-                for p in crack.get("user_points", []):
+            # ================================
+            #   2) Draw ATOMIC-only midlines (white) + endpoints
+            # ================================
+            for cid, crack in atomic.items():
+                if str(cid) in member_ids:
+                    continue  # skip atomic members of combined
+
+                # atomic midline
+                ml = crack.get("midline")
+                if ml and len(ml) >= 2:
+                    pts = np.asarray([[p[0], p[1]] for p in ml if p is not None], np.int32)
+                    if len(pts) >= 2:
+                        cv2.polylines(
+                            shown, [pts], False,
+                            (255, 255, 255),   # white
+                            2, cv2.LINE_AA
+                        )
+
+                # atomic endpoints
+                user_pts = crack.get("user_points") or []
+                for p in user_pts:
                     if p is None:
                         continue
                     x, y = int(p[0]), int(p[1])
+
+                    # outline
                     cv2.circle(shown, (x, y), 4, (0, 0, 0), 2, cv2.LINE_AA)
-                    cv2.circle(shown, (x, y), 4, (255, 0, 0), -1, cv2.LINE_AA)
+                    # magenta
+                    cv2.circle(shown, (x, y), 4, (0, 0, 255), -1, cv2.LINE_AA)
 
             return shown
 

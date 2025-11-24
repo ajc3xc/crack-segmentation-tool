@@ -846,28 +846,61 @@ class CrackUtils:
             return finals
     
     def _draw_manual_mode_overlay(self, canvas):
-        import cv2, numpy as np
+        """
+        Draws a lite overlay:
+        - ATOMIC cracks: white midline + magenta endpoints
+        - COMBINED cracks: yellow midline, NO endpoints
+        """
+        import cv2
+        import numpy as np
 
         shown = canvas.copy()
-        finals = CrackUtils.get_final_cracks(self.annotation.get("annotations", {}))
+        ann = (self.annotation.get("annotations", {}) or {})
+        atomic = ann.get("atomic_cracks", {}) or {}
+        combined = ann.get("combined_cracks", {}) or {}
 
-        for crack in finals:
-
-            # MIDLINE
+        # ---- 1) Combined cracks first (yellow) ----
+        for cid, crack in combined.items():
             ml = crack.get("midline")
             if ml and len(ml) >= 2:
-                pts = np.asarray([[p[0], p[1]] for p in ml if p is not None], np.int32)
+                pts = np.asarray([[p[0], p[1]] for p in ml if p is not None],
+                                np.int32)
                 if len(pts) >= 2:
-                    cv2.polylines(shown, [pts], False,
-                                (255, 255, 255), 2, cv2.LINE_AA)
+                    cv2.polylines(
+                        shown, [pts], False,
+                        (0, 255, 255),  # yellow (BGR)
+                        2, cv2.LINE_AA
+                    )
 
-            # USER ENDPOINTS
-            for p in crack.get("user_points", []):
+        # ---- 2) Atomic cracks (white + endpoints) ----
+        # but skip atomics that are members of combined
+        member_ids = {str(m) for cmb in combined.values()
+                            for m in (cmb.get("members", []) or [])}
+
+        for cid, crack in atomic.items():
+            if str(cid) in member_ids:
+                continue  # skip atomic members of combined
+
+            ml = crack.get("midline")
+            if ml and len(ml) >= 2:
+                pts = np.asarray([[p[0], p[1]] for p in ml if p is not None],
+                                np.int32)
+                if len(pts) >= 2:
+                    cv2.polylines(
+                        shown, [pts], False,
+                        (255, 255, 255),  # white
+                        2, cv2.LINE_AA
+                    )
+
+            # endpoints
+            user_pts = crack.get("user_points") or []
+            for p in user_pts:
                 if p is None:
                     continue
+
                 x, y = int(p[0]), int(p[1])
-                cv2.circle(shown, (x, y), 4, (0, 0, 0), 2, cv2.LINE_AA)
-                cv2.circle(shown, (x, y), 4, (0, 0, 255), -1, cv2.LINE_AA)
+                cv2.circle(shown, (x, y), 4, (0, 0, 0), 2, cv2.LINE_AA)     # outline
+                cv2.circle(shown, (x, y), 4, (0, 0, 255), -1, cv2.LINE_AA)  # magenta
 
         return shown
     
