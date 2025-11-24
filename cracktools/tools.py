@@ -367,7 +367,7 @@ class Draw():
 
         live_points = []
 
-        contours_name = "draw contours (Esc or 'X' closes)"
+        contours_name = "draw contours (Esc or 'X' closes) Cyan=combined, White=atomic"
         cv2.namedWindow(contours_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(contours_name, 1200, 800)  # make window large by default
         cv2.moveWindow(contours_name, move_x, move_y)
