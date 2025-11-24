@@ -777,36 +777,36 @@ class ManualDrawing(CrackUtils):
         Save or erase the drawn manual polyline.
 
         ADD:
-        - Requires overlap with an existing atomic (so we already have a midline).
-        - Union mask; rebuild geodesic_edges from the unioned mask boundary; recompute normals.
+        - Requires overlap with an existing *final* crack
+        (non-member atomic or combined).
+        - Union mask; rebuild geodesic_edges from the unioned mask boundary;
+        recompute normals.
 
         ERASE:
-        - Subtract from mask; if anything remains, rebuild geodesic_edges from the new mask boundary; recompute normals.
-        - If nothing remains, KEEP the atomic (midline/endpoints intact) but clear mask + edges
-        and remove it from any combined members.
+        - Subtract from mask; if anything remains, rebuild geodesic_edges from
+        the new mask boundary; recompute normals.
+        - If nothing remains, KEEP the crack (midline/endpoints intact) but
+        clear mask + edges.
+
+        Final cracks = all atomic cracks that are NOT members of any combined
+        + all combined cracks themselves.
 
         Always calls self.change_image() to refresh the main UI.
         """
         import numpy as np
         import cv2
-        import os
 
         print("\n" + "=" * 80)
         print("[MANUAL_SAVE] ENTER save_manual_segment")
         print(f"[MANUAL_SAVE] pending_mode = {getattr(self, 'pending_mode', None)}")
 
         try:
-            ann_dbg = self.annotation.get("annotations", {})
-            atomic_dbg = ann_dbg.get("atomic_cracks", {})
-            combined_dbg = ann_dbg.get("combined_cracks", {})
+            ann_dbg = self.annotation.get("annotations", {}) or {}
+            atomic_dbg = ann_dbg.get("atomic_cracks", {}) or {}
+            combined_dbg = ann_dbg.get("combined_cracks", {}) or {}
 
             print("[MANUAL_SAVE] AT ENTRY → atomic keys:", list(atomic_dbg.keys()))
             print("[MANUAL_SAVE] AT ENTRY → combined keys:", list(combined_dbg.keys()))
-            for k, v in atomic_dbg.items():
-                print(
-                    f"[MANUAL_SAVE]   cid={k} → has mask_crop={('mask_crop' in v)}, "
-                    f"mask_bbox={v.get('mask_bbox')}"
-                )
         except Exception as e:
             print("[MANUAL_SAVE] ERROR printing initial debug:", e)
 
@@ -828,7 +828,41 @@ class ManualDrawing(CrackUtils):
             H, W = self.original_image.shape[:2]
             mode = getattr(self, "pending_mode", "add")
 
-            # ---------- helper: rebuild edges + normals from a full-image mask ----------
+            # ---------- helper: which cracks are "final"? ----------
+            def iter_final_cracks():
+                """
+                Yield (kind, cid, crack_dict) where:
+                kind ∈ {'atomic', 'combined'}
+                Final = non-member atomics + all combined.
+                """
+                # collect atomic ids that are in any combined.members
+                member_ids = set()
+                for cmb_id, cmb in combined.items():
+                    for m in cmb.get("members", []) or []:
+                        member_ids.add(str(m))
+
+                # non-member atomics
+                for cid, crack in atomic.items():
+                    if str(cid) not in member_ids:
+                        yield "atomic", cid, crack
+
+                # all combined cracks
+                for cmb_id, crack in combined.items():
+                    yield "combined", cmb_id, crack
+
+            # ---------- helper: full-image mask from crop+bbox ----------
+            def reconstruct_full_mask(crack):
+                mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
+                if mc is None or bb is None or not len(mc):
+                    return np.zeros((H, W), np.uint8)
+                crop = np.array(mc, dtype=np.uint8)
+                x0, y0, w, h = [int(v) for v in bb]
+                x1, y1 = min(x0 + w, W), min(y0 + h, H)
+                full = np.zeros((H, W), np.uint8)
+                full[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
+                return full
+
+            # ---------- helper: rebuild edges + normals from full mask ----------
             def rebuild_edges_from_mask(full_mask, crack):
                 cnts, _ = cv2.findContours(
                     (full_mask > 0).astype(np.uint8),
@@ -874,17 +908,17 @@ class ManualDrawing(CrackUtils):
                 }
                 return e1, e2, normals
 
-            # quick mask state dump
-            print("[MANUAL_SAVE] atomic masks (pre-op):")
-            for cid, crack in atomic.items():
+            # ---------- debug: print mask state for final cracks ----------
+            print("[MANUAL_SAVE] final cracks (pre-op):")
+            for kind, cid, crack in iter_final_cracks():
                 mc = crack.get("mask_crop")
                 bb = crack.get("mask_bbox")
                 if mc is None or bb is None:
-                    print(f"  cid={cid}: NO mask_crop/bbox")
+                    print(f"  {kind} id={cid}: NO mask_crop/bbox")
                 else:
                     arr = np.array(mc, dtype=np.uint8)
                     print(
-                        f"  cid={cid}: mask_crop nonzero={np.count_nonzero(arr)} "
+                        f"  {kind} id={cid}: mask_crop nonzero={np.count_nonzero(arr)} "
                         f"bbox={bb}"
                     )
 
@@ -894,20 +928,8 @@ class ManualDrawing(CrackUtils):
                 poly_pts = poly.astype(np.int32).reshape((-1, 1, 2))
                 cv2.fillPoly(erase_mask, [poly_pts], 255)
 
-                changed = []
-                emptied = []
-
-                # 1) apply erase to each atomic
-                for cid, crack in list(atomic.items()):
-                    mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
-                    if mc is None or bb is None or not len(mc):
-                        full_old = np.zeros((H, W), np.uint8)
-                    else:
-                        crop = np.array(mc, dtype=np.uint8)
-                        x0, y0, w, h = [int(v) for v in bb]
-                        x1, y1 = min(x0 + w, W), min(y0 + h, H)
-                        full_old = np.zeros((H, W), np.uint8)
-                        full_old[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
+                for kind, cid, crack in iter_final_cracks():
+                    full_old = reconstruct_full_mask(crack)
 
                     full_new = cv2.bitwise_and(
                         full_old,
@@ -915,12 +937,15 @@ class ManualDrawing(CrackUtils):
                     )
 
                     if np.any(full_new):
+                        # still some mask left → update crop + edges
                         ys, xs = np.where(full_new > 0)
                         x0, x1 = xs.min(), xs.max() + 1
                         y0, y1 = ys.min(), ys.max() + 1
                         crop = full_new[y0:y1, x0:x1]
+
                         crack["mask_crop"] = crop.tolist()
-                        crack["mask_bbox"] = [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
+                        crack["mask_bbox"] = [int(x0), int(y0),
+                                            int(x1 - x0), int(y1 - y0)]
 
                         e1, e2, normals = rebuild_edges_from_mask(full_new, crack)
                         if e1 is not None:
@@ -929,42 +954,17 @@ class ManualDrawing(CrackUtils):
                                 "edge2": e2.tolist(),
                             }
                             crack["normal_edge_points"] = normals
-                            changed.append(cid)
                     else:
-                        # fully erased: keep the crack, but clear mask + edges
-                        emptied.append(cid)
-
-                # 2) clear mask + edges for fully erased atomics, prune from combined
-                for cid in emptied:
-                    crack = atomic.get(cid)
-                    if not crack:
-                        continue
-                    for key in ("mask_crop", "mask_bbox",
-                                "geodesic_edges", "normal_edge_points"):
-                        crack.pop(key, None)
-                    print(f"[FIX] Cleared mask/edges for atomic id={cid} (fully erased)")
-
-                    # remove this cid from combined memberships, but DO NOT delete the atomic
-                    for cmb_id, cmb in list(combined.items()):
-                        members = cmb.get("members", []) or []
-                        if cid in members:
-                            new_members = [m for m in members if m != cid]
-                            cmb["members"] = new_members
-                            print(
-                                f"[FIX] Purged erased atomic id={cid} from combined {cmb_id}"
-                            )
-                            if not new_members:
-                                del combined[cmb_id]
-                                print(
-                                    f"[FIX] Removed empty combined crack {cmb_id} "
-                                    f"(no members left)"
-                                )
+                        # fully erased: keep midline/user_points, clear mask + edges
+                        for key in ("mask_crop", "geodesic_edges", "normal_edge_points"):
+                            crack.pop(key, None)
+                        print(f"[MANUAL_SAVE] Cleared mask/edges for {kind} id={cid}")
 
                 self.save_annotation()
 
             # ====================== ADD MODE ===========================
             else:
-                target_id, target_crack = None, None
+                target_kind, target_id, target_crack = None, None, None
                 poly_mask = np.zeros((H, W), np.uint8)
                 cv2.fillPoly(
                     poly_mask,
@@ -972,42 +972,21 @@ class ManualDrawing(CrackUtils):
                     255
                 )
 
-                # 1) find first atomic that overlaps the drawn region
-                for cid, crack in atomic.items():
-                    mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
-                    if mc is None or bb is None or not len(mc):
-                        continue
-                    crop = np.array(mc, dtype=np.uint8)
-                    x0, y0, w, h = [int(v) for v in bb]
-                    x1, y1 = min(x0 + w, W), min(y0 + h, H)
-                    full_old = np.zeros((H, W), np.uint8)
-                    full_old[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
-
+                # 1) find first final crack that overlaps the drawn region
+                for kind, cid, crack in iter_final_cracks():
+                    full_old = reconstruct_full_mask(crack)
                     if np.any(cv2.bitwise_and(full_old, poly_mask)):
-                        target_id, target_crack = cid, crack
+                        target_kind, target_id, target_crack = kind, cid, crack
                         break
 
                 if target_crack is None:
-                    print("[MANUAL_SAVE] EARLY RETURN — no overlapping atomic found")
-                    print(
-                        "[MANUAL_SAVE] atomic keys at abort:",
-                        list(self.annotation.get("annotations", {})
-                            .get("atomic_cracks", {}).keys())
-                    )
+                    print("[MANUAL_SAVE] EARLY RETURN — no overlapping final crack found")
                     return
 
-                # 2) union new region into that atomic's mask
-                mc, bb = target_crack.get("mask_crop"), target_crack.get("mask_bbox")
-                if mc is None or bb is None or not len(mc):
-                    full_old = np.zeros((H, W), np.uint8)
-                else:
-                    crop = np.array(mc, dtype=np.uint8)
-                    x0, y0, w, h = [int(v) for v in bb]
-                    x1, y1 = min(x0 + w, W), min(y0 + h, H)
-                    full_old = np.zeros((H, W), np.uint8)
-                    full_old[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
-
+                # 2) union new region into that crack's mask
+                full_old = reconstruct_full_mask(target_crack)
                 full_new = cv2.bitwise_or(full_old, poly_mask)
+
                 ys, xs = np.where(full_new > 0)
                 if len(xs) and len(ys):
                     x0, x1 = xs.min(), xs.max() + 1

@@ -221,32 +221,46 @@ class Draw():
         if base.ndim == 2:
             base = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
             
+        def get_final_cracks(annotations):
+            ann = (annotations or {})
+            atomic = ann.get("atomic_cracks", {}) or {}
+            combined = ann.get("combined_cracks", {}) or {}
+
+            # collect all atomic IDs that belong to a combined crack
+            atomic_members = set()
+            for cmb in combined.values():
+                for m in cmb.get("members", []):
+                    atomic_members.add(str(m))
+
+            # final list = (atomic without membership) + (combined cracks)
+            finals = []
+
+            # non-member atomic cracks
+            for cid, cr in atomic.items():
+                if str(cid) not in atomic_members:
+                    finals.append(cr)
+
+            # combined cracks
+            for cr in combined.values():
+                finals.append(cr)
+
+            return finals
+        
         def draw_midline_overlay(img, annotations):
             shown = img.copy()
-            atomic = (annotations or {}).get("atomic_cracks", {}) or {}
+            finals = get_final_cracks(annotations)
 
-            for cid, crack in atomic.items():
-
-                # ---- MIDLINE (white) ----
+            for crack in finals:
                 ml = crack.get("midline")
                 if ml and len(ml) >= 2:
-                    pts = np.asarray([[p[0], p[1]] for p in ml if p is not None],
-                                    np.int32)
-                    if len(pts) >= 2:
-                        cv2.polylines(shown, [pts], False,
-                                    (255, 255, 255), 2, cv2.LINE_AA)
+                    pts = np.asarray([[p[0], p[1]] for p in ml if p is not None], np.int32)
+                    cv2.polylines(shown, [pts], False, (255, 255, 255), 2, cv2.LINE_AA)
 
-                # ---- USER ENDPOINTS (magenta w/black outline) ----
-                user_pts = crack.get("user_points") or []
-                for p in user_pts:
+                for p in crack.get("user_points", []):
                     if p is None:
                         continue
-
                     x, y = int(p[0]), int(p[1])
-
-                    # black outline
                     cv2.circle(shown, (x, y), 4, (0, 0, 0), 2, cv2.LINE_AA)
-                    # magenta fill
                     cv2.circle(shown, (x, y), 4, (255, 0, 0), -1, cv2.LINE_AA)
 
             return shown

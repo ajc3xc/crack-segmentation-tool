@@ -819,47 +819,103 @@ class CrackUtils:
             traceback.print_exc()
             error(e)
             
+    @staticmethod
+    def get_final_cracks(annotations):
+            ann = (annotations or {})
+            atomic = ann.get("atomic_cracks", {}) or {}
+            combined = ann.get("combined_cracks", {}) or {}
+
+            # collect all atomic IDs that belong to a combined crack
+            atomic_members = set()
+            for cmb in combined.values():
+                for m in cmb.get("members", []):
+                    atomic_members.add(str(m))
+
+            # final list = (atomic without membership) + (combined cracks)
+            finals = []
+
+            # non-member atomic cracks
+            for cid, cr in atomic.items():
+                if str(cid) not in atomic_members:
+                    finals.append(cr)
+
+            # combined cracks
+            for cr in combined.values():
+                finals.append(cr)
+
+            return finals
+    
     def _draw_manual_mode_overlay(self, canvas):
-        """
-        Draws a lite version of the main visualization onto `canvas`:
-        - midlines (blue)
-        - user endpoints (magenta with black outline)
-        - no crack IDs
-        """
-        import cv2
-        import numpy as np
+        import cv2, numpy as np
 
         shown = canvas.copy()
+        finals = CrackUtils.get_final_cracks(self.annotation.get("annotations", {}))
 
-        atomic = (self.annotation.get("annotations", {}) or {}) \
-                    .get("atomic_cracks", {}) or {}
+        for crack in finals:
 
-        for cid, crack in atomic.items():
-
-            # ---- MIDLINE (BLUE) ----
+            # MIDLINE
             ml = crack.get("midline")
             if ml and len(ml) >= 2:
-                pts = np.asarray([[p[0], p[1]] for p in ml if p is not None],
-                                np.int32)
+                pts = np.asarray([[p[0], p[1]] for p in ml if p is not None], np.int32)
                 if len(pts) >= 2:
                     cv2.polylines(shown, [pts], False,
-                                (255, 255, 255),      # BLUE (BGR)
-                                2, cv2.LINE_AA)
+                                (255, 255, 255), 2, cv2.LINE_AA)
 
-            # ---- USER ENDPOINTS (from user_points) ----
-            user_pts = crack.get("user_points") or []
-            for p in user_pts:
+            # USER ENDPOINTS
+            for p in crack.get("user_points", []):
                 if p is None:
                     continue
-
                 x, y = int(p[0]), int(p[1])
-
-                # Black outline
                 cv2.circle(shown, (x, y), 4, (0, 0, 0), 2, cv2.LINE_AA)
-                # Magenta fill
                 cv2.circle(shown, (x, y), 4, (0, 0, 255), -1, cv2.LINE_AA)
 
         return shown
+    
+    def draw_existing_cracks(self, im):
+        """
+        Draw ONLY final cracks in red:
+        - atomic NOT in any combined
+        - combined cracks
+        """
+        H, W = im.shape[:2]
+        ann = self.annotation.get("annotations", {}) or {}
+        atomic = ann.get("atomic_cracks", {}) or {}
+        combined = ann.get("combined_cracks", {}) or {}
+
+        # collect atomic IDs that belong to a combined crack
+        member_ids = set()
+        for cmb in combined.values():
+            for m in cmb.get("members", []):
+                member_ids.add(str(m))
+
+        def reconstruct_full_mask(crack):
+            mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
+            if mc is None or bb is None or not len(mc):
+                return np.zeros((H, W), np.uint8)
+            crop = np.array(mc, dtype=np.uint8)
+            x0, y0, w, h = map(int, bb)
+            mask = np.zeros((H, W), np.uint8)
+            mask[y0:y0+h, x0:x0+w] = crop[:h, :w]
+            return (mask > 0).astype(np.uint8)
+
+        overlay = np.zeros_like(im)
+
+        # 1) draw final atomics
+        for cid, crack in atomic.items():
+            if str(cid) in member_ids:
+                continue  # skip atomic members of combined
+            m = reconstruct_full_mask(crack)
+            if np.any(m):
+                overlay[m.astype(bool)] = (255, 0, 0)  # red
+
+        # 2) draw combined
+        for crack in combined.values():
+            m = reconstruct_full_mask(crack)
+            if np.any(m):
+                overlay[m.astype(bool)] = (255, 0, 0)
+
+        return cv2.addWeighted(im, 1, overlay, 0.35, 0)
+
     #####################################################################
     # Manual Drawing Functions
     #####################################################################
@@ -1716,32 +1772,6 @@ class CrackUtils:
         ax.axis("off")
         fig.savefig(fname, dpi=350, bbox_inches="tight")
         plt.close(fig)
-
-    def draw_existing_cracks(self, im):
-        """Overlay existing cracks (atomic + combined) in red onto a copy of the image."""
-        H, W = im.shape[:2]
-        ann = self.annotation.setdefault("annotations", {})
-        atomic = ann.setdefault("atomic_cracks", {})
-        combined = ann.setdefault("combined_cracks", {})
-
-        def reconstruct_full_mask(crack):
-            mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
-            if mc is None or bb is None or not len(mc):
-                return np.zeros((H, W), np.uint8)
-            crop = np.array(mc, dtype=np.uint8)
-            x0, y0, w, h = [int(v) for v in bb]
-            x1, y1 = min(x0 + w, W), min(y0 + h, H)
-            mask = np.zeros((H, W), np.uint8)
-            mask[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
-            return (mask > 0).astype(np.uint8)
-
-        red = np.zeros_like(im)
-        for crack in list(atomic.values()) + list(combined.values()):
-            m = reconstruct_full_mask(crack)
-            if np.any(m):
-                red[m.astype(bool)] = (255, 0, 0)
-
-        return cv2.addWeighted(im, 1, red, 0.35, 0)    
 
     def select_end_points_manmidlines(self, metrics: bool = False):
         print(metrics)
