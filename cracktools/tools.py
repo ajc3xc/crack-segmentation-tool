@@ -220,6 +220,36 @@ class Draw():
         base = self.image.copy()
         if base.ndim == 2:
             base = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
+            
+        def draw_midline_overlay(img, annotations):
+            shown = img.copy()
+            atomic = (annotations or {}).get("atomic_cracks", {}) or {}
+
+            for cid, crack in atomic.items():
+
+                # ---- MIDLINE (white) ----
+                ml = crack.get("midline")
+                if ml and len(ml) >= 2:
+                    pts = np.asarray([[p[0], p[1]] for p in ml if p is not None],
+                                    np.int32)
+                    if len(pts) >= 2:
+                        cv2.polylines(shown, [pts], False,
+                                    (255, 255, 255), 2, cv2.LINE_AA)
+
+                # ---- USER ENDPOINTS (magenta w/black outline) ----
+                user_pts = crack.get("user_points") or []
+                for p in user_pts:
+                    if p is None:
+                        continue
+
+                    x, y = int(p[0]), int(p[1])
+
+                    # black outline
+                    cv2.circle(shown, (x, y), 4, (0, 0, 0), 2, cv2.LINE_AA)
+                    # magenta fill
+                    cv2.circle(shown, (x, y), 4, (255, 0, 0), -1, cv2.LINE_AA)
+
+            return shown
 
         def reconstruct_full_mask(crack, H, W):
             mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
@@ -246,7 +276,8 @@ class Draw():
             pass
 
         # Layers
-        committed = base.copy()
+        committed = draw_midline_overlay(base.copy(), annotations)
+
         live_points = []
 
         contours_name = "draw contours (Esc or 'X' closes)"
@@ -265,7 +296,7 @@ class Draw():
         
         def redraw_committed():
             nonlocal committed
-            committed = base.copy()
+            committed = draw_midline_overlay(base.copy(), annotations)
             committed = redrow_lines(committed, self.contours_x, self.contours_y, self.t, 1, color=done_draw_color)
 
         def on_mouse(event, x, y, flags, param):

@@ -822,9 +822,9 @@ class CrackUtils:
     def _draw_manual_mode_overlay(self, canvas):
         """
         Draws a lite version of the main visualization onto `canvas`:
-        - midlines for every atomic crack
-        - endpoints
-        - crack ID labels
+        - midlines (blue)
+        - user endpoints (magenta with black outline)
+        - no crack IDs
         """
         import cv2
         import numpy as np
@@ -835,34 +835,29 @@ class CrackUtils:
                     .get("atomic_cracks", {}) or {}
 
         for cid, crack in atomic.items():
-            scid = str(cid)
 
-            # ---- midline ----
+            # ---- MIDLINE (BLUE) ----
             ml = crack.get("midline")
             if ml and len(ml) >= 2:
-                pts = np.asarray(
-                    [[p[0], p[1]] for p in ml if p is not None],
-                    np.int32
-                )
+                pts = np.asarray([[p[0], p[1]] for p in ml if p is not None],
+                                np.int32)
                 if len(pts) >= 2:
-                    cv2.polylines(shown, [pts], False, (255, 255, 255), 2)
+                    cv2.polylines(shown, [pts], False,
+                                (255, 255, 255),      # BLUE (BGR)
+                                2, cv2.LINE_AA)
 
-            # ---- endpoints ----
-            endpoints = crack.get("endpoints") or crack.get("pts") or []
-            for p in endpoints:
+            # ---- USER ENDPOINTS (from user_points) ----
+            user_pts = crack.get("user_points") or []
+            for p in user_pts:
                 if p is None:
                     continue
-                x, y = int(p[0]), int(p[1])
-                cv2.circle(shown, (x, y), 6, (0, 0, 0), -1)
 
-            '''# ---- crack ID ----
-            if ml and len(ml) >= 1:
-                x0, y0 = int(ml[0][0]), int(ml[0][1])
-                cv2.putText(
-                    shown, f"id={scid}", (x0 + 5, y0 - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                    (0, 200, 255), 1, cv2.LINE_AA
-                )'''
+                x, y = int(p[0]), int(p[1])
+
+                # Black outline
+                cv2.circle(shown, (x, y), 4, (0, 0, 0), 2, cv2.LINE_AA)
+                # Magenta fill
+                cv2.circle(shown, (x, y), 4, (0, 0, 255), -1, cv2.LINE_AA)
 
         return shown
     #####################################################################
