@@ -981,6 +981,9 @@ class CrackUtils:
             is_gray=True
         )
         self.all_segments_display.setPixmap(pixmap_mask)
+        
+    if hasattr(self, "reset_canvas"):
+        self.reset_canvas()
 
     '''def _build_combined_crack(self, member_ids, pad=10):
         """
