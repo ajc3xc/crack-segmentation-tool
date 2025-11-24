@@ -278,16 +278,39 @@ class Draw():
 
         try:
             if annotations is not None:
-                atomic = annotations.get("atomic_cracks", {})
-                combined = annotations.get("combined_cracks", {})
+                ann = annotations or {}
+                atomic  = ann.get("atomic_cracks", {}) or {}
+                combined = ann.get("combined_cracks", {}) or {}
+
+                # collect atomic IDs that belong to a combined crack
+                member_ids = {
+                    str(m)
+                    for cmb in combined.values()
+                    for m in (cmb.get("members", []) or [])
+                }
+
                 overlay = np.zeros_like(base, dtype=np.uint8)
-                for crack in list(atomic.values()) + list(combined.values()):
+
+                # -------- draw final atomic masks --------
+                for cid, crack in atomic.items():
+                    if str(cid) in member_ids:
+                        continue  # skip atomic members of combined
+
                     mask = reconstruct_full_mask(crack, H, W)
                     if np.any(mask):
                         overlay[mask.astype(bool)] = (0, 0, 255)
+
+                # -------- draw combined masks --------
+                for crack in combined.values():
+                    mask = reconstruct_full_mask(crack, H, W)
+                    if np.any(mask):
+                        overlay[mask.astype(bool)] = (0, 0, 255)
+
                 base = cv2.addWeighted(base, 1.0, overlay, 0.5, 0)
+
         except Exception:
             pass
+
 
         # Layers
         committed = draw_midline_overlay(base.copy(), annotations)
