@@ -773,7 +773,7 @@ class Ui_MainWindow(object):
         #Select Image Tab
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_5), _translate("MainWindow", "Select Image"))
         self.SelectFolderButton.setText(_translate("MainWindow", "Select Folder"))
-        self.SelectFolderButton.setToolTip(_translate("MainWindow", "<html><head/><body><p>Draw counturs of a crack manually</p><p>Wheel mause to zoom in/out</p><p>LMB hold to draw</p><p>LMB release to fix contur part</p><p>RMB to erase previouse contur part</p></body></html>"))
+        self.SelectFolderButton.setToolTip(_translate("MainWindow", "<html><head/><body><p>Draw contours of a crack manually</p><p>Wheel mause to zoom in/out</p><p>LMB hold to draw</p><p>LMB release to fix contur part</p><p>RMB to erase previouse contur part</p></body></html>"))
         self.PreviousImageButton.setText(_translate("MainWindow", "Previous"))
         self.NextImageButton.setText(_translate("MainWindow", "Next"))
         self.label_35.setText(_translate("MainWindow", "Image:"))
@@ -895,7 +895,7 @@ class Ui_MainWindow(object):
         
         #Add Segment Manually Tab
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_3), _translate("MainWindow", "Add Segment Manually"))
-        self.draw_segment_button.setToolTip(_translate("MainWindow", "<html><head/><body><p>Draw counturs of a crack manually</p><p>Wheel mause to zoom in/out</p><p>LMB hold to draw</p><p>LMB release to fix contur part</p><p>RMB to erase previouse contur part</p></body></html>"))
+        self.draw_segment_button.setToolTip(_translate("MainWindow", "<html><head/><body><p>Draw contours of a crack manually</p><p>Wheel mause to zoom in/out</p><p>LMB hold to draw</p><p>LMB release to fix contur part</p><p>RMB to erase previouse contur part</p></body></html>"))
         self.draw_segment_button.setText(_translate("MainWindow", "Draw\nSegment"))
         self.erase_segment_button.setText(_translate("MainWindow", "Erase\nSegment"))
         self.reset_segment_button.setText(_translate("MainWindow", "Reset\nCanvas"))

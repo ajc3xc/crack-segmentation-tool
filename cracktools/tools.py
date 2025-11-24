@@ -62,17 +62,17 @@ def put_points(img1):
     
     return (np.array(pts))'''
 
-def points(img1,scalar):
+'''def points(img1,scalar):
     global pts
     pts = []
     contur_points = put_points(cv2.resize(img1,\
                             (int(img1.shape[1]/scalar),int(img1.shape[0]/scalar))))
     contur_points = scalar*contur_points
-    return contur_points
+    return contur_points'''
 
-'''def redrow_lines(img,counturs_x,counturs_y,t,scale):
-    flat_x = [item for sublist in counturs_x for item in sublist]
-    flat_y = [item for sublist in counturs_y for item in sublist]
+'''def redrow_lines(img,contours_x,contours_y,t,scale):
+    flat_x = [item for sublist in contours_x for item in sublist]
+    flat_y = [item for sublist in contours_y for item in sublist]
     img2 = img.copy()
     for i in range(len(flat_x)-1):
         x1 = int2(flat_x[i]-0.5)
@@ -82,7 +82,7 @@ def points(img1,scalar):
         img2 = cv2.line(img2,(x1,y1),(x2,y2),color=(0,255,0),thickness=int2(np.ceil(t*scale)))
     return (img2)'''
     
-def redrow_lines(img, counturs_x, counturs_y, t, scale, color=(0, 255, 0)):
+def redrow_lines(img, contours_x, contours_y, t, scale, color=(0, 255, 0)):
     """
     Redraw contour lines on an image.
 
@@ -90,7 +90,7 @@ def redrow_lines(img, counturs_x, counturs_y, t, scale, color=(0, 255, 0)):
     ----------
     img : np.ndarray
         The image to draw on
-    counturs_x, counturs_y : list[list[float]]
+    contours_x, contours_y : list[list[float]]
         List of contour x and y coordinates (each sublist is one stroke)
     t : int
         Thickness factor
@@ -100,7 +100,7 @@ def redrow_lines(img, counturs_x, counturs_y, t, scale, color=(0, 255, 0)):
         BGR color for lines (default green)
     """
     img2 = img.copy()
-    for cx, cy in zip(counturs_x, counturs_y):  # each stroke
+    for cx, cy in zip(contours_x, contours_y):  # each stroke
         for i in range(len(cx) - 1):
             x1, y1 = int2(np.round(cx[i])),   int2(np.round(cy[i]))
             x2, y2 = int2(np.round(cx[i+1])), int2(np.round(cy[i+1]))
@@ -168,21 +168,21 @@ def redrow_bb(img,x,y,t,scale,pts,active,c):
         img2 = cv2.line(img2,(x1,y),(x1,y1),color=(255,0,0),thickness=int2(np.ceil(t*scale)))
     return (img2)
 
-def drow_mask_lines(img,counturs_x,counturs_y,color,t=1):
-#     flat_x = [item for sublist in counturs_x for item in sublist]
-#     flat_y = [item for sublist in counturs_y for item in sublist]
+def drow_mask_lines(img,contours_x,contours_y,color,t=1):
+#     flat_x = [item for sublist in contours_x for item in sublist]
+#     flat_y = [item for sublist in contours_y for item in sublist]
     img2 = img.copy()
-    for i in range(len(counturs_x)-1):
-        x1 = int2(np.round(counturs_x[i]))
-        x2 = int2(np.round(counturs_x[i+1]))
-        y1 = int2(np.round(counturs_y[i]))
-        y2 = int2(np.round(counturs_y[i+1]))
+    for i in range(len(contours_x)-1):
+        x1 = int2(np.round(contours_x[i]))
+        x2 = int2(np.round(contours_x[i+1]))
+        y1 = int2(np.round(contours_y[i]))
+        y2 = int2(np.round(contours_y[i+1]))
         img2 = cv2.line(img2,(x1,y1),(x2,y2),color=color,thickness=int2(np.ceil(t)))
         
-    x1 = int2(np.round(counturs_x[0]))
-    x2 = int2(np.round(counturs_x[-1]))
-    y1 = int2(np.round(counturs_y[0]))
-    y2 = int2(np.round(counturs_y[-1]))
+    x1 = int2(np.round(contours_x[0]))
+    x2 = int2(np.round(contours_x[-1]))
+    y1 = int2(np.round(contours_y[0]))
+    y2 = int2(np.round(contours_y[-1]))
     img2 = cv2.line(img2,(x1,y1),(x2,y2),color=color,thickness=int2(np.ceil(t)))
     return (img2)
 
@@ -190,7 +190,7 @@ def int2(a):
     return (int(np.round(a)))
 
 class Draw():
-    def counturs(self, image, scale, move_x=0, move_y=0, annotations=None, mode="add"):
+    def contours(self, image, scale, move_x=0, move_y=0, annotations=None, mode="add"):
         """
         Interactive contour drawing:
         - Green polylines drawn continuously with mouse
@@ -205,7 +205,7 @@ class Draw():
         self.t = 2  # line thickness
 
         # Stroke storage
-        self.counturs_x, self.counturs_y = [], []
+        self.contours_x, self.contours_y = [], []
         self.countur_x, self.countur_y = [], []
 
         # Pan/zoom state
@@ -249,9 +249,10 @@ class Draw():
         committed = base.copy()
         live_points = []
 
-        cv2.namedWindow('draw counturs', cv2.WINDOW_NORMAL)
-        cv2.resizeWindow('draw counturs', 1200, 800)  # make window large by default
-        cv2.moveWindow('draw counturs', move_x, move_y)
+        contours_name = "draw contours (Esc or 'X' closes)"
+        cv2.namedWindow(contours_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(contours_name, 1200, 800)  # make window large by default
+        cv2.moveWindow(contours_name, move_x, move_y)
 
         if mode=='add':
                 #green
@@ -265,7 +266,7 @@ class Draw():
         def redraw_committed():
             nonlocal committed
             committed = base.copy()
-            committed = redrow_lines(committed, self.counturs_x, self.counturs_y, self.t, 1, color=done_draw_color)
+            committed = redrow_lines(committed, self.contours_x, self.contours_y, self.t, 1, color=done_draw_color)
 
         def on_mouse(event, x, y, flags, param):
             nonlocal live_points
@@ -288,8 +289,8 @@ class Draw():
                 self.drawing = False
                 self.countur_x.append(x_real)
                 self.countur_y.append(y_real)
-                self.counturs_x.append(self.countur_x)
-                self.counturs_y.append(self.countur_y)
+                self.contours_x.append(self.countur_x)
+                self.contours_y.append(self.countur_y)
                 redraw_committed()
                 live_points = []
                 
@@ -297,9 +298,9 @@ class Draw():
                 self.countur_x, self.countur_y = [], []
 
             elif event == cv2.EVENT_RBUTTONDOWN:
-                if not self.drawing and len(self.counturs_x) > 0:
-                    self.counturs_x.pop()
-                    self.counturs_y.pop()
+                if not self.drawing and len(self.contours_x) > 0:
+                    self.contours_x.pop()
+                    self.contours_y.pop()
                     redraw_committed()
                     live_points = []
 
@@ -322,7 +323,7 @@ class Draw():
                 self.scale2x = 1 - (self.dx1 + self.dx2) / W
                 self.scale2y = 1 - (self.dy1 + self.dy2) / H
 
-        cv2.setMouseCallback('draw counturs', on_mouse)
+        cv2.setMouseCallback(contours_name, on_mouse)
 
         while True:
             display = committed.copy()
@@ -337,7 +338,7 @@ class Draw():
                             active_draw_color, self.t)
             else:
                 # show darker green for completed strokes
-                display = redrow_lines(display, self.counturs_x, self.counturs_y, self.t, 1, color=done_draw_color)
+                display = redrow_lines(display, self.contours_x, self.contours_y, self.t, 1, color=done_draw_color)
 
             # crop to zoom region
             x1 = max(0, self.dx1)
@@ -353,16 +354,16 @@ class Draw():
             new_h = int2(view.shape[0] / self.scale / self.scale2y)
             self.image_countur = cv2.resize(view, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
-            cv2.imshow('draw counturs', self.image_countur)
+            cv2.imshow(contours_name, self.image_countur)
 
             key = cv2.waitKey(1) & 0xFF
-            if key == 27 or cv2.getWindowProperty('draw counturs', cv2.WND_PROP_VISIBLE) < 1:
+            if key == 27 or cv2.getWindowProperty(contours_name, cv2.WND_PROP_VISIBLE) < 1:
                 break
 
         cv2.destroyAllWindows()
 
-        flat_x = [item for sublist in self.counturs_x for item in sublist]
-        flat_y = [item for sublist in self.counturs_y for item in sublist]
+        flat_x = [item for sublist in self.contours_x for item in sublist]
+        flat_y = [item for sublist in self.contours_y for item in sublist]
         return np.array(flat_x) - 0.5, np.array(flat_y) - 0.5
 
     def clear_pending_segment(self):
@@ -448,8 +449,8 @@ class Draw():
                 break
         cv2.destroyAllWindows()
 
-#         flat_x = [item for sublist in self.counturs_x for item in sublist]
-#         flat_y = [item for sublist in self.counturs_y for item in sublist]
+#         flat_x = [item for sublist in self.contours_x for item in sublist]
+#         flat_y = [item for sublist in self.contours_y for item in sublist]
 
 #         flat_x = np.array(flat_x) - 0.5
 #         flat_y = np.array(flat_y)- 0.5
@@ -492,7 +493,7 @@ class Draw():
 
             self.scale2x = 1-(self.dx1+self.dx2)/self.image.shape[1]
             self.scale2y = 1-(self.dy1+self.dy2)/self.image.shape[0]
-    #         image2 = redrow_lines(image,counturs_x,counturs_y,t,scale*scale2x)
+    #         image2 = redrow_lines(image,contours_x,contours_y,t,scale*scale2x)
             self.image_countur = self.image2[self.dy1:-self.dy2,self.dx1:-self.dx2,:]
             self.image_countur = cv2.resize(self.image_countur,[int2(self.image_countur.shape[1]/self.scale/self.scale2x),
                                                     int2(self.image_countur.shape[0]/self.scale/self.scale2y)],
@@ -510,7 +511,7 @@ class Draw():
 
             self.scale2x = 1-(self.dx1+self.dx2)/self.image.shape[1]
             self.scale2y = 1-(self.dy1+self.dy2)/self.image.shape[0]
-    #         image2 = redrow_lines(image,counturs_x,counturs_y,t,scale*scale2x)
+    #         image2 = redrow_lines(image,contours_x,contours_y,t,scale*scale2x)
             self.image_countur = self.image2[self.dy1:-self.dy2,self.dx1:-self.dx2,:]
             self.image_countur = cv2.resize(self.image_countur,[int2(self.image_countur.shape[1]/self.scale/self.scale2x),
                                                     int2(self.image_countur.shape[0]/self.scale/self.scale2y)],
@@ -547,15 +548,16 @@ class Draw():
         self.active = False
     
         
-        cv2.namedWindow('draw bb')
-        cv2.moveWindow('draw bb', move_x, move_y)
-        cv2.setMouseCallback('draw bb',self.bb)
+        bb_name = 'draw bb (Esc closes)'
+        cv2.namedWindow(bb_name)
+        cv2.moveWindow(bb_name, move_x, move_y)
+        cv2.setMouseCallback(bb_name,self.bb)
 
         self.image_countur = cv2.resize(self.image_countur,[int2(self.image_countur.shape[1]/scale),
                                                             int2(self.image_countur.shape[0]/scale)],
                                         interpolation = cv2.INTER_NEAREST)
         while(1):
-            cv2.imshow('draw bb',self.image_countur)
+            cv2.imshow(bb_name,self.image_countur)
             if cv2.waitKey(1) & 0xFF == 27:
                 break
             if len(self.c)<int(len(self.pts)/2):
@@ -566,8 +568,8 @@ class Draw():
                 
         cv2.destroyAllWindows()
 
-#         flat_x = [item for sublist in self.counturs_x for item in sublist]
-#         flat_y = [item for sublist in self.counturs_y for item in sublist]
+#         flat_x = [item for sublist in self.contours_x for item in sublist]
+#         flat_y = [item for sublist in self.contours_y for item in sublist]
 
 #         flat_x = np.array(flat_x) - 0.5
 #         flat_y = np.array(flat_y)- 0.5
@@ -641,7 +643,7 @@ class Draw():
 
             self.scale2x = 1-(self.dx1+self.dx2)/self.image.shape[1]
             self.scale2y = 1-(self.dy1+self.dy2)/self.image.shape[0]
-    #         image2 = redrow_lines(image,counturs_x,counturs_y,t,scale*scale2x)
+    #         image2 = redrow_lines(image,contours_x,contours_y,t,scale*scale2x)
             self.image_countur = self.image2[self.dy1:-self.dy2,self.dx1:-self.dx2,:]
             self.image_countur = cv2.resize(self.image_countur,[int2(self.image_countur.shape[1]/self.scale/self.scale2x),
                                                     int2(self.image_countur.shape[0]/self.scale/self.scale2y)],
@@ -661,7 +663,7 @@ class Draw():
 
             self.scale2x = 1-(self.dx1+self.dx2)/self.image.shape[1]
             self.scale2y = 1-(self.dy1+self.dy2)/self.image.shape[0]
-    #         image2 = redrow_lines(image,counturs_x,counturs_y,t,scale*scale2x)
+    #         image2 = redrow_lines(image,contours_x,contours_y,t,scale*scale2x)
             self.image_countur = self.image2[self.dy1:-self.dy2,self.dx1:-self.dx2,:]
             self.image_countur = cv2.resize(self.image_countur,[int2(self.image_countur.shape[1]/self.scale/self.scale2x),
                                                     int2(self.image_countur.shape[0]/self.scale/self.scale2y)],

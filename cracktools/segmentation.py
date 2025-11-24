@@ -745,9 +745,9 @@ def create_mask(image, x, y):
     # 4. Return as float (if you want to match previous behavior)
     return mask_clean.astype(float)
 
-def redrow_lines(img,counturs_x,counturs_y,t,scale):
-    flat_x = [item for sublist in counturs_x for item in sublist]
-    flat_y = [item for sublist in counturs_y for item in sublist]
+def redrow_lines(img,contours_x,contours_y,t,scale):
+    flat_x = [item for sublist in contours_x for item in sublist]
+    flat_y = [item for sublist in contours_y for item in sublist]
     img2 = img.copy()
     for i in range(len(flat_x)-1):
         x1 = int2(flat_x[i]-0.5)
@@ -757,21 +757,21 @@ def redrow_lines(img,counturs_x,counturs_y,t,scale):
         img2 = cv2.line(img2,(x1,y1),(x2,y2),color=(0,255,0),thickness=int2(np.ceil(t*scale)))
     return (img2)
 
-def drow_mask_lines(img,counturs_x,counturs_y,color,t=1,close_contur = False):
-#     flat_x = [item for sublist in counturs_x for item in sublist]
-#     flat_y = [item for sublist in counturs_y for item in sublist]
+def drow_mask_lines(img,contours_x,contours_y,color,t=1,close_contur = False):
+#     flat_x = [item for sublist in contours_x for item in sublist]
+#     flat_y = [item for sublist in contours_y for item in sublist]
     img2 = img.copy()
-    for i in range(len(counturs_x)-1):
-        x1 = int2(np.round(counturs_x[i]))
-        x2 = int2(np.round(counturs_x[i+1]))
-        y1 = int2(np.round(counturs_y[i]))
-        y2 = int2(np.round(counturs_y[i+1]))
+    for i in range(len(contours_x)-1):
+        x1 = int2(np.round(contours_x[i]))
+        x2 = int2(np.round(contours_x[i+1]))
+        y1 = int2(np.round(contours_y[i]))
+        y2 = int2(np.round(contours_y[i+1]))
         img2 = cv2.line(img2,(x1,y1),(x2,y2),color=color,thickness=int2(np.ceil(t)))
         
-    x1 = int2(np.round(counturs_x[0]))
-    x2 = int2(np.round(counturs_x[-1]))
-    y1 = int2(np.round(counturs_y[0]))
-    y2 = int2(np.round(counturs_y[-1]))
+    x1 = int2(np.round(contours_x[0]))
+    x2 = int2(np.round(contours_x[-1]))
+    y1 = int2(np.round(contours_y[0]))
+    y2 = int2(np.round(contours_y[-1]))
     if close_contur == True:
         img2 = cv2.line(img2,(x1,y1),(x2,y2),color=color,thickness=int2(np.ceil(t)))
     return (img2)

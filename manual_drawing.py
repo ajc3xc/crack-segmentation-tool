@@ -519,7 +519,7 @@ class ManualDrawing(CrackUtils):
                     self.clear_pending_segment()
 
             image_size = self.select_image_size.value()
-            x, y = ct.tools.Draw().counturs(
+            x, y = ct.tools.Draw().contours(
                 self.image[:, :, ::-1],
                 image_size,
                 annotations=self.annotation.get("annotations", {}),
@@ -752,7 +752,7 @@ class ManualDrawing(CrackUtils):
                     self.clear_pending_segment()
 
             image_size = self.select_image_size.value()
-            x, y = ct.tools.Draw().counturs(
+            x, y = ct.tools.Draw().contours(
                 self.image[:, :, ::-1],
                 image_size,
                 annotations=self.annotation.get("annotations", {}),

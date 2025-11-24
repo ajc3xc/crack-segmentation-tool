@@ -1870,7 +1870,7 @@
        </rect>
       </property>
       <property name="toolTip">
-       <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Draw counturs of a crack manually&lt;/p&gt;&lt;p&gt;Wheel mause to zoom in/out&lt;/p&gt;&lt;p&gt;LMB hold to draw&lt;/p&gt;&lt;p&gt;LMB release to fix contur part&lt;/p&gt;&lt;p&gt;RMB to erase previouse contur part&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+       <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Draw contours of a crack manually&lt;/p&gt;&lt;p&gt;Wheel mause to zoom in/out&lt;/p&gt;&lt;p&gt;LMB hold to draw&lt;/p&gt;&lt;p&gt;LMB release to fix contur part&lt;/p&gt;&lt;p&gt;RMB to erase previouse contur part&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
       </property>
       <property name="toolTipDuration">
        <number>1000000000</number>
