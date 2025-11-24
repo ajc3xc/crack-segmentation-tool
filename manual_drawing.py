@@ -14,6 +14,48 @@ from time import time
 #Functions for manual segmentation of preexisting cracks
 
 class ManualDrawing(CrackUtils):
+    '''def _draw_manual_mode_overlay(self, canvas):
+        """
+        Draws a lite version of the main visualization:
+        - midlines for every crack
+        - endpoints
+        - crack ID labels
+        """
+        import cv2
+        import numpy as np
+
+        H, W = self.original_image.shape[:2]
+        shown = canvas.copy()
+
+        atomic = (self.annotation.get("annotations", {}) or {}).get("atomic_cracks", {}) or {}
+
+        for cid, crack in atomic.items():
+            scid = str(cid)
+            
+            # ---- midline ----
+            ml = crack.get("midline")
+            if ml and len(ml) >= 2:
+                pts = np.asarray([[p[0], p[1]] for p in ml if p is not None], np.int32)
+                if len(pts) >= 2:
+                    cv2.polylines(shown, [pts], False, (255, 255, 255), 2)
+
+            # ---- endpoints ----
+            endpoints = crack.get("endpoints") or crack.get("pts") or []
+            for p in endpoints:
+                if p is None:
+                    continue
+                x, y = int(p[0]), int(p[1])
+                cv2.circle(shown, (x, y), 4, (0, 255, 255), -1)
+
+            # ---- crack ID ----
+            if ml and len(ml) >= 1:
+                x0, y0 = int(ml[0][0]), int(ml[0][1])
+                cv2.putText(shown, f"id={cid}", (x0+5, y0-5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            (0, 200, 255), 1, cv2.LINE_AA)
+
+        return shown
+    
     def save_manual_segment(self):
         """
         Save or erase the drawn manual polyline.
@@ -562,13 +604,13 @@ class ManualDrawing(CrackUtils):
 
         except Exception as e:
             import traceback; traceback.print_exc()
-            error(e)
+            error(e)'''
 
     def erase_segment(self):
         """Convenience wrapper for erase mode."""
         return self.draw_segment('erase')
     
-    def reset_canvas(self):
+    '''def reset_canvas(self):
         """Clear pending manual segments and reset the preview canvas."""
         try:
             self.manuall_x = []
@@ -592,6 +634,505 @@ class ManualDrawing(CrackUtils):
             print("[INFO] Canvas reset complete.")
         except Exception as e:
             import traceback; traceback.print_exc()
+            error(e)'''
+            
+    def reset_canvas(self):
+        """Clear pending manual segments and reset the preview canvas."""
+        try:
+            self.manuall_x = []
+            self.manuall_y = []
+            self.pending_mode = None
+
+            im = self.image.astype(np.uint8).copy()
+            im = self.draw_existing_cracks(im)
+            im = self._draw_manual_mode_overlay(im)
+
+            qimage = QImage(im, im.shape[1], im.shape[0],
+                            im.strides[0], QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimage)
+            scaled = pixmap.scaled(
+                self.manual_segment_screen.width(),
+                self.manual_segment_screen.height(),
+                Qt.KeepAspectRatio,
+                Qt.FastTransformation
+            )
+            self.manual_segment_screen.setPixmap(scaled)
+
+            print("[INFO] Canvas reset complete.")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            error(e)
+            
+    def _draw_manual_mode_overlay(self, canvas):
+        """
+        Draws a lite version of the main visualization onto `canvas`:
+        - midlines for every atomic crack
+        - endpoints
+        - crack ID labels
+        """
+        import cv2
+        import numpy as np
+
+        shown = canvas.copy()
+
+        atomic = (self.annotation.get("annotations", {}) or {}) \
+                    .get("atomic_cracks", {}) or {}
+
+        for cid, crack in atomic.items():
+            scid = str(cid)
+
+            # ---- midline ----
+            ml = crack.get("midline")
+            if ml and len(ml) >= 2:
+                pts = np.asarray(
+                    [[p[0], p[1]] for p in ml if p is not None],
+                    np.int32
+                )
+                if len(pts) >= 2:
+                    cv2.polylines(shown, [pts], False, (255, 255, 255), 2)
+
+            # ---- endpoints ----
+            endpoints = crack.get("endpoints") or crack.get("pts") or []
+            for p in endpoints:
+                if p is None:
+                    continue
+                x, y = int(p[0]), int(p[1])
+                cv2.circle(shown, (x, y), 4, (0, 255, 255), -1)
+
+            # ---- crack ID ----
+            if ml and len(ml) >= 1:
+                x0, y0 = int(ml[0][0]), int(ml[0][1])
+                cv2.putText(
+                    shown, f"id={scid}", (x0 + 5, y0 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (0, 200, 255), 1, cv2.LINE_AA
+                )
+
+        return shown
+    
+    def clear_pending_segment(self):
+        """
+        Clear any unsaved manual segment (used when overwriting).
+        """
+        if hasattr(self, "manuall_x"):
+            del self.manuall_x
+        if hasattr(self, "manuall_y"):
+            del self.manuall_y
+        if hasattr(self, "pending_mode"):
+            del self.pending_mode
+
+        # Clear the preview in the Qt widget too
+        if hasattr(self, "manual_segment_screen"):
+            from PyQt5.QtGui import QPixmap
+            self.manual_segment_screen.setPixmap(QPixmap())
+            
+    def draw_segment(self, mode):
+        from shapely.geometry import Polygon, MultiPolygon
+        from shapely.ops import unary_union
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import cv2
+
+        print(f"[DRAW_SEGMENT] mode={mode}")
+        try:
+            # --- Handle unsaved previous strokes ---
+            if hasattr(self, "manuall_x") and len(getattr(self, "manuall_x", [])) > 0:
+                from PyQt5.QtWidgets import QMessageBox
+                msg = QMessageBox()
+                msg.setIcon(QMessageBox.Warning)
+                msg.setText("You already have an unsaved manual segment.\n"
+                            "Continuing will overwrite it. Proceed?")
+                msg.setWindowTitle("Overwrite Segment")
+                msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                ret = msg.exec_()
+                if ret == QMessageBox.No:
+                    return
+                else:
+                    self.clear_pending_segment()
+
+            image_size = self.select_image_size.value()
+            x, y = ct.tools.Draw().counturs(
+                self.image[:, :, ::-1],
+                image_size,
+                annotations=self.annotation.get("annotations", {}),
+                mode=mode
+            )
+            if len(x) < 3:
+                print("[DRAW_SEGMENT] too few points; abort.")
+                return
+
+            coords = np.column_stack([x, y]).astype(np.int32)
+
+            tol = 15       # closure distance in px
+            min_gap = 10   # min separation in indices
+            polys = []
+
+            # --- Find ALL closures along stroke ---
+            for i in range(len(coords) - min_gap):
+                for j in range(i + min_gap, len(coords)):
+                    d = np.linalg.norm(coords[i] - coords[j])
+                    if d < tol:
+                        loop_coords = coords[i:j+1]
+                        if len(loop_coords) >= 3:
+                            poly = Polygon(loop_coords)
+                            if not poly.is_valid:
+                                poly = poly.buffer(0)
+                            if not poly.is_empty and poly.area > 30:
+                                polys.append(poly)
+
+            print(f"[DRAW_SEGMENT] raw loops found: {len(polys)}")
+
+            if not polys:
+                print("[DRAW_SEGMENT] No closed loop detected in stroke.")
+                return
+
+            # --- Merge overlapping polygons ---
+            merged = unary_union(polys)
+
+            if isinstance(merged, Polygon):
+                merged = [merged]
+            elif isinstance(merged, MultiPolygon):
+                merged = list(merged.geoms)
+
+            print(f"[DRAW_SEGMENT] independent loops after merge: {len(merged)}")
+
+            # --- Convert to OpenCV contours ---
+            valid_loops = []
+            for poly in merged:
+                c = np.array(poly.exterior.coords, dtype=np.int32).reshape((-1, 1, 2))
+                if c.shape[0] >= 3:
+                    valid_loops.append(c)
+
+            if not valid_loops:
+                print("[DRAW_SEGMENT] no valid loops after merge; abort.")
+                return
+
+            # --- Store biggest loop as the working poly ---
+            biggest = max(valid_loops, key=cv2.contourArea)
+            self.manuall_x = biggest[:, 0, 0]
+            self.manuall_y = biggest[:, 0, 1]
+            self.pending_mode = mode
+
+            # --- Preview ---
+            H, W = self.image.shape[:2]
+            im = self.image.astype(np.uint8).copy()
+            im = self.draw_existing_cracks(im)
+
+            preview_mask = np.zeros((H, W), np.uint8)
+            cv2.fillPoly(preview_mask, valid_loops, 255)
+
+            fill_color = (0, 255, 0) if mode == "add" else (255, 50, 0)
+            overlay = np.zeros_like(im)
+            overlay[preview_mask > 0] = fill_color
+            im = cv2.addWeighted(im, 1.0, overlay, 0.7, 0)
+
+            # --- Add midline + endpoint overlay (lite view) ---
+            im = self._draw_manual_mode_overlay(im)
+
+            # --- Show in Qt ---
+            qimage = QImage(im, im.shape[1], im.shape[0],
+                            im.strides[0], QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimage)
+            scaled = pixmap.scaled(
+                self.manual_segment_screen.width(),
+                self.manual_segment_screen.height(),
+                Qt.KeepAspectRatio,
+                Qt.FastTransformation
+            )
+            self.manual_segment_screen.setPixmap(scaled)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            error(e)
+            
+    def save_manual_segment(self):
+        """
+        Save or erase the drawn manual polyline.
+
+        ADD:
+        - Requires overlap with an existing atomic (so we already have a midline).
+        - Union mask; rebuild geodesic_edges from the unioned mask boundary; recompute normals.
+
+        ERASE:
+        - Subtract from mask; if anything remains, rebuild geodesic_edges from the new mask boundary; recompute normals.
+        - If nothing remains, KEEP the atomic (midline/endpoints intact) but clear mask + edges
+        and remove it from any combined members.
+
+        Always calls self.change_image() to refresh the main UI.
+        """
+        import numpy as np
+        import cv2
+        import os
+
+        print("\n" + "=" * 80)
+        print("[MANUAL_SAVE] ENTER save_manual_segment")
+        print(f"[MANUAL_SAVE] pending_mode = {getattr(self, 'pending_mode', None)}")
+
+        try:
+            ann_dbg = self.annotation.get("annotations", {})
+            atomic_dbg = ann_dbg.get("atomic_cracks", {})
+            combined_dbg = ann_dbg.get("combined_cracks", {})
+
+            print("[MANUAL_SAVE] AT ENTRY → atomic keys:", list(atomic_dbg.keys()))
+            print("[MANUAL_SAVE] AT ENTRY → combined keys:", list(combined_dbg.keys()))
+            for k, v in atomic_dbg.items():
+                print(
+                    f"[MANUAL_SAVE]   cid={k} → has mask_crop={('mask_crop' in v)}, "
+                    f"mask_bbox={v.get('mask_bbox')}"
+                )
+        except Exception as e:
+            print("[MANUAL_SAVE] ERROR printing initial debug:", e)
+
+        try:
+            # sanity: we must have a drawn loop
+            if not hasattr(self, "manuall_x") or not hasattr(self, "manuall_y"):
+                error("No manual polyline to save/erase.")
+                return
+            if len(self.manuall_x) < 2 or len(self.manuall_y) < 2:
+                error("Manual polyline too short.")
+                return
+
+            poly = np.column_stack([self.manuall_x, self.manuall_y]).astype(float)
+
+            ann = self.annotation.setdefault("annotations", {})
+            atomic = ann.setdefault("atomic_cracks", {})
+            combined = ann.setdefault("combined_cracks", {})
+
+            H, W = self.original_image.shape[:2]
+            mode = getattr(self, "pending_mode", "add")
+
+            # ---------- helper: rebuild edges + normals from a full-image mask ----------
+            def rebuild_edges_from_mask(full_mask, crack):
+                cnts, _ = cv2.findContours(
+                    (full_mask > 0).astype(np.uint8),
+                    cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+                )
+                if not cnts:
+                    return None, None, None
+
+                cnt = max(cnts, key=cv2.contourArea)
+                ring = cnt[:, 0, :].astype(float)
+                if ring.shape[0] < 4:
+                    return None, None, None
+                if not (ring[0] == ring[-1]).all():
+                    ring = np.vstack([ring, ring[0]])
+
+                m = np.asarray(crack.get("midline", []), float)
+                if m.ndim != 2 or m.shape[0] < 2 or m.shape[1] != 2:
+                    return None, None, None
+
+                mid_x, mid_y = m[:, 0], m[:, 1]
+                start, end = m[0], m[-1]
+
+                d0 = np.sum((ring - start) ** 2, axis=1)
+                d1 = np.sum((ring - end) ** 2, axis=1)
+                i0, i1 = int(np.argmin(d0)), int(np.argmin(d1))
+
+                if i0 <= i1:
+                    path1 = ring[i0:i1 + 1]
+                    path2 = np.vstack([ring[i1:], ring[:i0 + 1]])
+                else:
+                    path1 = np.vstack([ring[i0:], ring[:i1 + 1]])
+                    path2 = ring[i1:i0 + 1]
+
+                e1, e2 = np.array(path1, float), np.array(path2, float)
+
+                # normals along the midline
+                e1x, e1y, e2x, e2y = ct.segmentation.find_normal_pair(
+                    mid_x, mid_y, e1, e2
+                )
+                normals = {
+                    "edge1": [e1x.tolist(), e1y.tolist()],
+                    "edge2": [e2x.tolist(), e2y.tolist()],
+                }
+                return e1, e2, normals
+
+            # quick mask state dump
+            print("[MANUAL_SAVE] atomic masks (pre-op):")
+            for cid, crack in atomic.items():
+                mc = crack.get("mask_crop")
+                bb = crack.get("mask_bbox")
+                if mc is None or bb is None:
+                    print(f"  cid={cid}: NO mask_crop/bbox")
+                else:
+                    arr = np.array(mc, dtype=np.uint8)
+                    print(
+                        f"  cid={cid}: mask_crop nonzero={np.count_nonzero(arr)} "
+                        f"bbox={bb}"
+                    )
+
+            # ====================== ERASE MODE ==========================
+            if mode == "erase":
+                erase_mask = np.zeros((H, W), np.uint8)
+                poly_pts = poly.astype(np.int32).reshape((-1, 1, 2))
+                cv2.fillPoly(erase_mask, [poly_pts], 255)
+
+                changed = []
+                emptied = []
+
+                # 1) apply erase to each atomic
+                for cid, crack in list(atomic.items()):
+                    mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
+                    if mc is None or bb is None or not len(mc):
+                        full_old = np.zeros((H, W), np.uint8)
+                    else:
+                        crop = np.array(mc, dtype=np.uint8)
+                        x0, y0, w, h = [int(v) for v in bb]
+                        x1, y1 = min(x0 + w, W), min(y0 + h, H)
+                        full_old = np.zeros((H, W), np.uint8)
+                        full_old[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
+
+                    full_new = cv2.bitwise_and(
+                        full_old,
+                        cv2.bitwise_not(erase_mask)
+                    )
+
+                    if np.any(full_new):
+                        ys, xs = np.where(full_new > 0)
+                        x0, x1 = xs.min(), xs.max() + 1
+                        y0, y1 = ys.min(), ys.max() + 1
+                        crop = full_new[y0:y1, x0:x1]
+                        crack["mask_crop"] = crop.tolist()
+                        crack["mask_bbox"] = [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
+
+                        e1, e2, normals = rebuild_edges_from_mask(full_new, crack)
+                        if e1 is not None:
+                            crack["geodesic_edges"] = {
+                                "edge1": e1.tolist(),
+                                "edge2": e2.tolist(),
+                            }
+                            crack["normal_edge_points"] = normals
+                            changed.append(cid)
+                    else:
+                        # fully erased: keep the crack, but clear mask + edges
+                        emptied.append(cid)
+
+                # 2) clear mask + edges for fully erased atomics, prune from combined
+                for cid in emptied:
+                    crack = atomic.get(cid)
+                    if not crack:
+                        continue
+                    for key in ("mask_crop", "mask_bbox",
+                                "geodesic_edges", "normal_edge_points"):
+                        crack.pop(key, None)
+                    print(f"[FIX] Cleared mask/edges for atomic id={cid} (fully erased)")
+
+                    # remove this cid from combined memberships, but DO NOT delete the atomic
+                    for cmb_id, cmb in list(combined.items()):
+                        members = cmb.get("members", []) or []
+                        if cid in members:
+                            new_members = [m for m in members if m != cid]
+                            cmb["members"] = new_members
+                            print(
+                                f"[FIX] Purged erased atomic id={cid} from combined {cmb_id}"
+                            )
+                            if not new_members:
+                                del combined[cmb_id]
+                                print(
+                                    f"[FIX] Removed empty combined crack {cmb_id} "
+                                    f"(no members left)"
+                                )
+
+                self.save_annotation()
+
+            # ====================== ADD MODE ===========================
+            else:
+                target_id, target_crack = None, None
+                poly_mask = np.zeros((H, W), np.uint8)
+                cv2.fillPoly(
+                    poly_mask,
+                    [poly.astype(np.int32).reshape((-1, 1, 2))],
+                    255
+                )
+
+                # 1) find first atomic that overlaps the drawn region
+                for cid, crack in atomic.items():
+                    mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
+                    if mc is None or bb is None or not len(mc):
+                        continue
+                    crop = np.array(mc, dtype=np.uint8)
+                    x0, y0, w, h = [int(v) for v in bb]
+                    x1, y1 = min(x0 + w, W), min(y0 + h, H)
+                    full_old = np.zeros((H, W), np.uint8)
+                    full_old[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
+
+                    if np.any(cv2.bitwise_and(full_old, poly_mask)):
+                        target_id, target_crack = cid, crack
+                        break
+
+                if target_crack is None:
+                    print("[MANUAL_SAVE] EARLY RETURN — no overlapping atomic found")
+                    print(
+                        "[MANUAL_SAVE] atomic keys at abort:",
+                        list(self.annotation.get("annotations", {})
+                            .get("atomic_cracks", {}).keys())
+                    )
+                    return
+
+                # 2) union new region into that atomic's mask
+                mc, bb = target_crack.get("mask_crop"), target_crack.get("mask_bbox")
+                if mc is None or bb is None or not len(mc):
+                    full_old = np.zeros((H, W), np.uint8)
+                else:
+                    crop = np.array(mc, dtype=np.uint8)
+                    x0, y0, w, h = [int(v) for v in bb]
+                    x1, y1 = min(x0 + w, W), min(y0 + h, H)
+                    full_old = np.zeros((H, W), np.uint8)
+                    full_old[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
+
+                full_new = cv2.bitwise_or(full_old, poly_mask)
+                ys, xs = np.where(full_new > 0)
+                if len(xs) and len(ys):
+                    x0, x1 = xs.min(), xs.max() + 1
+                    y0, y1 = ys.min(), ys.max() + 1
+                    crop = full_new[y0:y1, x0:x1]
+                    target_crack["mask_crop"] = crop.tolist()
+                    target_crack["mask_bbox"] = [
+                        int(x0), int(y0), int(x1 - x0), int(y1 - y0)
+                    ]
+
+                e1, e2, normals = rebuild_edges_from_mask(full_new, target_crack)
+                if e1 is not None:
+                    target_crack["geodesic_edges"] = {
+                        "edge1": e1.tolist(),
+                        "edge2": e2.tolist(),
+                    }
+                    target_crack["normal_edge_points"] = normals
+
+                self.save_annotation()
+
+            # ==================== REFRESH UI ============================
+            im = self.image.astype(np.uint8).copy()
+            im = self.draw_existing_cracks(im)
+            im = self._draw_manual_mode_overlay(im)
+
+            qimage = QImage(
+                im, im.shape[1], im.shape[0],
+                im.strides[0], QImage.Format_RGB888
+            )
+            pixmap = QPixmap.fromImage(qimage)
+            scaled = pixmap.scaled(
+                self.manual_segment_screen.width(),
+                self.manual_segment_screen.height(),
+                Qt.KeepAspectRatio,
+                Qt.FastTransformation
+            )
+            self.manual_segment_screen.setPixmap(scaled)
+
+            self.change_image()
+
+            if hasattr(self, "manuall_x"):
+                del self.manuall_x
+            if hasattr(self, "manuall_y"):
+                del self.manuall_y
+            if hasattr(self, "pending_mode"):
+                del self.pending_mode
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
             error(e)
                  
     def commit_manual_midlines_full(self):
