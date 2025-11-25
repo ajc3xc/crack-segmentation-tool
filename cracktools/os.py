@@ -8,6 +8,16 @@ import scipy.signal
 from skimage.filters import threshold_otsu
 from time import time
 
+OS_MODE = "new"   # "old" or "new"
+def set_os_mode(mode: str):
+    """
+    mode ∈ {"old","new"}; affects only core semantic parts.
+    """
+    global OS_MODE
+    if mode.lower() not in ("old","new"):
+        raise ValueError("OS mode must be 'old' or 'new'")
+    OS_MODE = mode.lower()
+
 # ---------- Robust backend selection ----------
 CUPY_AVAILABLE = False
 try:
@@ -740,19 +750,24 @@ def CostFunctionVesselnessFiltering(U, ksi, zeta, sigma_s, method, sigmas_ext=0,
     S_tmp = lambda1**2 + c**2
     sigma2 = 0.2 * xp.max(xp.abs(S_tmp))
 
-    # fused version on GPU; vectorized on CPU
+    # epsilon depends on OS_MODE (for ablation)
+    if OS_MODE == "old":
+        eps = 1e-12   # effectively original “barely avoid NaN”
+    else:
+        eps = 1e-6    # safer, still tiny relative to typical |c|
+
     if CUPY_AVAILABLE:
         @cp.fuse()
-        def fused_vesselness(lambda1, c, Q, sigma1, sigma2):
+        def fused_vesselness(lambda1, c, Q, sigma1, sigma2, eps):
             S = lambda1**2 + c**2
-            R = lambda1 / (c + 1e-6)
+            R = lambda1 / (c + eps)
             cost = cp.exp(-R**2 / (2 * sigma1**2)) * (1 - cp.exp(-S / (2 * sigma2)))
             return cost * (1 - cp.heaviside(-Q, 0))
-        cost = fused_vesselness(lambda1, c, Q, sigma1, sigma2)
+        cost = fused_vesselness(lambda1, c, Q, sigma1, sigma2, eps)
         return cp.asnumpy(cost)
     else:
         S = lambda1**2 + c**2
-        R = lambda1 / (c + 1e-6)
+        R = lambda1 / (c + eps)
         cost = np.exp(-R**2 / (2 * sigma1**2)) * (1 - np.exp(-S / (2 * float(sigma2))))
         cost = cost * (1 - np.heaviside(-asnumpy(Q), 0.0))
         return cost
@@ -783,7 +798,11 @@ def MultiScaleVesselness(U,ksi,zeta,sigmas_s,method,sigmas_ext = 0, sigmaa_ext =
         vesselnessErosion = scipy.ndimage.morphology.grey_erosion(vesselness_pad,size=(3,0,0))
         vesselnessErosion =  vesselnessErosion[pad:-pad,pad:-pad,pad:-pad]
         #pad the top row just in case
-        vesselnessErosion[:,:1,:] = 0
+        if OS_MODE == "old":
+            vesselnessErosion[:,:5,:] = 0   # zero first five orientations
+        else:
+            vesselnessErosion[:,:1,:] = 0   # zero only the first slice
+
         vesselnessfilter.append(vesselnessErosion)
         print(f"vesselness remaining time: {time() - start_time}")
         

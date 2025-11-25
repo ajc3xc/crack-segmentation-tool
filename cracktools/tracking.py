@@ -387,10 +387,42 @@ def Dijsktra_grid(grid, start_point, end_point,transition_cost = None):
     path_y.append(int(y))
 
     return [path_x,path_y]'''
+    
+'''def fast_marching_2d(cost,start_point,end_point,l = 1, p = 6):
+    mu = 0
+    seeds = np.array([*start_point[::-1]])
+    tips = np.array([*end_point[::-1]])
+    b = np.array([0,cost.shape[0]])
+    c = np.array([0,cost.shape[1]])
+    sides = np.array([b,c])
+    dims = np.array([cost.shape[0],cost.shape[1]])
+    
+    DxZ,DyZ = np.gradient(cost) 
+    a11 = scipy.ndimage.gaussian_filter(mu*DxZ**2, 1, order=(0,0))
+    a12 = scipy.ndimage.gaussian_filter(mu*DxZ*DyZ, 1, order=(0,0))
+    a21 = scipy.ndimage.gaussian_filter(mu*DxZ*DyZ, 1, order=(0,0))
+    a22 = scipy.ndimage.gaussian_filter(mu*DyZ**2, 1, order=(0,0))
+    df = np.array([[1+a11,a12],[a21,1+a22]])
+    metric1 = (0.0001+cost*l)**p*df
+
+    metric = Riemann(metric1)
+    hfmIn = Eikonal.dictIn({
+        'model' : 'Riemann2',
+        'seeds' : np.expand_dims(seeds,axis = 0),
+        'arrayOrdering' : 'RowMajor',
+        'tips' : np.expand_dims(tips,axis = 0),
+        'metric' : metric})
+    hfmIn['order']=2
+    hfmIn.SetRect(sides = sides, dims = dims)
+    hfmOut = hfmIn.Run()
+    geos1 = [g.T for g in hfmOut['geodesics']]
+    print('Done.')
+    
+    return [geos1[0][:,1],geos1[0][:,0]]'''
+    
 
 
-
-from agd import Eikonal
+'''from agd import Eikonal
 from agd.Metrics import AsymQuad,Riemann # Riemannian metric and \Asymmetric Quadratic Models
 from agd import AutomaticDifferentiation as ad
 from agd import LinearParallel as lp
@@ -541,36 +573,362 @@ def fast_marching(os_cost,start_point,end_point,g11=1,g22=25,g33=25):
     #geos1 = runReedsSheppGF(cp.asarray(sides), cp.asarray([dims[1],dims[2],dims[0]]), [cp.asarray(seeds, dtype=cp.float64)], [cp.asarray(tips, dtype=cp.float64)], cp.asarray(metricLIFinclCostOld1, dtype=cp.float64))
     print(f"runReedsSheppGF = {time() - start_time}")
 
-    return [geos1[0][:,1],geos1[0][:,0]]
-
-def fast_marching_2d(cost,start_point,end_point,l = 1, p = 6):
-    mu = 0
-    seeds = np.array([*start_point[::-1]])
-    tips = np.array([*end_point[::-1]])
-    b = np.array([0,cost.shape[0]])
-    c = np.array([0,cost.shape[1]])
-    sides = np.array([b,c])
-    dims = np.array([cost.shape[0],cost.shape[1]])
+    return [geos1[0][:,1],geos1[0][:,0]]'''
     
-    DxZ,DyZ = np.gradient(cost) 
-    a11 = scipy.ndimage.gaussian_filter(mu*DxZ**2, 1, order=(0,0))
-    a12 = scipy.ndimage.gaussian_filter(mu*DxZ*DyZ, 1, order=(0,0))
-    a21 = scipy.ndimage.gaussian_filter(mu*DxZ*DyZ, 1, order=(0,0))
-    a22 = scipy.ndimage.gaussian_filter(mu*DyZ**2, 1, order=(0,0))
-    df = np.array([[1+a11,a12],[a21,1+a22]])
-    metric1 = (0.0001+cost*l)**p*df
+from agd import Eikonal
+from agd.Metrics import AsymQuad, Riemann  # Riemannian metric and Asymmetric Quadratic Models
+from agd import AutomaticDifferentiation as ad
+from agd import LinearParallel as lp
+from agd import FiniteDifferences as fd
+from agd import Eikonal
 
-    metric = Riemann(metric1)
+from agd.LinearParallel import outer_self as Outer  # outer product v \v^T of a vector with itself
+norm = ad.Optimization.norm
+import numpy as np; xp = np
+
+# ---------------------------------------------------------------------
+# Safety guard: CUPY_AVAILABLE may or may not exist in this module
+# ---------------------------------------------------------------------
+try:
+    CUPY_AVAILABLE
+except NameError:
+    CUPY_AVAILABLE = False
+
+# ---------------------------------------------------------------------
+# Shared helpers (unchanged math)
+# ---------------------------------------------------------------------
+def GGF(g11, g22, g33, GFtoLIFinv, LIFtoEuclideaninv):
+    GF = np.diag([g11, g22, g33])
+    transformMatrix = np.dot(LIFtoEuclideaninv, GFtoLIFinv)
+    G = np.dot(transformMatrix, np.dot(GF, transformMatrix.T))
+    return G
+
+def GLIFtoEuclideanOld(theta):
+    return np.array([
+        [ np.cos(theta),  np.sin(theta), 0],
+        [-np.sin(theta),  np.cos(theta), 0],
+        [ 0            ,  0            , 1]
+    ])
+
+def GLIFtoEuclideanOld_vec(nt):
+    """
+    Vectorized version of GLIFtoEuclideanOld for all t.
+    Returns [nt, 3, 3].
+    """
+    t = np.arange(nt) * 2 * np.pi / nt
+    LIF = np.zeros((nt, 3, 3))
+    LIF[:, 0, 0] = np.cos(t)
+    LIF[:, 0, 1] = np.sin(t)
+    LIF[:, 1, 0] = -np.sin(t)
+    LIF[:, 1, 1] = np.cos(t)
+    LIF[:, 2, 2] = 1.0
+    return LIF
+
+# ---------------------------------------------------------------------
+# Original (unoptimized) metric builder – for "old_unoptimized"
+# ---------------------------------------------------------------------
+def ReedsSheppMetricGFOld_naive(GF, dims, g11, g22, g33):
+    """
+    Original nested-loop implementation.
+    Returns metric[t, x, y, i, j] of shape (nt, nx, ny, 3, 3).
+    """
+    nx = dims[1]
+    ny = dims[2]
+    nt = dims[0]
+
+    GFinv = GF  # inverse of identity matrix. much faster this way
+    LIFtoEuclidean = np.zeros((dims[0], 3, 3))
+    for t in range(0, nt):
+        LIFtoEuclidean[t, :, :] = GLIFtoEuclideanOld(t * 2 * np.pi / nt)
+
+    LIFtoEuclideaninv = np.array(
+        [np.linalg.inv(LIFtoEuclidean[i]) for i in range(LIFtoEuclidean.shape[0])]
+    )
+    metric = np.zeros((dims[0], dims[1], dims[2], 3, 3))
+    for t in range(nt):
+        for x in range(nx):
+            for y in range(ny):
+                metric[t, x, y, :, :] = GGF(
+                    g11, g22, g33, GFinv[t, x, y], LIFtoEuclideaninv[t, :, :]
+                )
+    return metric
+
+# ---------------------------------------------------------------------
+# Optimized metric builder – same math, less memory – for "old_optimized"/"new_optimized"
+# ---------------------------------------------------------------------
+def ReedsSheppMetricGFOld_vec(GF, dims, g11, g22, g33):
+    """
+    Memory-efficient version of ReedsSheppMetricGFOld.
+    Assumes GF is unused (typically identity) and omits full spatial tiling.
+
+    Returns:
+        (nt, 3, 3) metric tensor; later broadcast over (x,y).
+    """
+    nt, nx, ny = dims[0], dims[1], dims[2]
+    LIFtoEuclidean = GLIFtoEuclideanOld_vec(nt)   # (nt, 3, 3)
+    LIFtoEuclideaninv = np.linalg.inv(LIFtoEuclidean)
+
+    # Diagonal GF metric
+    GFmat = np.diag([g11, g22, g33])
+
+    # Compose per-theta metric: M_t = LIFinv @ GF @ LIFinv^T
+    M = LIFtoEuclideaninv @ GFmat @ np.transpose(LIFtoEuclideaninv, (0, 2, 1))  # (nt, 3, 3)
+
+    return M
+
+# ---------------------------------------------------------------------
+# Original IncludeCost – expansion implementation (old_unoptimized)
+# ---------------------------------------------------------------------
+def IncludeCost_naive(cost, metric):
+    """
+    Original cost inclusion:
+      - cost is (nt, nx, ny)
+      - internally squared again → overall cost^4 if upstream passes os_cost**2
+    """
+    cost = cost**2
+    cost = np.expand_dims(cost, axis=3)
+    cost = np.concatenate([cost, cost, cost], axis=3)
+    cost = np.expand_dims(cost, axis=4)
+    cost = np.concatenate([cost, cost, cost], axis=4)
+    metric = metric * cost
+    return metric  # shape (nt, nx, ny, 3, 3)
+
+# ---------------------------------------------------------------------
+# Optimized IncludeCost – broadcast implementation (old/new optimized)
+# ---------------------------------------------------------------------
+def IncludeCost(cost, metric):
+    """
+    Broadcast-based IncludeCost:
+      - cost is (nt, nx, ny)
+      - internally squared again → overall cost^4 if upstream passes os_cost**2
+      - metric is:
+          * naive case: (nt, nx, ny, 3, 3)
+          * optimized case: (nt, 3, 3) and is broadcast over (x,y)
+    """
+    cost_sq = cost**2  # (nt, nx, ny)
+    cost_exp = cost_sq[:, :, :, None, None]  # (nt, nx, ny, 1, 1)
+
+    if metric.ndim == 3:
+        # optimized: metric[t, i, j]
+        metric_exp = metric[:, None, None, :, :]  # (nt, 1, 1, 3, 3)
+    else:
+        # naive: metric[t, x, y, i, j]
+        metric_exp = metric  # (nt, nx, ny, 3, 3)
+
+    return cost_exp * metric_exp  # (nt, nx, ny, 3, 3)
+
+# ---------------------------------------------------------------------
+# Riemann3_Periodic solver wrapper (unchanged except verbosity)
+# ---------------------------------------------------------------------
+def runReedsSheppGF(sides, dims, seeds, tips, metric):
+    metric = Riemann(xp.array(metric))
     hfmIn = Eikonal.dictIn({
-        'model' : 'Riemann2',
-        'seeds' : np.expand_dims(seeds,axis = 0),
-        'arrayOrdering' : 'RowMajor',
-        'tips' : np.expand_dims(tips,axis = 0),
-        'metric' : metric})
-    hfmIn['order']=2
-    hfmIn.SetRect(sides = sides, dims = dims)
+        'model'        : 'Riemann3_Periodic',
+        'seeds'        : seeds,
+        'arrayOrdering': 'RowMajor',
+        'tips'         : tips,
+        'metric'       : metric,
+        'verbosity'    : 0,
+    })
+    hfmIn.SetRect(sides=sides, dims=dims)
     hfmOut = hfmIn.Run()
-    geos1 = [g.T for g in hfmOut['geodesics']]
+    geos = [g.T for g in hfmOut['geodesics']]
     print('Done.')
-    
-    return [geos1[0][:,1],geos1[0][:,0]]
+    return geos
+
+# ---------------------------------------------------------------------
+# Ablation-ready fast_marching
+# ---------------------------------------------------------------------
+from time import time
+
+def fast_marching(
+    os_cost,
+    start_point,
+    end_point,
+    g11=1,
+    g22=25,
+    g33=25,
+    *,
+    mode="new_optimized",       # "old_unoptimized" | "old_optimized" | "new_optimized"
+    return_subtiming=False
+):
+    """
+    Reeds–Shepp fast marching for midline tracking (Riemann3_Periodic).
+
+    Modes
+    -----
+    - "old_unoptimized":
+        * EXACT original behavior:
+          - ReedsSheppMetricGFOld_naive (nested loops)
+          - IncludeCost_naive (concat-based)
+          - default anisotropy if g22/g33 not overridden: 100
+    - "old_optimized":
+        * Same math as original, but:
+          - ReedsSheppMetricGFOld_vec (vectorized over theta)
+          - IncludeCost (broadcast)
+          - default g22=g33 forced to 100 if left at 25
+    - "new_optimized" (default):
+        * Same math as optimized, but:
+          - default g22=g33 = 25 (your "new" behavior)
+
+    Returns
+    -------
+    - If return_subtiming is False:
+        [x_coords, y_coords]
+    - If return_subtiming is True:
+        ([x_coords, y_coords], subtiming_dict)
+    """
+    # -----------------------------------
+    # Basic setup (same for all modes)
+    # -----------------------------------
+    t_all0 = time()
+
+    NxCost = os_cost.shape[1]
+    NyCost = os_cost.shape[2]
+    NoCost = os_cost.shape[0]
+    s_theta = 2 * np.pi / NoCost
+
+    gfLIF = np.zeros((NoCost, NxCost, NyCost, 3, 3))
+    gfLIF[:, :, :, 0, 0] = 1
+    gfLIF[:, :, :, 1, 1] = 1
+    gfLIF[:, :, :, 2, 2] = 1
+
+    dims = np.array([NoCost, NxCost, NyCost])
+    sidesLIFmetric = np.array([[0, NxCost], [0, NyCost], [0, 2 * np.pi - s_theta]])
+    print("Initial constructions donne")
+
+    # match old defaults for "old_*" modes when user leaves g22,g33 at new defaults
+    if mode in ("old_unoptimized", "old_optimized") and g22 == 25 and g33 == 25:
+        g22_local = 100
+        g33_local = 100
+    else:
+        g22_local = g22
+        g33_local = g33
+
+    # we always pass cost**2 into IncludeCost, as in the original code
+    cost_sq_input = os_cost**2
+
+    # timing placeholders
+    t_metric = 0.0
+    t_include = 0.0
+    t_transpose = 0.0
+    t_solver = 0.0
+
+    # -----------------------------------
+    # Metric build (per mode)
+    # -----------------------------------
+    if mode == "old_unoptimized":
+        # 1) metric build – original nested implementation
+        t0 = time()
+        metricLIFOld = ReedsSheppMetricGFOld_naive(gfLIF, dims, g11, g22_local, g33_local)
+        t_metric = time() - t0
+        print(f"[fast_marching:{mode}] ReedsSheppMetricGFOld_naive = {t_metric:.4f} s")
+
+        # GC / GPU pool cleanup (optional, non-algorithmic)
+        import gc
+        gc.collect()
+        if CUPY_AVAILABLE:
+            import cupy as cp
+            mempool = cp.get_default_memory_pool()
+            pinned = cp.get_default_pinned_memory_pool()
+            mempool.free_all_blocks()
+            pinned.free_all_blocks()
+
+        # 2) Include cost – original expansion
+        t0 = time()
+        metricLIFinclCostOld = IncludeCost_naive(cost_sq_input, metricLIFOld)
+        t_include = time() - t0
+        print(f"[fast_marching:{mode}] IncludeCost_naive = {t_include:.4f} s")
+
+    elif mode == "old_optimized":
+        # 1) metric build – vectorized over theta
+        t0 = time()
+        metric_theta = ReedsSheppMetricGFOld_vec(gfLIF, dims, g11, g22_local, g33_local)  # (nt,3,3)
+        t_metric = time() - t0
+        print(f"[fast_marching:{mode}] ReedsSheppMetricGFOld_vec = {t_metric:.4f} s")
+
+        import gc
+        gc.collect()
+        if CUPY_AVAILABLE:
+            import cupy as cp
+            mempool = cp.get_default_memory_pool()
+            pinned = cp.get_default_pinned_memory_pool()
+            mempool.free_all_blocks()
+            pinned.free_all_blocks()
+
+        # 2) Include cost – broadcast version
+        t0 = time()
+        metricLIFinclCostOld = IncludeCost(cost_sq_input, metric_theta)  # (nt,nx,ny,3,3)
+        t_include = time() - t0
+        print(f"[fast_marching:{mode}] IncludeCost(broadcast) = {t_include:.4f} s")
+
+    elif mode == "new_optimized":
+        # Same as old_optimized, but with "new" defaults (g22=g33=25 unless overridden)
+        t0 = time()
+        metric_theta = ReedsSheppMetricGFOld_vec(gfLIF, dims, g11, g22_local, g33_local)
+        t_metric = time() - t0
+        print(f"[fast_marching:{mode}] ReedsSheppMetricGFOld_vec = {t_metric:.4f} s")
+
+        import gc
+        gc.collect()
+        if CUPY_AVAILABLE:
+            import cupy as cp
+            mempool = cp.get_default_memory_pool()
+            pinned = cp.get_default_pinned_memory_pool()
+            mempool.free_all_blocks()
+            pinned.free_all_blocks()
+
+        t0 = time()
+        metricLIFinclCostOld = IncludeCost(cost_sq_input, metric_theta)  # (nt,nx,ny,3,3)
+        t_include = time() - t0
+        print(f"[fast_marching:{mode}] IncludeCost(broadcast) = {t_include:.4f} s")
+
+    else:
+        raise ValueError(f"Unknown fast_marching mode: {mode}")
+
+    # -----------------------------------
+    # Transpose / reshape for AGD API
+    # -----------------------------------
+    t0 = time()
+    metricLIFinclCostOld1 = metricLIFinclCostOld.transpose((3, 4, 1, 2, 0))  # (3,3,Nx,Ny,No)
+    t_transpose = time() - t0
+    print(f"[fast_marching:{mode}] transpose = {t_transpose:.4f} s")
+
+    a = np.array([0, 2 * np.pi]) - s_theta / 2
+    b = np.array([0, NxCost])
+    c = np.array([0, NyCost])
+    sides = np.array([b, c, a])
+
+    seeds = np.array([*start_point[::-1], np.pi / 2])
+    tips = np.array([*end_point[::-1], np.pi / 2])
+
+    # The AGD Riemann3_Periodic expects dims in (nx, ny, nt) order
+    dims_agd = [dims[1], dims[2], dims[0]]
+
+    # -----------------------------------
+    # Run solver
+    # -----------------------------------
+    t0 = time()
+    geos1 = runReedsSheppGF(sides, dims_agd, [seeds], [tips], metricLIFinclCostOld1)
+    t_solver = time() - t0
+    print(f"[fast_marching:{mode}] runReedsSheppGF = {t_solver:.4f} s")
+
+    # -----------------------------------
+    # Prepare outputs
+    # -----------------------------------
+    path = [geos1[0][:, 1], geos1[0][:, 0]]  # [x, y]
+    t_total = time() - t_all0
+
+    subtiming = {
+        "fm_mode": mode,
+        "fm_metric_build_sec": float(t_metric),
+        "fm_include_cost_sec": float(t_include),
+        "fm_transpose_sec": float(t_transpose),
+        "fm_solver_sec": float(t_solver),
+        "fm_total_sec": float(t_total),
+    }
+
+    if return_subtiming:
+        return path, subtiming
+    else:
+        return path

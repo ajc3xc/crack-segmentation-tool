@@ -7,6 +7,7 @@ from PyQt5.QtCore import Qt
 
 from crackutils import *
 import cracktools as ct
+from cracktools.os import set_os_mode, OS_MODE
 from helpers.layout import Ui_MainWindow
 from time import time
 from helpers.crackhelpers import *
@@ -30,7 +31,7 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
             overlapFactor = self.wavelet_overlap_factor_box.value()
             dcStdDev = self.wavelet_STD_box.value()
             directional = False
-            from time import time
+            #from time import time
             start_time = time()
 
             # --- Use the full downsampled image for OS ---
@@ -59,54 +60,84 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
             self.update_cost_button.setStyleSheet("background-color : red")
             self.show_os_button.setStyleSheet("background-color : red")
     
-    def update_cost(self):
-        try:
-            self.update_cost_bar.setValue(0)
-            lambdaa = self.lambda_box.value()
-            p = self.power_box.value()
-            ksi = 1
-            zeta = 1
-            sigmas = self.sigmas_line_edit.text()
-            sigmas = [float(i) for i in sigmas.split(sep = ',')]
-            sigmas_ext = 1
-            start_time = time()
-            self.multiscalecostLIFExtReg = ct.os.MultiScaleVesselness(self.osGFCost.real,ksi,1,sigmas,"LIF",sigmas_ext = sigmas_ext)
-            print(f"MultiScaleVesselness took {time() - start_time:.2f} seconds")
-            
-            start_time = time()
-            costmultiscale = ct.os.MultiScaleVesselnessFilter(self.multiscalecostLIFExtReg)
-            print(f"MultiScaleVesselnessFilter took {time() - start_time:.2f} seconds")
-            start_time = time()
-            self.costFunction = ct.os.CostFunction(costmultiscale,lambdaa = lambdaa, p = p)
-            print(f"CostFunction took {time() - start_time:.2f} seconds")
+    def update_cost(self, return_timing=False):
+        import time
+        timing = {}
 
-            if getattr(self, 'current_mask', None) is not None and self.current_mask is not None:
-                # Sharpen cost inside mask
-                improved_cost = self.costFunction ** 2.0  # (You can tune the exponent as needed)
-                # If mask exists, apply it to the cost function
+        try:
+            t_all0 = time.time()
+            self.update_cost_bar.setValue(0)
+
+            lambdaa = self.lambda_box.value()
+            p       = self.power_box.value()
+            ksi     = 1
+            zeta    = 1
+            sigmas      = [float(i) for i in self.sigmas_line_edit.text().split(',')]
+            sigmas_ext  = 1
+
+            # ---- MultiScaleVesselness ----
+            t0 = time.time()
+            self.multiscalecostLIFExtReg = ct.os.MultiScaleVesselness(
+                self.osGFCost.real, ksi, 1, sigmas, "LIF",
+                sigmas_ext=sigmas_ext
+            )
+            timing["t_ms_vessel"] = time.time() - t0
+            print(f"[update_cost] MultiScaleVesselness={timing['t_ms_vessel']:.3f}s")
+
+            # ---- MultiScaleVesselnessFilter ----
+            t0 = time.time()
+            costmultiscale = ct.os.MultiScaleVesselnessFilter(self.multiscalecostLIFExtReg)
+            timing["t_ms_filter"] = time.time() - t0
+            print(f"[update_cost] MultiScaleVesselnessFilter={timing['t_ms_filter']:.3f}s")
+
+            # ---- CostFunction ----
+            t0 = time.time()
+            self.costFunction = ct.os.CostFunction(costmultiscale,
+                                                lambdaa=lambdaa, p=p)
+            timing["t_cost_fun"] = time.time() - t0
+            print(f"[update_cost] CostFunction={timing['t_cost_fun']:.3f}s")
+
+            # ---- Mask sharpening (new mode only) ----
+            if ct.os.OS_MODE == "new" and getattr(self, 'current_mask', None) is not None:
                 mask_bin = (self.current_mask > 0)
                 xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
                 mask_cropped = mask_bin[ymin:ymax, xmin:xmax]
                 mask3d = np.broadcast_to(mask_cropped, self.costFunction.shape)
+                improved = self.costFunction ** 2.0
                 PENALTY = 5.0
-                improved_cost = np.where(mask3d, improved_cost, np.clip(improved_cost * PENALTY, 0, 1))
-                self.costFunction = improved_cost
-            c00 = np.min(ct.os.Rescale(self.costFunction),axis = 0)
-            #c00 = np.max(ct.os.Rescale(self.costFunction), axis=0)
-            self.update_cost_bar.setValue(100)
+                self.costFunction = np.where(mask3d, improved,
+                                            np.clip(improved * PENALTY, 0, 1))
+
+            # ---- Visualization (c00) ----
+            c00 = np.min(ct.os.Rescale(self.costFunction), axis=0)
             c00 = c00 - np.min(c00)
-            c00 = (c00*255/np.max(c00)).astype(dtype=np.uint8)
-            print("c00 shape:", c00.shape)
-            qimage = QImage(c00.astype(dtype=np.uint8), c00.shape[1], c00.shape[0], 
+            if c00.max() > 0:
+                c00 = (c00 * 255.0 / c00.max()).astype(np.uint8)
+            else:
+                c00 = np.zeros_like(c00, dtype=np.uint8)
+
+            self.update_cost_bar.setValue(100)
+
+            # display
+            qimage = QImage(c00, c00.shape[1], c00.shape[0],
                             c00.strides[0], QImage.Format_Grayscale8)
             pixmap = QPixmap.fromImage(qimage)
-            scaled_pixmap = pixmap.scaled(self.cost_display.width(), self.cost_display.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.cost_display.setPixmap(scaled_pixmap)
-            print("c00 shape:", c00.shape)
+            scaled = pixmap.scaled(self.cost_display.width(),
+                                self.cost_display.height(),
+                                Qt.KeepAspectRatio, Qt.FastTransformation)
+            self.cost_display.setPixmap(scaled)
+
+            timing["t_total"] = time.time() - t_all0
+            print(f"[update_cost] total={timing['t_total']:.3f}s")
+
             self.midline_track_button.setStyleSheet("background-color : lightblue")
+
+            return (c00, timing) if return_timing else None
+
         except Exception as e:
             error(e)
             self.midline_track_button.setStyleSheet("background-color : red")
+            return None
            
     def midline_tracking(self):
         try:
@@ -707,16 +738,57 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
         except Exception as e:
             error(e)
             
-    def update_os_cost(self):
+    def update_os_cost(self, mode="new", save_dir=None, return_timing=False):
         """
-        Runs the OS and cost function generation for the current image.
-        This is a helper function to quickly generate the OS and cost without running the full pipeline.
+        Single unified function for OS + COST generation.
+        Used both by GUI buttons and pipeline.
         """
+        import time, cv2
         try:
-            self.update_image_crop()  # Ensure the crop is set correctly
+            # Select OS mode
+            if hasattr(ct.os, "set_os_mode"):
+                ct.os.set_os_mode(mode)
+            else:
+                ct.os.OS_MODE = mode
+
+            self.update_image_crop()
+
+            # ----- OS -----
+            t0 = time.time()
             self.update_os()
-            self.update_cost()
-            print("OS and cost function generated successfully.")
+            t_os = time.time() - t0
+            print(f"[update_os_cost] OS ({mode}) = {t_os:.3f}s")
+
+            # ----- COST -----
+            c00, timing_cost = self.update_cost(return_timing=True)
+            t_cost = timing_cost["t_total"]
+
+            if c00 is None:
+                print("[update_os_cost] ❌ cost failed")
+                return None
+
+            # ----- Optional save -----
+            png_path = None
+            if save_dir is not None:
+                png_path = f"{save_dir}/os_cost_{mode}.png"
+                cv2.imwrite(png_path, c00)
+
+            # ----- Return timing if requested -----
+            timing = {
+                "mode": mode,
+                "os_sec": t_os,
+                "cost_sec": t_cost,
+                **timing_cost,
+                "png_path": png_path,
+            }
+
+            if return_timing:
+                return c00, timing
+
+            print(f"[update_os_cost] total={t_os+t_cost:.3f}s")
+            print("OS + COST generated successfully.")
+
         except Exception as e:
             error(e)
-            print("Error generating OS or cost function:", e)
+            print("Error generating OS/COST:", e)
+            return None
