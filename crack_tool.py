@@ -3902,59 +3902,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         print(f"[smoke] ✅ edges ok for cid{crack_id}")
         return True
-    
-    '''def smoke_test_edges_for_combined(self, ccid: int, cmb: dict, edge_params=None, color_channel=None):
-        import os, numpy as np, cv2
-        from edge_workers import edge_param_worker
-        from helpers.save_load_files import safe_read_json, safe_write_json, metric_combined_path
-
-        base = self._image_base()
-        H, W = self.original_image.shape[:2]
-        ml = np.asarray(cmb.get("midline", []), float)
-        if ml.ndim != 2 or len(ml) < 2:
-            return False
-
-        # bbox
-        bbox = cmb.get("mask_bbox")
-        if not bbox:
-            m_full = manual_mask_from_crack(cmb, H, W)
-            bbox = plot_metrics.bbox_from_mask(m_full) or [0,0,W,H]
-        x,y,w,h = map(int, bbox)
-
-        if color_channel is None:
-            color_channel = 0 if self.edge_track_color_box.currentText()=="R" else 1 if self.edge_track_color_box.currentText()=="B" else 2
-        gray = self.original_image[:, :, color_channel].astype(np.float32)
-        crop = gray[y:y+h, x:x+w]
-        track_local_yx = np.vstack([ml[:,1]-y, ml[:,0]-x])
-
-        payload = dict(
-            image_crop_gray=crop,
-            pts_crop=[ml[0]-[x,y], ml[-1]-[x,y]],
-            adjusted_track=track_local_yx,
-            manual_midline_global=ml,
-            bbox=(x,y,w,h),
-            params=edge_params or {"window_half_size":45, "mu":0.0, "l":5, "p":14},
-            save_folder=self.save_folder,
-            image_base=base,
-            crack_id=f"combined{ccid}",
-            gt_crop=((self.current_mask[y:y+h, x:x+w]) > 0).astype(np.uint8) if getattr(self,"current_mask",None) is not None else None,
-        )
-
-        res = edge_param_worker(payload)
-        if not isinstance(res, dict) or res.get("status")!="ok":
-            return False
-
-        # persist to combined.json
-        cpath = metric_combined_path(self.save_folder, base)
-        cdata = safe_read_json(cpath, {}) or {}
-        rec = cdata.get(str(ccid), {})
-        rec["geodesic_edges"] = res.get("geodesic_edges", {})
-        rec["mask_crop"] = res.get("mask_crop", None)
-        rec["mask_bbox"] = [x,y,w,h]
-        cdata[str(ccid)] = rec
-        safe_write_json(cpath, cdata)
-        return True'''
-        
+      
     def run_midline_and_mask_metrics(self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True):
         """
         Minimal smoke test for manual cracks.
@@ -4352,53 +4300,74 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
     # ---- 4) Extract inputs for a subcrack (READS SNAPSHOT ONLY) ------------------
     def extract_edge_inputs_for_subcrack(self, crack_id, color_channel=None):
         """
-        Faithful payload builder for edge worker using only the per-crack snapshot file.
+        Faithful payload builder for edge_param_worker.
+        Reads ONLY from the per-crack snapshot file and constructs
+        a COMPLETE payload matching what smoke_test_edges_for_manual uses.
         """
         import numpy as np
         from helpers.metrics import metric_atomic_path_for, safe_read_json
 
         cid = str(crack_id)
-        p = metric_atomic_path_for(self.save_folder, self._image_base(), cid)
+        base = self._image_base()
+        p = metric_atomic_path_for(self.save_folder, base, cid)
         ann = safe_read_json(p, {})
+
         if not ann:
             print(f"[extract_edge_inputs] no snapshot for cid={cid}")
             return None
 
-        x, y, w, h = map(int, ann.get("mask_bbox", [0,0,0,0]))
+        # ---------------------------------------------------------
+        # 1. BBOX
+        # ---------------------------------------------------------
+        x, y, w, h = map(int, ann.get("mask_bbox", [0, 0, 0, 0]))
         if w <= 0 or h <= 0:
             print(f"[extract_edge_inputs] cid{cid} missing/invalid bbox")
             return None
-        self.active_bbox = [x, y, x+w, y+h]
 
-        if color_channel is None:
-            color_channel = (0 if self.edge_track_color_box.currentText() == "R"
-                            else 1 if self.edge_track_color_box.currentText() == "B"
-                            else 2)
+        xmin, ymin, xmax, ymax = x, y, x + w, y + h
+        self.active_bbox = [xmin, ymin, xmax, ymax]
 
+        # ---------------------------------------------------------
+        # 2. Midline
+        # ---------------------------------------------------------
         man_xy_g = np.asarray(ann.get("midline", []), float)
         if man_xy_g.ndim != 2 or man_xy_g.shape[1] != 2 or len(man_xy_g) < 2:
-            print(f"[extract_edge_inputs] ⚠ no valid manual midline for {cid}")
+            print(f"[extract_edge_inputs] ⚠ no valid midline for cid={cid}")
             return None
 
-        # endpoints like pipeline
-        self.pts = [np.array(man_xy_g[0]), np.array(man_xy_g[-1])]
+        # ---------------------------------------------------------
+        # 3. Endpoint setup (same as smoke test)
+        # ---------------------------------------------------------
+        self.pts = [man_xy_g[0].copy(), man_xy_g[-1].copy()]
         self.end_points = self.pts
 
-        self.update_image_crop()
-        if getattr(self, "skip_current_segment", False):
+        # ---------------------------------------------------------
+        # 4. Prepare crop + pts_crop
+        # ---------------------------------------------------------
+        try:
+            self.update_image_crop()
+            if getattr(self, "skip_current_segment", False):
+                return None
+        except Exception as e:
+            print(f"[extract_edge_inputs] crop update failed for cid={cid}: {e}")
             return None
 
-        # local track [y,x]
-        track_local_yx = np.vstack([man_xy_g[:,1] - y, man_xy_g[:,0] - x])
+        # track in local [y,x]
+        track_local_yx = np.vstack([
+            man_xy_g[:, 1] - ymin,
+            man_xy_g[:, 0] - xmin,
+        ])
 
-        # flip if needed
-        start_xy = track_local_yx[:,0][::-1]
+        # Flip if needed
+        start_xy = track_local_yx[:, 0][::-1]
         d0 = np.linalg.norm(start_xy - self.pts_crop[0])
         d1 = np.linalg.norm(start_xy - self.pts_crop[1])
         if d1 < d0:
             track_local_yx = track_local_yx[:, ::-1]
 
-        # manual normals (crop) if saved
+        # ---------------------------------------------------------
+        # 5. Normals (if present)
+        # ---------------------------------------------------------
         man_normals_crop = None
         ne = ann.get("normal_edge_points_full") or ann.get("normal_edge_points")
         if isinstance(ne, dict):
@@ -4407,24 +4376,51 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             e1c = np.column_stack([e1[:,0]-x, e1[:,1]-y]) if e1.ndim==2 else np.empty((0,2))
             e2c = np.column_stack([e2[:,0]-x, e2[:,1]-y]) if e2.ndim==2 else np.empty((0,2))
             if len(e1c) and len(e2c):
-                man_normals_crop = [[e1c[:,0], e1c[:,1]], [e2c[:,0], e2c[:,1]]]
+                man_normals_crop = [[e1c[:,0], e1c[:,1]],
+                                    [e2c[:,0], e2c[:,1]]]
+
+        # ---------------------------------------------------------
+        # 6. Gray channel
+        # ---------------------------------------------------------
+        if color_channel is None:
+            color_channel = (
+                0 if self.edge_track_color_box.currentText() == "R"
+                else 1 if self.edge_track_color_box.currentText() == "B"
+                else 2
+            )
 
         gray = self.image_crop[:, :, color_channel].astype(np.float32)
 
-        # clamp
+        # clamp endpoints to image crop
         H, W = gray.shape[:2]
         for p in self.pts_crop:
             p[0] = np.clip(p[0], 0, W-1e-3)
             p[1] = np.clip(p[1], 0, H-1e-3)
 
+        # ---------------------------------------------------------
+        # 7. OPTIONAL: GT CROP (just like smoke test)
+        # ---------------------------------------------------------
+        gt_crop = None
+        if getattr(self, "current_mask", None) is not None:
+            gt_crop = ((self.current_mask[y:y+h, x:x+w]) > 0).astype(np.uint8)
+
+        # ---------------------------------------------------------
+        # 8. FINAL PAYLOAD – FULL MATCH TO SMOKE TEST
+        # ---------------------------------------------------------
         return dict(
-            image_crop_gray=gray,
-            pts_crop=self.pts_crop,
-            adjusted_track=track_local_yx,
-            manual_midline_global=man_xy_g,
-            auto_midline_global=None,
-            bbox=(x, y, w, h),
-            manual_normals_crop=man_normals_crop,
+            image_crop_gray      = gray,
+            pts_crop             = self.pts_crop,
+            adjusted_track       = track_local_yx,
+            manual_midline_global= man_xy_g,
+            auto_midline_global  = None,
+            bbox                 = (x, y, w, h),
+            manual_normals_crop  = man_normals_crop,
+            gt_crop              = gt_crop,
+
+            # 🔥 Required by edge_param_worker
+            save_folder          = self.save_folder,
+            image_base           = base,
+            crack_id             = cid,
         )
 
     def run_edge_tracking_parallel(
@@ -4437,24 +4433,36 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         """
         Parallelize edge-mask + edge-tracking and save results into per-crack files.
 
-        NOW:
-        - Uses _flatten_edge_worker_result to build a timing-aware CSV.
-        - Still persists full geodesic edges / masks to per-crack JSON via set_tracked_edges_for_crack.
+        - Uses extract_edge_inputs_for_subcrack() as the *single authoritative*
+        payload builder. That function MUST return all fields needed by the worker:
+            save_folder, image_base, crack_id, bbox, image_crop_gray, pts_crop,
+            adjusted_track, manual_midline_global, gt_crop, manual_normals_crop.
+        - Uses _flatten_edge_worker_result() to build timing-aware CSV rows.
+        - Writes geodesic edges + masks back into per-cid JSON via set_tracked_edges_for_crack().
+        - Then reloads snapshot so downstream metrics see updated edges.
         """
         import os, time
         import numpy as np
         import pandas as pd
         from concurrent.futures import ProcessPoolExecutor, as_completed
+
         from edge_workers import edge_param_worker
         from helpers.metrics import set_tracked_edges_for_crack, load_snapshot_from_files
 
+        # ---------------------------------------------------------------------
+        # 0) Initial sync from authoring into snapshot structure
+        # ---------------------------------------------------------------------
         t0 = time.perf_counter()
         self._sync_metrics_snapshot_from_authoring(refresh_combine=False, persist=True)
         atomic = self._metric_atomic()
+
         if not atomic:
             print("[edge-parallel] ❌ no cracks to process")
             return []
 
+        # ---------------------------------------------------------------------
+        # 1) Parameter setup
+        # ---------------------------------------------------------------------
         if crack_ids is None:
             crack_ids = list(atomic.keys())
 
@@ -4464,22 +4472,26 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 else 1 if self.edge_track_color_box.currentText() == "B"
                 else 2
             )
+
         if edge_params_fixed is None:
             edge_params_fixed = {"window_half_size": 45, "mu": 0.0, "l": 5, "p": 14}
+
         if cpu_max_workers is None:
-            import os as _os
             cpu_max_workers = os.cpu_count()
 
         base_name   = self._image_base()
         metrics_dir = self._metrics_dir()
         os.makedirs(metrics_dir, exist_ok=True)
 
-        # Prepare payloads from snapshot files
+        # ---------------------------------------------------------------------
+        # 2) Build payloads using the *updated* extract_edge_inputs_for_subcrack()
+        # ---------------------------------------------------------------------
         tasks = []
         for cid in crack_ids:
             payload = self.extract_edge_inputs_for_subcrack(cid, color_channel=color_channel)
             if payload is None:
                 continue
+
             p = dict(payload)
             p["params"] = dict(edge_params_fixed)
             tasks.append((cid, p))
@@ -4489,16 +4501,21 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             return []
 
         print(f"[edge-parallel] launching {len(tasks)} edge workers across {cpu_max_workers} CPUs…")
-        rows = []
 
+        # ---------------------------------------------------------------------
+        # 3) Run workers in parallel
+        # ---------------------------------------------------------------------
+        rows = []
         with ProcessPoolExecutor(max_workers=cpu_max_workers) as ex:
             futs = {ex.submit(edge_param_worker, p): cid for (cid, p) in tasks}
+
             for fut in as_completed(futs):
                 cid = futs[fut]
                 try:
                     ew = fut.result()
+
                     if isinstance(ew, dict):
-                        # persist full geodesic edges / masks to per-crack JSON
+                        # Persist results (geodesic edges, mask_crop, normals)
                         set_tracked_edges_for_crack(
                             self.save_folder,
                             base_name,
@@ -4506,19 +4523,26 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                             ew,
                             mask_crop=ew.get("mask_crop"),
                         )
-                        # flatten for CSV (timings + scalar metrics + params)
+
+                        # Build flattened timing/metric row for CSV
                         row = self._flatten_edge_worker_result(
                             crack_id=cid,
                             params=edge_params_fixed,
                             ew=ew,
                         )
                         rows.append(row)
+
                         print(f"[edge-parallel] cid{cid} ✅")
+
                     else:
                         print(f"[edge-parallel] cid{cid} empty")
+
                 except Exception as e:
                     print(f"[edge-parallel] cid{cid} ❌ {e}")
 
+        # ---------------------------------------------------------------------
+        # 4) Export CSV / Runtime summary
+        # ---------------------------------------------------------------------
         t_elapsed = time.perf_counter() - t0
 
         if rows:
@@ -4532,7 +4556,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         else:
             print(f"[edge-parallel] ⚠ no successful results (elapsed {t_elapsed:.2f}s)")
 
-        # reload snapshot to include newly saved edges
+        # ---------------------------------------------------------------------
+        # 5) Reload snapshot so downstream metrics see the updated edges
+        # ---------------------------------------------------------------------
         self.metric_annotations = load_snapshot_from_files(self.save_folder, base_name)
         return rows
 
@@ -4576,7 +4602,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             try:
                 print(f"[edges] cid{crack_id}: running edge tracking ...")
                 _ = self.run_edge_tracking_parallel(
-                    crack_ids=[crack_id], cpu_max_workers=1, edge_params_fixed=edge_params_fixed
+                    crack_ids=[crack_id], cpu_max_workers=4, edge_params_fixed=edge_params_fixed
                 )
             except Exception as e:
                 print(f"[edges] cid{crack_id}: run_edge_tracking_parallel failed: {e}")
@@ -4634,193 +4660,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
     
     # ---- 6) Auto variants generation (SAVE ONLY TO PER-CRACK FILES) --------------
     # ---------- crack_tool.py (REPLACE the whole function) ----------
-
-    '''def generate_auto_variants_for_manual_parallel(
-            self, crack_id, g_variants=None, cache_key=None, force_recompute=True,
-            cpu_max_workers=None, color_channel=None, edge_params_fixed=None
-        ):
-        """
-        Stores variants + best directly under the crack's snapshot file (flat),
-        returns {"variants": {...}, "best_variant_id": int, "best": dict}.
-        """
-        import os, numpy as np, pandas as pd, cv2, traceback, math
-        from rs3_split import run_rs3_variants_split, _variant_desc, plot_midlines_overlay_all
-        from edge_workers import edge_param_worker
-        from helpers.metrics import (
-            set_auto_variant_for_crack, metric_atomic_path_for,
-            safe_read_json, safe_write_json, metric_image_dir
-        )
-
-        base_name = self._image_base()
-        p_cr = metric_atomic_path_for(self.save_folder, base_name, crack_id)
-        crack = safe_read_json(p_cr, {})
-        if not crack:
-            print(f"[AUTO {crack_id}] ❌ per-crack snapshot not found"); return None
-        src = (crack.get("source") or "").lower()
-        if src.startswith("auto") or src == "combined":
-            print(f"[AUTO {crack_id}] skip non-manual"); return None
-
-        x, y, w, h = map(int, crack.get("mask_bbox", [0,0,0,0]))
-        if w <= 0 or h <= 0:
-            print(f"[AUTO {crack_id}] no bbox"); return None
-        xmin, ymin, xmax, ymax = x, y, x + w, y + h
-
-        man_xy_g = np.asarray(crack.get("midline", []), float)
-        if man_xy_g.ndim != 2 or man_xy_g.shape[1] != 2 or len(man_xy_g) < 2:
-            print(f"[AUTO {crack_id}] no manual midline"); return None
-        p0, p1 = np.array(man_xy_g[0], float), np.array(man_xy_g[-1], float)
-
-        # crop/cost prep
-        try:
-            self.active_bbox = [xmin, ymin, xmax, ymax]
-            self.pts = [p0.copy(), p1.copy()]
-            self.end_points = self.pts
-            self.update_os_cost()
-            os_cost = self.costFunction
-        except Exception as e:
-            traceback.print_exc()
-            print(f"[AUTO {crack_id}] ❌ OS/COST stage failed: {e}")
-            return None
-
-        down = self.downsample_factor_box.value() if hasattr(self,"downsample_factor_box") else getattr(self,"down",1) or 1
-        p0_down_xy = np.asarray(self.pts_crop_down[0], float)
-        p1_down_xy = np.asarray(self.pts_crop_down[1], float)
-
-        if g_variants is None:
-            vals = (25, 50, 75)
-            g_variants = [{"g11":1.0, "g22":v, "g33":v} for v in vals]
-            g_variants += [{"g11":1.0, "g22":25, "g33":35}, {"g11":1.0, "g22":35, "g33":25}]
-
-        fm_results = run_rs3_variants_split(
-            ct=__import__('cracktools'), os_cost=os_cost, p0_down_xy=p0_down_xy, p1_down_xy=p1_down_xy,
-            g_variants=g_variants, down=int(down), bbox_xyxy=[xmin, ymin, xmax, ymax],
-            cpu_max_workers=cpu_max_workers or min(os.cpu_count() or 8, 16), mp_start_method="spawn"
-        )
-
-        if color_channel is None:
-            color_channel = (0 if self.edge_track_color_box.currentText() == "R"
-                            else 1 if self.edge_track_color_box.currentText() == "B"
-                            else 2)
-        gray = self.image_crop[:, :, color_channel].astype(np.float32)
-        pts_crop = self.pts_crop
-        if edge_params_fixed is None:
-            edge_params_fixed = {"window_half_size":45,"mu":0,"l":5,"p":14}
-
-        base_payload = dict(
-            image_crop_gray=gray, pts_crop=pts_crop,
-            manual_midline_global=man_xy_g, auto_midline_global=None,
-            bbox=(x, y, w, h), manual_normals_crop=None,
-            params=edge_params_fixed,
-        )
-
-        crack_dir = os.path.join(self._metrics_dir(), f"cid{crack_id}")
-        os.makedirs(crack_dir, exist_ok=True)
-
-        variants_out, metrics_rows = {}, {}
-        var_local_xy_by_id, variant_labels_by_id = {}, {}
-
-        man_xy_crop = np.column_stack([man_xy_g[:,0]-x, man_xy_g[:,1]-y])
-
-        for vid, r in enumerate(fm_results):
-            if not r.get("ok"): 
-                print(f"[AUTO {crack_id}] v{vid} ❌ {r.get('error')}"); 
-                continue
-
-            track_xy = np.asarray(r["track_full_xy"], float).T
-            d0 = np.linalg.norm(track_xy[0] - p0); d1 = np.linalg.norm(track_xy[0] - p1)
-            if d1 < d0: track_xy = track_xy[::-1]
-            track_xy = track_xy + (p0 - track_xy[0])
-
-            track_local_yx = np.vstack([track_xy[:,1]-y, track_xy[:,0]-x])
-            track_crop_xy  = np.column_stack([track_xy[:,0]-x, track_xy[:,1]-y])
-
-            payload = dict(base_payload); payload["adjusted_track"] = track_local_yx
-            ew = edge_param_worker(payload)
-
-            desc = _variant_desc(vid, g_variants[vid], edge_params_fixed)
-            variant_labels_by_id[vid] = desc["label"]
-
-            # flat vrec
-            vrec = {"midline": track_xy.tolist(), "mask_bbox":[x,y,w,h], "params": desc}
-            v_scores = {}
-            if ew and isinstance(ew, dict):
-                for k in ("normal_edge_points_full","normal_edge_points"):
-                    if k in ew and ew[k]: 
-                        vrec[k] = ew[k]
-                if ew.get("status") == "ok":
-                    v_scores = {k: float(ew[k]) for k in ("chamfer_mean","hausdorff","coverage") if k in ew}
-                    row = dict(ew)
-                    row.update({
-                        "image": base_name, "crack_id": crack_id, "variant_id": vid,
-                        **{k: desc[k] for k in ("g11","g22","g33","win","mu","ell","p")}
-                    })
-                    metrics_rows[vid] = row
-
-            variants_out[f"v{vid}"] = vrec
-            var_local_xy_by_id[vid] = track_crop_xy
-
-            # persist flat variant (also writes auto_best later)
-            set_auto_variant_for_crack(self.save_folder, base_name, crack_id, vrec, params=desc, is_best=False, scores=v_scores)
-
-            print(f"[AUTO {crack_id}] v{vid} len={len(track_xy)} startΔ={np.linalg.norm(track_xy[0]-p0):.2f} "
-                f"endΔ={np.linalg.norm(track_xy[-1]-p1):.2f}")
-
-        # choose best (by scores, smaller chamfer/hausdorff, larger coverage)
-        best_variant_id, best_flat = None, None
-        if metrics_rows:
-            df = pd.DataFrame(list(metrics_rows.values()))
-            df = df.sort_values(["chamfer_mean","hausdorff","coverage"], ascending=[True,True,False])
-            best_variant_id = int(df.iloc[0]["variant_id"])
-            df.to_csv(os.path.join(crack_dir, "rs3_variants.csv"), index=False)
-
-            import matplotlib.pyplot as plt
-            plt.figure(figsize=(6,3))
-            plt.bar(df["variant_id"].astype(str), df["chamfer_mean"])
-            plt.title(f"Chamfer by variant — {base_name} cid{crack_id}")
-            plt.xlabel("variant"); plt.ylabel("chamfer_mean")
-            plt.tight_layout()
-            plt.savefig(os.path.join(crack_dir, "chamfer_by_variant.png"), dpi=160); plt.close()
-
-        if best_variant_id is not None and f"v{best_variant_id}" in variants_out:
-            best_rec = variants_out[f"v{best_variant_id}"]
-            best_flat = set_auto_variant_for_crack(
-                self.save_folder, base_name, crack_id,
-                best_rec, params=best_rec.get("params"), is_best=True
-            )["auto_best"]
-
-        # overlays
-        crop_rgb = self.image_crop.copy()
-        if crop_rgb.ndim == 2: crop_rgb = cv2.cvtColor(crop_rgb, cv2.COLOR_GRAY2BGR)
-        im_overlay = crop_rgb.copy()
-        if len(man_xy_crop) >= 2:
-            pts = np.round(man_xy_crop).astype(np.int32).reshape(-1,1,2)
-            cv2.polylines(im_overlay, [pts], False, (0,0,0), 5, lineType=cv2.LINE_AA)
-            cv2.polylines(im_overlay, [pts], False, (255,255,255), 2, lineType=cv2.LINE_AA)
-        color_cycle = ["#e41a1c","#377eb8","#4daf4a","#984ea3","#ff7f00","#a65628","#f781bf","#999999","#1b9e77","#d95f02"]
-        for i,(vid, xy) in enumerate(sorted(var_local_xy_by_id.items())):
-            if xy is None or len(xy) < 2: continue
-            col = color_cycle[i % len(color_cycle)]
-            bgr = tuple(int(col.lstrip("#")[j:j+2], 16) for j in (4,2,0))
-            pts = np.round(xy).astype(np.int32).reshape(-1,1,2)
-            cv2.polylines(im_overlay, [pts], False, bgr, 2, lineType=cv2.LINE_AA)
-        cv2.imwrite(os.path.join(crack_dir, "midlines_overlay.png"), im_overlay)
-
-        plot_midlines_overlay_all(
-            image_crop_rgb=crop_rgb,
-            man_local_xy=man_xy_crop,
-            var_local_xy_by_id=var_local_xy_by_id,
-            variant_labels_by_id=variant_labels_by_id,
-            save_overlay_png=os.path.join(crack_dir, "midlines_overlay.png"),
-            save_legend_png=os.path.join(crack_dir, "midlines_overlay_legend.png"),
-        )
-
-        # refresh in-memory snapshot cache
-        from helpers.metrics import load_snapshot_from_files
-        self.metric_annotations = load_snapshot_from_files(self.save_folder, base_name)
-
-        print(f"[AUTO {crack_id}] ✅ {len(variants_out)} variants (best={best_variant_id})")
-        return {"variants": variants_out, "best_variant_id": best_variant_id, "best": best_flat}'''
-    
     def generate_auto_variants_for_manual_parallel(
         self,
         crack_id,
@@ -5348,18 +5187,20 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
     ):
         """
         Fast single-image execution of:
-            - manual edge tracking if missing
+            - snapshot sync from AUTHORING
             - (optional) edge param sweep
+            - edge tracking for MANUAL midlines (edge_param_worker + debug)
             - RS3 auto-variants per manual subcrack
-            - local RS3 family selection
+            - global RS3 family selection
+            - edge tracking for AUTO best (if present)
             - full mask/width metrics + supervision
 
-        This uses the snapshot structure exactly like batch_run, but without
-        global calibration. Super fast and clean for debugging.
+        Uses the same snapshot structure as batch_run, but without global calibration.
         """
 
         import os, time, numpy as np, pandas as pd
         from helpers import metrics
+        from helpers.save_load_files import load_snapshot_from_files
 
         if getattr(self, "original_image", None) is None:
             print("[quick] ❌ no image loaded")
@@ -5440,7 +5281,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print("[quick] edge calibration sweep...")
             rows = []
 
-            # NOTE: snapshot already synced above; _metric_atomic() now valid
+            # _metric_atomic() is valid after snapshot sync
             for cid, cr in self._metric_atomic().items():
                 src = (cr.get("source") or "").lower()
                 if src.startswith("auto") or src == "combined":
@@ -5465,7 +5306,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 keep_cols = [c for c in keep_cols if c in df_all.columns]
                 sub = df_all[keep_cols].dropna()
 
-                # reasonable composite objective
+                # composite objective using normalized distance metrics
                 sub["obj"] = (
                     1.0 * (sub["chamfer_mean"] / sub["chamfer_mean"].mean()) +
                     0.5 * (sub["hausdorff"] / sub["hausdorff"].mean()) +
@@ -5483,11 +5324,12 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         t_edge_calib = time.perf_counter() - t_edge_calib_start
 
         # ------------------------------------------------------------
-        # ENSURE TRACKED EDGES EXIST FOR MANUAL CRACKS
+        # PHASE 1: EDGE TRACKING FOR MANUAL CRACKS (edge_param_worker)
         # ------------------------------------------------------------
-        print("[quick] verifying geodesic edges + mask_crop for manual cracks...")
-        need_ids = []
+        print("[quick] running edge tracking for MANUAL cracks (debug plots)...")
+        t_manual_edges_start = time.perf_counter()
 
+        manual_ids = []
         for cid, cr in self._metric_atomic().items():
             src = (cr.get("source") or "").lower()
             if src.startswith("auto") or src == "combined":
@@ -5497,34 +5339,28 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 2:
                 continue
 
-            ge = cr.get("geodesic_edges", {}) or {}
-            has_e1 = isinstance(ge.get("edge1"), list) and len(ge.get("edge1")) > 1
-            has_e2 = isinstance(ge.get("edge2"), list) and len(ge.get("edge2")) > 1
-            has_mask = cr.get("mask_crop") is not None
+            manual_ids.append(cid)
 
-            if not (has_e1 and has_e2 and has_mask):
-                need_ids.append(cid)
+        print(f"[quick] manual cracks to edge-track: {manual_ids}")
 
-        if need_ids:
-            print(f"[quick] cracks needing edges: {need_ids}")
-            t_edgegen_start = time.perf_counter()
+        if manual_ids:
+            try:
+                _ = self.run_edge_tracking_parallel(
+                    crack_ids=manual_ids,
+                    cpu_max_workers=cpu_max_workers,
+                    edge_params_fixed=best_edge,
+                )
+            except Exception as e:
+                print(f"[quick] ⚠ manual edge tracking failed: {e}")
 
-            for cid in need_ids:
-                try:
-                    print(f"[quick] edgegen cid={cid} ...")
-                    ok = self.ensure_tracked_edges_and_normals(cid, best_edge)
-                    if not ok:
-                        print(f"[quick] ❌ ensure_tracked_edges_and_normals failed for cid={cid}")
-                except Exception as e:
-                    print(f"[quick] ❌ cid={cid} edgegen fail: {e}")
+            # reload snapshot to ensure new edges are visible
+            self.metric_annotations = load_snapshot_from_files(self.save_folder, base_name)
 
-            t_edgegen = time.perf_counter() - t_edgegen_start
-            print(f"[quick] edge-generation time = {t_edgegen:.2f}s")
-        else:
-            t_edgegen = 0.0
+        t_manual_edges = time.perf_counter() - t_manual_edges_start
+        print(f"[quick] manual-edge generation time = {t_manual_edges:.2f}s")
 
         # ------------------------------------------------------------
-        # RS3 AUTO VARIANTS (this image only)
+        # PHASE 1.5: RS3 AUTO VARIANTS (this image only)
         # ------------------------------------------------------------
         print("[quick] running RS3 auto variants...")
         t_auto_start = time.perf_counter()
@@ -5552,7 +5388,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         t_auto = time.perf_counter() - t_auto_start
 
         # ------------------------------------------------------------
-        # SELECT BEST RS3 FAMILY (IMAGE-LEVEL)
+        # PHASE 1.6: SELECT BEST RS3 FAMILY (IMAGE-LEVEL)
         # ------------------------------------------------------------
         print("[quick] selecting best RS3 family for this image...")
         if auto_packs:
@@ -5564,7 +5400,40 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print("[quick] ⚠ no auto_packs; skipping RS3 family selection.")
 
         # ------------------------------------------------------------
-        # MASK + WIDTH METRICS + SUPERVISION
+        # PHASE 2: GEODESIC EDGES FOR AUTO BEST MIDLINES
+        # ------------------------------------------------------------
+        print("[quick] generating geodesic edges for AUTO best midlines...")
+        t_auto_edges_start = time.perf_counter()
+
+        auto_ids = []
+        for cid, cr in self._metric_atomic().items():
+            # Depending on how _select_best_rs3_across_subcracks writes back,
+            # this may be either a separate 'auto_best' source or just nested under manual.
+            # Here we look for cracks explicitly marked as auto_best.
+            src = (cr.get("source") or "").lower()
+            if src == "auto_best":
+                auto_ids.append(cid)
+
+        print(f"[quick] auto cracks needing edges: {auto_ids}")
+
+        if auto_ids:
+            try:
+                _ = self.run_edge_tracking_parallel(
+                    crack_ids=auto_ids,
+                    cpu_max_workers=cpu_max_workers,
+                    edge_params_fixed=best_edge,
+                )
+            except Exception as e:
+                print(f"[quick] ⚠ auto-edgegen failed: {e}")
+
+            # reload snapshot to include AUTO edges
+            self.metric_annotations = load_snapshot_from_files(self.save_folder, base_name)
+
+        t_auto_edges = time.perf_counter() - t_auto_edges_start
+        print(f"[quick] auto-edge generation time = {t_auto_edges:.2f}s")
+
+        # ------------------------------------------------------------
+        # PHASE 3: MASK + WIDTH METRICS + SUPERVISION
         # ------------------------------------------------------------
         t_metrics_start = time.perf_counter()
         try:
@@ -5577,7 +5446,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         t_metrics = time.perf_counter() - t_metrics_start
 
         # ------------------------------------------------------------
-        # RUNTIME LOG
+        # LOGGING
         # ------------------------------------------------------------
         total_time = time.perf_counter() - t_total_start
         log_path = os.path.join(image_dir, "runtime_log.csv")
@@ -5585,8 +5454,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         row = {
             "image": base_name,
             "edge_calibration_s": round(t_edge_calib, 2),
-            "edge_generation_s": round(t_edgegen, 2),
+            "edge_generation_manual_s": round(t_manual_edges, 2),
             "auto_variants_s": round(t_auto, 2),
+            "auto_edgegen_s": round(t_auto_edges, 2),
             "mask_width_s": round(t_metrics, 2),
             "total_s": round(total_time, 2),
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -5604,8 +5474,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         print(
             f"[quick] ⏱ total = {total_time:.2f}s "
-            f"(edge_calib={t_edge_calib:.2f}s, edgegen={t_edgegen:.2f}s, "
-            f"auto={t_auto:.2f}s, mask_width={t_metrics:.2f}s)"
+            f"(edge_calib={t_edge_calib:.2f}s, manual-edgegen={t_manual_edges:.2f}s, "
+            f"auto={t_auto:.2f}s, auto-edgegen={t_auto_edges:.2f}s, mask_width={t_metrics:.2f}s)"
         )
 
         return {"image": base_name, "best_edge": best_edge}
