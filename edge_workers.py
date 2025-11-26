@@ -547,7 +547,33 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         track_e2_global = np.column_stack([track_e2[:,0]+x, track_e2[:,1]+y])
 
         # === OUTPUT SETUP ===
-        param_tag = f"ws{P['window_half_size']}_mu{P['mu']}_l{P['l']}_p{P['p']}"
+
+        # === OUTPUT SETUP ===
+        '''param_tag = f"ws{P['window_half_size']}_mu{P['mu']}_l{P['l']}_p{P['p']}"
+        dbg_dir = os.path.join(
+            payload["save_folder"],
+            "metrics",
+            base_name,
+            f"cid{crack_id}",
+            param_tag
+        )
+        os.makedirs(dbg_dir, exist_ok=True)'''
+        # determine source tag (manual vs auto)
+        src = str(payload.get("source", "")).lower()
+        if src.startswith("auto"):
+            midline_tag = "auto"
+        else:
+            midline_tag = "manual"
+
+        # parameter tag (edge params)
+        param_tag = (
+            f"{midline_tag}"
+            f"_ws{P['window_half_size']}"
+            f"_mu{P['mu']}"
+            f"_l{P['l']}"
+            f"_p{P['p']}"
+        )
+
         dbg_dir = os.path.join(
             payload["save_folder"],
             "metrics",
