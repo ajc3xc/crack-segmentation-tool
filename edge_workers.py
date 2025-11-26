@@ -502,7 +502,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         # --- timing: edge_masks ---
         t0 = time.perf_counter()
-        em1, em2 = edge_masks(img_norm, track_local_yx, window_half_size=int(P["window_half_size"], mode=seg_mode))
+        em1, em2 = edge_masks(img_norm, track_local_yx, window_half_size=int(P["window_half_size"]))
         t_edge_masks = float(time.perf_counter() - t0)
 
         midline_xy_crop = np.column_stack([track_local_yx[1], track_local_yx[0]])
@@ -547,8 +547,16 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         track_e2_global = np.column_stack([track_e2[:,0]+x, track_e2[:,1]+y])
 
         # === OUTPUT SETUP ===
-        dbg_dir = os.path.join(payload["save_folder"], "metrics", base_name, f"cid{crack_id}")
+        param_tag = f"ws{P['window_half_size']}_mu{P['mu']}_l{P['l']}_p{P['p']}"
+        dbg_dir = os.path.join(
+            payload["save_folder"],
+            "metrics",
+            base_name,
+            f"cid{crack_id}",
+            param_tag
+        )
         os.makedirs(dbg_dir, exist_ok=True)
+
 
         # --- Pretty RTX-on visualizations (edges + normals) ---
         pretty_path = os.path.join(dbg_dir, "edges_midlines_normals_pretty.png")
@@ -665,7 +673,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             print(f"[DEBUG VIS] ⚠️ gt_normals plotting failed: {e}")
 
         # --- Midline metrics ---
-        try:
+        '''try:
             n = min(len(track_e1), len(track_e2))
             auto_midline = 0.5 * (track_e1[:n] + track_e2[:n])
             man_midline = man_xy_g - np.array([x, y], float)
@@ -675,17 +683,9 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             metrics = {k: np.nan for k in [
                 "chamfer_mean","hausdorff","angle_err_deg","coverage",
                 "directional_bias","curvature_rms_ratio","local_thickness_corr"
-            ]}
+            ]}'''
 
-        '''result = {
-            "status": "ok",
-            "bbox": [x, y, w, h],
-            "mask_bbox": [x, y, w, h],
-            "mask_crop": mask_crop.tolist(),
-            "geodesic_edges": {"edge1": track_e1_global.tolist(), "edge2": track_e2_global.tolist()},
-            "normal_edge_points_full": {"edge1": normals_e1.tolist(), "edge2": normals_e2.tolist()},
-            **P, **metrics, **metrics_all
-        }'''
+        metrics = {}   # no midline scoring inside worker
         timing_dict = {
             "edge_masks_sec":      float(t_edge_masks),
             "edges_tracking_sec":  float(t_edges_tracking),
