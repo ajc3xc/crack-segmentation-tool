@@ -4832,6 +4832,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         edge_params_fixed=None,
         *,
         os_ablation=False,
+        smoke_test=True,
         os_modes=("old", "new"),
         save_os_cost_png=True,
     ):
@@ -4839,70 +4840,109 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         Auto midline variants with OS + RS3 ablation.
         *** Midline-only evaluation version ***
 
-        NEW:
-          - Returns a pack that includes a metrics_df for global selection.
-          - Each metrics row has a length/area weight so we can select a single
-            best param family across all subcracks for this image.
-
-        Still:
-          - NO edge_param_worker
-          - NO geodesic edges
-          - NO mask metrics
-          - NO normals
-          - Ranking ONLY by midline similarity to manual.
+        REQUIRES that per-crack snapshots already exist for cid{crack_id}.
+        If not found, this function now auto-syncs once and retries.
         """
+
         import os, math, numpy as np, pandas as pd, cv2
         import cracktools as ct
         from rs3_split import run_rs3_variants_split, _variant_desc, plot_midlines_overlay_all
         from helpers.metrics import (
-            set_auto_variant_for_crack, metric_atomic_path_for,
-            safe_read_json, compute_midline_metrics
+            set_auto_variant_for_crack,
+            metric_atomic_path_for,
+            safe_read_json,
+            compute_midline_metrics,
+            load_snapshot_from_files,
         )
 
+        # ------------------------------------------------------------
+        # 0) Resolve snapshot paths
+        # ------------------------------------------------------------
         base_name = self._image_base()
         p_cr = metric_atomic_path_for(self.save_folder, base_name, crack_id)
-        crack = safe_read_json(p_cr, {})
-        if not crack:
-            print(f"[AUTO {crack_id}] ❌ no per-crack snapshot")
-            return None
 
-        # allow only manual midlines
+        # ------------------------------------------------------------
+        # 1) Load crack entry; if missing → auto-resync snapshot once
+        # ------------------------------------------------------------
+        crack = safe_read_json(p_cr, None)
+
+        if not isinstance(crack, dict) or not crack:
+            print(f"[AUTO {crack_id}] ❌ snapshot missing → forcing resync…")
+
+            # force-build per-cid JSON files from authoring
+            try:
+                self._sync_metrics_snapshot_from_authoring(
+                    refresh_combine=False,
+                    persist=True
+                )
+            except Exception as e:
+                print(f"[AUTO {crack_id}] ❌ resync failed: {e}")
+                return None
+
+            # retry loading snapshot after sync
+            crack = safe_read_json(p_cr, None)
+            if not isinstance(crack, dict) or not crack:
+                print(f"[AUTO {crack_id}] ❌ still missing per-crack snapshot after sync")
+                return None
+
+        # ------------------------------------------------------------
+        # 2) Require manually authored cracks only
+        # ------------------------------------------------------------
         src = (crack.get("source") or "").lower()
         if src.startswith("auto") or src == "combined":
             print(f"[AUTO {crack_id}] skip non-manual crack")
             return None
 
-        x, y, w, h = map(int, crack.get("mask_bbox", [0, 0, 0, 0]))
+        # ------------------------------------------------------------
+        # 3) Validate bbox + midline
+        # ------------------------------------------------------------
+        try:
+            x, y, w, h = map(int, crack.get("mask_bbox", [0, 0, 0, 0]))
+        except Exception:
+            print(f"[AUTO {crack_id}] ❌ invalid bbox format")
+            return None
+
         if w <= 0 or h <= 0:
-            print(f"[AUTO {crack_id}] no bbox")
+            print(f"[AUTO {crack_id}] ❌ no bbox")
             return None
 
         xmin, ymin, xmax, ymax = x, y, x + w, y + h
         man_xy_g = np.asarray(crack.get("midline", []), float)
+
         if man_xy_g.ndim != 2 or len(man_xy_g) < 2:
-            print(f"[AUTO {crack_id}] invalid manual midline")
+            print(f"[AUTO {crack_id}] ❌ invalid manual midline")
             return None
 
-        # --- NEW: manual length + bbox area for weighting ---
+        # ------------------------------------------------------------
+        # 4) Precompute geometry (manual length, bbox area)
+        # ------------------------------------------------------------
         seg = man_xy_g[1:] - man_xy_g[:-1]
         man_len_px = float(np.sqrt((seg ** 2).sum(axis=1)).sum())
-        bbox_area  = float(max(w * h, 1))
+        bbox_area = float(max(w * h, 1))
 
-        p0, p1 = np.array(man_xy_g[0], float), np.array(man_xy_g[-1], float)
+        p0 = np.array(man_xy_g[0], float)
+        p1 = np.array(man_xy_g[-1], float)
 
+        # ------------------------------------------------------------
+        # 5) Ensure cid directory exists
+        # ------------------------------------------------------------
         crack_dir = os.path.join(self._metrics_dir(), f"cid{crack_id}")
         os.makedirs(crack_dir, exist_ok=True)
 
+        # (execution continues unchanged with your existing code)
         # -----------------------------------
         # 1) G-variants (midline curvature params)
         # -----------------------------------
         if g_variants is None:
-            vals = (25, 50, 75)
-            g_variants = [{"g11":1.0, "g22":v, "g33":v} for v in vals]
-            g_variants += [
-                {"g11":1.0, "g22":25, "g33":35},
-                {"g11":1.0, "g22":35, "g33":25},
-            ]
+            if smoke_test:
+                g_variants = [{"g11": 1.0, "g22":25, "g33":25}]
+            else:
+                vals = (25, 50, 75)
+                g_variants = [{"g11":1.0, "g22":v, "g33":v} for v in vals]
+                g_variants += [
+                    {"g11":1.0, "g22":25, "g33":35},
+                    {"g11":1.0, "g22":35, "g33":25},
+                ]
 
         # -----------------------------------
         # 2) OS + cost computation (multi-mode)
@@ -4929,7 +4969,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         def _run_os_cost_inline(mode_name: str):
             save_dir = crack_dir if save_os_cost_png else None
-            cost, timing, png_path = self.update_os_cost(
+            cost, timing = self.update_os_cost(
                 mode=mode_name, save_dir=save_dir, return_timing=True
             )
             return cost, timing
@@ -5320,7 +5360,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         import os, time, numpy as np, pandas as pd
         from helpers import metrics
-        from helpers.save_load_files import metric_atomic_path_for, safe_read_json
 
         if getattr(self, "original_image", None) is None:
             print("[quick] ❌ no image loaded")
@@ -5329,12 +5368,12 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         base_name = self._image_base()
         print(f"\n[quick] metrics for current image: {base_name}")
 
+        # ------------------------------------------------------------
+        # SAFETY CHECK — must have ≥2-pt manual midlines in AUTHORING
+        # ------------------------------------------------------------
         ann = (getattr(self, "annotation", {}) or {}).get("annotations", {}) or {}
-        atomic = ann.get("atomic_cracks", {}) or {}
+        atomic_authoring = ann.get("atomic_cracks", {}) or {}
 
-        # ------------------------------------------------------------
-        # SAFETY CHECK — must have ≥2-pt manual midlines, else purge snapshot
-        # ------------------------------------------------------------
         def _has_valid_manual_midlines(atomic_dict):
             for crack in atomic_dict.values():
                 src = (crack.get("source") or "").lower()
@@ -5345,7 +5384,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     return True
             return False
 
-        if not atomic or not _has_valid_manual_midlines(atomic):
+        if not atomic_authoring or not _has_valid_manual_midlines(atomic_authoring):
             print(f"[DEBUG QUICK] 🧹 No valid manual midlines — purging snapshot for {base_name}")
 
             metrics_dir = os.path.join(self.save_folder, "metrics")
@@ -5364,6 +5403,18 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             return {}
 
         # ------------------------------------------------------------
+        # SNAPSHOT SYNC (CRITICAL for per-cid files + _metric_atomic)
+        # ------------------------------------------------------------
+        try:
+            # Builds metrics/<base>/cid*/cid*.json and sets self.metric_annotations
+            self._sync_metrics_snapshot_from_authoring(
+                refresh_combine=False,
+                persist=True
+            )
+        except Exception as e:
+            print(f"[quick] ⚠ snapshot sync failed: {e}")
+
+        # ------------------------------------------------------------
         # SETUP
         # ------------------------------------------------------------
         image_dir = self._metrics_dir()
@@ -5374,20 +5425,22 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         # (OPTIONAL) EDGE PARAM CALIBRATION
         # ------------------------------------------------------------
         if edge_grid is None:
-            edge_grid = {"window_half_size": [35,45,55],
-                        "mu": [0,5],
-                        "l": [2,5],
-                        "p": [6,14]}
+            edge_grid = {
+                "window_half_size": [35, 45, 55],
+                "mu": [0, 5],
+                "l": [2, 5],
+                "p": [6, 14],
+            }
 
-        best_edge = {"window_half_size":45, "mu":0.0, "l":5, "p":14}
+        best_edge = {"window_half_size": 45, "mu": 0.0, "l": 5, "p": 14}
 
         t_edge_calib_start = time.perf_counter()
 
         if do_edge_calibrate:
             print("[quick] edge calibration sweep...")
             rows = []
-            self._sync_metrics_snapshot_from_authoring(refresh_combine=False, persist=True)
 
+            # NOTE: snapshot already synced above; _metric_atomic() now valid
             for cid, cr in self._metric_atomic().items():
                 src = (cr.get("source") or "").lower()
                 if src.startswith("auto") or src == "combined":
@@ -5397,20 +5450,26 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 if man.ndim != 2 or man.shape[1] != 2 or len(man) < 2:
                     continue
 
-                df = self.sweep_edges_with_executor(cid, grid=edge_grid, max_workers=cpu_max_workers)
+                df = self.sweep_edges_with_executor(
+                    cid,
+                    grid=edge_grid,
+                    max_workers=cpu_max_workers
+                )
                 if df is not None and not df.empty:
                     rows.append(df)
 
             if rows:
                 df_all = pd.concat(rows, ignore_index=True)
-                param_cols = ["param_window_half_size","param_mu","param_l","param_p"]
-                sub = df_all[[c for c in (param_cols+["chamfer_mean","hausdorff","coverage"]) if c in df_all.columns]].dropna()
+                param_cols = ["param_window_half_size", "param_mu", "param_l", "param_p"]
+                keep_cols = param_cols + ["chamfer_mean", "hausdorff", "coverage"]
+                keep_cols = [c for c in keep_cols if c in df_all.columns]
+                sub = df_all[keep_cols].dropna()
 
-                # NEW professional objective
+                # reasonable composite objective
                 sub["obj"] = (
                     1.0 * (sub["chamfer_mean"] / sub["chamfer_mean"].mean()) +
                     0.5 * (sub["hausdorff"] / sub["hausdorff"].mean()) +
-                    0.3 * (1 - sub["coverage"])
+                    0.3 * (1.0 - sub["coverage"])
                 )
 
                 best = sub.sort_values("obj", ascending=True).iloc[0]
@@ -5420,7 +5479,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     "l": int(best["param_l"]),
                     "p": int(best["param_p"]),
                 }
-
 
         t_edge_calib = time.perf_counter() - t_edge_calib_start
 
@@ -5497,36 +5555,44 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         # SELECT BEST RS3 FAMILY (IMAGE-LEVEL)
         # ------------------------------------------------------------
         print("[quick] selecting best RS3 family for this image...")
-        self._select_best_rs3_across_subcracks(auto_packs)
+        if auto_packs:
+            try:
+                self._select_best_rs3_across_subcracks(auto_packs)
+            except Exception as e:
+                print(f"[quick] ⚠ RS3 family selection failed: {e}")
+        else:
+            print("[quick] ⚠ no auto_packs; skipping RS3 family selection.")
 
-                # ---- metrics + plots + supervision for this image ----
-        from helpers import metrics as metrics_mod
-
+        # ------------------------------------------------------------
+        # MASK + WIDTH METRICS + SUPERVISION
+        # ------------------------------------------------------------
         t_metrics_start = time.perf_counter()
-        self.compute_mask_and_width_metrics_for_image(
-            display=False,
-            export_supervision=True,
-            cache_key=metrics_mod._auto_cache_key(self),
-            include_auto=True,
-        )
-        t_mask_width = time.perf_counter() - t_metrics_start
+        try:
+            self.compute_mask_and_width_metrics_for_image(
+                display=False,
+                export_supervision=True,
+            )
+        except Exception as e:
+            print(f"[quick] ❌ compute_mask_and_width_metrics_for_image failed: {e}")
+        t_metrics = time.perf_counter() - t_metrics_start
 
+        # ------------------------------------------------------------
+        # RUNTIME LOG
+        # ------------------------------------------------------------
         total_time = time.perf_counter() - t_total_start
-
-        # log timings
         log_path = os.path.join(image_dir, "runtime_log.csv")
+
         row = {
             "image": base_name,
             "edge_calibration_s": round(t_edge_calib, 2),
-            "auto_variants_s": round(t_auto_variants, 2),
-            "mask_build_s": 0.0,                     # now folded into mask_width_s
-            "mask_width_s": round(t_mask_width, 2),  # full metrics+plots time
-            "supervision_s": 0.0,
+            "edge_generation_s": round(t_edgegen, 2),
+            "auto_variants_s": round(t_auto, 2),
+            "mask_width_s": round(t_metrics, 2),
             "total_s": round(total_time, 2),
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
+
         try:
-            import pandas as pd
             if os.path.exists(log_path):
                 df = pd.read_csv(log_path)
                 df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
@@ -5534,10 +5600,14 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 df = pd.DataFrame([row])
             df.to_csv(log_path, index=False)
         except Exception as e:
-            print(f"[quick] failed to write runtime_log.csv: {e}")
+            print(f"[quick] ⚠ failed to write runtime_log.csv: {e}")
 
-        print(f"[quick] ⏱ total = {total_time:.2f}s (edge={t_edge_calib:.2f}s, auto={t_auto_variants:.2f}s, "
-              f"mask_width={t_mask_width:.2f}s)")
+        print(
+            f"[quick] ⏱ total = {total_time:.2f}s "
+            f"(edge_calib={t_edge_calib:.2f}s, edgegen={t_edgegen:.2f}s, "
+            f"auto={t_auto:.2f}s, mask_width={t_metrics:.2f}s)"
+        )
+
         return {"image": base_name, "best_edge": best_edge}
 
     # ---- 9) generate_auto_manual_midline (READ FROM SNAPSHOT VARIANTS) -----------

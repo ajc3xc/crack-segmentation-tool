@@ -740,40 +740,66 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
             
     def update_os_cost(self, mode="new", save_dir=None, return_timing=False):
         """
-        Single unified function for OS + COST generation.
-        Used both by GUI buttons and pipeline.
+        Unified OS + COST generator.
+        Returns:
+            (cost_volume, timing_dict)  if return_timing=True
+            cost_volume                 if return_timing=False
+
+        cost_volume = self.costFunction (3-D), suitable for RS3.
         """
         import time, cv2
+        import numpy as np
+        import cracktools as ct
+
+        # Remember old mode so global state is restored later
+        prev_mode = getattr(ct.os, "OS_MODE", "new")
+
         try:
-            # Select OS mode
+            # ---- 1) Set OS MODE ----
             if hasattr(ct.os, "set_os_mode"):
                 ct.os.set_os_mode(mode)
             else:
                 ct.os.OS_MODE = mode
 
-            self.update_image_crop()
+            # ---- 2) Ensure crop is up to date ----
+            if hasattr(self, "update_image_crop"):
+                self.update_image_crop()
 
-            # ----- OS -----
+            # ---- 3) OS stage ----
             t0 = time.time()
-            self.update_os()
+            if hasattr(self, "update_os"):
+                self.update_os()
             t_os = time.time() - t0
             print(f"[update_os_cost] OS ({mode}) = {t_os:.3f}s")
 
-            # ----- COST -----
-            c00, timing_cost = self.update_cost(return_timing=True)
-            t_cost = timing_cost["t_total"]
+            # ---- 4) COST stage ----
+            out = self.update_cost(return_timing=True)
+            if out is None:
+                print(f"[update_os_cost] ❌ update_cost failed (mode={mode})")
+                return None if not return_timing else (None, {})
+            c00, timing_cost = out
+            t_cost = timing_cost.get("t_total", 0.0)
 
-            if c00 is None:
-                print("[update_os_cost] ❌ cost failed")
-                return None
+            # ---- 5) Extract full 3-D cost volume for RS3 ----
+            cost_volume = getattr(self, "costFunction", None)
+            if cost_volume is None:
+                print(f"[update_os_cost] ❌ self.costFunction is None (mode={mode})")
+                return None if not return_timing else (None, {})
 
-            # ----- Optional save -----
+            cost_volume = np.asarray(cost_volume, dtype=float)
+
+            # ---- 6) Optionally save 2-D preview ----
             png_path = None
             if save_dir is not None:
-                png_path = f"{save_dir}/os_cost_{mode}.png"
-                cv2.imwrite(png_path, c00)
+                try:
+                    os.makedirs(save_dir, exist_ok=True)
+                    png_path = f"{save_dir}/os_cost_{mode}.png"
+                    cv2.imwrite(png_path, c00)
+                    print(f"[update_os_cost] saved preview → {png_path}")
+                except Exception as e:
+                    print(f"[update_os_cost] ⚠ preview save failed: {e}")
 
-            # ----- Return timing if requested -----
+            # ---- 7) Package timing ----
             timing = {
                 "mode": mode,
                 "os_sec": t_os,
@@ -782,13 +808,16 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
                 "png_path": png_path,
             }
 
+            # ---- 8) Return ----
             if return_timing:
-                return c00, timing
-
-            print(f"[update_os_cost] total={t_os+t_cost:.3f}s")
-            print("OS + COST generated successfully.")
+                return cost_volume, timing
+            else:
+                return cost_volume
 
         except Exception as e:
-            error(e)
-            print("Error generating OS/COST:", e)
-            return None
+            print(f"[update_os_cost] ❌ exception: {e}")
+            return None if not return_timing else (None, {})
+
+        finally:
+            # Restore previous OS_MODE so GUI stays consistent
+            ct.os.OS_MODE = prev_mode
