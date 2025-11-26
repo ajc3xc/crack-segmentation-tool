@@ -111,6 +111,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/win-64/pillow-11.3.0-py311h0f9b5fc_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-25.1.1-pyh8b19718_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pixman-0.46.4-hc614b68_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-64/psutil-7.1.3-py311hf893f09_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pthread-stubs-0.4-h0e40799_1002.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pyparsing-3.2.3-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pyside6-6.9.1-py311h5d1a980_0.conda
@@ -1860,6 +1861,24 @@ packages:
   - xarray ; extra == 'dev-optional'
   - plotly[dev-optional] ; extra == 'dev'
   requires_python: '>=3.8'
+- conda: https://conda.anaconda.org/conda-forge/win-64/psutil-7.1.3-py311hf893f09_0.conda
+  sha256: 62611ce54d62682f9e37100bb3af4da1a9da49d631fd505521e20647a6e2e171
+  md5: 697ef79a96ce3fb39ca62aa58a8915c7
+  depends:
+  - python
+  - vc >=14.3,<15
+  - vc14_runtime >=14.44.35208
+  - ucrt >=10.0.20348.0
+  - vc >=14.3,<15
+  - vc14_runtime >=14.44.35208
+  - ucrt >=10.0.20348.0
+  - python_abi 3.11.* *_cp311
+  license: BSD-3-Clause
+  license_family: BSD
+  purls:
+  - pkg:pypi/psutil?source=hash-mapping
+  size: 532233
+  timestamp: 1762092931133
 - conda: https://conda.anaconda.org/conda-forge/win-64/pthread-stubs-0.4-h0e40799_1002.conda
   sha256: 7e446bafb4d692792310ed022fe284e848c6a868c861655a92435af7368bae7b
   md5: 3c8f2573569bb816483e5cf57efbbe29
