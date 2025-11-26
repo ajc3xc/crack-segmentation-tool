@@ -489,13 +489,20 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     P = payload["params"]
     crack_id = payload.get("crack_id", "?")
     base_name = payload.get("image_base", "unknown")
+    
+    # -----------------------------------------------------------
+    # NEW: segmentation mode toggle
+    # -----------------------------------------------------------
+    seg_mode = str(P.get("seg_mode", "new")).lower()
+    if seg_mode not in ("old", "new"):
+        seg_mode = "new"
 
     try:
         img_norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
         # --- timing: edge_masks ---
         t0 = time.perf_counter()
-        em1, em2 = edge_masks(img_norm, track_local_yx, window_half_size=int(P["window_half_size"]))
+        em1, em2 = edge_masks(img_norm, track_local_yx, window_half_size=int(P["window_half_size"], mode=seg_mode))
         t_edge_masks = float(time.perf_counter() - t0)
 
         midline_xy_crop = np.column_stack([track_local_yx[1], track_local_yx[0]])
@@ -510,6 +517,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             mu=int(P["mu"]), l=int(P["l"]), p=int(P["p"]),
             return_normal_edges=True,
             prefer_gpu=True,
+            mode=seg_mode,               # <<< CRITICAL
         )
         t_edges_tracking = float(time.perf_counter() - t1)
 
