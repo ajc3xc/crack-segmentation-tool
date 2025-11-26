@@ -3794,31 +3794,50 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         print(f"[DEBUG METRICS] ===== END for {base_name} =====")
     
     # ===============================================================
-    # === Smoke test edge worker (cropped + light aware) ===
+    # === Smoke test edge worker (cropped + light aware) ============
     # ===============================================================
     def smoke_test_edges_for_manual(self, crack_id, edge_params=None, color_channel=None):
         import os, numpy as np, traceback, cv2
-        from edge_workers import edge_param_worker, _debug_plot_edge_worker
-        #from helpers.metrics import (
-        #    metric_atomic_path_for, safe_read_json,
-        #    set_tracked_edges_for_crack, metric_image_dir
-        #)
+
+        from edge_workers import edge_param_worker
+        from helpers.metrics import (
+            metric_atomic_path_for,
+            safe_read_json,
+            set_tracked_edges_for_crack,
+        )
+
+        # -----------------------------------------------------------
+        # Load per-crack snapshot
+        # -----------------------------------------------------------
         base = self._image_base()
         p = metric_atomic_path_for(self.save_folder, base, crack_id)
         cr = safe_read_json(p, {})
+
         if not cr:
             print(f"[smoke] ❌ no snapshot for cid={crack_id}")
             return False
 
+        # -----------------------------------------------------------
+        # Validate bbox + midline
+        # -----------------------------------------------------------
         H, W = self.original_image.shape[:2]
+
         bb = cr.get("mask_bbox", None)
-        if not (isinstance(bb, (list, tuple)) and len(bb) == 4):
+        if not (isinstance(bb, (list,tuple)) and len(bb)==4):
             print(f"[smoke] ❌ cid{crack_id}: invalid mask_bbox {bb}")
             return False
-        x, y, w, h = map(int, bb)
-        xmin, ymin, xmax, ymax = x, y, x + w, y + h
-        man_xy_g = np.asarray(cr.get("midline", []), float)
 
+        x, y, w, h = map(int, bb)
+        xmin, ymin, xmax, ymax = x, y, x+w, y+h
+
+        man_xy_g = np.asarray(cr.get("midline", []), float)
+        if man_xy_g.ndim != 2 or man_xy_g.shape[1] != 2 or len(man_xy_g) < 2:
+            print(f"[smoke] ❌ cid{crack_id}: invalid midline")
+            return False
+
+        # -----------------------------------------------------------
+        # Setup GUI crop extraction
+        # -----------------------------------------------------------
         try:
             self.active_bbox = [xmin, ymin, xmax, ymax]
             self.pts = [man_xy_g[0].copy(), man_xy_g[-1].copy()]
@@ -3826,64 +3845,97 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             self.update_image_crop()
             if getattr(self, "skip_current_segment", False):
                 return False
-        except Exception as e:
+        except Exception:
             traceback.print_exc()
             return False
 
+        # -----------------------------------------------------------
+        # Channel selection
+        # -----------------------------------------------------------
         if color_channel is None:
-            color_channel = (0 if self.edge_track_color_box.currentText()=="R"
-                            else 1 if self.edge_track_color_box.currentText()=="B"
-                            else 2)
-        gray = self.image_crop[:, :, color_channel].astype(np.float32)
-        track_local_yx = np.vstack([man_xy_g[:,1]-ymin, man_xy_g[:,0]-xmin])
-        if edge_params is None:
-            edge_params = {"window_half_size":45, "mu":0.0, "l":5, "p":14, "seg_mode": "new"}
+            color_channel = (
+                0 if self.edge_track_color_box.currentText()=="R"
+                else 1 if self.edge_track_color_box.currentText()=="B"
+                else 2
+            )
 
+        gray = self.image_crop[:, :, color_channel].astype(np.float32)
+        track_local_yx = np.vstack([man_xy_g[:,1] - y, man_xy_g[:,0] - x])
+
+        if edge_params is None:
+            edge_params = {"window_half_size":45, "mu":0.0, "l":5, "p":14, "seg_mode":"new"}
+
+        # -----------------------------------------------------------
+        # GT crop for worker
+        # -----------------------------------------------------------
         gt_crop = None
         if getattr(self, "current_mask", None) is not None:
             gt_crop = ((self.current_mask[y:y+h, x:x+w]) > 0).astype(np.uint8)
 
+        # -----------------------------------------------------------
+        # Global GT + image for worker
+        # -----------------------------------------------------------
+        if getattr(self, "current_mask", None) is not None:
+            gt_full = (self.current_mask > 0).astype(np.uint8)
+        else:
+            gt_full = np.zeros((H, W), np.uint8)
+
+        # -----------------------------------------------------------
+        # Build payload EXACTLY like extract_edge_inputs_for_subcrack()
+        # -----------------------------------------------------------
         payload = dict(
-            image_crop_gray=gray,
-            pts_crop=self.pts_crop,
-            adjusted_track=track_local_yx,
-            manual_midline_global=man_xy_g,
-            bbox=(x, y, w, h),
-            params=edge_params,
-            save_folder=self.save_folder,
-            image_base=base,
-            crack_id=str(crack_id),
-            gt_crop=gt_crop,
+            image_crop_gray       = gray,
+            pts_crop              = self.pts_crop,
+            adjusted_track        = track_local_yx,
+            manual_midline_global = man_xy_g,
+            auto_midline_global   = None,
+            bbox                  = (x, y, w, h),
+            params                = edge_params,
+            gt_crop               = gt_crop,
+
+            # global info (for save_gt_vs_manual_overlay in worker)
+            image_shape           = (H, W),
+            gt_full               = gt_full,
+            original_image        = self.original_image,
+
+            # worker-required
+            save_folder           = self.save_folder,
+            image_base            = base,
+            crack_id              = str(crack_id),
+            source                = "manual",
         )
 
+        # -----------------------------------------------------------
+        # Run worker
+        # -----------------------------------------------------------
         ew = edge_param_worker(payload)
         if not isinstance(ew, dict):
             print(f"[smoke] ❌ edge worker returned empty for cid{crack_id}")
             return False
 
-        set_tracked_edges_for_crack(self.save_folder, base, crack_id, ew, mask_crop=ew.get("mask_crop"))
-        #cid_path = os.path.join(self.save_folder, "metrics", base, f"cid{crack_id}.json")
+        # -----------------------------------------------------------
+        # Save results to per-cid snapshot
+        # -----------------------------------------------------------
+        set_tracked_edges_for_crack(
+            self.save_folder,
+            base,
+            crack_id,
+            ew,
+            mask_crop=ew.get("mask_crop"),
+        )
+
         cid_path = metric_atomic_path_for(self.save_folder, base, crack_id)
         if os.path.exists(cid_path):
-            print(f"[smoke] ✅ found snapshot {cid_path}")
+            print(f"[smoke] ✅ updated snapshot → {cid_path}")
         else:
             print(f"[smoke] ❌ expected cid file not found at {cid_path}")
 
+        # -----------------------------------------------------------
+        # Optional: Legacy heavy debug (only if DEBUG_SAVE_LIGHT=False)
+        # -----------------------------------------------------------
         if not DEBUG_SAVE_LIGHT:
-            # old heavy overlays only when full debug enabled
             try:
-                e1 = np.array(ew.get("geodesic_edges", {}).get("edge1", []), float)
-                e2 = np.array(ew.get("geodesic_edges", {}).get("edge2", []), float)
-                _debug_plot_edge_worker(
-                    gray, np.zeros_like(gray), np.zeros_like(gray),
-                    np.column_stack([track_local_yx[1], track_local_yx[0]]),
-                    e1, e2, edge_params, tag=f"cid{crack_id}_smoke",
-                )
-                print(f"[smoke] wrote edge-worker debug plot for cid{crack_id}")
-            except Exception as e:
-                print(f"[smoke] overlay(local) failed: {e}")
-
-            try:
+                # Overlay edges on the original image (legacy)
                 ge = cr.get("geodesic_edges", {})
                 overlay = self.original_image.copy()
                 if overlay.ndim == 2:
@@ -3992,7 +4044,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print(f"[SMOKE] mask/width stage failed: {e}")
 
         # --- 4) move per-CID overlay into its folder + redraw midline on gt_normals ---
-        try:
+        '''try:
             H, W = self.original_image.shape[:2]
             gt_full = (self.current_mask > 0).astype(np.uint8) if getattr(self, "current_mask", None) is not None else np.zeros((H, W), np.uint8)
             ann = self._metric_atomic()
@@ -4066,7 +4118,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         self.dump_global_midline_and_mask_overlays(thickness_px=3)
         total_time = time.perf_counter() - t_total_start
-        print(f"[SMOKE] ✅ completed minimal metrics in {total_time:.2f}s\n")
+        print(f"[SMOKE] ✅ completed minimal metrics in {total_time:.2f}s\n")'''
          
     # ================= crack_tool.py (metrics snapshot integration) =================
 
@@ -4302,7 +4354,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         """
         Faithful payload builder for edge_param_worker.
         Reads ONLY from the per-crack snapshot file and constructs
-        a COMPLETE payload matching what smoke_test_edges_for_manual uses.
+        a COMPLETE payload matching what smoke_test_edges_for_manual uses,
+        plus global info needed for save_gt_vs_manual_overlay.
         """
         import numpy as np
         from helpers.metrics import metric_atomic_path_for, safe_read_json
@@ -4315,6 +4368,19 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         if not ann:
             print(f"[extract_edge_inputs] no snapshot for cid={cid}")
             return None
+
+        # ---------------------------------------------------------
+        # Global image + GT (for global overlay)
+        # ---------------------------------------------------------
+        if getattr(self, "original_image", None) is None:
+            print(f"[extract_edge_inputs] ❌ no original_image for cid={cid}")
+            return None
+
+        H, W = self.original_image.shape[:2]
+        if getattr(self, "current_mask", None) is not None:
+            gt_full = (self.current_mask > 0).astype(np.uint8)
+        else:
+            gt_full = np.zeros((H, W), np.uint8)
 
         # ---------------------------------------------------------
         # 1. BBOX
@@ -4373,11 +4439,11 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         if isinstance(ne, dict):
             e1 = np.asarray(ne.get("edge1", []), float)
             e2 = np.asarray(ne.get("edge2", []), float)
-            e1c = np.column_stack([e1[:,0]-x, e1[:,1]-y]) if e1.ndim==2 else np.empty((0,2))
-            e2c = np.column_stack([e2[:,0]-x, e2[:,1]-y]) if e2.ndim==2 else np.empty((0,2))
+            e1c = np.column_stack([e1[:, 0] - x, e1[:, 1] - y]) if e1.ndim == 2 else np.empty((0, 2))
+            e2c = np.column_stack([e2[:, 0] - x, e2[:, 1] - y]) if e2.ndim == 2 else np.empty((0, 2))
             if len(e1c) and len(e2c):
-                man_normals_crop = [[e1c[:,0], e1c[:,1]],
-                                    [e2c[:,0], e2c[:,1]]]
+                man_normals_crop = [[e1c[:, 0], e1c[:, 1]],
+                                    [e2c[:, 0], e2c[:, 1]]]
 
         # ---------------------------------------------------------
         # 6. Gray channel
@@ -4392,35 +4458,40 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         gray = self.image_crop[:, :, color_channel].astype(np.float32)
 
         # clamp endpoints to image crop
-        H, W = gray.shape[:2]
+        Hc, Wc = gray.shape[:2]
         for p in self.pts_crop:
-            p[0] = np.clip(p[0], 0, W-1e-3)
-            p[1] = np.clip(p[1], 0, H-1e-3)
+            p[0] = np.clip(p[0], 0, Wc - 1e-3)
+            p[1] = np.clip(p[1], 0, Hc - 1e-3)
 
         # ---------------------------------------------------------
-        # 7. OPTIONAL: GT CROP (just like smoke test)
+        # 7. OPTIONAL: GT CROP (same as smoke test)
         # ---------------------------------------------------------
         gt_crop = None
         if getattr(self, "current_mask", None) is not None:
-            gt_crop = ((self.current_mask[y:y+h, x:x+w]) > 0).astype(np.uint8)
+            gt_crop = ((self.current_mask[y:y + h, x:x + w]) > 0).astype(np.uint8)
 
         # ---------------------------------------------------------
-        # 8. FINAL PAYLOAD – FULL MATCH TO SMOKE TEST
+        # 8. FINAL PAYLOAD – FULL MATCH + GLOBAL INFO
         # ---------------------------------------------------------
         return dict(
-            image_crop_gray      = gray,
-            pts_crop             = self.pts_crop,
-            adjusted_track       = track_local_yx,
-            manual_midline_global= man_xy_g,
-            auto_midline_global  = None,
-            bbox                 = (x, y, w, h),
-            manual_normals_crop  = man_normals_crop,
-            gt_crop              = gt_crop,
+            image_crop_gray       = gray,
+            pts_crop              = self.pts_crop,
+            adjusted_track        = track_local_yx,
+            manual_midline_global = man_xy_g,
+            auto_midline_global   = None,
+            bbox                  = (x, y, w, h),
+            manual_normals_crop   = man_normals_crop,
+            gt_crop               = gt_crop,
 
-            # 🔥 Required by edge_param_worker
-            save_folder          = self.save_folder,
-            image_base           = base,
-            crack_id             = cid,
+            # global info for save_gt_vs_manual_overlay
+            image_shape           = (H, W),
+            gt_full               = gt_full,
+            original_image        = self.original_image,
+
+            # required by edge_param_worker
+            save_folder           = self.save_folder,
+            image_base            = base,
+            crack_id              = cid,
         )
 
     def run_edge_tracking_parallel(
