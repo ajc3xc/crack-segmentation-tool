@@ -4464,14 +4464,14 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             p[1] = np.clip(p[1], 0, Hc - 1e-3)
 
         # ---------------------------------------------------------
-        # 7. OPTIONAL: GT CROP (same as smoke test)
+        # 7. OPTIONAL: GT CROP
         # ---------------------------------------------------------
         gt_crop = None
         if getattr(self, "current_mask", None) is not None:
             gt_crop = ((self.current_mask[y:y + h, x:x + w]) > 0).astype(np.uint8)
 
         # ---------------------------------------------------------
-        # 8. FINAL PAYLOAD – FULL MATCH + GLOBAL INFO
+        # 8. FINAL PAYLOAD
         # ---------------------------------------------------------
         return dict(
             image_crop_gray       = gray,
@@ -4504,13 +4504,10 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         """
         Parallelize edge-mask + edge-tracking and save results into per-crack files.
 
-        - Uses extract_edge_inputs_for_subcrack() as the *single authoritative*
-        payload builder. That function MUST return all fields needed by the worker:
-            save_folder, image_base, crack_id, bbox, image_crop_gray, pts_crop,
-            adjusted_track, manual_midline_global, gt_crop, manual_normals_crop.
+        - Uses extract_edge_inputs_for_subcrack() as the authoritative payload builder.
         - Uses _flatten_edge_worker_result() to build timing-aware CSV rows.
         - Writes geodesic edges + masks back into per-cid JSON via set_tracked_edges_for_crack().
-        - Then reloads snapshot so downstream metrics see updated edges.
+        - Reloads snapshot so downstream metrics see updated edges.
         """
         import os, time
         import numpy as np
@@ -4521,7 +4518,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         from helpers.metrics import set_tracked_edges_for_crack, load_snapshot_from_files
 
         # ---------------------------------------------------------------------
-        # 0) Initial sync from authoring into snapshot structure
+        # 0) Sync snapshot from authoring
         # ---------------------------------------------------------------------
         t0 = time.perf_counter()
         self._sync_metrics_snapshot_from_authoring(refresh_combine=False, persist=True)
@@ -4555,7 +4552,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         os.makedirs(metrics_dir, exist_ok=True)
 
         # ---------------------------------------------------------------------
-        # 2) Build payloads using the *updated* extract_edge_inputs_for_subcrack()
+        # 2) Build payloads
         # ---------------------------------------------------------------------
         tasks = []
         for cid in crack_ids:
@@ -4586,7 +4583,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     ew = fut.result()
 
                     if isinstance(ew, dict):
-                        # Persist results (geodesic edges, mask_crop, normals)
+                        # Persist results
                         set_tracked_edges_for_crack(
                             self.save_folder,
                             base_name,
@@ -4595,7 +4592,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                             mask_crop=ew.get("mask_crop"),
                         )
 
-                        # Build flattened timing/metric row for CSV
+                        # CSV row
                         row = self._flatten_edge_worker_result(
                             crack_id=cid,
                             params=edge_params_fixed,
@@ -4612,7 +4609,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     print(f"[edge-parallel] cid{cid} ❌ {e}")
 
         # ---------------------------------------------------------------------
-        # 4) Export CSV / Runtime summary
+        # 4) Export CSV
         # ---------------------------------------------------------------------
         t_elapsed = time.perf_counter() - t0
 
@@ -4628,7 +4625,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print(f"[edge-parallel] ⚠ no successful results (elapsed {t_elapsed:.2f}s)")
 
         # ---------------------------------------------------------------------
-        # 5) Reload snapshot so downstream metrics see the updated edges
+        # 5) Reload snapshot
         # ---------------------------------------------------------------------
         self.metric_annotations = load_snapshot_from_files(self.save_folder, base_name)
         return rows

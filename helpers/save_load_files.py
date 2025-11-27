@@ -501,7 +501,7 @@ def set_auto_variant_for_crack(save_folder, base_name, crack_id, vrec, params=No
     safe_write_json(p, rec)
     return rec
 
-def set_tracked_edges_for_crack(save_folder: str, base: str, cid, payload: dict, mask_crop=None):
+'''def set_tracked_edges_for_crack(save_folder: str, base: str, cid, payload: dict, mask_crop=None):
     p = metric_atomic_path_for(save_folder, base, cid)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     data = dict(payload or {})
@@ -509,6 +509,53 @@ def set_tracked_edges_for_crack(save_folder: str, base: str, cid, payload: dict,
         data["mask_crop"] = mask_crop
     with open(p, "w", encoding="utf-8") as f:
         json.dump(data, f)
+    return p'''
+def set_tracked_edges_for_crack(save_folder: str, base: str, cid, payload: dict, mask_crop=None):
+    """
+    Safely merge edge-tracking outputs into the existing per-cid snapshot.
+
+    CRITICAL FIX:
+      - DOES NOT OVERWRITE the entire cidX.json.
+      - PRESERVES: auto_best, auto_variants, source, manual midline, RS3 midline, etc.
+      - UPDATES ONLY: geodesic edges, mask_crop, timing, metrics, and worker params.
+
+    This prevents auto variants from being destroyed during manual-edge generation.
+    """
+
+    import os
+    from helpers.metrics import safe_read_json
+
+    p = metric_atomic_path_for(save_folder, base, cid)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+
+    # --- Load old record FIRST ---------------
+    old = safe_read_json(p, {})
+
+    # Normalize to dict
+    if not isinstance(old, dict):
+        old = {}
+
+    # --- Begin with previous data -----------
+    merged = dict(old)
+
+    # --- Merge IN new worker payload fields --
+    # (payload contains: status, bbox, mask_bbox, mask_crop, geodesic_edges, timing,
+    #  window_half_size, mu, l, p, IoU metrics, boundary metrics, ASSD, HD95 …)
+    for k, v in (payload or {}).items():
+        merged[k] = v
+
+    # --- Explicit mask_crop overwrite -------
+    if mask_crop is not None:
+        merged["mask_crop"] = mask_crop
+
+    # --- Ensure crack_id preserved ----------
+    if "crack_id" not in merged:
+        merged["crack_id"] = cid
+
+    # --- Write MERGED JSON ------------------
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(merged, f, indent=2)
+
     return p
     
 def set_geodesic_edges_for_crack(save_folder, base_name, crack_id, ge_dict):
