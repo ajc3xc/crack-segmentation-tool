@@ -31,105 +31,193 @@ def edge_masks(
     image_gray,
     track,
     window_half_size=40,
-    mode="new"   # "new" or "old"
+    mode="new",   # "new" (GPU hybrid) or "old" (akomp22)
 ):
     """
-    Unified edge mask extractor for ablation:
-    ---------------------------------------------------------
-    mode="old" → EXACT ORIGINAL REPO IMPLEMENTATION
-        - rotation-based window alignment
-        - sobel after rotate
-        - gaussian_filter(order=(1,0))
-        - no GPU
-        - no numeric stabilization
-        - fully faithful, bit-for-bit identical (except float rounding)
+    Unified edge mask extractor.
 
-    mode="new" → GPU-optional optimized version
-        - per-patch gpu sobel if available
-        - no rotation
-        - normal-projection gradient
-        - much more stable on wide/weak cracks
+    mode="new" → your CURRENT GPU/CPU hybrid implementation
+                 (fully working, used for actual experiments)
 
-    Returns:
-        edge_mask1, edge_mask2
+    mode="old" → faithful port of the original akomp22 version
+                 (keeps the x/y quirks, mainly for ablation)
     """
     import numpy as np
     import scipy.ndimage as ndi
 
-    # ===============================================================
-    # ===================== MODE: OLD VERSION =======================
-    # ===============================================================
-    if mode == "old":
-        # ---- this is the ORIGINAL implementation kept intact ----
+    # ------------------------------------------------------------------
+    # =============== MODE: NEW (YOUR GPU HYBRID) ======================
+    # ------------------------------------------------------------------
+    if str(mode).lower() == "new":
+        """
+        This branch is IDENTICAL to your working GPU hybrid version.
+        """
+        # Try to import CuPy and test for an actual GPU
+        try:
+            import cupy as cp, cupyx.scipy.ndimage as cndi
+            try:
+                n_devices = cp.cuda.runtime.getDeviceCount()
+                use_gpu = n_devices > 0
+            except Exception:
+                use_gpu = False
+        except Exception:
+            cp, cndi, use_gpu = np, ndi, False
+
+        if not use_gpu:
+            print("[edge_mask] ⚙️ running in CPU mode (no CUDA device detected)")
+
+        img_h, img_w = image_gray.shape
         edge_mask = np.zeros_like(image_gray, dtype=float)
         center_line_length = 3
+        n_skipped = 0
 
         for i in range(track.shape[1] - 1):
-            start_x = track[1, i]
-            start_y = track[0, i]
-
-            # forward/back for tangent
+            y0 = float(track[0, i])
+            x0 = float(track[1, i])
             if i < track.shape[1] - center_line_length:
-                end_x = track[1, i + center_line_length]
-                end_y = track[0, i + center_line_length]
+                y1 = float(track[0, i + center_line_length])
+                x1 = float(track[1, i + center_line_length])
                 flip = False
             else:
-                end_x = track[1, i - center_line_length]
-                end_y = track[0, i - center_line_length]
+                y1 = float(track[0, i - center_line_length])
+                x1 = float(track[1, i - center_line_length])
                 flip = True
 
-            if start_x == end_x and start_y == end_y:
+            if y0 == y1 and x0 == x1:
+                n_skipped += 1
                 continue
 
             try:
                 from cracktools.tracking import tang_len
-                ddx, ddy, _ = tang_len(start_x, start_y, end_x, end_y)
+                ddx, ddy, _ = tang_len(x0, y0, x1, y1)
             except Exception:
-                ddy = end_y - start_y
-                ddx = end_x - start_x
-
+                ddy = y1 - y0
+                ddx = x1 - x0
             if flip:
-                ddx = -ddx
-                ddy = -ddy
+                ddx, ddy = -ddx, -ddy
 
-            # ---- ORIGINAL ANGLE ----
-            angle_deg = np.arctan2(ddx, ddy) * 57.3
-
-            # ---- ORIGINAL WINDOW ----
-            r1 = int(start_y - window_half_size)
-            r2 = int(start_y + window_half_size)
-            c1 = int(start_x - window_half_size)
-            c2 = int(start_x + window_half_size)
-            if r1 < 0 or c1 < 0 or r2 > image_gray.shape[0] or c2 > image_gray.shape[1]:
+            angle = np.degrees(np.arctan2(ddx, ddy))
+            half_r = int(min(window_half_size, y0, img_h - y0 - 1))
+            half_c = int(min(window_half_size, x0, img_w - x0 - 1))
+            r1, r2 = int(round(y0 - half_r)), int(round(y0 + half_r))
+            c1, c2 = int(round(x0 - half_c)), int(round(x0 + half_c))
+            if r1 < 0 or r2 > img_h or c1 < 0 or c2 > img_w:
                 continue
-
             window = image_gray[r1:r2, c1:c2]
             if window.shape[0] < 3 or window.shape[1] < 3:
                 continue
 
-            # ---- ORIGINAL rotate->sobel->unrotate ----
-            win_rot = ndi.rotate(window, angle_deg, reshape=False)
-            sobel = ndi.gaussian_filter(win_rot / 255.0, 1, order=(1, 0),
-                                        mode='reflect', cval=0.0)
+            try:
+                patch = window.astype(float) / 255.0
+                if use_gpu:
+                    patch = cp.asarray(patch)
+                    grad_y = cndi.gaussian_filter(patch, sigma=1, order=(1, 0), mode='reflect')
+                    grad_x = cndi.gaussian_filter(patch, sigma=1, order=(0, 1), mode='reflect')
+                    grad_y, grad_x = cp.asnumpy(grad_y), cp.asnumpy(grad_x)
+                else:
+                    grad_y = ndi.gaussian_filter(patch, sigma=1, order=(1, 0), mode='reflect')
+                    grad_x = ndi.gaussian_filter(patch, sigma=1, order=(0, 1), mode='reflect')
 
-            sobel_rot = ndi.rotate(sobel, -angle_deg, reshape=False)
+                projected = grad_x * (-ddy) + grad_y * ddx
+                m = max(1, int(min(half_r, half_c) / 5))
+                projected[:m, :] = projected[-m:, :] = 0
+                projected[:, :m] = projected[:, -m:] = 0
+                edge_mask[r1:r2, c1:c2] += projected
+            except Exception as e:
+                print(f"[edge_mask-new] Failed at i={i}: {e}")
+                continue
 
-            # ---- ORIGINAL center cropping ----
-            m = max(1, window.shape[0] // 5)
-            sobel_rot[:m, :] = 0
-            sobel_rot[-m:, :] = 0
-            sobel_rot[:, :m] = 0
-            sobel_rot[:, -m:] = 0
-
-            # ---- ORIGINAL accumulation ----
-            prev = edge_mask[r1:r2, c1:c2]
-            edge_mask[r1:r2, c1:c2] = prev + sobel_rot
-
-        # ---- ORIGINAL mask2 construction ----
+        print(f"[edge_mask] (mode=new) skipped {n_skipped} zero-length segments")
         edge_mask1 = edge_mask - np.min(edge_mask)
         edge_mask2 = -edge_mask1 - np.min(-edge_mask1)
-
+        print(f"[edge_mask] (mode=new) done (GPU per-patch={'yes' if use_gpu else 'no'})")
         return edge_mask1, edge_mask2
+
+    # ------------------------------------------------------------------
+    # =============== MODE: OLD (AKOMP22 ORIGINAL) =====================
+    # ------------------------------------------------------------------
+    # NOTE: this intentionally keeps the old x/y usage and window logic.
+    mode = "old"
+    edge_mask = np.zeros_like(image_gray, dtype=float)
+    center_line_length = 3
+    n_skipped = 0
+    H, W = image_gray.shape
+
+    for i in range(track.shape[1] - 1):
+        # ORIGINAL code: track[1] -> "x", track[0] -> "y"
+        start_point_x = track[1, i]
+        start_point_y = track[0, i]
+        a = False
+
+        if i < track.shape[1] - center_line_length:
+            end_point_x = track[1, i + center_line_length]
+            end_point_y = track[0, i + center_line_length]
+        else:
+            a = True
+            end_point_x = track[1, i - center_line_length]
+            end_point_y = track[0, i - center_line_length]
+
+        if start_point_x == end_point_x and start_point_y == end_point_y:
+            n_skipped += 1
+            continue
+
+        # ORIGINAL tangent computation
+        try:
+            from cracktools.tracking import tang_len
+            ddx, ddy, _ = tang_len(start_point_x, start_point_y,
+                                   end_point_x, end_point_y)
+        except Exception:
+            ddy = end_point_y - start_point_y
+            ddx = end_point_x - start_point_x
+
+        if a:
+            ddx = -ddx
+            ddy = -ddy
+
+        # ORIGINAL angle
+        angle_deg = np.arctan2(ddx, ddy) * 57.3
+
+        # ORIGINAL window (note: index order kept as in repo)
+        r1 = int(start_point_x - window_half_size)
+        r2 = int(start_point_x + window_half_size)
+        c1 = int(start_point_y - window_half_size)
+        c2 = int(start_point_y + window_half_size)
+
+        # In the original this could crash; here we safely skip
+        if r1 < 0 or c1 < 0 or r2 > H or c2 > W:
+            continue
+
+        window = image_gray[r1:r2, c1:c2]
+        if window.shape[0] < 3 or window.shape[1] < 3:
+            continue
+
+        # ORIGINAL rotate → sobel → unrotate
+        win_rot = ndi.rotate(window, angle_deg, reshape=False)
+        sobel = ndi.gaussian_filter(
+            win_rot / 255.0,
+            1,
+            order=(1, 0),
+            mode='reflect',
+            cval=0.0,
+            truncate=4.0,
+        )
+        sobel_rot = ndi.rotate(sobel, -angle_deg, reshape=False)
+
+        # ORIGINAL border suppression
+        m = max(1, int(window_half_size / 5))
+        sobel_rot[:m, :] = 0
+        sobel_rot[-m:, :] = 0
+        sobel_rot[:, :m] = 0
+        sobel_rot[:, -m:] = 0
+
+        edge_window = edge_mask[r1:r2, c1:c2]
+        edge_mask[r1:r2, c1:c2] = edge_window + sobel_rot
+
+    print(f"[edge_mask] (mode=old) skipped {n_skipped} zero-length segments")
+    edge_mask1 = edge_mask - np.min(edge_mask)
+    edge_mask2 = -edge_mask1 - np.min(-edge_mask1)
+    print(f"[edge_mask] (mode=old) done")
+    return edge_mask1, edge_mask2
 
     # ===============================================================
     # ===================== MODE: NEW VERSION =======================
