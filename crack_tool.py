@@ -3884,25 +3884,31 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         # Build payload EXACTLY like extract_edge_inputs_for_subcrack()
         # -----------------------------------------------------------
         payload = dict(
-            image_crop_gray       = gray,
-            pts_crop              = self.pts_crop,
-            adjusted_track        = track_local_yx,
-            manual_midline_global = man_xy_g,
-            auto_midline_global   = None,
-            bbox                  = (x, y, w, h),
-            params                = edge_params,
-            gt_crop               = gt_crop,
+            # core image + geometry
+            image_crop_gray = gray,
+            pts_crop        = self.pts_crop,
+            adjusted_track  = track_local_yx,
 
-            # global info (for save_gt_vs_manual_overlay in worker)
-            image_shape           = (H, W),
-            gt_full               = gt_full,
-            original_image        = self.original_image,
+            # unified midline (always the one we WANT the worker to use)
+            midline_global  = man_xy_g,
+            midline_type    = "manual",
+
+            bbox            = (x, y, w, h),
+            params          = edge_params,
+            gt_crop         = gt_crop,
+
+            # global info (for save_gt_vs_manual_overlay)
+            image_shape     = (H, W),
+            gt_full         = gt_full,
+            original_image  = self.original_image,
 
             # worker-required
-            save_folder           = self.save_folder,
-            image_base            = base,
-            crack_id              = str(crack_id),
-            source                = "manual",
+            save_folder     = self.save_folder,
+            image_base      = base,
+            crack_id        = str(crack_id),
+
+            # legacy tag — optional, no longer used for behavior
+            source          = "manual",
         )
 
         # -----------------------------------------------------------
@@ -4350,12 +4356,17 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         print(f"[DEBUG SUP] === END (UNIFIED) for {base_name} ===\n")'''
        
     # ---- 4) Extract inputs for a subcrack (READS SNAPSHOT ONLY) ------------------
-    def extract_edge_inputs_for_subcrack(self, crack_id, color_channel=None):
+    def extract_edge_inputs_for_subcrack(self, crack_id, color_channel=None, prefer_auto_best=False):
         """
         Faithful payload builder for edge_param_worker.
-        Reads ONLY from the per-crack snapshot file and constructs
-        a COMPLETE payload matching what smoke_test_edges_for_manual uses,
-        plus global info needed for save_gt_vs_manual_overlay.
+
+        NEW BEHAVIOR:
+        - Reads cid{crack_id}.json
+        - If prefer_auto_best=True and auto_best.midline exists and is valid,
+          uses that as the midline.
+        - Otherwise falls back to the manual midline.
+
+        Returns a payload dict used directly by edge_param_worker.
         """
         import numpy as np
         from helpers.metrics import metric_atomic_path_for, safe_read_json
@@ -4366,16 +4377,17 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         ann = safe_read_json(p, {})
 
         if not ann:
-            print(f"[extract_edge_inputs] no snapshot for cid={cid}")
+            print(f"[extract_edge_inputs] cid={cid} ❌ no snapshot at {p}")
             return None
 
-        src = str(ann.get("source", "manual")).lower()
+        #print(f'[ANN KEYS] {ann.get("source", "None")}')
+        src = (ann.get("source") or "manual").lower()
 
         # ---------------------------------------------------------
         # Global image + GT (for global overlay)
         # ---------------------------------------------------------
         if getattr(self, "original_image", None) is None:
-            print(f"[extract_edge_inputs] ❌ no original_image for cid={cid}")
+            print(f"[extract_edge_inputs] cid={cid} ❌ no original_image")
             return None
 
         H, W = self.original_image.shape[:2]
@@ -4389,34 +4401,43 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         # ---------------------------------------------------------
         x, y, w, h = map(int, ann.get("mask_bbox", [0, 0, 0, 0]))
         if w <= 0 or h <= 0:
-            print(f"[extract_edge_inputs] cid{cid} missing/invalid bbox")
+            print(f"[extract_edge_inputs] cid={cid} ❌ missing/invalid bbox {ann.get('mask_bbox')}")
             return None
 
         xmin, ymin, xmax, ymax = x, y, x + w, y + h
         self.active_bbox = [xmin, ymin, xmax, ymax]
 
         # ---------------------------------------------------------
-        # 2. Midline
+        # 2. Choose midline: manual vs auto_best
         # ---------------------------------------------------------
         man_xy_g = np.asarray(ann.get("midline", []), float)
-        if man_xy_g.ndim != 2 or man_xy_g.shape[1] != 2 or len(man_xy_g) < 2:
-            print(f"[extract_edge_inputs] ⚠ no valid midline for cid={cid} (src={src})")
+        auto_xy_g = None
+        if "auto_best" in ann and isinstance(ann["auto_best"], dict):
+            auto_xy_g = np.asarray(ann["auto_best"].get("midline", []), float)
+
+        midline_type = "manual"
+        mid_xy_g = man_xy_g
+
+        def _valid_mid(arr):
+            return arr is not None and arr.ndim == 2 and arr.shape[1] == 2 and len(arr) >= 2
+
+        if prefer_auto_best and _valid_mid(auto_xy_g):
+            midline_type = "auto_best"
+            mid_xy_g = auto_xy_g
+        elif not _valid_mid(man_xy_g):
+            print(f"[extract_edge_inputs] cid={cid} ❌ no valid manual midline; prefer_auto_best={prefer_auto_best}")
             return None
 
-        # Debug midline info
-        try:
-            print(
-                f"[extract_edge_inputs] cid={cid} src={src} "
-                f"midline_len={len(man_xy_g)} "
-                f"first={man_xy_g[0].tolist()} last={man_xy_g[-1].tolist()}"
-            )
-        except Exception:
-            pass
+        print(
+            f"[extract_edge_inputs] cid={cid} src={src} "
+            f"prefer_auto_best={prefer_auto_best} midline_type={midline_type} "
+            f"n_pts={len(mid_xy_g)} bbox=({x},{y},{w},{h})"
+        )
 
         # ---------------------------------------------------------
         # 3. Endpoint setup (same as smoke test)
         # ---------------------------------------------------------
-        self.pts = [man_xy_g[0].copy(), man_xy_g[-1].copy()]
+        self.pts = [mid_xy_g[0].copy(), mid_xy_g[-1].copy()]
         self.end_points = self.pts
 
         # ---------------------------------------------------------
@@ -4425,19 +4446,19 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         try:
             self.update_image_crop()
             if getattr(self, "skip_current_segment", False):
-                print(f"[extract_edge_inputs] cid={cid} skip_current_segment=True")
+                print(f"[extract_edge_inputs] cid={cid} segment skipped by update_image_crop")
                 return None
         except Exception as e:
-            print(f"[extract_edge_inputs] crop update failed for cid={cid}: {e}")
+            print(f"[extract_edge_inputs] cid={cid} ❌ crop update failed: {e}")
             return None
 
         # track in local [y,x]
         track_local_yx = np.vstack([
-            man_xy_g[:, 1] - y,
-            man_xy_g[:, 0] - x,
+            mid_xy_g[:, 1] - ymin,
+            mid_xy_g[:, 0] - xmin,
         ])
 
-        # Flip if needed
+        # Flip if needed so start matches pts_crop[0]
         start_xy = track_local_yx[:, 0][::-1]
         d0 = np.linalg.norm(start_xy - self.pts_crop[0])
         d1 = np.linalg.norm(start_xy - self.pts_crop[1])
@@ -4490,8 +4511,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             image_crop_gray       = gray,
             pts_crop              = self.pts_crop,
             adjusted_track        = track_local_yx,
-            manual_midline_global = man_xy_g,
-            auto_midline_global   = None,
+            midline_global = mid_xy_g,   # this is the midline we actually use
             bbox                  = (x, y, w, h),
             manual_normals_crop   = man_normals_crop,
             gt_crop               = gt_crop,
@@ -4501,11 +4521,12 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             gt_full               = gt_full,
             original_image        = self.original_image,
 
-            # REQUIRED by edge_param_worker for labeling
+            # bookkeeping / debug
             save_folder           = self.save_folder,
             image_base            = base,
             crack_id              = cid,
-            source                = src,     # <--- CRITICAL (manual vs auto_best)
+            src_tag               = src,
+            midline_type          = midline_type,
         )
 
     def run_edge_tracking_parallel(
@@ -4514,11 +4535,13 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         cpu_max_workers=None,
         edge_params_fixed=None,
         color_channel=None,
+        prefer_auto_best=False,
     ):
         """
         Parallelize edge-mask + edge-tracking and save results into per-crack files.
 
         - Uses extract_edge_inputs_for_subcrack() as the authoritative payload builder.
+          If prefer_auto_best=True, that function will try to use auto_best.midline.
         - Uses _flatten_edge_worker_result() to build timing-aware CSV rows.
         - Writes geodesic edges + masks back into per-cid JSON via set_tracked_edges_for_crack().
         - Reloads snapshot so downstream metrics see updated edges.
@@ -4570,19 +4593,38 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         # ---------------------------------------------------------------------
         tasks = []
         for cid in crack_ids:
-            payload = self.extract_edge_inputs_for_subcrack(cid, color_channel=color_channel)
+            payload = self.extract_edge_inputs_for_subcrack(
+                cid,
+                color_channel=color_channel,
+                prefer_auto_best=prefer_auto_best,
+            )
             if payload is None:
                 continue
+
+            # DEBUG: log what midline type we're using
+            midline_type = payload.get("midline_type", "manual")
+            src_tag = payload.get("src_tag", "?")
+            n_pts = len(payload.get("midline_global", []))
+            print(
+                f"[edge-parallel] cid{cid} midline_type={midline_type} "
+                f"src_tag={src_tag} n_pts={n_pts} prefer_auto_best={prefer_auto_best}"
+            )
 
             p = dict(payload)
             p["params"] = dict(edge_params_fixed)
             tasks.append((cid, p))
+            break
 
         if not tasks:
             print("[edge-parallel] nothing to run")
             return []
 
-        print(f"[edge-parallel] launching {len(tasks)} edge workers across {cpu_max_workers} CPUs…")
+        print(
+            f"[edge-parallel] launching {len(tasks)} edge workers across {cpu_max_workers} CPUs… "
+            f"(prefer_auto_best={prefer_auto_best})"
+        )
+        
+        #return
 
         # ---------------------------------------------------------------------
         # 3) Run workers in parallel
@@ -5504,6 +5546,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     crack_ids=auto_ids,
                     cpu_max_workers=cpu_max_workers,
                     edge_params_fixed=best_edge,
+                    prefer_auto_best=True
                 )
             except Exception as e:
                 print(f"[quick] ⚠ auto-edgegen failed: {e}")
@@ -5513,6 +5556,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         t_auto_edges = time.perf_counter() - t_auto_edges_start
         print(f"[quick] auto-edge generation time = {t_auto_edges:.2f}s")
+        
+        return
 
         # ------------------------------------------------------------
         # PHASE 3: MASK + WIDTH METRICS + SUPERVISION

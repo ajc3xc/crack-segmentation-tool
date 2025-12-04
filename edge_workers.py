@@ -69,11 +69,11 @@ def _compare_reference_debug(payload, track_local_yx):
     print("\n=== [COMPARE DEBUG: edge_param_worker()] ===")
     bbox = payload.get("bbox")
     gray = payload.get("image_crop_gray")
-    man_g = np.asarray(payload.get("manual_midline_global"), float)
+    man_g = np.asarray(payload.get("midline_global"), float)
     pts_crop = np.asarray(payload.get("pts_crop"))
     print(f"bbox={bbox}")
     print(f"crop_shape={gray.shape if gray is not None else None}")
-    print(f"manual_midline_global first={man_g[0]} last={man_g[-1]} len={len(man_g)}")
+    print(f"midline_global first={man_g[0]} last={man_g[-1]} len={len(man_g)}")
     print(f"pts_crop[0]={pts_crop[0]} pts_crop[1]={pts_crop[1]}")
     print(f"track_local_yx start(yx)={track_local_yx[:,0]} end(yx)={track_local_yx[:,-1]}")
     # flip to [x,y] for intuitive view
@@ -729,7 +729,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     img        = payload["image_crop_gray"]
     pts_crop   = payload["pts_crop"]
     track_yx   = payload["adjusted_track"]  # (2, N) [y, x]
-    man_xy_g   = np.asarray(payload["manual_midline_global"], float)
+    mid_xy_g   = np.asarray(payload["midline_global"], float)
     x, y, w, h = map(int, payload["bbox"])
     P          = payload["params"]
 
@@ -744,6 +744,8 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     seg_mode = str(P.get("seg_mode", "new")).lower()
     if seg_mode not in ("old", "new"):
         seg_mode = "new"
+        
+    print(f'[SUPER DEBUG] Payload type {str(payload.get("midline_type", "")).lower()}')
 
     try:
         # -------------------------------------------------------
@@ -813,7 +815,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         # -------------------------------------------------------
         # manual vs auto tag
         # -------------------------------------------------------
-        src = str(payload.get("source", "")).lower()
+        src = str(payload.get("midline_type", "")).lower()
         midline_tag = "auto" if src.startswith("auto") else "manual"
 
         param_tag = (
