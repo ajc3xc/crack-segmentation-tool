@@ -80,6 +80,8 @@ def _stitch_lines_by_user(member_ids, atomic):
     mid2arr, mid2ends = {}, {}
     for mid in member_ids:
         crack = atomic.get(mid)
+        #print()
+        #print(atomic.keys(), crack.keys(), crack['source'])
         if not crack: continue
         ml = crack.get("midline", []) or []
         if len(ml) < 2: continue

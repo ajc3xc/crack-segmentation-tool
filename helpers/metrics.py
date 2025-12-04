@@ -1271,6 +1271,9 @@ def manual_mask_from_crack(crack: dict, H: int, W: int) -> np.ndarray:
     Build a binary manual mask for a single crack.
     Priority: geodesic_edges polygon → (optional) mask_crop+mask_bbox → zeros.
     """
+    print()
+    print(f"[TTTTTT] {crack.keys()}, {crack['source']}, {crack.items()}")
+    print()
     ge = (crack or {}).get("geodesic_edges", {}) or {}
     if ("edge1" in ge) and ("edge2" in ge):
         m = _safe_poly_fill(H, W, ge.get("edge1", []), ge.get("edge2", []))
