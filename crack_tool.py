@@ -4369,6 +4369,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print(f"[extract_edge_inputs] no snapshot for cid={cid}")
             return None
 
+        src = str(ann.get("source", "manual")).lower()
+
         # ---------------------------------------------------------
         # Global image + GT (for global overlay)
         # ---------------------------------------------------------
@@ -4398,8 +4400,18 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         # ---------------------------------------------------------
         man_xy_g = np.asarray(ann.get("midline", []), float)
         if man_xy_g.ndim != 2 or man_xy_g.shape[1] != 2 or len(man_xy_g) < 2:
-            print(f"[extract_edge_inputs] ⚠ no valid midline for cid={cid}")
+            print(f"[extract_edge_inputs] ⚠ no valid midline for cid={cid} (src={src})")
             return None
+
+        # Debug midline info
+        try:
+            print(
+                f"[extract_edge_inputs] cid={cid} src={src} "
+                f"midline_len={len(man_xy_g)} "
+                f"first={man_xy_g[0].tolist()} last={man_xy_g[-1].tolist()}"
+            )
+        except Exception:
+            pass
 
         # ---------------------------------------------------------
         # 3. Endpoint setup (same as smoke test)
@@ -4413,6 +4425,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         try:
             self.update_image_crop()
             if getattr(self, "skip_current_segment", False):
+                print(f"[extract_edge_inputs] cid={cid} skip_current_segment=True")
                 return None
         except Exception as e:
             print(f"[extract_edge_inputs] crop update failed for cid={cid}: {e}")
@@ -4420,8 +4433,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         # track in local [y,x]
         track_local_yx = np.vstack([
-            man_xy_g[:, 1] - ymin,
-            man_xy_g[:, 0] - xmin,
+            man_xy_g[:, 1] - y,
+            man_xy_g[:, 0] - x,
         ])
 
         # Flip if needed
@@ -4464,14 +4477,14 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             p[1] = np.clip(p[1], 0, Hc - 1e-3)
 
         # ---------------------------------------------------------
-        # 7. OPTIONAL: GT CROP
+        # 7. OPTIONAL: GT CROP (same as smoke test)
         # ---------------------------------------------------------
         gt_crop = None
         if getattr(self, "current_mask", None) is not None:
             gt_crop = ((self.current_mask[y:y + h, x:x + w]) > 0).astype(np.uint8)
 
         # ---------------------------------------------------------
-        # 8. FINAL PAYLOAD
+        # 8. FINAL PAYLOAD – FULL MATCH + GLOBAL INFO
         # ---------------------------------------------------------
         return dict(
             image_crop_gray       = gray,
@@ -4488,10 +4501,11 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             gt_full               = gt_full,
             original_image        = self.original_image,
 
-            # required by edge_param_worker
+            # REQUIRED by edge_param_worker for labeling
             save_folder           = self.save_folder,
             image_base            = base,
             crack_id              = cid,
+            source                = src,     # <--- CRITICAL (manual vs auto_best)
         )
 
     def run_edge_tracking_parallel(

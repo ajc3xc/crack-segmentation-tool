@@ -1891,6 +1891,63 @@ class CrackUtils:
             if idx1 != idx2:
                 readonly_conn_idx.append((min(idx1, idx2), max(idx1, idx2)))
 
+                # ------------------------------------------------------------------
+        # Helper: build an overlay image (original + mask)
+        # ------------------------------------------------------------------
+        def make_overlay_image():
+            """
+            Return an HxWx3 uint8 RGB array:
+            - None if no mask
+            - 0.65*orig + 0.35*mask_overlay if a mask exists
+            """
+            import numpy as np
+            import cv2
+
+            base = self.original_image
+            mask = getattr(self, "current_mask", None)  # or self.combined_mask / self.mask
+
+            if mask is None or base is None:
+                return None
+
+            # ensure RGB
+            if base.ndim == 2:
+                base_rgb = cv2.cvtColor(base, cv2.COLOR_GRAY2RGB)
+            else:
+                base_rgb = base.copy()
+
+            h, w = base_rgb.shape[:2]
+
+            # resize mask if needed
+            if mask.shape[:2] != (h, w):
+                mask_resized = cv2.resize(mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+            else:
+                mask_resized = mask
+
+            m = mask_resized.astype(np.float32)
+            if m.max() > 0:
+                m = m / m.max()
+            m3 = np.repeat(m[..., None], 3, axis=2)  # HxWx3
+
+            # gray overlay; you can color this later if you want
+            mask_rgb = m3 * 255.0
+
+            alpha_im = 0.65
+            alpha_mask = 0.35
+            blended = alpha_im * base_rgb.astype(np.float32) + alpha_mask * mask_rgb
+            blended = np.clip(blended, 0, 255).astype(np.uint8)
+            return blended
+        
+        '''annot = CrackAnnotator(
+            image=self.original_image,
+            boxes=boxes,
+            initial_points=initial_points,
+            initial_connections=initial_conns,
+            initial_midlines={},
+        )'''
+        
+        # Build overlay (if mask exists)
+        overlay_img = make_overlay_image()
+
         annot = CrackAnnotator(
             image=self.original_image,
             boxes=boxes,
@@ -1898,6 +1955,31 @@ class CrackUtils:
             initial_connections=initial_conns,
             initial_midlines={},
         )
+
+        # Attach overlay to annotator and (for now) enable it by default if present
+        if overlay_img is not None:
+            annot.set_overlay_image(overlay_img)
+            annot.set_overlay_enabled(True)
+            
+        # ======================================================
+        # Overlay toggle button (only shown if overlay exists)
+        # ======================================================
+        overlay_btn = QPushButton("Hide Overlay")   # default ON
+        overlay_btn.setCheckable(True)
+        overlay_btn.setChecked(True)
+        overlay_btn.setVisible(overlay_img is not None)
+
+        def on_overlay_toggled(checked):
+            # checked == True means "Hide" mode, so overlay OFF
+            annot.set_overlay_enabled(not checked)
+            if checked:
+                overlay_btn.setText("Show Overlay")
+                overlay_btn.setStyleSheet("")
+            else:
+                overlay_btn.setText("Hide Overlay")
+                overlay_btn.setStyleSheet("background:#f2b3b3;")  # light red
+
+        overlay_btn.clicked.connect(on_overlay_toggled)
 
         #annot.readonly_midlines = readonly_midlines
         #annot.readonly_connections = readonly_conn_idx
@@ -2011,6 +2093,9 @@ class CrackUtils:
         manual_btn.setCheckable(True)
         manual_btn.setVisible(False)
         layout.addWidget(manual_btn)
+        
+        # NEW: Overlay toggle button
+        layout.addWidget(overlay_btn)   
 
         hint = QLabel(
             "Editable: Auto/Manual in black/light-blue.     Read-only: Auto/Manual cracks in gray/beige — cant delete in editor, must delete segment in Delete Segmentations.\n"

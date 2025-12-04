@@ -1003,7 +1003,7 @@ class CrackAnnotator(QtWidgets.QWidget):
 
 
     # ========= paintEvent (draw with float pan_x/pan_y) =========
-    def paintEvent(self, event):
+    """def paintEvent(self, event):
         qp = QPainter(self)
         qp.setRenderHint(QPainter.Antialiasing)
 
@@ -1201,8 +1201,167 @@ class CrackAnnotator(QtWidgets.QWidget):
                 qp.drawLine(
                     QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
                     QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                )"""
+                
+    # ========= paintEvent (draw with float pan_x/pan_y) =========
+    def paintEvent(self, event):
+        qp = QPainter(self)
+        qp.setRenderHint(QPainter.Antialiasing)
+
+        # scaled image size
+        sw = int(self.img_w * self.scale)
+        sh = int(self.img_h * self.scale)
+
+        # expose transform for hit-testing & overlays
+        self._last_draw_scale = self.scale
+        self._last_draw_xoff = float(self.pan_x)
+        self._last_draw_yoff = float(self.pan_y)
+
+        if self.image_pixmap:
+            # choose base or overlay pixmap
+            pix = self.overlay_pixmap if (self.use_overlay and self.overlay_pixmap is not None) else self.image_pixmap
+            # draw the image at floating pan offset (cast to int for painting)
+            qp.drawPixmap(int(self.pan_x), int(self.pan_y), sw, sh, pix)
+
+        # convenient locals for overlay transforms
+        scale = self._last_draw_scale
+        xoff  = self._last_draw_xoff
+        yoff  = self._last_draw_yoff
+
+        crop_xmin, crop_ymin = getattr(self, "crop_offset", (0, 0))
+        def apply_offset(pt):
+            return (pt[0] + crop_xmin, pt[1] + crop_ymin)
+
+        # --- boxes ---
+        qp.setPen(QPen(QColor(0, 128, 255), 3))
+        for xmin, ymin, xmax, ymax in self.boxes:
+            qp.drawRect(
+                int(xmin * scale + xoff),
+                int(ymin * scale + yoff),
+                int((xmax - xmin) * scale),
+                int((ymax - ymin) * scale),
+            )
+
+        # --- read-only connections ---
+        qp.setPen(QPen(QColor(150, 150, 150), 2, Qt.DashLine))
+        for i1, i2 in self.readonly_connections:
+            if i1 < len(self.points) and i2 < len(self.points):
+                p1 = apply_offset(self.points[i1])
+                p2 = apply_offset(self.points[i2])
+                qp.drawLine(
+                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
+        # --- read-only midlines ---
+        qp.setPen(QPen(QColor(150, 150, 0), 2))
+        for key, rec in self.readonly_midlines.items():
+            poly = rec.get("poly", [])
+            if not poly or len(poly) < 2:
+                continue
+            tag = rec.get("tag", "manual")
+            r, g, b = rec.get("color", (150, 150, 0))
+            # thicker, solid for processed; dashed + semi-transparent for unprocessed
+            if tag == "unprocessed":
+                pen = QPen(QColor(r, g, b, 180), 3, Qt.DashLine)
+            elif tag == "auto":
+                pen = QPen(QColor(r, g, b), 3)  # solid auto color
+            else:  # processed manual
+                pen = QPen(QColor(r, g, b), 3)
+            qp.setPen(pen)
+            for i in range(1, len(poly)):
+                p1x, p1y = poly[i - 1]
+                p2x, p2y = poly[i]
+                # account for crop offset + pan/scale
+                p1x += getattr(self, "crop_offset", (0, 0))[0]
+                p1y += getattr(self, "crop_offset", (0, 0))[1]
+                p2x += getattr(self, "crop_offset", (0, 0))[0]
+                p2y += getattr(self, "crop_offset", (0, 0))[1]
+                qp.drawLine(
+                    QPoint(int(p1x * scale + xoff), int(p1y * scale + yoff)),
+                    QPoint(int(p2x * scale + xoff), int(p2y * scale + yoff))
+                )
+
+        # --- editable midlines (manual, with unprocessed flag support) ---
+        for key, entry in self.midlines.items():
+            # Support both dict and direct list forms
+            if isinstance(entry, dict):
+                poly = entry.get("poly", [])
+                unprocessed = entry.get("unprocessed", False)
+            else:
+                poly = entry
+                unprocessed = False
+
+            if not poly or len(poly) < 2:
+                continue
+
+            # Color/style based on processing state
+            color = QColor(255, 165, 0) if unprocessed else QColor(0, 200, 255)
+            style = Qt.DashLine if unprocessed else Qt.SolidLine
+            width = 5 if unprocessed else 4
+            thick = 8 if (self.connection_mode and key == getattr(self, "_hover_midline_key", None)) else width
+            qp.setPen(QPen(color, thick, style))
+
+            for i in range(1, len(poly)):
+                p1 = apply_offset(poly[i - 1])
+                p2 = apply_offset(poly[i])
+                qp.drawLine(
+                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                )
+
+        # --- editable connections ---
+        for idx, (i1, i2) in enumerate(self.connections):
+            if i1 < len(self.points) and i2 < len(self.points):
+                p1 = apply_offset(self.points[i1])
+                p2 = apply_offset(self.points[i2])
+                thick = 6 if (self.connection_mode and self.connecting_index is None
+                              and idx == self.hover_line_index and self.hover_index is None) else 4
+                qp.setPen(QPen(QColor(0, 0, 0), thick))
+                qp.drawLine(
+                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                )
+
+        # --- points ---
+        for i, (x, y) in enumerate(self.points):
+            x, y = apply_offset((x, y))
+            center = QPoint(int(x * scale + xoff), int(y * scale + yoff))
+            brush = QColor(0, 200, 0) if i == self.hover_index or (
+                self.connection_mode and i == self.connecting_index) else QColor(200, 80, 80)
+            qp.setBrush(brush)
+            qp.setPen(Qt.NoPen)
+            # keep circle size constant on screen regardless of zoom
+            r_screen = int(self.point_radius)
+            qp.drawEllipse(center, r_screen, r_screen)
+
+        # --- editable midlines (simple cyan layer to keep behavior from older code) ---
+        qp.setPen(QPen(QColor(0, 200, 200), 4))
+        for key, poly in self.midlines.items():
+            if isinstance(poly, dict):
+                poly = poly.get("poly", [])
+            if len(poly) < 2:
+                continue
+            thick = 8 if (self.connection_mode and key == getattr(self, "_hover_midline_key", None)) else 4
+            qp.setPen(QPen(QColor(0, 200, 200), thick))
+            for i in range(1, len(poly)):
+                p1 = apply_offset(poly[i - 1])
+                p2 = apply_offset(poly[i])
+                qp.drawLine(
+                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                )
+
+        # --- live polyline (manual midline in progress) ---
+        if self.polyline_mode and len(self.polyline) >= 1:
+            qp.setPen(QPen(QColor(0, 200, 200), 4))
+            for i in range(1, len(self.polyline)):
+                p1 = apply_offset(self.polyline[i - 1])
+                p2 = apply_offset(self.polyline[i])
+                qp.drawLine(
+                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                )
 
     # ========= fit-to-view (center using float pan; keep widget = viewport size) =========
     def _fit_to_view(self):
@@ -1683,6 +1842,35 @@ class CrackAnnotator(QtWidgets.QWidget):
         self._hover_midline_key = self._midline_hit_test(event.pos(), 10.0) if not self._is_drawing else None
         self.update()
 
+    def set_overlay_image(self, overlay_np):
+        """
+        Set an alternative background image (e.g., original+mask blend).
+
+        overlay_np: HxWx3 uint8 RGB NumPy array with SAME size as orig_image.
+        If None is passed, overlay is disabled.
+        """
+        if overlay_np is None:
+            self.overlay_pixmap = None
+            self.use_overlay = False
+            self.update()
+            return
+
+        h, w, _ = overlay_np.shape
+        qimg = QImage(
+            overlay_np.data,
+            w,
+            h,
+            overlay_np.strides[0],
+            QImage.Format_RGB888
+        )
+        self.overlay_pixmap = QPixmap.fromImage(qimg)
+        # do not force-enable here; let caller decide or call set_overlay_enabled
+        self.update()
+
+    def set_overlay_enabled(self, enabled: bool):
+        """Turn overlay drawing on/off (if overlay_pixmap is set)."""
+        self.use_overlay = bool(enabled)
+        self.update()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MiddleButton and self._panning:

@@ -450,53 +450,127 @@ def _flatten_variant_record(vid: int, vrec: dict, params: dict, scores: dict = N
     """
     Keep bottom-level clean and single-line-ish:
     {
-      "variant_id": 2, "midline": [[...],[...]], 
+      "variant_id": 2, "midline": [[...],[...]],
       "params": {"g11":1,"g22":35,"g33":25,"win":45,"mu":0,"ell":5,"p":14},
       "scores": {"chamfer_mean":..., "hausdorff":..., "coverage":...},
       "normal_edge_points": {"edge1":[[x,y],...], "edge2":[[x,y],...]}
     }
     """
+    import numpy as np
+
+    if not isinstance(vrec, dict):
+        print(f"[_flatten_variant_record] ⚠ vrec is not dict (vid={vid}): {type(vrec)}")
+        vrec = {}
+
+    midline = vrec.get("midline", [])
+    n_mid = len(midline) if isinstance(midline, (list, tuple)) else 0
+
     out = {
         "variant_id": int(vid),
-        "midline": vrec.get("midline", []),
+        "midline": midline,
         "params": params or {},
         "scores": scores or {},
     }
+
+    # Optional normals
     for k in ("normal_edge_points_full", "normal_edge_points"):
         if k in vrec and vrec[k]:
             out["normal_edge_points"] = vrec[k]
             break
+
+    # Light debug to understand what's being stored
+    try:
+        g11 = out["params"].get("g11", None)
+        g22 = out["params"].get("g22", None)
+        g33 = out["params"].get("g33", None)
+        ch  = out["scores"].get("chamfer_mean", None)
+        cov = out["scores"].get("coverage", None)
+        print(
+            f"[_flatten_variant_record] vid={vid} n_mid={n_mid} "
+            f"g=({g11},{g22},{g33}) chamfer={ch} cov={cov}"
+        )
+    except Exception as e:
+        print(f"[_flatten_variant_record] ⚠ debug print failed for vid={vid}: {e}")
+
     return out
     
-def set_auto_variant_for_crack(save_folder, base_name, crack_id, vrec, params=None, is_best=False, scores=None):
+def set_auto_variant_for_crack(
+    save_folder, base_name, crack_id,
+    vrec, params=None, is_best=False, scores=None
+):
     """
-    Persist a variant under atomic crack snapshot (flat).
-    Ensures keys: auto_variants (dict of vN -> {...}), auto_best (single flat dict).
+    Persist an auto-variant under atomic crack snapshot (flat).
+
+    UPDATED:
+      - Always keeps auto_variants[vN]
+      - If is_best=True:
+          * writes auto_best (flattened)
+          * publishes its midline into top-level `midline`
+          * ensures `mask_bbox` is present (if provided)
+          * marks `source = "auto_best"` so Phase 2 can see it
+      - Adds debug prints so we can see exactly what happens.
     """
+    import numpy as np
+
     p = metric_atomic_path_for(save_folder, base_name, crack_id)
     rec = safe_read_json(p, {})
-    if not rec: 
+    if not isinstance(rec, dict):
         rec = {"crack_id": crack_id}
 
     # Normalize container
     av = rec.get("auto_variants")
     if not isinstance(av, dict):
         av = {}
+
+    # Determine variant ID
     vid = None
     if isinstance(vrec, dict):
-        # best effort: try to extract known id from params/desc
-        vid = vrec.get("params", {}).get("variant_id", None)
-    # fallback from caller
+        vid = (vrec.get("params") or {}).get("variant_id", None)
     if vid is None:
-        # caller usually passes 'v<id>' externally; we won't rely on that here
         vid = len(av)
 
-    flat = _flatten_variant_record(vid, vrec, params or vrec.get("params", {}), scores=scores)
+    # Flatten
+    flat = _flatten_variant_record(
+        vid,
+        vrec,
+        params or vrec.get("params", {}),
+        scores=scores,
+    )
     av[f"v{vid}"] = flat
     rec["auto_variants"] = av
 
+    # Debug: basic info about this variant
+    midline = flat.get("midline", [])
+    n_mid = len(midline) if isinstance(midline, (list, tuple)) else 0
+    print(
+        f"[set_auto_variant_for_crack] cid={crack_id} vid={vid} "
+        f"is_best={is_best} n_mid={n_mid}"
+    )
+
+    # If this is the best one, publish it
     if is_best:
         rec["auto_best"] = dict(flat)  # copy
+
+        # Publish midline
+        if n_mid > 0:
+            rec["midline"] = midline
+        else:
+            print(
+                f"[set_auto_variant_for_crack] ⚠ best variant vid={vid} "
+                f"has empty midline for cid={crack_id}"
+            )
+
+        # Publish bbox if present in vrec
+        if isinstance(vrec, dict) and "mask_bbox" in vrec:
+            rec["mask_bbox"] = vrec["mask_bbox"]
+
+        # Mark source so Phase 2 picks it up
+        old_src = rec.get("source", None)
+        rec["source"] = "auto_best"
+        print(
+            f"[set_auto_variant_for_crack] cid={crack_id} "
+            f"source: {old_src!r} → 'auto_best'"
+        )
 
     safe_write_json(p, rec)
     return rec
@@ -510,54 +584,40 @@ def set_auto_variant_for_crack(save_folder, base_name, crack_id, vrec, params=No
     with open(p, "w", encoding="utf-8") as f:
         json.dump(data, f)
     return p'''
-def set_tracked_edges_for_crack(save_folder: str, base: str, cid, payload: dict, mask_crop=None):
+
+def set_tracked_edges_for_crack(save_folder, base, cid, payload, mask_crop=None):
     """
-    Safely merge edge-tracking outputs into the existing per-cid snapshot.
-
-    CRITICAL FIX:
-      - DOES NOT OVERWRITE the entire cidX.json.
-      - PRESERVES: auto_best, auto_variants, source, manual midline, RS3 midline, etc.
-      - UPDATES ONLY: geodesic edges, mask_crop, timing, metrics, and worker params.
-
-    This prevents auto variants from being destroyed during manual-edge generation.
+    Merge new edge results into existing per-crack JSON
+    instead of overwriting the entire file.
     """
-
-    import os
-    from helpers.metrics import safe_read_json
+    from helpers.metrics import metric_atomic_path_for, safe_read_json, safe_write_json
 
     p = metric_atomic_path_for(save_folder, base, cid)
-    os.makedirs(os.path.dirname(p), exist_ok=True)
 
-    # --- Load old record FIRST ---------------
-    old = safe_read_json(p, {})
+    # Load existing (manual OR auto) data
+    old = safe_read_json(p, {}) or {}
 
-    # Normalize to dict
-    if not isinstance(old, dict):
-        old = {}
+    # Start from the old snapshot, not from payload
+    out = dict(old)
 
-    # --- Begin with previous data -----------
-    merged = dict(old)
-
-    # --- Merge IN new worker payload fields --
-    # (payload contains: status, bbox, mask_bbox, mask_crop, geodesic_edges, timing,
-    #  window_half_size, mu, l, p, IoU metrics, boundary metrics, ASSD, HD95 …)
+    # Merge edge-tracking-specific results
     for k, v in (payload or {}).items():
-        merged[k] = v
+        out[k] = v
 
-    # --- Explicit mask_crop overwrite -------
+    # Optional crop
     if mask_crop is not None:
-        merged["mask_crop"] = mask_crop
+        out["mask_crop"] = mask_crop
 
-    # --- Ensure crack_id preserved ----------
-    if "crack_id" not in merged:
-        merged["crack_id"] = cid
+    # DO NOT remove:
+    # - source ("manual" / "auto_best")
+    # - auto_best
+    # - auto_variants
+    # - midline (auto or manual)
+    # - anything else that belongs to auto mode
 
-    # --- Write MERGED JSON ------------------
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(merged, f, indent=2)
-
+    safe_write_json(p, out)
     return p
-    
+
 def set_geodesic_edges_for_crack(save_folder, base_name, crack_id, ge_dict):
     """Store geodesic edges (edge1/edge2 lists) under atomic crack snapshot."""
     p = metric_atomic_path_for(save_folder, base_name, crack_id)
