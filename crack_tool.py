@@ -528,140 +528,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
     ###################################################################
     ##    METRICS FUNCTIONS
     ###################################################################
-      
-    '''def generate_auto_manual_midline(self, crack_id, cache_key=None, display=False):
-        """
-        Recreate the 'all autos vs manual' overlay from cached variants,
-        useful if you disabled recompute or just want the plot.
-        """
-        import os, numpy as np, cv2, matplotlib.pyplot as plt
-        from crackutils import CrackUtils
-
-        ann = self.annotation.get("annotations", {}).get("atomic_cracks", {})
-        crack = ann.get(str(crack_id))
-        if not crack:
-            print(f"[plot] crack {crack_id} not found"); return
-
-        cache_key = cache_key or metrics._auto_cache_key(self)
-        pack = crack.get("variants", {}).get("auto", {}).get(cache_key)
-        if not pack:
-            print(f"[plot] no cached variants under key={cache_key}"); return
-
-        x, y, w, h = map(int, crack["mask_bbox"])
-        self.active_bbox = [x, y, x+w, y+h]
-        self.update_image_crop()
-        crop_rgb = self.image_crop.copy()
-        if crop_rgb.ndim == 2:
-            crop_rgb = cv2.cvtColor(crop_rgb, cv2.COLOR_GRAY2BGR)
-
-        man_xy = np.asarray(crack.get("midline", []), float)
-        man_xy_crop = np.column_stack([man_xy[:,0]-x, man_xy[:,1]-y]) if len(man_xy)>=2 else np.empty((0,2))
-
-        # plot
-        plt.figure(figsize=(6,6))
-        plt.imshow(cv2.cvtColor(crop_rgb, cv2.COLOR_BGR2RGB))
-        if len(man_xy_crop) >= 2:
-            plt.plot(man_xy_crop[:,0], man_xy_crop[:,1], 'k-', lw=4, label="manual")
-            plt.plot(man_xy_crop[:,0], man_xy_crop[:,1], 'w-', lw=2)
-
-        colors = plt.cm.tab20.colors
-        for i,(k,v) in enumerate(sorted(pack["variants"].items())):
-            auto = np.asarray(v.get("midline", []), float)
-            if len(auto) < 2: continue
-            auto_crop = np.column_stack([auto[:,0]-x, auto[:,1]-y])
-            plt.plot(auto_crop[:,0], auto_crop[:,1], '-', lw=2, color=colors[i%len(colors)], label=k)
-
-        plt.legend(ncol=2, fontsize=8)
-        plt.axis("equal"); plt.tight_layout()
-        out_dir = os.path.join(self.save_folder, "metrics", os.path.splitext(os.path.basename(self.name))[0], f"cid{crack_id}")
-        os.makedirs(out_dir, exist_ok=True)
-        out_png = os.path.join(out_dir, "midlines_overlay_legend_replot.png")
-        plt.savefig(out_png, dpi=180)
-        if display: plt.show()
-        else: plt.close()
-        print(f"[plot] saved → {out_png}")'''
-
-    
-
-    '''def extract_edge_inputs_for_subcrack(self, crack_id, color_channel=None):
-        """
-        Faithfully reconstructs the context that run_pipeline + edge_mask would have set
-        for a manual crack, so edge_param_worker sees exactly the same inputs.
-        Automatically reverses midline if needed to align with p0→p1.
-        """
-        import numpy as np
-        ann = self.annotation["annotations"]["atomic_cracks"][crack_id]
-        x, y, w, h = map(int, ann["mask_bbox"])
-        self.active_bbox = [x, y, x + w, y + h]
-
-        # --- Determine color channel ---
-        if color_channel is None:
-            color_channel = (
-                0 if self.edge_track_color_box.currentText() == "R"
-                else 1 if self.edge_track_color_box.currentText() == "B"
-                else 2
-            )
-
-        # --- Use manual midline directly ---
-        man_xy_g = metrics._finite_xy(ann["midline"])
-        if len(man_xy_g) < 2:
-            print(f"[extract_edge_inputs_for_subcrack] ⚠ no valid manual midline for {crack_id}")
-            return None
-
-        # --- Define endpoints exactly like run_pipeline ---
-        self.pts = [np.array(man_xy_g[0]), np.array(man_xy_g[-1])]
-        self.end_points = self.pts
-
-        # --- Run the real crop creation ---
-        self.update_image_crop()
-        if getattr(self, "skip_current_segment", False):
-            return None
-
-        # --- Compute local track in [y,x] form consistent with edge_mask ---
-        track_local_yx = np.vstack([
-            man_xy_g[:, 1] - y,  # y
-            man_xy_g[:, 0] - x   # x
-        ])
-
-        # --- Flip if start/end order mismatched (ensure start = p0) ---
-        # Convert [y,x] → [x,y] for comparison with pts_crop
-        start_xy = track_local_yx[:, 0][::-1]
-        end_xy = track_local_yx[:, -1][::-1]
-        d_start_p0 = np.linalg.norm(start_xy - self.pts_crop[0])
-        d_start_p1 = np.linalg.norm(start_xy - self.pts_crop[1])
-        if d_start_p1 < d_start_p0:
-            print(f"[extract_edge_inputs_for_subcrack] Reversing midline for crack {crack_id}")
-            track_local_yx = track_local_yx[:, ::-1]
-
-        # --- Optional manual normals (crop coords) ---
-        man_normals_crop = None
-        if "normal_edge_points_full" in ann:
-            e1 = np.asarray(ann["normal_edge_points_full"]["edge1"], float)
-            e2 = np.asarray(ann["normal_edge_points_full"]["edge2"], float)
-            e1c = np.column_stack([e1[:, 0] - x, e1[:, 1] - y])
-            e2c = np.column_stack([e2[:, 0] - x, e2[:, 1] - y])
-            man_normals_crop = [[e1c[:, 0], e1c[:, 1]], [e2c[:, 0], e2c[:, 1]]]
-
-        # --- Extract grayscale crop ---
-        gray = self.image_crop[:, :, color_channel].astype(np.float32)
-
-        # --- Clamp endpoints to crop bounds to prevent "seed out of range" ---
-        H, W = gray.shape[:2]
-        for p in self.pts_crop:
-            p[0] = np.clip(p[0], 0, W - 1e-3)
-            p[1] = np.clip(p[1], 0, H - 1e-3)
-
-        # --- Return payload identical in shape to edge_mask() context ---
-        return dict(
-            image_crop_gray=gray,
-            pts_crop=self.pts_crop,
-            adjusted_track=track_local_yx,
-            manual_midline_global=man_xy_g,
-            auto_midline_global=None,
-            bbox=(x, y, w, h),
-            manual_normals_crop=man_normals_crop,
-        )'''
-
     def debug_edge_sweep_once(self, crack_id=None, max_workers=8):
         """
         Convenience wrapper: pick first manual crack if none given, run sweep, save CSV.
@@ -688,48 +554,192 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         
     def summarize_dataset_metrics(self):
         """
-        Walk metrics/*/* CSVs and produce overall means + a few compact plots.
+        Walk metrics/*/* CSVs and produce overall means + richer manual-vs-auto plots.
+        Expects per-image files:
+        - mask_metrics.csv with columns including:
+            image, crack_type ∈ {atomic, combined, TOTAL, atomic_auto, combined_auto, TOTAL_AUTO, ...}
+            iou, boundary_f1, ...
+        - width_metrics.csv written via width_summary_to_csv(..., label)
+            with some column that identifies subset (e.g. 'subset', 'tag', 'group', or 'crack_type').
         """
-        import os, glob, pandas as pd, matplotlib.pyplot as plt
+        import os, glob
+        import pandas as pd
+        import numpy as np
+        import matplotlib.pyplot as plt
 
         root = os.path.join(self.save_folder, "metrics")
-        if not os.path.isdir(root): 
-            print("[summarize] no metrics directory yet"); return
+        if not os.path.isdir(root):
+            print("[summarize] no metrics directory yet")
+            return
 
-        # collect mask_metrics + width_metrics
-        mask_csvs  = glob.glob(os.path.join(root, "*", "mask_metrics.csv"))
-        width_csvs = glob.glob(os.path.join(root, "*", "width_metrics.csv"))
+        out_dir = os.path.join(root, "_summary")
+        os.makedirs(out_dir, exist_ok=True)
 
-        out_dir = os.path.join(root, "_summary"); os.makedirs(out_dir, exist_ok=True)
+        # ------------------------------------------------------------
+        # MASK METRICS (manual vs auto, by crack_type)
+        # ------------------------------------------------------------
+        mask_csvs = glob.glob(os.path.join(root, "*", "mask_metrics.csv"))
 
-        # --- mask
         if mask_csvs:
             dfm = pd.concat([pd.read_csv(p) for p in mask_csvs], ignore_index=True)
             dfm.to_csv(os.path.join(out_dir, "mask_metrics_all.csv"), index=False)
-            m = dfm.mean(numeric_only=True)
 
-            # bar plot for IoU means
-            plt.figure(figsize=(4,3))
-            vals = [m.get("iou_manual_vs_gt", float("nan")), m.get("iou_auto_vs_gt", float("nan"))]
-            plt.bar(["manual_vs_gt","auto_vs_gt"], vals)
-            plt.ylim(0,1); plt.ylabel("IoU")
-            plt.title("Mean Mask IoU (dataset)")
-            plt.tight_layout(); plt.savefig(os.path.join(out_dir, "mask_iou_means.png"), dpi=160); plt.close()
+            if "crack_type" not in dfm.columns:
+                print("[summarize] mask_metrics.csv has no 'crack_type' column; skipping mask breakdown plots.")
+            else:
+                # ---- Per crack_type mean metrics ----
+                by_type = dfm.groupby("crack_type").mean(numeric_only=True).reset_index()
+                by_type.to_csv(os.path.join(out_dir, "mask_metrics_by_crack_type.csv"), index=False)
 
-        # --- width
+                # Choose IoU column name
+                iou_col = None
+                for cand in ["iou", "iou_manual_vs_gt", "iou_auto_vs_gt"]:
+                    if cand in dfm.columns:
+                        iou_col = cand
+                        break
+
+                # Choose boundary metric if present
+                bf1_col = "boundary_f1" if "boundary_f1" in dfm.columns else None
+
+                # ---------- Plot 1: IoU by crack_type ----------
+                if iou_col is not None:
+                    plt.figure(figsize=(6, 4))
+                    plt.bar(by_type["crack_type"], by_type[iou_col])
+                    plt.ylim(0, 1)
+                    plt.xticks(rotation=30, ha="right")
+                    plt.ylabel("IoU")
+                    plt.title(f"Mean {iou_col} by crack_type (dataset)")
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(out_dir, "mask_iou_by_crack_type.png"), dpi=160)
+                    plt.close()
+                else:
+                    print("[summarize] no IoU column found in mask metrics.")
+
+                # ---------- Plot 2: TOTAL vs TOTAL_AUTO IoU bar ----------
+                if iou_col is not None:
+                    df_total = dfm[dfm["crack_type"].isin(["TOTAL", "TOTAL_AUTO"])]
+                    if not df_total.empty:
+                        mean_total = df_total.groupby("crack_type")[iou_col].mean()
+                        labels = []
+                        vals = []
+                        for ct in ["TOTAL", "TOTAL_AUTO"]:
+                            if ct in mean_total.index:
+                                labels.append(ct)
+                                vals.append(mean_total.loc[ct])
+
+                        if vals:
+                            plt.figure(figsize=(4, 3))
+                            plt.bar(labels, vals)
+                            plt.ylim(0, 1)
+                            plt.ylabel("IoU")
+                            plt.title(f"Mean {iou_col}: TOTAL vs TOTAL_AUTO")
+                            plt.tight_layout()
+                            plt.savefig(os.path.join(out_dir, "mask_iou_total_vs_auto.png"), dpi=160)
+                            plt.close()
+
+                # ---------- Plot 3: TOTAL vs TOTAL_AUTO IoU scatter ----------
+                if iou_col is not None:
+                    # pivot: image x crack_type
+                    pivot = dfm.pivot_table(
+                        index="image", columns="crack_type", values=iou_col, aggfunc="mean"
+                    )
+                    if "TOTAL" in pivot.columns and "TOTAL_AUTO" in pivot.columns:
+                        x = pivot["TOTAL"].values
+                        y = pivot["TOTAL_AUTO"].values
+                        mask = np.isfinite(x) & np.isfinite(y)
+                        if np.any(mask):
+                            x = x[mask]
+                            y = y[mask]
+                            plt.figure(figsize=(4, 4))
+                            plt.scatter(x, y, alpha=0.6)
+                            max_val = float(max(1e-6, x.max(), y.max()))
+                            plt.plot([0, max_val], [0, max_val], linestyle="--", linewidth=1)
+                            plt.xlabel("TOTAL IoU (manual)")
+                            plt.ylabel("TOTAL_AUTO IoU (auto_best)")
+                            plt.title("Per-image TOTAL IoU: manual vs auto_best")
+                            plt.tight_layout()
+                            plt.savefig(os.path.join(out_dir, "mask_iou_total_vs_auto_scatter.png"), dpi=160)
+                            plt.close()
+
+                # ---------- Plot 4: boundary F1 by crack_type ----------
+                if bf1_col is not None:
+                    plt.figure(figsize=(6, 4))
+                    plt.bar(by_type["crack_type"], by_type[bf1_col])
+                    plt.ylim(0, 1)
+                    plt.xticks(rotation=30, ha="right")
+                    plt.ylabel("Boundary F1")
+                    plt.title("Mean boundary F1 by crack_type (dataset)")
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(out_dir, "boundary_f1_by_crack_type.png"), dpi=160)
+                    plt.close()
+
+        # ------------------------------------------------------------
+        # WIDTH METRICS (manual vs auto, combined vs combined_auto)
+        # ------------------------------------------------------------
+        width_csvs = glob.glob(os.path.join(root, "*", "width_metrics.csv"))
+
         if width_csvs:
             dfw = pd.concat([pd.read_csv(p) for p in width_csvs], ignore_index=True)
             dfw.to_csv(os.path.join(out_dir, "width_metrics_all.csv"), index=False)
-            m = dfw.mean(numeric_only=True)
 
-            # compact bar plot
-            keep = ["width_diff_mae","width_diff_rmse","width_diff_mean","width_diff_std"]
-            present = [k for k in keep if k in dfw.columns]
-            plt.figure(figsize=(5,3))
-            plt.bar(present, [m[k] for k in present])
-            plt.xticks(rotation=20)
-            plt.title("Mean width differences (edge - mask)")
-            plt.tight_layout(); plt.savefig(os.path.join(out_dir, "width_means.png"), dpi=160); plt.close()
+            # detect subset column (manual/auto/combined/combined_auto)
+            subset_col = None
+            for cand in ["subset", "tag", "group", "crack_type", "mode"]:
+                if cand in dfw.columns:
+                    subset_col = cand
+                    break
+
+            if subset_col is None:
+                print("[summarize] width_metrics.csv has no subset/tag/group column; using global summary only.")
+                m = dfw.mean(numeric_only=True)
+                keep = [c for c in ["width_diff_mae", "width_diff_rmse", "width_diff_mean", "width_diff_std"]
+                        if c in dfw.columns]
+                if keep:
+                    plt.figure(figsize=(5, 3))
+                    plt.bar(keep, [m[c] for c in keep])
+                    plt.xticks(rotation=20)
+                    plt.title("Mean width differences (global)")
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(out_dir, "width_means_global.png"), dpi=160)
+                    plt.close()
+            else:
+                by_subset = dfw.groupby(subset_col).mean(numeric_only=True).reset_index()
+                by_subset.to_csv(os.path.join(out_dir, "width_metrics_by_subset.csv"), index=False)
+
+                # candidate metric columns
+                mae_col  = None
+                rmse_col = None
+                for cand in ["width_diff_mae", "mae", "abs_diff_mae"]:
+                    if cand in dfw.columns:
+                        mae_col = cand
+                        break
+                for cand in ["width_diff_rmse", "rmse"]:
+                    if cand in dfw.columns:
+                        rmse_col = cand
+                        break
+
+                # ---------- Plot: width MAE / RMSE by subset ----------
+                if mae_col or rmse_col:
+                    subsets = by_subset[subset_col].astype(str).tolist()
+                    mae_vals  = [by_subset[mae_col][i]  if mae_col  else np.nan for i in range(len(by_subset))]
+                    rmse_vals = [by_subset[rmse_col][i] if rmse_col else np.nan for i in range(len(by_subset))]
+
+                    x = np.arange(len(subsets))
+                    width = 0.35
+
+                    plt.figure(figsize=(6, 4))
+                    if mae_col:
+                        plt.bar(x - width/2, mae_vals, width, label=mae_col)
+                    if rmse_col:
+                        plt.bar(x + width/2, rmse_vals, width, label=rmse_col)
+
+                    plt.xticks(x, subsets, rotation=20, ha="right")
+                    plt.ylabel("Pixels")
+                    plt.title("Mean crack width errors by subset (manual/auto/combined/combined_auto)")
+                    plt.legend()
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(out_dir, "width_errors_by_subset.png"), dpi=160)
+                    plt.close()
 
         print(f"[summarize] wrote summaries → {out_dir}")
     
@@ -2016,7 +2026,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         # RS3 availability flag
         rs3_enabled = (global_best_rs3 is not None) and (not edges_only)
 
-        # ============================================================
+                # ============================================================
         # PHASE B: APPLY
         # ============================================================
         print("[global-metrics] applying global parameters...")
@@ -2092,9 +2102,11 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     # Mask + width metrics (manual → GT only)
                     t_metrics_start = time.perf_counter()
                     try:
+                        # no RS3 in edges_only, so auto_best won't exist → manual only
                         self.compute_mask_and_width_metrics_for_image(
                             display=False,
                             export_supervision=True,
+                            include_auto=False,
                         )
                     except Exception as e:
                         print(f"[apply] mask/width failed: {e}")
@@ -2158,11 +2170,13 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                         auto_packs = {}
 
                     # ---- Final mask + width metrics ----
+                    # Here we WANT manual vs auto (TOTAL/TOTAL_AUTO, combined vs combined_auto, etc.)
                     t_metrics_start = time.perf_counter()
                     try:
                         self.compute_mask_and_width_metrics_for_image(
                             display=False,
                             export_supervision=True,
+                            include_auto=True,
                         )
                     except Exception as e:
                         print(f"[apply] mask/width failed: {e}")
@@ -2179,8 +2193,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     "total_image_s": round(t_img, 2),
                     "metrics_s": round(t_metrics, 2),
                     "auto_variants_s": round(t_auto, 2),
-                    "mask_build_s": 0.0,   # (now merged inside compute_mask_and_width_metrics_for_image)
-                    "supervision_s": 0.0,  # (supervision done inside metrics function)
+                    "mask_build_s": 0.0,   # merged inside compute_mask_and_width_metrics_for_image
+                    "supervision_s": 0.0,  # done inside metrics function
                     "edge_parallel_s": round(t_edge_parallel, 2),
                     "mode": ("edges_only" if edges_only else "full"),
                 }
@@ -2193,7 +2207,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                             "processed_cracks": processed,
                             "mode": ("edges_only" if edges_only else "full"),
                             "edge_params_used": global_best_edge,
-                            "rs3_available": rs3_available,
+                            "rs3_available": (not edges_only and rs3_available),
                         }, f)
                     open(done_flag, "a").close()
                 except Exception as e:
@@ -2236,183 +2250,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
         print(f"[global-metrics] ⏱ total runtime = {total:.2f}s (A1={tA1:.2f}, A2={tA2:.2f}, B={tB:.2f})")
-
-    def export_training_supervision_for_image(self, cache_key=None, normal_half_span=32.0, step=0.5):
-        """
-        Export per-crack supervision artifacts for training/analysis.
-
-        For each *manual* atomic crack:
-        - manual_midline.csv
-        - manual_mask.png (single-crack GT mask)
-        - manual_gt_width_samples.csv (widths from GT mask along manual midline normals)
-        - auto_best_midline.csv        (if best variant exists)
-        - auto_best_normals_edge1.csv, auto_best_normals_edge2.csv (if present)
-        - auto_best_params.json
-        - auto_best_width_samples.csv  (if both auto edges present)
-
-        All files saved under: metrics/<image>/supervision/cid<id>/
-        """
-        import os, json
-        import numpy as np
-        import pandas as pd
-        import cv2
-        
-
-        def _ensure_dir(p):
-            os.makedirs(p, exist_ok=True); return p
-
-        def _resample_polyline(xy, step=1.0):
-            xy = np.asarray(xy, float)
-            if len(xy) < 2: return xy
-            d = np.sqrt(((xy[1:] - xy[:-1])**2).sum(1))
-            s = np.concatenate([[0.0], np.cumsum(d)])
-            L = s[-1]
-            if L <= 1e-6: return xy
-            n = max(2, int(np.ceil(L/step))+1)
-            s_new = np.linspace(0, L, n)
-            # linear interpolate
-            x = np.interp(s_new, s, xy[:,0])
-            y = np.interp(s_new, s, xy[:,1])
-            return np.column_stack([x,y])
-
-        def _bilinear_sample(img01, pts_xy):
-            # img01: HxW float {0,1}; pts_xy: Nx2 (x,y) floats
-            H, W = img01.shape
-            x = pts_xy[:,0].clip(0, W-1)
-            y = pts_xy[:,1].clip(0, H-1)
-            x0 = np.floor(x).astype(int); x1 = np.minimum(x0+1, W-1)
-            y0 = np.floor(y).astype(int); y1 = np.minimum(y0+1, H-1)
-            fx = x - x0; fy = y - y0
-            Ia = img01[y0, x0]
-            Ib = img01[y0, x1]
-            Ic = img01[y1, x0]
-            Id = img01[y1, x1]
-            return (Ia*(1-fx)*(1-fy) + Ib*fx*(1-fy) + Ic*(1-fx)*fy + Id*fx*fy)
-
-        def _edges_from_mask_along_normals(mid_xy, mask_bin, half_span=32.0, ds=0.5):
-            # Returns DataFrame with per-sample mid/edge coords + width (px).
-            xy = _resample_polyline(mid_xy, step=1.0)
-            if len(xy) < 2: return pd.DataFrame()
-            # tangents
-            v = np.gradient(xy, axis=0)
-            nrm = np.stack([-v[:,1], v[:,0]], axis=1)
-            nrm_len = np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-9
-            n = nrm / nrm_len
-
-            ts = np.arange(-half_span, half_span+1e-6, ds)  # sample offsets
-            rows = []
-            for i, p in enumerate(xy):
-                line = p[None,:] + ts[:,None]*n[i:i+1,:]     # (T,2)
-                vals = _bilinear_sample(mask_bin.astype(float), line)
-                # pick leftmost ≥0.5 and rightmost ≥0.5 indices
-                on = np.where(vals >= 0.5)[0]
-                if len(on) == 0:
-                    rows.append([i, p[0], p[1], np.nan, np.nan, np.nan, np.nan, np.nan])
-                    continue
-                il, ir = on[0], on[-1]
-                xl, yl = line[il]
-                xr, yr = line[ir]
-                width = np.hypot(xr - xl, yr - yl)
-                rows.append([i, p[0], p[1], xl, yl, xr, yr, width])
-
-            return pd.DataFrame(rows, columns=[
-                "sample_idx","mid_x","mid_y","edgeL_x","edgeL_y","edgeR_x","edgeR_y","width_px"
-            ])
-
-        if getattr(self, "current_mask", None) is None:
-            print("[supervision] no GT mask loaded for this image"); 
-            return
-
-        base_name = os.path.splitext(os.path.basename(self.name))[0]
-        image_dir = os.path.join(self.save_folder, "metrics", base_name)
-        sup_root  = _ensure_dir(os.path.join(image_dir, "supervision"))
-
-        H, W = self.original_image.shape[:2]
-        mask_bin = (self.current_mask > 0).astype(np.uint8)
-
-        ann = self.annotation.get("annotations", {}) or {}
-        atomic = ann.get("atomic_cracks", {}) or {}
-        cache_key = cache_key or metrics._auto_cache_key(self)
-
-        for cid, crack in atomic.items():
-            src = (crack.get("source") or "").lower()
-            if src.startswith("auto") or src == "combined":
-                continue
-
-            man_xy = metrics._finite_xy(crack.get("midline", []))
-            if len(man_xy) < 2:
-                continue
-
-            # paths
-            out_dir = _ensure_dir(os.path.join(sup_root, f"cid{cid}"))
-
-            # ---- Manual GT: midline + single-crack mask + width samples from mask
-            pd.DataFrame(man_xy, columns=["x","y"]).to_csv(
-                os.path.join(out_dir, "manual_midline.csv"), index=False
-            )
-
-            m_manual = metrics._reconstruct_full_mask(crack, H, W)
-            cv2.imwrite(os.path.join(out_dir, "manual_mask.png"),
-                        (m_manual>0).astype(np.uint8)*255)
-
-            try:
-                df_gt = _edges_from_mask_along_normals(
-                    mid_xy=man_xy, mask_bin=mask_bin, half_span=normal_half_span, ds=step
-                )
-                if not df_gt.empty:
-                    df_gt.to_csv(os.path.join(out_dir, "manual_gt_width_samples.csv"), index=False)
-            except Exception as e:
-                print(f"[supervision] GT widths failed for cid={cid}: {e}")
-
-            # ---- Auto best variant artifacts (if exist)
-            pack = crack.get("variants", {}).get("auto", {}).get(cache_key)
-            if pack:
-                bid = pack.get("best_variant_id")
-                if bid is not None:
-                    best = pack["variants"].get(f"v{bid}", {})
-
-                    # midline
-                    auto_xy = np.asarray(best.get("midline", []), dtype=float)
-                    if auto_xy.size >= 4:
-                        pd.DataFrame(auto_xy, columns=["x","y"]).to_csv(
-                            os.path.join(out_dir, "auto_best_midline.csv"), index=False
-                        )
-
-                    # params
-                    params = best.get("params", {})
-                    try:
-                        with open(os.path.join(out_dir, "auto_best_params.json"), "w") as f:
-                            json.dump(params, f)
-                    except Exception as e:
-                        print(f"[supervision] write params failed for cid={cid}: {e}")
-
-                    # normals/edge points (if edge worker provided them)
-                    ne = best.get("normal_edge_points_full") or best.get("normal_edge_points")
-                    if isinstance(ne, dict):
-                        e1 = np.asarray(ne.get("edge1", []), float)
-                        e2 = np.asarray(ne.get("edge2", []), float)
-                        if e1.size >= 4:
-                            pd.DataFrame(e1, columns=["x","y"]).to_csv(
-                                os.path.join(out_dir, "auto_best_normals_edge1.csv"), index=False
-                            )
-                        if e2.size >= 4:
-                            pd.DataFrame(e2, columns=["x","y"]).to_csv(
-                                os.path.join(out_dir, "auto_best_normals_edge2.csv"), index=False
-                            )
-                        # If both edges present and aligned by index, dump per-sample widths
-                        try:
-                            if e1.size >= 4 and e2.size >= 4:
-                                n = min(len(e1), len(e2))
-                                w = np.hypot(e1[:n,0]-e2[:n,0], e1[:n,1]-e2[:n,1])
-                                df_auto_w = pd.DataFrame({
-                                    "idx": np.arange(n),
-                                    "edge1_x": e1[:n,0], "edge1_y": e1[:n,1],
-                                    "edge2_x": e2[:n,0], "edge2_y": e2[:n,1],
-                                    "width_px": w
-                                })
-                                df_auto_w.to_csv(os.path.join(out_dir, "auto_best_width_samples.csv"), index=False)
-                        except Exception as e:
-                            print(f"[supervision] auto width export failed for cid={cid}: {e}")
 
 
     '''def run_midline_and_mask_metrics(self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True):
@@ -6105,6 +5942,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             crop_rgb = cv2.cvtColor(crop_rgb, cv2.COLOR_GRAY2BGR)
 
         man_xy_crop = np.column_stack([man_xy_g[:,0]-x, man_xy_g[:,1]-y])
+        print(x,y)
 
         plot_midlines_overlay_all(
             image_crop_rgb=crop_rgb,
