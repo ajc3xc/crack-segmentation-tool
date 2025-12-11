@@ -266,6 +266,10 @@ class Ui_MainWindow(object):
         self.label_5.setStyleSheet("color: rgb(0, 0, 0);")
         self.label_5.setTextFormat(QtCore.Qt.AutoText)
         self.label_5.setObjectName("label_5")
+        self.export_gt_supervision = QtWidgets.QPushButton(self.tab)
+        self.export_gt_supervision.setGeometry(QtCore.QRect(5, 490, 150, 30))
+        self.export_gt_supervision.setToolTipDuration(1000000000)
+        self.export_gt_supervision.setObjectName("export_gt_supervision")
         self.update_image_crop_button = QtWidgets.QPushButton(self.tab)
         self.update_image_crop_button.setGeometry(QtCore.QRect(5, 530, 150, 48))
         self.update_image_crop_button.setToolTipDuration(1000000000)
@@ -510,8 +514,7 @@ class Ui_MainWindow(object):
         self.label_30.setPixmap(QtGui.QPixmap("images/Picture.jpg"))
         self.label_30.setScaledContents(True)
         self.label_30.setObjectName("label_30")
-        
-        
+               
         self.label_30.raise_()
         self.image_crop_down_display.raise_()
         self.select_points_button.raise_()
@@ -535,6 +538,7 @@ class Ui_MainWindow(object):
         self.crack_color_box.raise_()
         self.downsample_factor_box.raise_()
         self.label_5.raise_()
+        self.export_gt_supervision.raise_()
         self.update_image_crop_button.raise_()
         self.label_2.raise_()
         self.color_chenel_box.raise_()
@@ -682,6 +686,7 @@ class Ui_MainWindow(object):
         self.label_31.setPixmap(QtGui.QPixmap("images/Picture.jpg"))
         self.label_31.setScaledContents(True)
         self.label_31.setObjectName("label_31")
+        
         self.label_31.raise_()
         self.edge_map_display.raise_()
         self.edge_mask_button.raise_()
@@ -743,6 +748,7 @@ class Ui_MainWindow(object):
         self.label_32.setPixmap(QtGui.QPixmap("images/Picture.jpg"))
         self.label_32.setScaledContents(True)
         self.label_32.setObjectName("label_32")
+        
         self.label_32.raise_()
         self.draw_segment_button.raise_()
         self.erase_segment_button.raise_()
@@ -750,6 +756,10 @@ class Ui_MainWindow(object):
         self.save_manuall_segment_button.raise_()
         self.manual_segment_full_screen_button.raise_()
         self.reset_segment_button.raise_()
+        
+        
+        
+        
         self.tabWidget.addTab(self.tab_3, "")
         MainWindow.setCentralWidget(self.centralwidget)
         self.statusbar = QtWidgets.QStatusBar(MainWindow)
@@ -824,6 +834,7 @@ class Ui_MainWindow(object):
         self.crack_color_box.setItemText(1, _translate("MainWindow", "Bright crack"))
         self.downsample_factor_box.setToolTip(_translate("MainWindow", "Image downsample factor to reduce processing time"))
         self.label_5.setText(_translate("MainWindow", "Downsample factor"))
+        self.export_gt_supervision.setText(_translate("MainWindow", "Export Ground Truth"))
         self.update_image_crop_button.setText(_translate("MainWindow", "Update Cropped\nImage"))
         self.label_2.setText(_translate("MainWindow", "Color Chenel"))
         self.color_chenel_box.setToolTip(_translate("MainWindow", "Only one collor chennel used for image processing. Chose the one that gives the most crack contrast"))

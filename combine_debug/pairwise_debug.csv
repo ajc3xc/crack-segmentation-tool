@@ -1,2 +1,2 @@
 aid,bid,shared,prox<th,dmin,maskA_px,maskB_px,bbox_fmt,overlap,overlap_px,why
-0,1,True,True,0.0,270,598,xywh,False,0,shared;prox<10.0
+0,1,True,True,0.0,565,284,xywh,False,0,shared;prox<10.0

@@ -147,7 +147,6 @@ def _stitch_lines_by_user(member_ids, atomic):
                 stitched.append(mid2arr[m])
     return [_finite_xy(s) for s in stitched if len(s) >= 2]
 
-
 def _align_edge_to_midline(S_xy, E_xy):
     d_f = np.linalg.norm(E_xy[0]-S_xy[0]) + np.linalg.norm(E_xy[-1]-S_xy[-1])
     d_r = np.linalg.norm(E_xy[0]-S_xy[-1]) + np.linalg.norm(E_xy[-1]-S_xy[0])
@@ -159,6 +158,117 @@ def _ribbon_mask_from_midline(H, W, S_xy, thickness_px=4):
     pts = np.round(S_xy).astype(np.int32).reshape(-1, 1, 2)
     cv2.polylines(mask, [pts], isClosed=False, color=255, thickness=thickness_px, lineType=cv2.LINE_AA)
     return mask
+
+def gt_groups_from_midlines_and_gtmask(atomic: dict, gt_mask, H, W):
+    """
+    Pure GT grouping:
+    Group atomic cracks if:
+      (1) Their midlines fall into the SAME connected component of the GT mask, OR
+      (2) They share a start/end user endpoint.
+
+    Does NOT use:
+        - manual_mask_from_crack
+        - auto grouping heuristics
+        - proximity or overlap logic
+        - geodesic edges
+        - snapshot data
+    """
+
+    import numpy as np
+    import cv2
+
+    # ------------------------------------
+    # 1) Label connected components in GT
+    # ------------------------------------
+    gt_bin = (gt_mask > 0).astype(np.uint8)
+    num_labels, cc_map = cv2.connectedComponents(gt_bin)
+
+    # ------------------------------------
+    # 2) Determine for each atomic:
+    #     - which GT CC its midline occupies
+    #     - which user endpoints it has
+    # ------------------------------------
+    cid_to_cc = {}
+    cid_to_endpoints = {}
+
+    def get_user_endpoints(cr):
+        ups = cr.get("user_points", []) or []
+        ucs = cr.get("user_connections", []) or []
+        endpoints = set()
+        for pair in ucs:
+            for idx in pair:
+                if 0 <= idx < len(ups):
+                    endpoints.add(tuple(map(float, ups[idx])))
+        return endpoints
+
+    for cid, cr in atomic.items():
+        cid_str = str(cid)
+
+        mid = np.asarray(cr.get("midline", []), float)
+        if mid.ndim == 2 and len(mid) >= 1:
+            ys = np.clip(mid[:, 1].round().astype(int), 0, H-1)
+            xs = np.clip(mid[:, 0].round().astype(int), 0, W-1)
+            cc_labels = cc_map[ys, xs]
+            # pick the most common CC label (ignoring background 0)
+            nonzero = cc_labels[cc_labels > 0]
+            if len(nonzero):
+                # mode of the CC labels
+                vals, counts = np.unique(nonzero, return_counts=True)
+                cid_to_cc[cid_str] = int(vals[np.argmax(counts)])
+            else:
+                # midline did not land inside GT mask
+                cid_to_cc[cid_str] = None
+        else:
+            cid_to_cc[cid_str] = None
+
+        cid_to_endpoints[cid_str] = get_user_endpoints(cr)
+
+    # ------------------------------------
+    # 3) Build adjacency graph:
+    #     A ~ B if:
+    #       - cc(A) == cc(B) and != None
+    #       - endpoints(A) ∩ endpoints(B) != ∅
+    # ------------------------------------
+    ids = sorted(cid_to_cc.keys())
+    adj = {cid: set() for cid in ids}
+
+    for i in range(len(ids)):
+        for j in range(i+1, len(ids)):
+            a, b = ids[i], ids[j]
+
+            same_cc = (cid_to_cc[a] is not None and
+                       cid_to_cc[a] == cid_to_cc[b])
+
+            shared_endpoints = bool(cid_to_endpoints[a] & cid_to_endpoints[b])
+
+            if same_cc or shared_endpoints:
+                adj[a].add(b)
+                adj[b].add(a)
+
+    # ------------------------------------
+    # 4) Connected components of adjacency graph
+    # ------------------------------------
+    visited = set()
+    groups = []
+    for cid in ids:
+        if cid in visited:
+            continue
+        comp = []
+        stack = [cid]
+        while stack:
+            u = stack.pop()
+            if u in visited:
+                continue
+            visited.add(u)
+            comp.append(u)
+            stack.extend(adj[u])
+        if len(comp) >= 2:
+            groups.append(sorted(comp, key=lambda x: int(x)))
+
+    return {
+        str(i): {"members": g}
+        for i, g in enumerate(groups)
+    }
 
 def plot_combined_debug(
     *,

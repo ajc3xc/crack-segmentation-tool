@@ -11,8 +11,10 @@ import cracktools as ct
 #from helpers.layout import Ui_MainWindow
 from time import time
 
+from combiner import gt_groups_from_midlines_and_gtmask
+
 class CombineClearSegments(CrackUtils):
-    def combine_segments(self):
+    '''def combine_segments(self):
         """
         Combine multiple cracks (atomic or already-combined) into a new combined crack.
         - If an atomic crack belongs to a combined crack, it is listed under that combined crack instead.
@@ -205,6 +207,278 @@ class CombineClearSegments(CrackUtils):
 
         # --- Build a *full* combined crack (midline + edges + widths + crop)
         combined_entry = self._build_combined_crack(sorted(selected_atomic_ids, key=lambda s: int(s)))
+        if combined_entry is None:
+            error("Failed to build combined crack (no valid midlines or masks).")
+            self.change_image()
+            return
+
+        combined_cracks[new_cmb_id] = combined_entry
+
+        self.save_annotation()
+        self.change_image()'''
+        
+    def combine_segments(self):
+        """
+        Combine multiple cracks (atomic or already-combined) into a new combined crack.
+        - UI is the same as before.
+        - Connectivity check is now consistent with auto_combine_segments:
+
+            1) If a GT mask is available and valid:
+                use gt_groups_from_midlines_and_gtmask to ensure the selection
+                lies inside a single GT-group.
+            2) Otherwise:
+                use auto_groups_from_atomic to ensure the selection lies inside
+                a single auto-group.
+            3) Only if auto_groups_from_atomic returns no groups do we fall back
+            to the old cracks_all_connected (overlap/endpoints) test.
+        """
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
+        from PyQt5.QtGui import QImage, QPixmap
+        from PyQt5.QtCore import Qt
+        import numpy as np, cv2
+
+        from combiner import gt_groups_from_midlines_and_gtmask
+        from helpers.combine_debug import auto_groups_from_atomic
+
+        if not hasattr(self, "annotation") or not isinstance(self.annotation, dict):
+            error("No annotation data loaded.")
+            return
+
+        ann_root = self.annotation.setdefault("annotations", {})
+        atomic_cracks = ann_root.setdefault("atomic_cracks", {})
+        combined_cracks = ann_root.setdefault("combined_cracks", {})
+
+        H, W = self.original_image.shape[:2]
+
+        # ------------------------------------------------------------------
+        # Helpers (mask + legacy connectivity used only as final fallback)
+        # ------------------------------------------------------------------
+        def mask_from_crack(crack):
+            mc = crack.get("mask_crop")
+            bb = crack.get("mask_bbox")
+            if mc is not None and bb is not None:
+                crop = np.array(mc, dtype=np.uint8)
+                x, y, w, h = [int(v) for v in bb]
+                x2, y2 = min(x + w, W), min(y + h, H)
+                w_eff, h_eff = max(0, x2 - x), max(0, y2 - y)
+                if h_eff > 0 and w_eff > 0:
+                    crop = (crop > 0).astype(np.uint8)[:h_eff, :w_eff]
+                    m = np.zeros((H, W), np.uint8)
+                    m[y:y + h_eff, x:x + w_eff] = crop
+                    return m
+            full = np.array(crack.get("mask", []), dtype=np.uint8)
+            if full.size == H * W and full.shape == (H, W):
+                return (full > 0).astype(np.uint8)
+            return np.zeros((H, W), np.uint8)
+
+        def cracks_overlap_or_connect(crackA, crackB):
+            # Overlap check
+            mA = mask_from_crack(crackA)
+            mB = mask_from_crack(crackB)
+            if np.any(mA & mB):
+                return True
+            # User endpoint check
+            upA = [tuple(pt) for pt in crackA.get("user_points", [])]
+            upB = [tuple(pt) for pt in crackB.get("user_points", [])]
+            if set(upA) & set(upB):
+                return True
+            return False
+
+        def cracks_all_connected(cracks):
+            """Legacy: ensure all cracks form one connected component by overlap/endpoints."""
+            n = len(cracks)
+            if n < 2:
+                return False
+            adj = {i: set() for i in range(n)}
+            for i in range(n):
+                for j in range(i + 1, n):
+                    if cracks_overlap_or_connect(cracks[i], cracks[j]):
+                        adj[i].add(j)
+                        adj[j].add(i)
+            visited = set()
+            stack = [0]
+            while stack:
+                u = stack.pop()
+                if u in visited:
+                    continue
+                visited.add(u)
+                stack.extend(adj[u] - visited)
+            return len(visited) == n
+
+        # ------------------------------------------------------------------
+        # Build a unique display list where each atomic belongs to ≤1 combined
+        # ------------------------------------------------------------------
+        display_items = []  # list of (type, id)
+        seen_atomic = set()
+
+        # Add combined cracks first as single entries
+        for cmb_id, cmb in sorted(combined_cracks.items(), key=lambda kv: int(kv[0])):
+            members = cmb.get("members", [])
+            if any(m in atomic_cracks for m in members):
+                display_items.append(("combined", cmb_id))
+                seen_atomic.update(members)
+
+        # Then add remaining atomic cracks
+        for atom_id in sorted(atomic_cracks.keys(), key=lambda s: int(s)):
+            if atom_id not in seen_atomic:
+                display_items.append(("atomic", atom_id))
+
+        if len(display_items) < 2:
+            error("Need at least two segments (atomic or combined) to combine.")
+            return
+
+        # ------------------------------------------------------------------
+        # Dialog UI
+        # ------------------------------------------------------------------
+        dlg = QDialog(self.MainWindow)
+        dlg.setWindowTitle("Combine Segments")
+        layout = QVBoxLayout(dlg)
+
+        listwidget = QListWidget()
+        listwidget.setSelectionMode(QListWidget.MultiSelection)
+        for tpe, cid in display_items:
+            if tpe == "atomic":
+                lbl = f"Atomic {cid}"
+            else:
+                members = combined_cracks[cid].get("members", [])
+                lbl = f"Combined {cid} (members: {','.join(members)})"
+            listwidget.addItem(lbl)
+        layout.addWidget(listwidget)
+
+        btns = QHBoxLayout()
+        btn_ok = QPushButton("Combine Selected")
+        btn_cancel = QPushButton("Cancel")
+        btns.addWidget(btn_ok)
+        btns.addWidget(btn_cancel)
+        layout.addLayout(btns)
+
+        btn_ok.clicked.connect(dlg.accept)
+        btn_cancel.clicked.connect(dlg.reject)
+
+        # ------------------------------------------------------------------
+        # Highlight selection on the image
+        # ------------------------------------------------------------------
+        def highlight():
+            display = self.original_image.copy()
+            for i, (tpe, cid) in enumerate(display_items):
+                crack = atomic_cracks[cid] if tpe == "atomic" else combined_cracks[cid]
+                m_full = mask_from_crack(crack)
+                if np.any(m_full):
+                    color = (255, 0, 0)
+                    alpha = 0.25
+                    if listwidget.item(i).isSelected():
+                        color = (255, 255, 0)
+                        alpha = 0.6
+                    overlay = np.zeros_like(display)
+                    overlay[m_full.astype(bool)] = color
+                    display = cv2.addWeighted(display, 1, overlay, alpha, 0)
+            im = display.astype(np.uint8)
+            qimage = QImage(im, im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimage)
+            scaled = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(),
+                                Qt.KeepAspectRatio, Qt.FastTransformation)
+            self.ImageScreen.setPixmap(scaled)
+
+        listwidget.itemSelectionChanged.connect(highlight)
+        highlight()
+
+        if dlg.exec_() != QDialog.Accepted:
+            self.change_image()
+            return
+
+        selected_rows = [i.row() for i in listwidget.selectedIndexes()]
+        if len(selected_rows) < 2:
+            error("Select at least two segments to combine.")
+            self.change_image()
+            return
+
+        # ------------------------------------------------------------------
+        # Gather all atomic members from selection
+        # ------------------------------------------------------------------
+        selected_atomic_ids = set()
+        for idx in selected_rows:
+            tpe, cid = display_items[idx]
+            if tpe == "atomic":
+                selected_atomic_ids.add(cid)
+            else:
+                selected_atomic_ids.update(combined_cracks[cid].get("members", []))
+
+        # ==========================================================
+        # CONNECTIVITY CHECK (GT-first, then auto_groups, then legacy)
+        # ==========================================================
+        candidate = set(selected_atomic_ids)
+
+        # Try to get a GT mask
+        gt_mask = None
+        if hasattr(self, "gt_mask") and self.gt_mask is not None:
+            gt_mask = np.asarray(self.gt_mask)
+        elif ann_root.get("gt_mask") is not None:
+            gt_mask = np.asarray(ann_root["gt_mask"])
+
+        used_gt = False
+        if gt_mask is not None:
+            if gt_mask.ndim == 3:
+                gt_mask = cv2.cvtColor(gt_mask, cv2.COLOR_BGR2GRAY)
+            if gt_mask.shape[:2] == (H, W) and np.any(gt_mask):
+                used_gt = True
+                groups_gt = gt_groups_from_midlines_and_gtmask(atomic_cracks, gt_mask, H, W)
+                ok_gt = any(candidate.issubset(set(g["members"])) for g in groups_gt.values())
+                if not ok_gt:
+                    error("Selected cracks do not form a single GT-consistent group.")
+                    self.change_image()
+                    return
+
+        if not used_gt:
+            # No usable GT → use auto_groups_from_atomic instead of cracks_all_connected
+            groups_auto = auto_groups_from_atomic(
+                atomic_cracks,
+                image_hw=(H, W),
+                px_thresh=10.0,
+                debug_root=None,   # or a folder if you want CSV/overlays
+            )
+
+            if groups_auto:
+                ok_auto = any(candidate.issubset(set(g["members"])) for g in groups_auto.values())
+                if not ok_auto:
+                    error("Selected cracks do not lie in a single auto-group (mask/endpoint/proximity).")
+                    self.change_image()
+                    return
+            else:
+                # Final fallback: legacy overlap/endpoints connectivity
+                selected_cracks = [atomic_cracks[cid] for cid in selected_atomic_ids if cid in atomic_cracks]
+                if not cracks_all_connected(selected_cracks):
+                    error("Selected cracks do not all connect (overlap or shared endpoints).")
+                    self.change_image()
+                    return
+
+        # ------------------------------------------------------------------
+        # Remove any existing combined fully contained by this new merge
+        # ------------------------------------------------------------------
+        to_delete = []
+        for cmb_id, cmb in list(combined_cracks.items()):
+            members = set(cmb.get("members", []))
+            if members.issubset(selected_atomic_ids):
+                to_delete.append(cmb_id)
+        for cmb_id in to_delete:
+            combined_cracks.pop(cmb_id, None)
+
+        # ------------------------------------------------------------------
+        # Allocate a new combined id
+        # ------------------------------------------------------------------
+        cmb_ids = []
+        for k in combined_cracks.keys():
+            try:
+                cmb_ids.append(int(k))
+            except Exception:
+                pass
+        new_cmb_id = str(max(cmb_ids) + 1 if cmb_ids else 0)
+
+        # ------------------------------------------------------------------
+        # Build the combined crack (midline + edges + widths + crop)
+        # ------------------------------------------------------------------
+        combined_entry = self._build_combined_crack(
+            sorted(selected_atomic_ids, key=lambda s: int(s))
+        )
         if combined_entry is None:
             error("Failed to build combined crack (no valid midlines or masks).")
             self.change_image()
@@ -455,98 +729,8 @@ class CombineClearSegments(CrackUtils):
             self.change_image()
         else:
             self.change_image()
-
-    """def auto_combine_segments(self):
-        '''
-        Automatically combine atomic cracks that overlap or share endpoints.
-        Reuses _build_combined_crack for consistency.
-        If an atomic crack already belongs to a combined crack, it will extend that
-        combined crack when new overlaps/branches are detected.
-        '''
-        if not hasattr(self, "original_image") or self.original_image is None:
-            print("⚠️ No image loaded — skipping auto_combine_segments.")
-            return
-        if not hasattr(self, "annotation") or not self.annotation:
-            print("⚠️ No annotation loaded — skipping auto_combine_segments.")
-            return
-        
-        ann = self.annotation.setdefault("annotations", {})
-        atomic = ann.setdefault("atomic_cracks", {})
-        combined = ann.setdefault("combined_cracks", {})
-
-        H, W = self.original_image.shape[:2]
-
-        # --- Helper: same as in combine_segments ---
-        def mask_from_crack(crack):
-            mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
-            if mc is not None and bb is not None:
-                crop = np.array(mc, dtype=np.uint8)
-                x, y, w, h = [int(v) for v in bb]
-                x2, y2 = min(x+w, W), min(y+h, H)
-                w_eff, h_eff = max(0, x2-x), max(0, y2-y)
-                if h_eff > 0 and w_eff > 0:
-                    crop = (crop > 0).astype(np.uint8)[:h_eff, :w_eff]
-                    m = np.zeros((H, W), dtype=np.uint8)
-                    m[y:y+h_eff, x:x+w_eff] = crop
-                    return m
-            full = np.array(crack.get("mask", []), dtype=np.uint8)
-            if full.size == H*W and full.shape == (H,W):
-                return (full > 0).astype(np.uint8)
-            return np.zeros((H,W), dtype=np.uint8)
-
-        def cracks_overlap_or_connect(crackA, crackB):
-            if np.any(mask_from_crack(crackA) & mask_from_crack(crackB)):
-                return True
-            upA = [tuple(pt) for pt in crackA.get("user_points", [])]
-            upB = [tuple(pt) for pt in crackB.get("user_points", [])]
-            return bool(set(upA) & set(upB))
-
-        # --- Build list of "entries": atomic or combined ---
-        # Each atomic should appear only once (if in combined, skip here)
-        seen_atomic = set(m for cmb in combined.values() for m in cmb.get("members", []))
-        entries = [("combined", cid) for cid in combined.keys()]
-        entries.extend(("atomic", aid) for aid in atomic.keys() if aid not in seen_atomic)
-
-        # --- For each atomic not yet combined, check if it connects to an existing combined ---
-        for tpe, cid in list(entries):
-            if tpe != "atomic":
-                continue
-            crack = atomic[cid]
-            # see if it overlaps/attaches to any combined
-            attached_to = None
-            for cmb_id, cmb in combined.items():
-                for m in cmb.get("members", []):
-                    if cracks_overlap_or_connect(crack, atomic.get(m, {})):
-                        attached_to = cmb_id
-                        break
-                if attached_to:
-                    break
-            if attached_to:
-                # extend existing combined by rebuilding with old members + this new one
-                members = set(combined[attached_to]["members"])
-                '''members.add(cid)
-                combined[attached_to] = self._build_combined_crack(sorted(members, key=lambda s: int(s)))'''
-                members_clean = [m for m in members if isinstance(m, (str, int)) and str(m).isdigit()]
-                if not members_clean:
-                    continue
-                combined[attached_to] = self._build_combined_crack(sorted(members_clean, key=lambda s: int(s)))
-                print(f"Extended combined {attached_to} with atomic {cid}")
-            else:
-                # check if it overlaps with other "free" atomics → make a new combined
-                overlaps = [cid]
-                for tpe2, cid2 in entries:
-                    if tpe2 == "atomic" and cid2 != cid:
-                        if cracks_overlap_or_connect(crack, atomic[cid2]):
-                            overlaps.append(cid2)
-                if len(overlaps) > 1:
-                    new_id = str(max([int(k) for k in combined.keys() if k.isdigit()] or [-1]) + 1)
-                    combined[new_id] = self._build_combined_crack(sorted(overlaps, key=lambda s: int(s)))
-                    print(f"Auto-created combined {new_id} from atomics {overlaps}")
-
-        self.save_annotation()
-        self.change_image()"""
-        
-    def auto_combine_segments(self):
+ 
+    '''def auto_combine_segments(self):
         """
         Automatically combine atomic cracks that overlap, connect, or are close in midline space.
         Reuses _build_combined_crack for consistency.
@@ -653,6 +837,101 @@ class CombineClearSegments(CrackUtils):
                     new_id = str(max([int(k) for k in combined.keys() if k.isdigit()] or [-1]) + 1)
                     combined[new_id] = self._build_combined_crack(sorted(overlaps, key=lambda s: int(s)))
                     print(f"[COMBINE_DBG] Auto-created combined {new_id} from atomics {overlaps}")
+
+        self.save_annotation()
+        self.change_image()'''
+        
+    def auto_combine_segments(self):
+        """
+        Automatically combine atomic cracks using GT when possible.
+
+        Priority:
+        1) If a GT mask is available and matches the image size:
+            - use gt_groups_from_midlines_and_gtmask(atomic, gt_mask, H, W)
+        2) Otherwise:
+            - fall back to auto_groups_from_atomic(atomic, image_hw=(H, W))
+
+        Then rebuild self.annotation['annotations']['combined_cracks']
+        by calling self._build_combined_crack() for each group.
+        """
+
+        import numpy as np, cv2
+        from combiner import gt_groups_from_midlines_and_gtmask
+        from helpers.combine_debug import auto_groups_from_atomic
+
+        if not hasattr(self, "original_image") or self.original_image is None:
+            print("⚠️ No image loaded — skipping auto_combine_segments.")
+            return
+        if not hasattr(self, "annotation") or not self.annotation:
+            print("⚠️ No annotation loaded — skipping auto_combine_segments.")
+            return
+
+        ann = self.annotation.setdefault("annotations", {})
+        atomic = ann.setdefault("atomic_cracks", {})
+        combined = ann.setdefault("combined_cracks", {})
+
+        H, W = self.original_image.shape[:2]
+
+        # -----------------------------------------
+        # Try to locate a GT mask
+        #   - primary: self.gt_mask (if you use that)
+        #   - fallback: ann["gt_mask"] if stored in annotations
+        # -----------------------------------------
+        gt_mask = None
+
+        if hasattr(self, "gt_mask") and self.gt_mask is not None:
+            gt_mask = np.asarray(self.gt_mask)
+        elif ann.get("gt_mask") is not None:
+            gt_mask = np.asarray(ann["gt_mask"])
+
+        if gt_mask is not None:
+            # convert to gray if needed
+            if gt_mask.ndim == 3:
+                gt_mask = cv2.cvtColor(gt_mask, cv2.COLOR_BGR2GRAY)
+            if gt_mask.shape[:2] != (H, W):
+                print(f"[COMBINE_DBG] gt_mask shape {gt_mask.shape[:2]} != image {(H, W)} — ignoring GT.")
+                gt_mask = None
+
+        # -----------------------------------------
+        # Choose grouping strategy
+        # -----------------------------------------
+        if gt_mask is not None and np.any(gt_mask):
+            print("[COMBINE_DBG] using GT-based grouping via gt_groups_from_midlines_and_gtmask()")
+            groups = gt_groups_from_midlines_and_gtmask(atomic, gt_mask, H, W)
+        else:
+            print("[COMBINE_DBG] no usable GT mask; falling back to auto_groups_from_atomic()")
+            groups = auto_groups_from_atomic(
+                atomic,
+                image_hw=(H, W),
+                px_thresh=10.0,
+                debug_root=None  # or "combine_debug" if you want CSV/overlays
+            )
+
+        print(f"[COMBINE_DBG] grouping produced {len(groups)} combined groups: {groups}")
+
+        # -----------------------------------------
+        # Rebuild combined_cracks from groups
+        # (GT / auto grouping is authoritative)
+        # -----------------------------------------
+        combined.clear()
+
+        for gid, ginfo in groups.items():
+            members = ginfo.get("members") or []
+            if len(members) < 2:
+                continue
+
+            try:
+                sorted_members = sorted(members, key=lambda s: int(s))
+            except Exception:
+                sorted_members = sorted(members)
+
+            entry = self._build_combined_crack(sorted_members)
+            if entry is None:
+                print(f"[COMBINE_DBG] _build_combined_crack failed for group {gid} ({members})")
+                continue
+
+            combined[gid] = entry
+            print(f"[COMBINE_DBG] combined[{gid}] ← members={sorted_members}")
 
         self.save_annotation()
         self.change_image()

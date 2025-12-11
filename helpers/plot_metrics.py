@@ -28,6 +28,8 @@ def plot_edges_and_normals(
     norm2_segs,
     bbox=None,            # optional [x0, y0, w, h]
     out_png,
+    sparsity:int = 10,
+    gt_plot:bool = False,
     title="",
 ):
     """
@@ -94,28 +96,36 @@ def plot_edges_and_normals(
     # ------------------------------
     for seg in midline_segs:
         seg = np.asarray(seg)
+
+        if gt_plot:
+            # GT mode → DO NOT SPLIT
+            ax.plot(seg[:,0]-shift_x, seg[:,1]-shift_y, "w-", lw=1.6)
+            continue
+
+        # Debug/auto mode → split long jumps
         for s in split(seg):
             ax.plot(s[:,0]-shift_x, s[:,1]-shift_y, "w-", lw=1.2)
 
     # ------------------------------
     # Draw edges
     # ------------------------------
-    for seg in edge1_segs:
-        seg = np.asarray(seg)
-        for s in split(seg):
-            ax.plot(s[:,0]-shift_x, s[:,1]-shift_y, "r-", lw=1.2)
+    if not gt_plot:
+        for seg in edge1_segs:
+            seg = np.asarray(seg)
+            for s in split(seg):
+                ax.plot(s[:,0]-shift_x, s[:,1]-shift_y, "r-", lw=1.2)
 
-    for seg in edge2_segs:
-        seg = np.asarray(seg)
-        for s in split(seg):
-            ax.plot(s[:,0]-shift_x, s[:,1]-shift_y, "g-", lw=1.2)
+        for seg in edge2_segs:
+            seg = np.asarray(seg)
+            for s in split(seg):
+                ax.plot(s[:,0]-shift_x, s[:,1]-shift_y, "g-", lw=1.2)
 
     # ------------------------------
     # Draw normals (sparse)
     # ------------------------------
     for n1, n2 in zip(norm1_segs, norm2_segs):
         n = min(len(n1), len(n2))
-        for i in range(0, n, 10):
+        for i in range(0, n, sparsity):
             p1 = n1[i] - [shift_x, shift_y]
             p2 = n2[i] - [shift_x, shift_y]
             ax.plot([p1[0], p2[0]], [p1[1], p2[1]],
@@ -124,12 +134,18 @@ def plot_edges_and_normals(
     # ------------------------------
     # Legend — blue title + bold
     # ------------------------------
-    handles = [
-        Line2D([], [], color='white', lw=1.4, label='Midline'),
-        Line2D([], [], color='red', lw=1.4, label='Edge 1 (Left)'),
-        Line2D([], [], color='green', lw=1.4, label='Edge 2 (Right)'),
-        Line2D([], [], color='cyan', lw=1.4, label='Normals'),
-    ]
+    if gt_plot:
+        handles = [
+            Line2D([], [], color='white', lw=1.4, label='Midline'),
+            Line2D([], [], color='cyan', lw=1.4, label='Normals'),
+        ]    
+    else:    
+        handles = [
+            Line2D([], [], color='white', lw=1.4, label='Midline'),
+            Line2D([], [], color='red', lw=1.4, label='Edge 1 (Left)'),
+            Line2D([], [], color='green', lw=1.4, label='Edge 2 (Right)'),
+            Line2D([], [], color='cyan', lw=1.4, label='Normals'),
+        ]
 
     leg = ax.legend(
         handles=handles,
