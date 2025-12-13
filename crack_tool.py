@@ -474,8 +474,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         self.manual_endpoint_pairs = None
 
         # Persist JSON
-        #with open(self.ann_name, 'w') as fp:
-        #    json.dump(self.annotation, fp)
+        self.save_annotation()
             
         self.auto_combine_segments()
 

@@ -2308,41 +2308,6 @@ class CrackUtils:
                 ann["atomic_cracks"] = {}
             ac = ann["atomic_cracks"]
 
-            # one entry per manual midline
-            '''if metrics:
-                for k, poly in self.manual_midlines_tmp.items():
-                    try:
-                        if isinstance(k, tuple):
-                            i1, i2 = k
-                        elif isinstance(k, str) and "_" in k:
-                            i1, i2 = map(int, k.split("_"))
-                        else:
-                            continue
-
-                        cid = str(len(ac))
-
-                        # --- compute synthetic bounding box of midline ---
-                        if poly:
-                            xs = [p[0] for p in poly]
-                            ys = [p[1] for p in poly]
-                            x, y = min(xs), min(ys)
-                            w, h = max(xs) - x, max(ys) - y
-                            mask_bbox = [float(x), float(y), float(w), float(h)]
-                        else:
-                            mask_bbox = [0.0, 0.0, 1.0, 1.0]
-
-                        ac[cid] = {
-                            "src": "manual_poly",
-                            "midline": [[float(x), float(y)] for (x, y) in poly],
-                            "user_points": [list(self.user_points[i1]), list(self.user_points[i2])],
-                            "user_connections": [[0, 1]],
-                            "mask_compact": [],
-                            "mask_bbox": mask_bbox,
-                        }
-
-                    except Exception as e:
-                        print(f"[DEBUG persist_manual_midline] failed for key={k}: {e}")'''
-
             print(f"[SAVE] Manual selections committed to in-memory annotations.")
             dlg.accept()
 

@@ -311,7 +311,7 @@ class Draw():
                     # outline
                     cv2.circle(shown, (x, y), 4, (0, 0, 0), 2, cv2.LINE_AA)
                     # magenta
-                    cv2.circle(shown, (x, y), 4, (0, 0, 255), -1, cv2.LINE_AA)
+                    cv2.circle(shown, (x, y), 4, (128, 0, 0), -1, cv2.LINE_AA)
 
             return shown
 
@@ -367,7 +367,7 @@ class Draw():
 
         live_points = []
 
-        contours_name = f"{mode} contours (Esc or 'X' closes) Cyan=combined, White=atomic Red=mask"
+        contours_name = f"{mode.upper()} contours (Esc or 'X' closes) midline(Cyan=combined, White=atomic) mask(Red), non-combined atomic endpoints (Blue)"
         cv2.namedWindow(contours_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(contours_name, 1200, 800)  # make window large by default
         cv2.moveWindow(contours_name, move_x, move_y)
