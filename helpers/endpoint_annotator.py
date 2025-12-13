@@ -1333,7 +1333,9 @@ class CrackAnnotator(QtWidgets.QWidget):
             qp.setBrush(brush)
             qp.setPen(Qt.NoPen)
             # keep circle size constant on screen regardless of zoom
-            r_screen = int(self.point_radius)
+            #r_screen = int(self.point_radius)
+            r_screen = max(1, int(self.point_radius * (scale ** .5)))
+            r_screen = max(1, min(16, r_screen))
             qp.drawEllipse(center, r_screen, r_screen)
 
         # --- editable midlines (simple cyan layer to keep behavior from older code) ---
