@@ -2683,6 +2683,976 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         from combiner import build_combined_crack_stateless
         from helpers import metrics as metrics_mod   # for _auto_cache_key
         from helpers.plot_metrics import save_gt_vs_manual_overlay
+        from helpers.supervision import export_gt_supervision_for_image as _export_gt_sup
+
+        print(f"[DEBUG METRICS] ===== START for {getattr(self, 'name', '?')} =====")
+        if getattr(self, "current_mask", None) is None:
+            print("[DEBUG METRICS] ⚠ no GT mask loaded")
+            return {}
+
+        base_name   = self._image_base()
+        metrics_dir = self._metrics_dir()
+        os.makedirs(metrics_dir, exist_ok=True)
+
+        # supervision root for this image (for GT normals)
+        gt_sup_root = os.path.join(self.save_folder, "supervision", base_name)
+
+        ann_path = getattr(self, "ann_name", None)
+        if not ann_path or not os.path.exists(ann_path):
+            print(f"[DEBUG METRICS] ⚠ no annotation found for {base_name}")
+            return {}
+
+        with open(ann_path, "r", encoding="utf-8") as f:
+            ann_json = json.load(f)
+        authoring_atomic = (ann_json.get("annotations", {}) or {}).get("atomic_cracks", {}) or {}
+
+        H, W = self.original_image.shape[:2]
+        gt_full = (self.current_mask > 0).astype(np.uint8)
+
+        # ------------------------------------------------------------------
+        # 1) Merge from snapshots – manual view of atomics only
+        # ------------------------------------------------------------------
+        atomic_all = merged_metric_atomic(authoring_atomic, self.save_folder, base_name)
+        print(f"[DEBUG METRICS] merged {len(atomic_all)} atomic cracks after edge snapshots merge")
+
+        def _is_manual(cr):
+            src = (cr.get("source") or "").lower()
+            return src in ("manual", "manual_poly", "manual_midline")
+
+        atomic = {cid: cr for cid, cr in atomic_all.items() if _is_manual(cr)}
+        print(f"[DEBUG METRICS] using {len(atomic)} manual cracks for mask/width metrics")
+
+        # ------------------------------------------------------------------
+        # 2) Build AUTO atomic set from per-cid snapshots (auto_best)
+        # ------------------------------------------------------------------
+        auto_atomic = {}
+        if include_auto:
+            if cache_key is None:
+                cache_key = metrics_mod._auto_cache_key(self)
+
+            print(f"[DEBUG METRICS] authoring_atomic keys: {list(authoring_atomic.keys())}")
+            for cid in authoring_atomic.keys():
+                scid = str(cid)
+                p = metric_atomic_path_for(self.save_folder, base_name, scid)
+                snap = safe_read_json(p, {})
+                if not snap:
+                    continue
+
+                ab = snap.get("auto_best")
+                if not isinstance(ab, dict):
+                    continue
+
+                mid_auto = np.asarray(ab.get("midline", []), float)
+                if mid_auto.ndim != 2 or mid_auto.shape[1] != 2 or len(mid_auto) < 2:
+                    continue
+
+                ge_auto = ab.get("geodesic_edges")
+                if not isinstance(ge_auto, dict) or not ge_auto.get("edge1") or not ge_auto.get("edge2"):
+                    # fall back to snapshot-level geodesics if auto_best didn't persist them
+                    ge_auto = snap.get("geodesic_edges", {}) or {}
+
+                auto_cr = {
+                    "midline": mid_auto.tolist(),
+                    "geodesic_edges": ge_auto,
+                    "mask_bbox": snap.get("mask_bbox"),
+                    "mask_crop": snap.get("mask_crop"),
+                    "timing": snap.get("timing", {}),
+                    "source": "auto_best",
+                }
+                auto_atomic[scid] = auto_cr
+
+            print(f"[DEBUG METRICS] built {len(auto_atomic)} auto_best cracks for mask/width metrics")
+        else:
+            print("[DEBUG METRICS] auto metrics disabled for this call.")
+
+        # ------------------------------------------------------------------
+        # 3) Repair missing crops for MANUAL atomics from edges
+        # ------------------------------------------------------------------
+        def _bbox_from_mask_full(mask):
+            ys, xs = np.where(mask > 0)
+            if xs.size == 0 or ys.size == 0:
+                return None
+            x0, x1 = int(xs.min()), int(xs.max()) + 1
+            y0, y1 = int(ys.min()), int(ys.max()) + 1
+            return [x0, y0, x1, y1]
+
+        repaired = []
+        for cid, cr in atomic.items():
+            m = _mask_from_crack(cr, H, W)
+            if int(m.sum()) == 0:
+                m2 = reconstruct_manual_mask_from_edges(cr, H, W)
+                if m2 is not None and int(m2.sum()) > 0:
+                    bb = _bbox_from_mask_full(m2)
+                    if bb:
+                        x0, y0, x1, y1 = bb
+                        w = x1 - x0
+                        h = y1 - y0
+                        cr["mask_bbox"] = [x0, y0, w, h]
+                        cr["mask_crop"] = m2[y0:y1, x0:x1].astype("uint8").tolist()
+                        safe_write_json(metric_atomic_path_for(self.save_folder, base_name, cid), cr)
+                        repaired.append(cid)
+        if repaired:
+            print(f"[COMBINE_DBG] repaired mask_crop/bbox for: {sorted(repaired)}")
+
+        # ------------------------------------------------------------------
+        # 4) Grouping + rebuild (MANUAL + AUTO combined) via combiner
+        # ------------------------------------------------------------------
+        combine_debug_root = os.path.join(metrics_dir, "combine_debug")
+
+        authoring_combined = auto_groups_from_atomic(
+            atomic,
+            image_hw=(H, W),
+            px_thresh=10.0,
+            debug_root=combine_debug_root
+        )
+        print(f"[COMBINE_DBG] synthesized {len(authoring_combined)} combined groups automatically.")
+
+        # ------------------------------------------------------------------
+        # 4.5) CORRECT GT SUPERVISION EXPORT (ATOMIC + GT GROUPED COMBINED)
+        # ------------------------------------------------------------------
+        if export_supervision:
+            try:
+                from combiner import gt_groups_from_midlines_and_gtmask
+
+                # rebuild GT-based grouping (real ground truth!)
+                gt_combined = gt_groups_from_midlines_and_gtmask(
+                    atomic=atomic,
+                    gt_mask=gt_full,
+                    H=H,
+                    W=W,
+                )
+
+                print(f"[GT_SUP] GT-based combined groups = {len(gt_combined)}")
+
+                _export_gt_sup(
+                    base_name=base_name,
+                    save_root=self.save_folder,
+                    original_image=self.original_image,
+                    H=H,
+                    W=W,
+                    atomic=atomic,
+                    combined_groups=gt_combined,
+                    gt_mask=gt_full,
+                )
+
+                print(f"[DEBUG METRICS] GT supervision export completed for {base_name}")
+
+            except Exception as e:
+                print(f"[DEBUG METRICS] GT supervision export failed: {e}")
+
+        # ---- MANUAL combined (for debug pretty + timing) ----
+        rebuilt_combined = {}
+
+        def plot_combined_debug(
+            *,
+            original_image,
+            segs,
+            edge1_segs,
+            edge2_segs,
+            norm1_segs,
+            norm2_segs,
+            mask_bbox,
+            member_ids,
+            out_dir,
+        ):
+            os.makedirs(out_dir, exist_ok=True)
+            out_png = os.path.join(out_dir, "edges_midlines_normals_pretty.png")
+
+            from edge_workers import plot_edges_and_normals
+            plot_edges_and_normals(
+                base_image=original_image,
+                midline_segs=segs,
+                edge1_segs=edge1_segs,
+                edge2_segs=edge2_segs,
+                norm1_segs=norm1_segs,
+                norm2_segs=norm2_segs,
+                bbox=mask_bbox,
+                out_png=out_png,
+                title=f"Combined Crack (members={', '.join(member_ids)})",
+            )
+
+        for ccid, cmb in authoring_combined.items():
+            members = cmb.get("members", []) or []
+            if not members:
+                continue
+
+            members_str = "_".join(str(m) for m in members)
+            cmb_root = os.path.join(metrics_dir, f"combined{ccid}_{members_str}")
+
+            manual_dir = os.path.join(cmb_root, "manual")
+            auto_dir   = os.path.join(cmb_root, "auto")
+
+            os.makedirs(manual_dir, exist_ok=True)
+            os.makedirs(auto_dir, exist_ok=True)
+
+            def _manual_cb(**dbg):
+                try:
+                    plot_combined_debug(
+                        original_image=self.original_image,
+                        segs=dbg["segs"],
+                        edge1_segs=dbg["edge1_segs"],
+                        edge2_segs=dbg["edge2_segs"],
+                        norm1_segs=dbg["norm1_segs"],
+                        norm2_segs=dbg["norm2_segs"],
+                        mask_bbox=dbg["mask_bbox"],
+                        member_ids=members,
+                        out_dir=manual_dir,
+                    )
+                except Exception as e:
+                    print(f"[COMBINE_DBG] debug_callback failed: {e}")
+
+            rebuilt = build_combined_crack_stateless(
+                original_image=self.original_image,
+                authoring_atomic=atomic,
+                member_ids=[str(m) for m in members],
+                window_half_size=45, mu=0.0, l=5, p=14,
+                color_channel=0, pad=10, prefer_gpu=True,
+                debug_callback=_manual_cb,
+            )
+
+            rebuilt["members"] = members
+            rebuilt_combined[str(ccid)] = rebuilt
+
+        combined_map = rebuilt_combined
+
+        # ---- AUTO combined (for debug pretty + timing) ----
+        auto_combined_map = {}
+        if include_auto and auto_atomic:
+            for ccid, cmb in authoring_combined.items():
+                members = cmb.get("members", [])
+                if not members:
+                    continue
+
+                members_str = "_".join(str(m) for m in members)
+                cmb_root = os.path.join(metrics_dir, f"combined{ccid}_{members_str}")
+                auto_dir = os.path.join(cmb_root, "auto")
+                os.makedirs(auto_dir, exist_ok=True)
+
+                def _auto_cb(**dbg):
+                    try:
+                        plot_combined_debug(
+                            original_image=self.original_image,
+                            segs=dbg["segs"],
+                            edge1_segs=dbg["edge1_segs"],
+                            edge2_segs=dbg["edge2_segs"],
+                            norm1_segs=dbg["norm1_seqs"],
+                            norm2_segs=dbg["norm2_seqs"],
+                            mask_bbox=dbg["mask_bbox"],
+                            member_ids=members,
+                            out_dir=auto_dir,
+                        )
+                    except Exception as e:
+                        print(f"[AUTO_COMBINE_DBG] debug failed: {e}")
+
+                rebuilt_auto = build_combined_crack_stateless(
+                    original_image=self.original_image,
+                    authoring_atomic=auto_atomic,
+                    member_ids=[str(m) for m in members],
+                    window_half_size=45, mu=0.0, l=5, p=14,
+                    color_channel=0, pad=10, prefer_gpu=True,
+                    debug_callback=_auto_cb,
+                )
+
+                rebuilt_auto["members"] = members
+                auto_combined_map[str(ccid)] = rebuilt_auto
+
+        # ------------------------------------------------------------------
+        # 5) MASK METRICS: MANUAL atomic + MANUAL combined + TOTAL
+        # ------------------------------------------------------------------
+        mask_rows = []
+        agg_manual = np.zeros((H, W), np.uint8)
+
+        # --- ATOMIC (manual) -----------------------------------------------
+        combined_members_flat = [
+            str(m)
+            for g in combined_map.values()
+            for m in (g.get("members") or [])
+        ]
+
+        for cid, crack in atomic.items():
+            scid = str(cid)
+            # skip atomics that are part of any manual combined group
+            if scid in combined_members_flat:
+                continue
+            try:
+                m_full = manual_mask_from_crack(crack, H, W)
+                if m_full is None:
+                    continue
+                agg_manual |= (m_full > 0).astype(np.uint8)
+                base = compute_mask_metrics(gt_full, m_full)
+                bnd  = boundary_fscore(gt_full, m_full, tau=2.0)
+                surf = assd_hd95(gt_full, m_full)
+                row = {
+                    "image": base_name,
+                    "crack_type": "atomic",
+                    "crack_id": scid,
+                    "members": "",
+                }
+                row.update(base); row.update(bnd); row.update(surf)
+                mask_rows.append(row)
+                print(f"[DEBUG MASK] atomic cid={scid} IoU={base['iou']:.4f}")
+            except Exception as e:
+                print(f"[atomic fail] {e}")
+
+        # --- COMBINED (manual) ---------------------------------------------
+        for ccid, cmb in (combined_map or {}).items():
+            try:
+                members = cmb.get("members", []) or []
+                if not members:
+                    continue
+
+                combined_mask = np.zeros((H, W), np.uint8)
+                member_bboxes = []
+
+                for m in members:
+                    cr = atomic.get(str(m))
+                    if cr:
+                        mm = _mask_from_crack(cr, H, W)
+                        combined_mask |= (mm > 0).astype(np.uint8)
+
+                        if np.any(mm):
+                            yx = np.argwhere(mm)
+                            y0, x0 = yx.min(axis=0)
+                            y1, x1 = yx.max(axis=0)
+                            member_bboxes.append([x0, y0, x1, y1])
+
+                if not np.any(combined_mask):
+                    print(f"[COMBINE_DBG] ⚠️ combined {ccid} empty (manual) — skipping.")
+                    continue
+
+                if member_bboxes:
+                    xmins, ymins, xmaxs, ymaxs = zip(*member_bboxes)
+                    x0 = max(min(xmins) - 5, 0)
+                    y0 = max(min(ymins) - 5, 0)
+                    x1 = min(max(xmaxs) + 5, W)
+                    y1 = min(max(ymaxs) + 5, H)
+                else:
+                    x0, y0, x1, y1 = 0, 0, W, H
+
+                gt_crop  = gt_full[y0:y1, x0:x1]
+                man_crop = combined_mask[y0:y1, x0:x1]
+
+                base = compute_mask_metrics(gt_crop, man_crop)
+                bnd  = boundary_fscore(gt_crop, man_crop, tau=2.0)
+                surf = assd_hd95(gt_crop, man_crop)
+
+                members_str = "_".join(str(m) for m in members)
+                cmb_root = os.path.join(metrics_dir, f"combined{ccid}_{members_str}")
+                manual_dir = os.path.join(cmb_root, "manual")
+                os.makedirs(manual_dir, exist_ok=True)
+
+                # global overlay
+                save_gt_vs_manual_overlay(
+                    H,
+                    W,
+                    gt_full,
+                    combined_mask,
+                    os.path.join(manual_dir, "gt_vs_manual_mask_global.png"),
+                    bbox=[x0, y0, x1 - x0, y1 - y0],
+                    original_image=self.original_image,
+                )
+
+                # normals + width colormap
+                try:
+                    from helpers.metrics import normals_from_mask_for_midline
+                    from helpers import plot_metrics
+
+                    mid_global = np.asarray(cmb.get("midline", []), float)
+                    mid_crop = mid_global.copy()
+                    mid_crop[:, 0] -= x0
+                    mid_crop[:, 1] -= y0
+
+                    gt_mask_u8 = (man_crop * 255).astype(np.uint8)
+
+                    (e1x, e1y, e2x, e2y, _), _ = normals_from_mask_for_midline(
+                        mid_crop, gt_mask_u8 > 0, max_radius=50
+                    )
+                    normals_e1 = np.column_stack([e1x, e1y])
+                    normals_e2 = np.column_stack([e2x, e2y])
+
+                    out_normals = os.path.join(manual_dir, "gt_normals.png")
+                    plot_metrics.plot_gt_normals_on_gtbw(
+                        gt_mask_u8,
+                        mid_crop,
+                        normals_e1,
+                        normals_e2,
+                        out_normals
+                    )
+                    print(f"[COMBINE_DBG] wrote → {out_normals}")
+
+                except Exception as e:
+                    print(f"[COMBINE_DBG] combined gt_normals failed (manual): {e}")
+                    normals_e1 = normals_e2 = None
+
+                try:
+                    from edge_workers import plot_widths_colormap_on_crop
+
+                    img_norm = cv2.cvtColor(
+                        self.original_image[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY
+                    )
+
+                    gt_bin   = (gt_crop > 0).astype(np.uint8)
+                    pred_bin = (man_crop > 0).astype(np.uint8)
+
+                    intersect = np.logical_and(gt_bin, pred_bin)
+                    pred_only = np.logical_and(pred_bin, np.logical_not(gt_bin))
+                    gt_only   = np.logical_and(gt_bin, np.logical_not(pred_bin))
+
+                    vis_gray  = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2RGB).astype(np.float32) / 255.0
+                    dark_base = np.clip(vis_gray * 0.35, 0, 1.0)
+                    overlay   = dark_base.copy()
+
+                    overlay[gt_only == 1]   = (.2, 0.2, 1.0)
+                    overlay[pred_only == 1] = (.2, 1.0, 1.0)
+                    overlay[intersect == 1] = (0.95, 0.95, 0.95)
+
+                    blended  = cv2.addWeighted(overlay, 0.85, dark_base, 0.15, 0)
+                    blended  = np.clip(blended * 255.0, 0, 255).astype(np.uint8)
+
+                    vis_large = cv2.resize(blended, None, fx=3, fy=3, interpolation=cv2.INTER_NEAREST)
+
+                    out_iou = os.path.join(manual_dir, "gt_vs_manual_mask.png")
+                    cv2.imwrite(out_iou, vis_large)
+                    print(f"[COMBINE_DBG] wrote → {out_iou}")
+
+                    if normals_e1 is not None and normals_e2 is not None:
+                        S = 3.0
+                        mid_scaled = mid_crop * S
+                        e1_scaled  = normals_e1 * S
+                        e2_scaled  = normals_e2 * S
+
+                        out_width = os.path.join(manual_dir, "widths_colormap_on_crop.png")
+
+                        plot_widths_colormap_on_crop(
+                            gt_vs_manual_rgb = vis_large,
+                            e1               = e1_scaled,
+                            e2               = e2_scaled,
+                            midline_xy       = mid_scaled,
+                            track_e1         = None,
+                            track_e2         = None,
+                            out_png          = out_width,
+                        )
+                        print(f"[COMBINE_DBG] wrote → {out_width}")
+
+                except Exception as e:
+                    print(f"[COMBINE_DBG] pretty/width overlay failed (manual): {e}")
+
+                row = {
+                    "image": base_name,
+                    "crack_type": "combined",
+                    "crack_id": str(ccid),
+                    "members": members_str,
+                    **base, **bnd, **surf,
+                }
+                mask_rows.append(row)
+
+                print(f"[DEBUG MASK] combined id={ccid}({members_str}) "
+                    f"IoU={base['iou']:.4f} bF1={bnd['boundary_f1']:.4f}")
+
+                agg_manual |= (combined_mask > 0).astype(np.uint8)
+
+            except Exception as e:
+                print(f"[DEBUG METRICS] combined id={ccid} failed (manual): {e}")
+                traceback.print_exc()
+
+        # --- TOTAL (manual) -------------------------------------------------
+        base_total = compute_mask_metrics(gt_full, agg_manual)
+        bnd_total  = boundary_fscore(gt_full, agg_manual, tau=2.0)
+        surf_total = assd_hd95(gt_full, agg_manual)
+        mask_rows.append({
+            "image": base_name,
+            "crack_type": "TOTAL",
+            "crack_id": "",
+            "members": "",
+            **base_total, **bnd_total, **surf_total
+        })
+        print(f"[DEBUG MASK] TOTAL IoU={mask_iou(agg_manual,gt_full):.4f}")
+
+        # ------------------------------------------------------------------
+        # 6) MASK METRICS: AUTO ATOMIC + AUTO COMBINED (optional)
+        # ------------------------------------------------------------------
+        agg_auto = np.zeros((H, W), np.uint8)
+        if include_auto and auto_atomic:
+            print("[DEBUG MASK] computing AUTO atomic metrics vs GT ...")
+            for cid, cr in auto_atomic.items():
+                scid = str(cid)
+                try:
+                    m_full = _mask_from_crack(cr, H, W)
+                    if m_full is None or int(m_full.sum()) == 0:
+                        continue
+                    agg_auto |= (m_full > 0).astype(np.uint8)
+                    base = compute_mask_metrics(gt_full, m_full)
+                    bnd  = boundary_fscore(gt_full, m_full, tau=2.0)
+                    surf = assd_hd95(gt_full, m_full)
+                    row = {
+                        "image": base_name,
+                        "crack_type": "atomic_auto",
+                        "crack_id": scid,
+                        "members": "",
+                    }
+                    row.update(base); row.update(bnd); row.update(surf)
+                    mask_rows.append(row)
+                    print(f"[DEBUG MASK] atomic_auto cid={scid} IoU={base['iou']:.4f}")
+                except Exception as e:
+                    print(f"[atomic_auto fail] {e}")
+
+            # --- COMBINED (auto) --------------------------------------------
+            for ccid, cmb in (authoring_combined or {}).items():
+                try:
+                    members = cmb.get("members", []) or []
+                    if not members:
+                        continue
+
+                    combined_mask_auto = np.zeros((H, W), np.uint8)
+                    member_bboxes = []
+
+                    for m in members:
+                        cr = auto_atomic.get(str(m))
+                        if cr:
+                            mm = _mask_from_crack(cr, H, W)
+                            combined_mask_auto |= (mm > 0).astype(np.uint8)
+
+                            if np.any(mm):
+                                yx = np.argwhere(mm)
+                                y0, x0 = yx.min(axis=0)
+                                y1, x1 = yx.max(axis=0)
+                                member_bboxes.append([x0, y0, x1, y1])
+
+                    if not np.any(combined_mask_auto):
+                        print(f"[COMBINE_DBG] ⚠️ combined {ccid} empty (auto) — skipping.")
+                        continue
+
+                    if member_bboxes:
+                        xmins, ymins, xmaxs, ymaxs = zip(*member_bboxes)
+                        x0 = max(min(xmins) - 5, 0)
+                        y0 = max(min(ymins) - 5, 0)
+                        x1 = min(max(xmaxs) + 5, W)
+                        y1 = min(max(ymaxs) + 5, H)
+                    else:
+                        x0, y0, x1, y1 = 0, 0, W, H
+
+                    gt_crop  = gt_full[y0:y1, x0:x1]
+                    auto_crop = combined_mask_auto[y0:y1, x0:x1]
+
+                    base = compute_mask_metrics(gt_crop, auto_crop)
+                    bnd  = boundary_fscore(gt_crop, auto_crop, tau=2.0)
+                    surf = assd_hd95(gt_crop, auto_crop)
+
+                    members_str = "_".join(str(m) for m in members)
+                    cmb_root = os.path.join(metrics_dir, f"combined{ccid}_{members_str}")
+                    auto_dir = os.path.join(cmb_root, "auto")
+                    os.makedirs(auto_dir, exist_ok=True)
+
+                    # global overlay GT vs AUTO
+                    save_gt_vs_manual_overlay(
+                        H,
+                        W,
+                        gt_full,
+                        combined_mask_auto,
+                        os.path.join(auto_dir, "gt_vs_auto_mask_global.png"),
+                        bbox=[x0, y0, x1 - x0, y1 - y0],
+                        original_image=self.original_image,
+                    )
+
+                    # normals + width colormap for AUTO combined, if midline exists
+                    try:
+                        from helpers.metrics import normals_from_mask_for_midline
+                        from helpers import plot_metrics
+
+                        cmb_auto = auto_combined_map.get(str(ccid), {})
+                        mid_global = np.asarray(cmb_auto.get("midline", []), float)
+                        if mid_global.ndim == 2 and mid_global.shape[1] == 2 and len(mid_global) >= 2:
+                            mid_crop = mid_global.copy()
+                            mid_crop[:, 0] -= x0
+                            mid_crop[:, 1] -= y0
+
+                            auto_mask_u8 = (auto_crop * 255).astype(np.uint8)
+
+                            (e1x, e1y, e2x, e2y, _), _ = normals_from_mask_for_midline(
+                                mid_crop, auto_mask_u8 > 0, max_radius=50
+                            )
+                            normals_e1 = np.column_stack([e1x, e1y])
+                            normals_e2 = np.column_stack([e2x, e2y])
+
+                            out_normals = os.path.join(auto_dir, "auto_normals.png")
+                            plot_metrics.plot_gt_normals_on_gtbw(
+                                auto_mask_u8,
+                                mid_crop,
+                                normals_e1,
+                                normals_e2,
+                                out_normals
+                            )
+                            print(f"[COMBINE_DBG] wrote → {out_normals}")
+                        else:
+                            normals_e1 = normals_e2 = None
+
+                    except Exception as e:
+                        print(f"[COMBINE_DBG] combined gt_normals failed (auto): {e}")
+                        normals_e1 = normals_e2 = None
+
+                    try:
+                        from edge_workers import plot_widths_colormap_on_crop
+
+                        img_norm = cv2.cvtColor(
+                            self.original_image[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY
+                        )
+
+                        gt_bin   = (gt_crop > 0).astype(np.uint8)
+                        pred_bin = (auto_crop > 0).astype(np.uint8)
+
+                        intersect = np.logical_and(gt_bin, pred_bin)
+                        pred_only = np.logical_and(pred_bin, np.logical_not(gt_bin))
+                        gt_only   = np.logical_and(gt_bin, np.logical_not(pred_bin))
+
+                        vis_gray  = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2RGB).astype(np.float32) / 255.0
+                        dark_base = np.clip(vis_gray * 0.35, 0, 1.0)
+                        overlay   = dark_base.copy()
+
+                        overlay[gt_only == 1]   = (.2, 0.2, 1.0)
+                        overlay[pred_only == 1] = (.2, 1.0, 1.0)
+                        overlay[intersect == 1] = (0.95, 0.95, 0.95)
+
+                        blended  = cv2.addWeighted(overlay, 0.85, dark_base, 0.15, 0)
+                        blended  = np.clip(blended * 255.0, 0, 255).astype(np.uint8)
+
+                        vis_large = cv2.resize(blended, None, fx=3, fy=3, interpolation=cv2.INTER_NEAREST)
+
+                        out_iou = os.path.join(auto_dir, "gt_vs_auto_mask.png")
+                        cv2.imwrite(out_iou, vis_large)
+                        print(f"[COMBINE_DBG] wrote → {out_iou}")
+
+                        if normals_e1 is not None and normals_e2 is not None:
+                            S = 3.0
+                            mid_scaled = mid_crop * S
+                            e1_scaled  = normals_e1 * S
+                            e2_scaled  = normals_e2 * S
+
+                            out_width = os.path.join(auto_dir, "widths_colormap_on_crop_auto.png")
+
+                            plot_widths_colormap_on_crop(
+                                gt_vs_manual_rgb = vis_large,
+                                e1               = e1_scaled,
+                                e2               = e2_scaled,
+                                midline_xy       = mid_scaled,
+                                track_e1         = None,
+                                track_e2         = None,
+                                out_png          = out_width,
+                            )
+                            print(f"[COMBINE_DBG] wrote → {out_width}")
+
+                    except Exception as e:
+                        print(f"[COMBINE_DBG] pretty/width overlay failed (auto): {e}")
+
+                    row = {
+                        "image": base_name,
+                        "crack_type": "combined_auto",
+                        "crack_id": str(ccid),
+                        "members": members_str,
+                        **base, **bnd, **surf,
+                    }
+                    mask_rows.append(row)
+
+                    print(f"[DEBUG MASK] combined_auto id={ccid}({members_str}) "
+                        f"IoU={base['iou']:.4f} bF1={bnd['boundary_f1']:.4f}")
+
+                    # note: agg_auto already has atomic OR; union with combined masks
+                    # is redundant but harmless
+                    agg_auto |= (combined_mask_auto > 0).astype(np.uint8)
+
+                except Exception as e:
+                    print(f"[DEBUG METRICS] combined id={ccid} failed (auto): {e}")
+                    traceback.print_exc()
+
+            # --- TOTAL_AUTO ---------------------------------------------------
+            if int(agg_auto.sum()) > 0:
+                base_total_auto = compute_mask_metrics(gt_full, agg_auto)
+                bnd_total_auto  = boundary_fscore(gt_full, agg_auto, tau=2.0)
+                surf_total_auto = assd_hd95(gt_full, agg_auto)
+                mask_rows.append({
+                    "image": base_name,
+                    "crack_type": "TOTAL_AUTO",
+                    "crack_id": "",
+                    "members": "",
+                    **base_total_auto, **bnd_total_auto, **surf_total_auto
+                })
+            else:
+                print("[DEBUG MASK] AUTO aggregate mask empty — skipping TOTAL_AUTO.")
+
+        # ------------------------------------------------------------------
+        # 7) SAVE MASK METRICS CSV
+        # ------------------------------------------------------------------
+        out_csv = os.path.join(metrics_dir, "mask_metrics.csv")
+        pd.DataFrame(mask_rows).to_csv(out_csv, index=False)
+        print(f"[DEBUG MASK] wrote → {out_csv}")
+
+        # ------------------------------------------------------------------
+        # 8) WIDTH DIFF CHARTS (manual + optional auto)
+        # ------------------------------------------------------------------
+        try:
+            print("[DEBUG METRICS] width comparisons ...")
+
+            # MANUAL widths ---------------------------------------------------
+            width_rows_manual = []
+            ret = compare_widths_for_cracks(
+                {"atomic_cracks": atomic},
+                gt_full, base_name, metrics_dir,
+                display=display, tag="manual",
+                return_normals=False, normals_plot=False,
+                gt_sup_root=gt_sup_root,
+            )
+            if len(ret):
+                width_rows_manual = ret[0]
+            width_summary_to_csv(metrics_dir, base_name, width_rows_manual, "manual")
+            write_width_diff_overlay(
+                H, W, width_rows_manual,
+                os.path.join(metrics_dir, "manual_width_diffs_overlay.png"),
+                vlim=8.0
+            )
+
+            # COMBINED (manual) widths ---------------------------------------
+            combined_for_width = {}
+            for ccid, cmb in combined_map.items():
+                members = cmb.get("members", [])
+                mid_all, e1_all, e2_all = [], [], []
+                for m in members:
+                    cr = atomic.get(str(m))
+                    if not cr:
+                        continue
+                    ml = np.asarray(cr.get("midline", []), float)
+                    if ml.ndim == 2 and len(ml) >= 2:
+                        mid_all.append(ml)
+                    ge = cr.get("geodesic_edges", {}) or {}
+                    if "edge1" in ge and "edge2" in ge:
+                        e1_all.append(np.asarray(ge["edge1"], float))
+                        e2_all.append(np.asarray(ge["edge2"], float))
+                if mid_all:
+                    mid_merge = np.vstack(mid_all)
+                else:
+                    mid_merge = np.zeros((0, 2))
+                e1_merge = np.vstack(e1_all) if e1_all else np.zeros((0, 2))
+                e2_merge = np.vstack(e2_all) if e2_all else np.zeros((0, 2))
+
+                combined_for_width[str(ccid)] = {
+                    "midline": mid_merge.tolist(),
+                    "geodesic_edges": {"edge1": e1_merge.tolist(), "edge2": e2_merge.tolist()},
+                    "members": members,
+                    "timing": cmb.get("timing", {}),
+                }
+
+            retc = compare_widths_for_cracks(
+                {"combined_cracks": combined_for_width},
+                gt_full, base_name, metrics_dir,
+                display=display, tag="combined",
+                return_normals=False, normals_plot=False,
+                gt_sup_root=gt_sup_root,
+            )
+            if len(retc):
+                width_summary_to_csv(metrics_dir, base_name, retc[0], "combined")
+                write_width_diff_overlay(
+                    H, W, retc[0],
+                    os.path.join(metrics_dir, "combined_width_diffs_overlay.png"),
+                    vlim=8.0
+                )
+
+            # AUTO widths (atomic + combined_auto) ---------------------------
+            if include_auto and auto_atomic:
+                print("[DEBUG WIDTH] auto atomic width comparisons ...")
+                reta = compare_widths_for_cracks(
+                    {"atomic_cracks": auto_atomic},
+                    gt_full, base_name, metrics_dir,
+                    display=display, tag="auto",
+                    return_normals=False, normals_plot=False,
+                    gt_sup_root=gt_sup_root,
+                )
+                if len(reta):
+                    width_summary_to_csv(metrics_dir, base_name, reta[0], "auto")
+                    write_width_diff_overlay(
+                        H, W, reta[0],
+                        os.path.join(metrics_dir, "auto_width_diffs_overlay.png"),
+                        vlim=8.0
+                    )
+
+                # COMBINED AUTO widths
+                combined_auto_for_width = {}
+                for ccid, cmb in (authoring_combined or {}).items():
+                    members = cmb.get("members", [])
+                    if not members:
+                        continue
+                    mid_all, e1_all, e2_all = [], [], []
+                    for m in members:
+                        cr = auto_atomic.get(str(m))
+                        if not cr:
+                            continue
+                        ml = np.asarray(cr.get("midline", []), float)
+                        if ml.ndim == 2 and len(ml) >= 2:
+                            mid_all.append(ml)
+                        ge = cr.get("geodesic_edges", {}) or {}
+                        if "edge1" in ge and "edge2" in ge:
+                            e1_all.append(np.asarray(ge["edge1"], float))
+                            e2_all.append(np.asarray(ge["edge2"], float))
+                    if not mid_all:
+                        continue
+                    mid_merge = np.vstack(mid_all)
+                    e1_merge = np.vstack(e1_all) if e1_all else np.zeros((0, 2))
+                    e2_merge = np.vstack(e2_all) if e2_all else np.zeros((0, 2))
+
+                    combined_auto_for_width[str(ccid)] = {
+                        "midline": mid_merge.tolist(),
+                        "geodesic_edges": {"edge1": e1_merge.tolist(), "edge2": e2_merge.tolist()},
+                        "members": members,
+                        "timing": (auto_combined_map.get(str(ccid), {}).get("timing", {})),
+                    }
+
+                retc_auto = compare_widths_for_cracks(
+                    {"combined_cracks": combined_auto_for_width},
+                    gt_full, base_name, metrics_dir,
+                    display=display, tag="combined_auto",
+                    return_normals=False, normals_plot=False,
+                    gt_sup_root=gt_sup_root,
+                )
+                if len(retc_auto):
+                    width_summary_to_csv(metrics_dir, base_name, retc_auto[0], "combined_auto")
+                    write_width_diff_overlay(
+                        H, W, retc_auto[0],
+                        os.path.join(metrics_dir, "combined_auto_width_diffs_overlay.png"),
+                        vlim=8.0
+                    )
+
+        except Exception as e:
+            print(f"[DEBUG WIDTH] failed: {e}")
+
+        # ------------------------------------------------------------------
+        # 9) CORE RUNTIME SUMMARY (edge_masks, edge_tracking, combine)
+        # ------------------------------------------------------------------
+        try:
+            timing_rows = []
+
+            # manual atomic
+            for cid, cr in atomic.items():
+                tdict = cr.get("timing") or {}
+                if tdict:
+                    row = {
+                        "image": base_name,
+                        "crack_type": "atomic",
+                        "crack_id": str(cid),
+                    }
+                    row.update(tdict)
+                    timing_rows.append(row)
+
+            # manual combined
+            for ccid, cmb in (combined_map or {}).items():
+                tdict = cmb.get("timing") or {}
+                if tdict:
+                    row = {
+                        "image": base_name,
+                        "crack_type": "combined",
+                        "crack_id": str(ccid),
+                    }
+                    row.update(tdict)
+                    timing_rows.append(row)
+
+            # auto atomic timing
+            if include_auto and auto_atomic:
+                for cid, cr in auto_atomic.items():
+                    tdict = cr.get("timing") or {}
+                    if tdict:
+                        row = {
+                            "image": base_name,
+                            "crack_type": "atomic_auto",
+                            "crack_id": str(cid),
+                        }
+                        row.update(tdict)
+                        timing_rows.append(row)
+
+                # auto combined timing
+                for ccid, cmb in (auto_combined_map or {}).items():
+                    tdict = cmb.get("timing") or {}
+                    if tdict:
+                        row = {
+                            "image": base_name,
+                            "crack_type": "combined_auto",
+                            "crack_id": str(ccid),
+                        }
+                        row.update(tdict)
+                        timing_rows.append(row)
+
+            if timing_rows:
+                timing_df = pd.DataFrame(timing_rows)
+                timing_csv = os.path.join(metrics_dir, f"{base_name}_timings_core.csv")
+                timing_df.to_csv(timing_csv, index=False)
+
+                from helpers.plot_metrics import plot_core_timing_bars
+                timing_png = os.path.join(metrics_dir, f"{base_name}_timings_core.png")
+                plot_core_timing_bars(metrics_dir, base_name, timing_png)
+        except Exception as e:
+            print(f"[DEBUG TIMING] timing summary failed: {e}")
+
+        # ------------------------------------------------------------------
+        # 10) FINAL SUMMARY / PRESENTATION PLOTS
+        # ------------------------------------------------------------------
+        try:
+            from helpers.present_plots import build_deck_plots_for_image
+            print("[DEBUG PLOT] building deck-ready summary plots ...")
+            build_deck_plots_for_image(metrics_dir, base_name)
+        except Exception as e:
+            print(f"[DEBUG PLOT] deck plots failed: {e}")
+
+        '''from helpers.supervision import export_all_supervision
+
+        # supervision remains manual-only (GT + manual)
+        export_all_supervision(
+            atomic=atomic,
+            combined=combined_map,
+            metrics_dir=metrics_dir,
+            original_image=self.original_image
+        )'''
+
+        print(f"[DEBUG METRICS] ===== END for {base_name} =====")
+    
+    '''def compute_mask_and_width_metrics_for_image(
+        self,
+        display=False,
+        export_supervision=False,
+        *,
+        cache_key=None,
+        include_auto=False,   # enable auto-variant scoring
+    ):
+        """
+        Snapshot-only driver (strict edges). Writes:
+        - metrics/<base>/cid{X}/gt_vs_manual_mask_global.png
+        - metrics/<base>/cid{X}/gt_normals.png
+        - metrics/<base>/combined{C}_{members}/manual/gt_vs_manual_mask_global.png
+        - metrics/<base>/combined{C}_{members}/manual/gt_normals.png  (merged normals)
+        - metrics/<base>/combined{C}_{members}/auto/gt_vs_auto_mask_global.png   (NEW)
+        - metrics/<base>/combined{C}_{members}/auto/auto_normals.png             (NEW)
+        - metrics/<base>/mask_metrics.csv
+            * atomic, combined, TOTAL
+            * atomic_auto, combined_auto, TOTAL_AUTO (when include_auto=True)
+        - width diff overlays + per-type CSVs
+            * manual: atomic + combined
+            * auto:   atomic + combined_auto (NEW)
+        """
+        import os, json, numpy as np, pandas as pd, traceback, cv2
+        from helpers.metrics import (
+            compute_mask_metrics,
+            boundary_fscore,
+            assd_hd95,
+            reconstruct_manual_mask_from_edges,
+            mask_iou,
+            has_valid_mask,
+            manual_mask_from_crack,
+            safe_write_json,
+            metric_atomic_path_for,
+            width_summary_to_csv,
+            compare_widths_for_cracks,
+            write_width_diff_overlay,
+            safe_read_json,
+            merged_metric_atomic,
+        )
+        from helpers.combine_debug import _mask_from_crack, auto_groups_from_atomic
+        from combiner import build_combined_crack_stateless
+        from helpers import metrics as metrics_mod   # for _auto_cache_key
+        from helpers.plot_metrics import save_gt_vs_manual_overlay
 
         print(f"[DEBUG METRICS] ===== START for {getattr(self, 'name', '?')} =====")
         if getattr(self, "current_mask", None) is None:
@@ -3565,7 +4535,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             original_image=self.original_image
         )
 
-        print(f"[DEBUG METRICS] ===== END for {base_name} =====")
+        print(f"[DEBUG METRICS] ===== END for {base_name} =====")'''
         
     
     ### old
