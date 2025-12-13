@@ -1243,7 +1243,8 @@ class CrackAnnotator(QtWidgets.QWidget):
             )
 
         # --- read-only connections ---
-        qp.setPen(QPen(QColor(150, 150, 150), 2, Qt.DashLine))
+        midline_color = QColor(90, 200, 0)
+        qp.setPen(QPen(midline_color, 2, Qt.DashLine))
         for i1, i2 in self.readonly_connections:
             if i1 < len(self.points) and i2 < len(self.points):
                 p1 = apply_offset(self.points[i1])

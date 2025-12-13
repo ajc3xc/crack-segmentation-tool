@@ -1964,23 +1964,6 @@ class CrackUtils:
         # ======================================================
         # Overlay toggle button (only shown if overlay exists)
         # ======================================================
-        '''overlay_btn = QPushButton("Hide Overlay")   # default ON
-        overlay_btn.setCheckable(True)
-        overlay_btn.setChecked(True)
-        overlay_btn.setVisible(overlay_img is not None)
-
-        def on_overlay_toggled(checked):
-            # checked == True means "Hide" mode, so overlay OFF
-            annot.set_overlay_enabled(not checked)
-            if checked:
-                overlay_btn.setText("Show Overlay")
-                overlay_btn.setStyleSheet("")
-            else:
-                overlay_btn.setText("Hide Overlay")
-                overlay_btn.setStyleSheet("background:#f2b3b3;")  # light red
-
-        #overlay_btn.clicked.connect(on_overlay_toggled)
-        overlay_btn.toggled.connect(on_overlay_toggled)'''
 
         overlay_btn = QPushButton("Hide Overlay")
         overlay_btn.setCheckable(True)
@@ -2019,7 +2002,7 @@ class CrackUtils:
             a, b = (i1, i2) if i1 <= i2 else (i2, i1)
             ro_mid[(a, b)] = {
                 "poly": [[float(x), float(y)] for (x, y) in poly],  # <- the key paintEvent reads
-                "color": (160, 160, 160),                           # optional; safe default
+                "color": (90, 200, 0),                           # optional; safe default
                 "readonly": True,                                   # optional; used by tools
                 "tag": "existing"                                   # optional; for legend/debug
             }
@@ -2122,7 +2105,7 @@ class CrackUtils:
         layout.addWidget(overlay_btn)   
 
         hint = QLabel(
-            "Editable: Auto/Manual in black/light-blue.     Read-only: Auto/Manual cracks in gray/beige — cant delete in editor, must delete segment in Delete Segmentations.\n"
+            "Editable: Auto/Manual in black/light-blue.     Read-only: Auto/Manual cracks in green — cant delete in editor, must delete segment in Delete Segmentations.\n"
             "Click unconnected point in Connection Mode to create new point.        Hover and click in respective mode to delete.        Mousewheel/2-finger swipe = zoom in/out.\n"
             "Manual: Left-hold on starting point → draw → finish on a different endpoint.       Backspace/Z or Right-hold for fast/slow deletion.       Shimmy: zoom in toward direction, zoom out slightly to move; image may distort until 1.0 scale."
         )

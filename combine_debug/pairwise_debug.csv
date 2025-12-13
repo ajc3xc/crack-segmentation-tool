@@ -1,4 +1,4 @@
 aid,bid,shared,prox<th,dmin,maskA_px,maskB_px,bbox_fmt,overlap,overlap_px,why
 0,1,True,True,0.0,604,289,xywh,False,0,shared;prox<10.0
-0,2,False,False,30.07,604,90,xywh,False,0,none
-1,2,False,False,32.14,289,90,xywh,False,0,none
+0,2,False,False,29.07,604,40,xywh,False,0,none
+1,2,False,False,21.02,289,40,xywh,False,0,none
