@@ -367,7 +367,7 @@ class Draw():
 
         live_points = []
 
-        contours_name = f"{mode.upper()} contours (Esc or 'X' closes) midline(Cyan=combined, White=atomic) mask(Red), non-combined atomic endpoints (Blue)"
+        contours_name = f"{mode.upper()} contours (Esc or 'X' closes) midline(Cyan=combined, White=atomic); mask(Red); non-combined atomic endpoints (Blue)"
         cv2.namedWindow(contours_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(contours_name, 1200, 800)  # make window large by default
         cv2.moveWindow(contours_name, move_x, move_y)

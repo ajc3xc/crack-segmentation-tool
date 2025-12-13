@@ -693,7 +693,7 @@ class Ui_MainWindow(object):
         self.label_28.setStyleSheet("color: rgb(0, 0, 0);")
         self.label_28.setObjectName("label_28")
         self.save_current_segment_button = QtWidgets.QPushButton(self.tab_2)
-        self.save_current_segment_button.setGeometry(QtCore.QRect(970, 900, 141, 28))
+        self.save_current_segment_button.setGeometry(QtCore.QRect(1030, 885, 141, 28))
         self.save_current_segment_button.setObjectName("save_current_segment_button")
         self.all_segments_display = QtWidgets.QLabel(self.tab_2)
         self.all_segments_display.setGeometry(QtCore.QRect(1030, 0, 871, 881))

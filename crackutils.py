@@ -848,8 +848,8 @@ class CrackUtils:
     def _draw_manual_mode_overlay(self, canvas):
         """
         Draws a lite overlay:
-        - ATOMIC cracks: white midline + magenta endpoints
-        - COMBINED cracks: yellow midline, NO endpoints
+        - ATOMIC cracks: white midline + blue endpoints
+        - COMBINED cracks: lightblue midline, NO endpoints
         """
         import cv2
         import numpy as np
@@ -1810,11 +1810,11 @@ class CrackUtils:
         print(metrics)
         if not hasattr(self, "original_image") or self.original_image is None:
             error("No original image found.")
-            return
+            return -1
         
         if not hasattr(self, "annotation") or self.annotation is None:
             error("No annotation data found.")
-            return
+            return -1
 
         from PyQt5.QtWidgets import (
             QDialog, QVBoxLayout, QHBoxLayout, QPushButton,

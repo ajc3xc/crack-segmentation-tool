@@ -105,8 +105,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         self.update_os_button.clicked.connect(self.update_os)
         self.update_cost_button.clicked.connect(self.update_os_cost)
         self.midline_track_button.clicked.connect(self.midline_tracking)
-        # self.save_current_segment_button.clicked.connect(self.save_current_segment)
-        self.save_current_segment_button.hide()
 
         # Repurpose the OS button for full pipeline
         try:
@@ -125,6 +123,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         self.update_track_display_button.clicked.connect(self.update_track_display)
         self.track_full_screen_button.clicked.connect(self.track_full_screen)
         self.edge_tracks_full_screen_button.clicked.connect(self.edge_tracks_full_screen)
+        self.save_current_segment_button.clicked.connect(self.save_current_segment)
  
        
        
