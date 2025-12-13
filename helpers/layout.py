@@ -16,10 +16,31 @@ class Ui_MainWindow(object):
         MainWindow.setObjectName("MainWindow")
         MainWindow.resize(1928, 1028)
         MainWindow.setAnimated(True)
-        self.centralwidget = QtWidgets.QWidget(MainWindow)
+        '''self.centralwidget = QtWidgets.QWidget(MainWindow)
         self.centralwidget.setObjectName("centralwidget")
         self.tabWidget = QtWidgets.QTabWidget(self.centralwidget)
-        self.tabWidget.setGeometry(QtCore.QRect(0, 0, 1921, 1011))
+        self.tabWidget.setGeometry(QtCore.QRect(0, 0, 1921, 1011))'''
+        # --- Scroll-area wrapper for small screens, fixed design size ---
+        DESIGN_W = 1921
+        DESIGN_H = 1011
+
+        self.scrollArea = QtWidgets.QScrollArea(MainWindow)
+        self.scrollArea.setObjectName("scrollArea")
+        self.scrollArea.setWidgetResizable(False)          # do NOT stretch content
+        self.scrollArea.setAlignment(QtCore.Qt.AlignCenter)  # center on large screens
+
+        # Content widget (keeps absolute geometry intact)
+        self.centralwidget = QtWidgets.QWidget()
+        self.centralwidget.setObjectName("centralwidget")
+        self.centralwidget.setFixedSize(QtCore.QSize(DESIGN_W, DESIGN_H))
+
+        self.scrollArea.setWidget(self.centralwidget)
+
+        # Tabs live inside the fixed-size content widget
+        self.tabWidget = QtWidgets.QTabWidget(self.centralwidget)
+        self.tabWidget.setGeometry(QtCore.QRect(0, 0, DESIGN_W, DESIGN_H))
+        self.tabWidget.setFixedSize(QtCore.QSize(DESIGN_W, DESIGN_H))
+
         self.tabWidget.setToolTip("")
         self.tabWidget.setToolTipDuration(1000000000)
         self.tabWidget.setWhatsThis("")
@@ -761,7 +782,8 @@ class Ui_MainWindow(object):
         
         
         self.tabWidget.addTab(self.tab_3, "")
-        MainWindow.setCentralWidget(self.centralwidget)
+        #MainWindow.setCentralWidget(self.centralwidget)
+        MainWindow.setCentralWidget(self.scrollArea)
         self.statusbar = QtWidgets.QStatusBar(MainWindow)
         self.statusbar.setObjectName("statusbar")
         MainWindow.setStatusBar(self.statusbar)
