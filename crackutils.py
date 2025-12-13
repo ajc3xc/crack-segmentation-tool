@@ -1807,6 +1807,14 @@ class CrackUtils:
         plt.close(fig)
 
     def select_end_points_manmidlines(self, metrics: bool = False):
+        def _dbg_poly(label, poly, n=30):
+            if not poly:
+                print(f"[DBG {label}] EMPTY")
+                return
+            print(f"[DBG {label}] len={len(poly)} first {min(n, len(poly))}:")
+            for i, (x, y) in enumerate(poly[:n]):
+                print(f"   {i:02d}: ({x:.6f}, {y:.6f})")
+
         print(metrics)
         if not hasattr(self, "original_image") or self.original_image is None:
             error("No original image found.")
@@ -2016,7 +2024,7 @@ class CrackUtils:
         orig_mousePressEvent = annot.mousePressEvent
 
         def guarded_mousePressEvent(ev):
-            p = annot._to_image_coords(ev.pos())
+            p = annot._to_image_coords(ev.localPos())
             point_i = annot._find_point_at(p)
 
             # Gather extra debug state
@@ -2270,6 +2278,11 @@ class CrackUtils:
             if hasattr(annot, "finalize_drawing_if_needed"):
                 annot.finalize_drawing_if_needed()
             self.manual_midlines_tmp = dict(getattr(annot, "midlines", {}))
+
+            # DEBUG: inspect ONLY newly drawn midlines (not readonly)
+            for k, poly in self.manual_midlines_tmp.items():
+                _dbg_poly(f"NEW MIDLINE (raw annot.midlines) {k}", poly)
+                break  # print just one; remove break if you want all
 
             # --- build manual endpoint list for later reference ---
             self.manual_endpoint_pairs = []

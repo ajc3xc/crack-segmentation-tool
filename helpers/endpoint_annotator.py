@@ -468,154 +468,6 @@ class CrackAnnotator(QtWidgets.QWidget):
         self.update()
         return True
 
-    # ---------- mouse handlers ----------
-    '''def mousePressEvent(self, event):
-        # image coords under the cursor (using pan/scale)
-        img_rect = QtCore.QRect(
-            int(self._last_draw_xoff),
-            int(self._last_draw_yoff),
-            int(self.img_w * self.scale),
-            int(self.img_h * self.scale),
-        )
-        if not img_rect.contains(event.pos()):
-            return  # ignore clicks in gray margin
-
-        p = self._to_image_coords(event.pos())
-        point_i = self._find_point_at(p)
-        line_i = self._find_line_at(p)
-        mid_key = self._midline_hit_test(event.pos(), 10.0)
-        
-        print(f"[PRESS] Click at {p}, point_i={point_i}, line_i={line_i}, mid_key={mid_key}, "
-              f"_is_drawing={self._is_drawing}, polyline_mode={self.polyline_mode}, polyline_len={len(self.polyline)}")
-
-        if mid_key in self.readonly_midlines:
-            mid_key = None
-        if line_i is not None and (self.connections[line_i] in self.readonly_connections):
-            line_i = None
-
-        # ----- Polyline mode -----
-        if self.polyline_mode:
-            if event.button() == Qt.LeftButton:
-                if not self._is_drawing:
-                    # first click while in polyline mode
-                    if mid_key is not None:
-                        self.midlines.pop(mid_key, None)
-                        self._hover_midline_key = None
-                        self.update()
-                        return
-                    if line_i is not None:
-                        self.connections.pop(line_i)
-                        self.update()
-                        return
-                    if point_i is None or len(self.points) < 2:
-                        return
-                    self._start_idx = point_i
-                    sx, sy = self.points[self._start_idx]
-                    self.polyline = [(float(sx), float(sy))]
-                    self._is_drawing = True
-                    print(f"[PRESS] START midline from {self._start_idx} at {self.points[self._start_idx]}")
-                    self.update()
-                    return
-                else:
-                    # second+ clicks while drawing
-                    if getattr(self, "_just_committed_midline", False):
-                        self._just_committed_midline = False
-                        return
-                    if point_i is not None and point_i != self._start_idx:
-                        self._commit_midline(point_i)
-                    elif point_i is None:
-                        # add free point to the live polyline (in image coords!)
-                        px, py = p
-                        self.polyline.append((float(px), float(py)))
-                        print(f"[PRESS] Added polyline point: {self.polyline[-1]}")
-                        self.update()
-                    return
-
-            elif event.button() == Qt.RightButton:
-                if self._is_drawing:
-                    self._erase_timer.stop()
-                    QtCore.QTimer.singleShot(500, lambda: (
-                        self._erase_timer.start(75)
-                        if (QtWidgets.QApplication.mouseButtons() & Qt.RightButton and self._is_drawing)
-                        else None
-                    ))
-                    if len(self.polyline) > 1:
-                        self._pop_poly_point()
-                    else:
-                        self.polyline = []
-                        self._is_drawing = False
-                        self._start_idx = None
-                    self.update()
-                return
-
-        # ----- Normal connection / point modes -----
-        if event.button() == Qt.LeftButton:
-            if (not self.polyline_mode) and self.connection_mode and (mid_key is not None):
-                self.midlines.pop(mid_key, None)
-                self._hover_midline_key = None
-                self.update()
-                return
-
-            if not self.connection_mode:
-                # add/remove point
-                if point_i is None:
-                    # p is already in image coords
-                    self.points.append((float(p[0]), float(p[1])))
-                    print(f"[PRESS] Added new point at {p}")
-                else:
-                    if any(point_i in c for c in self.readonly_connections) or \
-                       any(point_i in k for k in self.readonly_midlines.keys()):
-                        return
-                    self._delete_point_reindex(point_i)
-            else:
-                # connect / delete edges
-                if (line_i is not None) and (self.connecting_index is None) and (point_i is None):
-                    self.connections.pop(line_i)
-                elif point_i is not None:
-                    if self.connecting_index is None:
-                        self.connecting_index = point_i
-                    elif self.connecting_index != point_i:
-                        c = self._sorted(self.connecting_index, point_i)
-                        if c not in self.connections and c not in self.readonly_connections:
-                            self.connections.append(c)
-                        self.connecting_index = None
-                    else:
-                        self.connecting_index = None
-                else:
-                    self.connecting_index = None
-            self.update()
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.RightButton:
-            self._erase_timer.stop()
-
-    def mouseMoveEvent(self, event):
-        # use image coords for hit-tests & drawing
-        p = self._to_image_coords(event.pos())
-        point_i = self._find_point_at(p)
-
-        if self.polyline_mode and self._is_drawing and (event.buttons() & Qt.LeftButton):
-            if point_i is not None and point_i != self._start_idx:
-                print(f"[MOVE] Hovering endpoint {point_i}, attempting commit")
-                self._commit_midline(point_i)
-                return
-            else:
-                # freehand: append image-space points
-                self._add_poly_point(p)
-                # print(f"[MOVE] Added freehand point {p}")
-                self.update()
-                return
-
-        self.hover_index = self._find_point_at(p)
-        if self.connection_mode and self.connecting_index is None and self.hover_index is None:
-            self.hover_line_index = self._find_line_at(p)
-        else:
-            self.hover_line_index = None
-
-        # midline hit-test wants screen coords; that's event.pos()
-        self._hover_midline_key = self._midline_hit_test(event.pos(), 10.0) if not self._is_drawing else None
-        self.update()'''
-
     def add_midline_auto(self, i1, i2, poly):
         """
         Add an automatically-computed midline for the pair (i1,i2).
@@ -1701,19 +1553,19 @@ class CrackAnnotator(QtWidgets.QWidget):
 
         if event.button() == Qt.MiddleButton:
             self._panning = True
-            self._pan_last = event.pos()
+            self._pan_last = event.localPos()
             self.setCursor(Qt.ClosedHandCursor)
             print(f"[PAN] start at {self._pan_last}")
             return
 
         # ----- EXISTING EDITOR LOGIC (unchanged below) -----
-        if not img_rect.contains(event.pos()):
+        if not img_rect.contains(event.localPos()):
             return  # ignore clicks in gray margin
 
-        p = self._to_image_coords(event.pos())
+        p = self._to_image_coords(event.localPos())
         point_i = self._find_point_at(p)
         line_i = self._find_line_at(p)
-        mid_key = self._midline_hit_test(event.pos(), 10.0)
+        mid_key = self._midline_hit_test(event.localPos(), 10.0)
 
         print(f"[PRESS] Click at {p}, point_i={point_i}, line_i={line_i}, mid_key={mid_key}, "
             f"_is_drawing={self._is_drawing}, polyline_mode={self.polyline_mode}, polyline_len={len(self.polyline)}")
@@ -1812,18 +1664,18 @@ class CrackAnnotator(QtWidgets.QWidget):
 
     def mouseMoveEvent(self, event):
         if self._panning and self._pan_last is not None:
-            dx = float(event.pos().x() - self._pan_last.x())
-            dy = float(event.pos().y() - self._pan_last.y())
+            dx = float(event.localPos().x() - self._pan_last.x())
+            dy = float(event.localPos().y() - self._pan_last.y())
             self.pan_x += dx
             self.pan_y += dy
-            self._pan_last = event.pos()
+            self._pan_last = event.localPos()
             self._enforce_bounds()
             print(f"[PAN] move dx={dx:.1f}, dy={dy:.1f} -> pan=({self.pan_x:.1f},{self.pan_y:.1f})")
             self.update()
             return
 
         # --- existing hover / drawing logic ---
-        p = self._to_image_coords(event.pos())
+        p = self._to_image_coords(event.localPos())
         point_i = self._find_point_at(p)
 
         if self.polyline_mode and self._is_drawing and (event.buttons() & Qt.LeftButton):
@@ -1842,7 +1694,7 @@ class CrackAnnotator(QtWidgets.QWidget):
         else:
             self.hover_line_index = None
 
-        self._hover_midline_key = self._midline_hit_test(event.pos(), 10.0) if not self._is_drawing else None
+        self._hover_midline_key = self._midline_hit_test(event.localPos(), 10.0) if not self._is_drawing else None
         self.update()
 
     def set_overlay_image(self, overlay_np):
