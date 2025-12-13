@@ -1964,7 +1964,7 @@ class CrackUtils:
         # ======================================================
         # Overlay toggle button (only shown if overlay exists)
         # ======================================================
-        overlay_btn = QPushButton("Hide Overlay")   # default ON
+        '''overlay_btn = QPushButton("Hide Overlay")   # default ON
         overlay_btn.setCheckable(True)
         overlay_btn.setChecked(True)
         overlay_btn.setVisible(overlay_img is not None)
@@ -1979,7 +1979,31 @@ class CrackUtils:
                 overlay_btn.setText("Hide Overlay")
                 overlay_btn.setStyleSheet("background:#f2b3b3;")  # light red
 
-        overlay_btn.clicked.connect(on_overlay_toggled)
+        #overlay_btn.clicked.connect(on_overlay_toggled)
+        overlay_btn.toggled.connect(on_overlay_toggled)'''
+
+        overlay_btn = QPushButton("Hide Overlay")
+        overlay_btn.setCheckable(True)
+        overlay_btn.setVisible(overlay_img is not None)
+
+        def on_overlay_toggled(checked):
+            annot.set_overlay_enabled(not checked)
+            if checked:
+                overlay_btn.setText("Show Overlay")
+                overlay_btn.setStyleSheet("")
+            else:
+                overlay_btn.setText("Hide Overlay")
+                overlay_btn.setStyleSheet("background:#f2b3b3;")
+
+        overlay_btn.toggled.connect(on_overlay_toggled)
+
+        # ---- CRITICAL SECTION ----
+        overlay_btn.blockSignals(True)
+        overlay_btn.setChecked(False)      # overlay ON initially
+        overlay_btn.blockSignals(False)
+
+        # Manually sync ONCE
+        on_overlay_toggled(overlay_btn.isChecked())
 
         #annot.readonly_midlines = readonly_midlines
         #annot.readonly_connections = readonly_conn_idx
