@@ -1931,8 +1931,8 @@ class CrackUtils:
             # gray overlay; you can color this later if you want
             mask_rgb = m3 * 255.0
 
-            alpha_im = 0.65
-            alpha_mask = 0.35
+            alpha_im = 0.6
+            alpha_mask = 0.4
             blended = alpha_im * base_rgb.astype(np.float32) + alpha_mask * mask_rgb
             blended = np.clip(blended, 0, 255).astype(np.uint8)
             return blended
