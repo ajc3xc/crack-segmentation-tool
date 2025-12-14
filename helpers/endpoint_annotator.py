@@ -1191,7 +1191,7 @@ class CrackAnnotator(QtWidgets.QWidget):
             qp.drawEllipse(center, r_screen, r_screen)
 
         # --- editable midlines (simple cyan layer to keep behavior from older code) ---
-        qp.setPen(QPen(QColor(0, 200, 200), 4))
+        '''qp.setPen(QPen(QColor(0, 200, 200), 4))
         for key, poly in self.midlines.items():
             if isinstance(poly, dict):
                 poly = poly.get("poly", [])
@@ -1205,7 +1205,7 @@ class CrackAnnotator(QtWidgets.QWidget):
                 qp.drawLine(
                     QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
                     QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
-                )
+                )'''
 
         # --- live polyline (manual midline in progress) ---
         if self.polyline_mode and len(self.polyline) >= 1:
@@ -1660,7 +1660,6 @@ class CrackAnnotator(QtWidgets.QWidget):
                 else:
                     self.connecting_index = None
             self.update()
-
 
     def mouseMoveEvent(self, event):
         if self._panning and self._pan_last is not None:
