@@ -1594,6 +1594,9 @@ class CrackAnnotator(QtWidgets.QWidget):
         if self.polyline_mode:
             if event.button() == Qt.LeftButton:
                 if not self._is_drawing:
+                    #dont delete old midlines while drawing (duh)
+                    if point_i is not None:
+                        mid_key = None
                     # Absolute priority enforcement
                     if mid_key is not None:
                         self.midlines.pop(mid_key, None)
