@@ -1693,7 +1693,14 @@ class CrackAnnotator(QtWidgets.QWidget):
         else:
             self.hover_line_index = None
 
-        self._hover_midline_key = self._midline_hit_test(event.localPos(), 10.0) if not self._is_drawing else None
+        #self._hover_midline_key = self._midline_hit_test(event.localPos(), 10.0) if not self._is_drawing else None
+        # Midline hover detection rules:
+        #  - never while drawing
+        #  - never when hovering a point
+        if not self._is_drawing and self.hover_index is None:
+            self._hover_midline_key = self._midline_hit_test(event.localPos(), 10.0)
+        else:
+            self._hover_midline_key = None
         self.update()
 
     def set_overlay_image(self, overlay_np):
