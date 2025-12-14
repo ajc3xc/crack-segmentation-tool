@@ -42,7 +42,7 @@ def poly_median_spacing(poly):
     return float(np.median(d))
 
 
-def resample_polyline(poly, step=.6):
+def resample_polyline(poly, step=.7):
     poly = np.asarray(poly, float)
     if len(poly) < 2:
         return poly
