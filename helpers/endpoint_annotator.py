@@ -3,7 +3,7 @@
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtWidgets import QMessageBox
 from PyQt5.QtGui import QPainter, QPen, QColor, QPixmap, QImage
-from PyQt5.QtCore import Qt, QPoint
+from PyQt5.QtCore import Qt, QPointF
 
 # I dare you to waste another week trying to improve the zooming functionality
 
@@ -585,8 +585,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p1 = apply_offset(self.points[i1])
                 p2 = apply_offset(self.points[i2])
                 qp.drawLine(
-                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                    QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
         # --- read-only midlines ---
@@ -596,8 +596,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p1 = apply_offset(poly[i - 1])
                 p2 = apply_offset(poly[i])
                 qp.drawLine(
-                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                    QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
         # --- editable connections ---
@@ -609,14 +609,14 @@ class CrackAnnotator(QtWidgets.QWidget):
                             and idx == self.hover_line_index and self.hover_index is None) else 4
                 qp.setPen(QPen(QColor(0, 0, 0), thick))
                 qp.drawLine(
-                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                    QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
         # --- points ---
         for i, (x, y) in enumerate(self.points):
             x, y = apply_offset((x, y))
-            center = QPoint(int(x * scale + xoff), int(y * scale + yoff))
+            center = QPointF(int(x * scale + xoff), int(y * scale + yoff))
             brush = QColor(0, 200, 0) if i == self.hover_index or (
                 self.connection_mode and i == self.connecting_index) else QColor(200, 80, 80)
             qp.setBrush(brush)
@@ -633,8 +633,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p1 = apply_offset(poly[i - 1])
                 p2 = apply_offset(poly[i])
                 qp.drawLine(
-                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                    QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
         # --- live polyline (manual midline in progress) ---
@@ -644,8 +644,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p1 = apply_offset(self.polyline[i - 1])
                 p2 = apply_offset(self.polyline[i])
                 qp.drawLine(
-                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                    QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )'''
 
     #def _min_scale(self):
@@ -751,7 +751,7 @@ class CrackAnnotator(QtWidgets.QWidget):
                 self._zoom_at(center, scale_change)
         return True
 
-    def _zoom_at(self, pos: QtCore.QPoint, factor: float):
+    def _zoom_at(self, pos: QtCore.QPointF, factor: float):
         self._hook_scroll_area()
 
         old = self.scale
@@ -898,8 +898,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p1 = apply_offset(self.points[i1])
                 p2 = apply_offset(self.points[i2])
                 qp.drawLine(
-                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                    QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
         # --- read-only midlines ---
@@ -909,8 +909,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p1 = apply_offset(poly[i - 1])
                 p2 = apply_offset(poly[i])
                 qp.drawLine(
-                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                    QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )'''
                 
         # --- read-only midlines ---
@@ -938,8 +938,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p2x += getattr(self, "crop_offset", (0,0))[0]
                 p2y += getattr(self, "crop_offset", (0,0))[1]
                 qp.drawLine(
-                    QPoint(int(p1x * scale + xoff), int(p1y * scale + yoff)),
-                    QPoint(int(p2x * scale + xoff), int(p2y * scale + yoff))
+                    QPointF(int(p1x * scale + xoff), int(p1y * scale + yoff)),
+                    QPointF(int(p2x * scale + xoff), int(p2y * scale + yoff))
                 )
 
 
@@ -968,8 +968,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p1 = apply_offset(poly[i - 1])
                 p2 = apply_offset(poly[i])
                 qp.drawLine(
-                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                    QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )'''
                 
         
@@ -997,8 +997,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p1 = apply_offset(poly[i - 1])
                 p2 = apply_offset(poly[i])
                 qp.drawLine(
-                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                    QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
 
@@ -1011,15 +1011,15 @@ class CrackAnnotator(QtWidgets.QWidget):
                             and idx == self.hover_line_index and self.hover_index is None) else 4
                 qp.setPen(QPen(QColor(0, 0, 0), thick))
                 qp.drawLine(
-                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                    QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
         # --- points ---
         #print(len(self.points))
         for i, (x, y) in enumerate(self.points):
             x, y = apply_offset((x, y))
-            center = QPoint(int(x * scale + xoff), int(y * scale + yoff))
+            center = QPointF(int(x * scale + xoff), int(y * scale + yoff))
             brush = QColor(0, 200, 0) if i == self.hover_index or (
                 self.connection_mode and i == self.connecting_index) else QColor(200, 80, 80)
             qp.setBrush(brush)
@@ -1040,8 +1040,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p1 = apply_offset(poly[i - 1])
                 p2 = apply_offset(poly[i])
                 qp.drawLine(
-                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                    QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
         # --- live polyline (manual midline in progress) ---
@@ -1051,8 +1051,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p1 = apply_offset(self.polyline[i - 1])
                 p2 = apply_offset(self.polyline[i])
                 qp.drawLine(
-                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                    QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )"""
                 
     # ========= paintEvent (draw with float pan_x/pan_y) =========
@@ -1102,8 +1102,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p1 = apply_offset(self.points[i1])
                 p2 = apply_offset(self.points[i2])
                 qp.drawLine(
-                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                    QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
         # --- read-only midlines ---
@@ -1131,8 +1131,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p2x += getattr(self, "crop_offset", (0, 0))[0]
                 p2y += getattr(self, "crop_offset", (0, 0))[1]
                 qp.drawLine(
-                    QPoint(int(p1x * scale + xoff), int(p1y * scale + yoff)),
-                    QPoint(int(p2x * scale + xoff), int(p2y * scale + yoff))
+                    QPointF(int(p1x * scale + xoff), int(p1y * scale + yoff)),
+                    QPointF(int(p2x * scale + xoff), int(p2y * scale + yoff))
                 )
 
         # --- editable midlines (manual, with unprocessed flag support) ---
@@ -1159,8 +1159,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p1 = apply_offset(poly[i - 1])
                 p2 = apply_offset(poly[i])
                 qp.drawLine(
-                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                    QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
         # --- editable connections ---
@@ -1172,14 +1172,14 @@ class CrackAnnotator(QtWidgets.QWidget):
                               and idx == self.hover_line_index and self.hover_index is None) else 4
                 qp.setPen(QPen(QColor(0, 0, 0), thick))
                 qp.drawLine(
-                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                    QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
         # --- points ---
         for i, (x, y) in enumerate(self.points):
             x, y = apply_offset((x, y))
-            center = QPoint(int(x * scale + xoff), int(y * scale + yoff))
+            center = QPointF(int(x * scale + xoff), int(y * scale + yoff))
             brush = QColor(0, 200, 0) if i == self.hover_index or (
                 self.connection_mode and i == self.connecting_index) else QColor(200, 80, 80)
             qp.setBrush(brush)
@@ -1203,8 +1203,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p1 = apply_offset(poly[i - 1])
                 p2 = apply_offset(poly[i])
                 qp.drawLine(
-                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                    QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
         # --- live polyline (manual midline in progress) ---
@@ -1214,8 +1214,8 @@ class CrackAnnotator(QtWidgets.QWidget):
                 p1 = apply_offset(self.polyline[i - 1])
                 p2 = apply_offset(self.polyline[i])
                 qp.drawLine(
-                    QPoint(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
-                    QPoint(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
+                    QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
+                    QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
 
     # ========= fit-to-view (center using float pan; keep widget = viewport size) =========
@@ -1344,7 +1344,7 @@ class CrackAnnotator(QtWidgets.QWidget):
                 f"(vw={vw:.0f},vh={vh:.0f}, sw={sw:.0f},sh={sh:.0f}, margin={margin_frac:.2f})")
 
     # ========= precise cursor-anchored zoom (NO scrollbar drift) + deep debug =========
-    def _zoom_at(self, pos: QtCore.QPoint, factor: float):
+    def _zoom_at(self, pos: QtCore.QPointF, factor: float):
         """Zoom with the anchor fixed under `pos` (widget coords), using float pan."""
         self._hook_scroll_area()
 
@@ -1409,7 +1409,7 @@ class CrackAnnotator(QtWidgets.QWidget):
 
         self.update()
 
-    '''def _zoom_at(self, pos: QtCore.QPoint, factor: float):
+    '''def _zoom_at(self, pos: QtCore.QPointF, factor: float):
         """Zoom with the anchor fixed under `pos` (widget coords)."""
         self._hook_scroll_area()
 
@@ -1559,7 +1559,7 @@ class CrackAnnotator(QtWidgets.QWidget):
             return
 
         # ----- EXISTING EDITOR LOGIC (unchanged below) -----
-        if not img_rect.contains(event.localPos()):
+        if not img_rect.contains(event.pos()):
             return  # ignore clicks in gray margin
 
         p = self._to_image_coords(event.localPos())

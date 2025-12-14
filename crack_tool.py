@@ -311,20 +311,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                             print(f"[DEBUG] all_points at runtime: {all_points}")
                             print(f"[DEBUG] Trying to match p0={p0}  p1={p1}")
 
-                            # manual_midlines_tmp keys are "i_j" from annotator indices; match geometrically
-                            '''for k, poly in manual_midlines_dict.items():
-                                try:
-                                    i1, i2 = map(int, k.split("_"))
-                                    c_i = tuple(all_points[i1])
-                                    c_j = tuple(all_points[i2])
-                                    print(f"[DEBUG] Checking key={k}, c_i={c_i}, c_j={c_j}")
-                                    if (c_i, c_j) == (p0, p1) or (c_i, c_j) == (p1, p0):
-                                        print(f"[DEBUG] Found match for key={k}")
-                                        found_key = k
-                                        break
-                                except Exception as e:
-                                    print(f"[DEBUG] Error parsing key={k}: {e}")'''
-                                    
+                            # manual_midlines_tmp keys are "i_j" from annotator indices; match geometrically     
                             for k, poly in manual_midlines_dict.items():
                                 try:
                                     # handle both tuple keys (2,3) and string keys "2_3"
@@ -356,13 +343,34 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                             if found_key:
                                 # Convert full-image manual polyline to crop coords and set as self.track
                                 poly = np.array(manual_midlines_dict[found_key], dtype=float)  # [[x,y],...]
+
+                                """print("\n[DBG MANUAL POLYLINE] first 20 (FULL IMAGE COORDS):")
+                                for i, (x, y) in enumerate(poly[:20]):
+                                    print(f"  {i:02d}: ({x:.6f}, {y:.6f})")"""
+
                                 cy = poly[:, 1] - ymin
                                 cx = poly[:, 0] - xmin
+
+                                """print("\n[DBG AFTER CROP OFFSET] first 20:")
+                                for i in range(min(20, len(cx))):
+                                    print(f"  {i:02d}: cx={cx[i]:.6f}, cy={cy[i]:.6f}")"""
+
                                 self.track = np.vstack([cy, cx])
+
+                                """print("\n[DBG TRACK ARRAY]")
+                                print(f"  dtype: {self.track.dtype}")
+                                print(f"  shape: {self.track.shape}")
+
+                                print("[DBG TRACK first 20]:")
+                                for i in range(min(20, self.track.shape[1])):
+                                    print(f"  {i:02d}: (y={self.track[0, i]:.6f}, x={self.track[1, i]:.6f})")"""
+
+                                # ---- endpoint bookkeeping (unchanged) ----
                                 self.pts_crop = [
                                     np.array(self.pts[0]) - np.array([xmin, ymin]),
                                     np.array(self.pts[1]) - np.array([xmin, ymin])
                                 ]
+
                                 downsample = self.downsample_factor_box.value()
                                 self.pts_crop_down = [p / downsample for p in self.pts_crop]
                             else:
@@ -419,16 +427,31 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                         new_cid = _next_crack_id_str()
                         self.current_crack_id = int(new_cid)
 
+                        def _dbg_track(label, track, n=20):
+                            print(f"\n[DBG {label}]")
+                            if track is None:
+                                print("  track is None")
+                                return
+                            print(f"  dtype={track.dtype}, shape={track.shape}")
+                            pts = track[:, :min(n, track.shape[1])]
+                            for i in range(pts.shape[1]):
+                                y, x = pts[:, i]
+                                print(f"  {i:02d}: (y={y:.6f}, x={x:.6f})")
+
+                        _dbg_track("PRE edge_mask (track)", self.track)
+
                         # Geodesic edges & masks for this pair
                         self.current_source = src
                         start_time = time()
                         self.edge_mask()
                         edgemask_time = time()
+                        _dbg_track("EXIT edge_mask (track)", self.track)
                         print()
                         print(f"[TIME] Edge mask time: {edgemask_time - start_time}")
                         self.edge_tracking()
                         print()
                         print(f"[TIME] Edge tracking time: {time() - edgemask_time}")
+                        _dbg_track("EXIT edge_tracking (track)", self.track)
 
                         # Pair-local globals so save_current_segment writes them into that crack
                         self.user_points = pair_user_points
@@ -473,7 +496,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         self.manual_endpoint_pairs = None
 
         # Persist JSON
-        self.save_annotation()
+        #self.save_annotation()
             
         self.auto_combine_segments()
 

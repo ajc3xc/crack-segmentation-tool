@@ -32,6 +32,33 @@ ROUNDING_DIGITS=6
 
 from helpers.metrics import *
 
+import numpy as np
+
+def poly_median_spacing(poly):
+    poly = np.asarray(poly, float)
+    if len(poly) < 2:
+        return None
+    d = np.linalg.norm(np.diff(poly, axis=0), axis=1)
+    return float(np.median(d))
+
+
+def resample_polyline(poly, step=.6):
+    poly = np.asarray(poly, float)
+    if len(poly) < 2:
+        return poly
+
+    d = np.linalg.norm(np.diff(poly, axis=0), axis=1)
+    s = np.concatenate([[0.0], np.cumsum(d)])
+    total = s[-1]
+
+    if total < step:
+        return poly
+
+    t = np.arange(0, total, step)
+    x = np.interp(t, s, poly[:, 0])
+    y = np.interp(t, s, poly[:, 1])
+    return np.column_stack([x, y])
+
 #This class is basically is all of the utility / save and load or unimportant functions that aren't directly accessible via a ui button or aren't important
 #
 class CrackUtils:
@@ -2279,10 +2306,30 @@ class CrackUtils:
                 annot.finalize_drawing_if_needed()
             self.manual_midlines_tmp = dict(getattr(annot, "midlines", {}))
 
-            # DEBUG: inspect ONLY newly drawn midlines (not readonly)
+            # --- Anti-noise pass: sanitize newly drawn manual midlines ---
             for k, poly in self.manual_midlines_tmp.items():
+                poly = np.asarray(poly, float)
+                if len(poly) < 3:
+                    continue
+
+                med = poly_median_spacing(poly)
+
+                if med is not None and med < 0.3:
+                    poly_rs = resample_polyline(poly, step=1.0)
+
+                    # Preserve endpoints exactly
+                    poly_rs[0]  = poly[0]
+                    poly_rs[-1] = poly[-1]
+
+                    self.manual_midlines_tmp[k] = poly_rs.tolist()
+
+                    print(f"[ANTI-NOISE] midline {k}: median spacing {med:.3f}px → resampled ({len(poly)} → {len(poly_rs)})")
+
+
+            # DEBUG: inspect ONLY newly drawn midlines (not readonly)
+            '''for k, poly in self.manual_midlines_tmp.items():
                 _dbg_poly(f"NEW MIDLINE (raw annot.midlines) {k}", poly)
-                break  # print just one; remove break if you want all
+                break  # print just one; remove break if you want all'''
 
             # --- build manual endpoint list for later reference ---
             self.manual_endpoint_pairs = []
