@@ -180,6 +180,10 @@ class CrackAnnotator(QtWidgets.QWidget):
         if self.polyline:
             self.polyline.pop()
 
+    def _point_radius_screen(self):
+        r = self.point_radius * (self.scale ** 0.5)
+        return max(1, min(16, r))
+
     # ---------- rest of your existing methods ----------
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Backspace, Qt.Key_Z):
@@ -201,12 +205,24 @@ class CrackAnnotator(QtWidgets.QWidget):
         return ((pos.x() - self.pan_x) / self.scale,
                 (pos.y() - self.pan_y) / self.scale)
 
-    def _find_point_at(self, pos):
+    '''def _find_point_at(self, pos):
         # Keep hitbox radius constant in screen space, not image space
-        r = self.point_radius / self.scale
+        r = self._point_radius_screen()
         r2 = r * r
         for i, (x, y) in enumerate(self.points):
             if (x - pos[0])**2 + (y - pos[1])**2 <= r2:
+                return i
+        return None'''
+    def _find_point_at(self, pos_img):
+        # pos_img is in IMAGE coordinates
+        r_screen = self._point_radius_screen()
+        r_img = r_screen / self.scale   # convert to image space
+        r2 = r_img * r_img
+
+        for i, (x, y) in enumerate(self.points):
+            dx = x - pos_img[0]
+            dy = y - pos_img[1]
+            if dx*dx + dy*dy <= r2:
                 return i
         return None
 
@@ -1186,8 +1202,7 @@ class CrackAnnotator(QtWidgets.QWidget):
             qp.setPen(Qt.NoPen)
             # keep circle size constant on screen regardless of zoom
             #r_screen = int(self.point_radius)
-            r_screen = max(1, int(self.point_radius * (scale ** .5)))
-            r_screen = max(1, min(16, r_screen))
+            r_screen = self._point_radius_screen()
             qp.drawEllipse(center, r_screen, r_screen)
 
         # --- editable midlines (simple cyan layer to keep behavior from older code) ---
@@ -1579,6 +1594,7 @@ class CrackAnnotator(QtWidgets.QWidget):
         if self.polyline_mode:
             if event.button() == Qt.LeftButton:
                 if not self._is_drawing:
+                    # Absolute priority enforcement
                     if mid_key is not None:
                         self.midlines.pop(mid_key, None)
                         self._hover_midline_key = None
@@ -1629,6 +1645,9 @@ class CrackAnnotator(QtWidgets.QWidget):
 
         # ----- Normal connection / point modes -----
         if event.button() == Qt.LeftButton:
+            if point_i is not None:
+                        mid_key = None
+                        line_i = None
             if (not self.polyline_mode) and self.connection_mode and (mid_key is not None):
                 self.midlines.pop(mid_key, None)
                 self._hover_midline_key = None
