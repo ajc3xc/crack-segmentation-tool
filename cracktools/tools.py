@@ -272,34 +272,54 @@ class Draw():
             # ================================
             #   1) Draw combined midlines (yellow)
             # ================================
-            for cid, crack in combined.items():
+            def draw_crack(crack, color, thickness=2):
                 ml = crack.get("midline")
-                if ml and len(ml) >= 2:
-                    pts = np.asarray([[p[0], p[1]] for p in ml if p is not None], np.int32)
-                    if len(pts) >= 2:
-                        cv2.polylines(
-                            shown, [pts], False,
-                            (255, 255, 0),   # yellow (RGB)
-                            2, cv2.LINE_AA
-                        )
+                if not ml or len(ml) < 2:
+                    return
 
-            # ================================
-            #   2) Draw ATOMIC-only midlines (white) + endpoints
-            # ================================
+                seg = []
+                for p in ml:
+                    # gap / pen-up marker
+                    if (
+                        p is None or
+                        len(p) != 2 or
+                        p[0] is None or
+                        p[1] is None
+                    ):
+                        if len(seg) >= 2:
+                            pts = np.asarray(seg, np.int32)
+                            cv2.polylines(
+                                shown,
+                                [pts],
+                                False,
+                                color,
+                                thickness,
+                                cv2.LINE_AA
+                            )
+                        seg = []
+                        continue
+
+                    seg.append([float(p[0]), float(p[1])])
+
+                # flush last segment
+                if len(seg) >= 2:
+                    pts = np.asarray(seg, np.int32)
+                    cv2.polylines(
+                        shown,
+                        [pts],
+                        False,
+                        color,
+                        thickness,
+                        cv2.LINE_AA
+                    )
+            
+            for cid, crack in combined.items():
+                draw_crack(crack, (255, 255, 0))   # yellow
+
             for cid, crack in atomic.items():
                 if str(cid) in member_ids:
-                    continue  # skip atomic members of combined
-
-                # atomic midline
-                ml = crack.get("midline")
-                if ml and len(ml) >= 2:
-                    pts = np.asarray([[p[0], p[1]] for p in ml if p is not None], np.int32)
-                    if len(pts) >= 2:
-                        cv2.polylines(
-                            shown, [pts], False,
-                            (255, 255, 255),   # white
-                            2, cv2.LINE_AA
-                        )
+                    continue
+                draw_crack(crack, (255, 255, 255)) # white
 
                 # atomic endpoints
                 user_pts = crack.get("user_points") or []
@@ -666,7 +686,7 @@ class Draw():
         self.active = False
     
         
-        bb_name = 'draw bb (Esc closes)'
+        bb_name = 'draw bb (Esc closes, RightClick deletes most recent)'
         cv2.namedWindow(bb_name)
         cv2.moveWindow(bb_name, move_x, move_y)
         cv2.setMouseCallback(bb_name,self.bb)

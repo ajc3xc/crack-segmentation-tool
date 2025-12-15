@@ -3618,16 +3618,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         except Exception as e:
             print(f"[DEBUG PLOT] deck plots failed: {e}")
 
-        '''from helpers.supervision import export_all_supervision
-
-        # supervision remains manual-only (GT + manual)
-        export_all_supervision(
-            atomic=atomic,
-            combined=combined_map,
-            metrics_dir=metrics_dir,
-            original_image=self.original_image
-        )'''
-
         print(f"[DEBUG METRICS] ===== END for {base_name} =====")
     
     '''def compute_mask_and_width_metrics_for_image(

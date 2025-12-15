@@ -184,7 +184,32 @@ class CrackUtils:
 
         dlg = QDialog(self.MainWindow)
         dlg.setWindowTitle("Select Image & Save Folders")
+        
+        dlg.setWindowFlags(
+            dlg.windowFlags()
+            | Qt.WindowContextHelpButtonHint
+        )
         layout = QVBoxLayout(dlg)
+        
+        def event(self, event):
+            if event.type() == QtCore.QEvent.WhatsThis:
+                QMessageBox.information(
+                    self,
+                    "Folder Selection Help",
+                    (
+                        "Image folder:\n"
+                        "  Directory containing input images.\n\n"
+                        "Save folder:\n"
+                        "  Output location for metrics and results.\n\n"
+                        "Use Masks:\n"
+                        "  Enable if ground-truth segmentation masks exist.\n\n"
+                        "Mask folder:\n"
+                        "  Directory containing masks aligned with images."
+                    )
+                )
+                return True
+            return super().event(event)
+
 
         # Image folder row
         img_row = QHBoxLayout()
@@ -885,19 +910,51 @@ class CrackUtils:
         ann = (self.annotation.get("annotations", {}) or {})
         atomic = ann.get("atomic_cracks", {}) or {}
         combined = ann.get("combined_cracks", {}) or {}
+        
+        def draw_crack(crack, color, thickness=2):
+                ml = crack.get("midline")
+                if not ml or len(ml) < 2:
+                    return
+
+                seg = []
+                for p in ml:
+                    # gap / pen-up marker
+                    if (
+                        p is None or
+                        len(p) != 2 or
+                        p[0] is None or
+                        p[1] is None
+                    ):
+                        if len(seg) >= 2:
+                            pts = np.asarray(seg, np.int32)
+                            cv2.polylines(
+                                shown,
+                                [pts],
+                                False,
+                                color,
+                                thickness,
+                                cv2.LINE_AA
+                            )
+                        seg = []
+                        continue
+
+                    seg.append([float(p[0]), float(p[1])])
+
+                # flush last segment
+                if len(seg) >= 2:
+                    pts = np.asarray(seg, np.int32)
+                    cv2.polylines(
+                        shown,
+                        [pts],
+                        False,
+                        color,
+                        thickness,
+                        cv2.LINE_AA
+                    )
 
         # ---- 1) Combined cracks first (yellow) ----
         for cid, crack in combined.items():
-            ml = crack.get("midline")
-            if ml and len(ml) >= 2:
-                pts = np.asarray([[p[0], p[1]] for p in ml if p is not None],
-                                np.int32)
-                if len(pts) >= 2:
-                    cv2.polylines(
-                        shown, [pts], False,
-                        (0, 255, 255),  # yellow (BGR)
-                        2, cv2.LINE_AA
-                    )
+            draw_crack(crack, (0, 255, 255))
 
         # ---- 2) Atomic cracks (white + endpoints) ----
         # but skip atomics that are members of combined
@@ -907,17 +964,8 @@ class CrackUtils:
         for cid, crack in atomic.items():
             if str(cid) in member_ids:
                 continue  # skip atomic members of combined
-
-            ml = crack.get("midline")
-            if ml and len(ml) >= 2:
-                pts = np.asarray([[p[0], p[1]] for p in ml if p is not None],
-                                np.int32)
-                if len(pts) >= 2:
-                    cv2.polylines(
-                        shown, [pts], False,
-                        (255, 255, 255),  # white
-                        2, cv2.LINE_AA
-                    )
+            
+            draw_crack(crack, (255, 255, 255))
 
             # endpoints
             user_pts = crack.get("user_points") or []
