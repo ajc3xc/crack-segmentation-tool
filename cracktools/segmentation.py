@@ -1110,66 +1110,6 @@ def create_mask(image, x, y, mode="new"):
 
         return mask.astype(np.float32)
 
-def create_mask_from_edges(
-    image: np.ndarray,
-    edge1_xy,
-    edge2_xy,
-    *,
-    mode: str = "new",
-):
-    """
-    Canonical mask builder from crack boundary edges.
-
-    ALWAYS returns a full-frame mask.
-    No tight crops. No bbox squeezing. No surprises.
-
-    Returns:
-        mask_full : uint8 (H,W)
-        mask_bbox : [0,0,W,H]
-        mask_crop : uint8 (H,W)   # identical to mask_full
-    """
-    import numpy as np
-
-    H, W = image.shape[:2]
-
-    e1 = np.asarray(edge1_xy, float)
-    e2 = np.asarray(edge2_xy, float)
-
-    # remove NaN separators
-    if e1.ndim != 2 or e2.ndim != 2 or e1.shape[1] != 2 or e2.shape[1] != 2:
-        mask0 = np.zeros((H, W), np.uint8)
-        return mask0, [0, 0, W, H], mask0
-
-    m1 = np.isfinite(e1[:, 0]) & np.isfinite(e1[:, 1])
-    m2 = np.isfinite(e2[:, 0]) & np.isfinite(e2[:, 1])
-    e1 = e1[m1]
-    e2 = e2[m2]
-
-    if len(e1) < 2 or len(e2) < 2:
-        mask0 = np.zeros((H, W), np.uint8)
-        return mask0, [0, 0, W, H], mask0
-
-    # polygon = edge1 forward + edge2 reversed
-    poly = np.vstack([e1, e2[::-1]])
-
-    xs = np.round(poly[:, 0]).astype(int)
-    ys = np.round(poly[:, 1]).astype(int)
-
-    # clip to image bounds
-    xs = np.clip(xs, 0, W - 1)
-    ys = np.clip(ys, 0, H - 1)
-
-    from cracktools.segmentation import create_mask
-
-    mask_full = create_mask(
-        image,
-        ys,
-        xs,
-        mode=mode,
-    ).astype(np.uint8)
-
-    return mask_full, [0, 0, W, H], mask_full
-
 def debug_mask_from_edges_inline(
     *,
     img_gray,                  # (H,W) uint8 crop
@@ -1247,7 +1187,7 @@ def debug_mask_from_edges_inline(
     overlay = dark_base.copy()
 
     overlay[mask == 1] = (0.95, 0.95, 0.95)
-    blended = cv2.addWeighted(overlay, 0.85, dark_base, 0.15, 0.0)
+    blended = cv2.addWeighted(overlay, 0.8, dark_base, 0.2, 0.0)
 
     plot_edges_and_normals(
         base_image=(blended * 255).astype(np.uint8),
