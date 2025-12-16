@@ -2705,6 +2705,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         from helpers import metrics as metrics_mod   # for _auto_cache_key
         from helpers.plot_metrics import save_gt_vs_manual_overlay
         from helpers.supervision import export_gt_supervision_for_image as _export_gt_sup
+        from cracktools.segmentation import create_mask_from_edges
 
         print(f"[DEBUG METRICS] ===== START for {getattr(self, 'name', '?')} =====")
         if getattr(self, "current_mask", None) is None:
@@ -2797,7 +2798,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             y0, y1 = int(ys.min()), int(ys.max()) + 1
             return [x0, y0, x1, y1]
 
-        repaired = []
+        '''repaired = []
         for cid, cr in atomic.items():
             m = _mask_from_crack(cr, H, W)
             if int(m.sum()) == 0:
@@ -2813,7 +2814,32 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                         safe_write_json(metric_atomic_path_for(self.save_folder, base_name, cid), cr)
                         repaired.append(cid)
         if repaired:
-            print(f"[COMBINE_DBG] repaired mask_crop/bbox for: {sorted(repaired)}")
+            print(f"[COMBINE_DBG] repaired mask_crop/bbox for: {sorted(repaired)}")'''
+        repaired = []
+
+        for cid, cr in atomic.items():
+            ge = (cr or {}).get("geodesic_edges", {}) or {}
+            if "edge1" not in ge or "edge2" not in ge:
+                continue
+
+            mask_full, bb, mask_crop = create_mask_from_edges(
+                self.original_image,
+                ge["edge1"],
+                ge["edge2"],
+                mode="new",
+            )
+
+            if mask_full.any():
+                cr["mask_bbox"] = bb
+                cr["mask_crop"] = mask_crop.astype("uint8").tolist()
+                safe_write_json(
+                    metric_atomic_path_for(self.save_folder, base_name, cid),
+                    cr
+                )
+                repaired.append(cid)
+
+        if repaired:
+            print(f"[COMBINE_DBG] repaired mask_crop/bbox via create_mask for: {sorted(repaired)}")
 
         # ------------------------------------------------------------------
         # 4) Grouping + rebuild (MANUAL + AUTO combined) via combiner
@@ -3015,7 +3041,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             except Exception as e:
                 print(f"[atomic fail] {e}")
 
-        # --- COMBINED (manual) ---------------------------------------------
+        '''# --- COMBINED (manual) ---------------------------------------------
         for ccid, cmb in (combined_map or {}).items():
             try:
                 members = cmb.get("members", []) or []
@@ -3103,8 +3129,125 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
                 except Exception as e:
                     print(f"[COMBINE_DBG] combined gt_normals failed (manual): {e}")
-                    normals_e1 = normals_e2 = None
+                    normals_e1 = normals_e2 = None'''
+        
+        # --- COMBINED (manual) ---------------------------------------------
+        for ccid, cmb in (combined_map or {}).items():
+            try:
+                members = cmb.get("members", []) or []
+                if not members:
+                    continue
 
+                # ------------------------------------------------------------------
+                # Authoritative combined outputs (DO NOT RECOMPUTE)
+                # ------------------------------------------------------------------
+                bb   = cmb.get("mask_bbox")
+                crop = cmb.get("mask_crop")
+
+                if not bb or crop is None:
+                    print(f"[COMBINE_DBG] ⚠️ combined {ccid} missing mask_crop/bbox — skipping.")
+                    continue
+
+                x0, y0, w, h = map(int, bb)
+                x1, y1 = x0 + w, y0 + h
+
+                man_crop = np.asarray(crop, dtype=np.uint8)
+                gt_crop  = gt_full[y0:y1, x0:x1]
+
+                # ------------------------------------------------------------------
+                # Reconstruct GLOBAL combined mask (needed later)
+                # ------------------------------------------------------------------
+                combined_mask = np.zeros((H, W), np.uint8)
+                combined_mask[y0:y1, x0:x1] = (man_crop > 0).astype(np.uint8)
+
+                # ------------------------------------------------------------------
+                # Metrics
+                # ------------------------------------------------------------------
+                base = compute_mask_metrics(gt_crop, man_crop)
+                bnd  = boundary_fscore(gt_crop, man_crop, tau=2.0)
+                surf = assd_hd95(gt_crop, man_crop)
+
+                members_str = "_".join(str(m) for m in members)
+                cmb_root  = os.path.join(metrics_dir, f"combined{ccid}_{members_str}")
+                manual_dir = os.path.join(cmb_root, "manual")
+                os.makedirs(manual_dir, exist_ok=True)
+
+                # ------------------------------------------------------------------
+                # Global overlay (correct frame)
+                # ------------------------------------------------------------------
+                save_gt_vs_manual_overlay(
+                    H, W,
+                    gt_full,
+                    combined_mask,
+                    os.path.join(manual_dir, "gt_vs_manual_mask_global.png"),
+                    bbox=[x0, y0, w, h],
+                    original_image=self.original_image,
+                )
+
+                # ------------------------------------------------------------------
+                # Normals: USE COMBINED SEGMENTS (NO FLATTENED MIDLINE)
+                # ------------------------------------------------------------------
+                from helpers import plot_metrics
+
+                mid_segs = cmb.get("midline_segments", [])
+                if not mid_segs:
+                    print(f"[COMBINE_DBG] ⚠️ combined {ccid} has no midline_segments")
+                    continue
+
+                # Collect normals already computed during combine
+                ne = cmb.get("normal_edge_points", {})
+                e1 = np.asarray(ne.get("edge1", []), float)
+                e2 = np.asarray(ne.get("edge2", []), float)
+
+                if e1.size == 0 or e2.size == 0:
+                    print(f"[COMBINE_DBG] ⚠️ combined {ccid} missing normal_edge_points")
+                    continue
+
+                # Flatten midline ONLY FOR PLOTTING (NaNs allowed here)
+                mid_plot = np.asarray(cmb.get("midline", []), float)
+
+                # Shift into crop frame
+                mid_plot = mid_plot.copy()
+                mid_plot[:, 0] -= x0
+                mid_plot[:, 1] -= y0
+
+                e1c = e1.copy()
+                e2c = e2.copy()
+                e1c[:, 0] -= x0; e1c[:, 1] -= y0
+                e2c[:, 0] -= x0; e2c[:, 1] -= y0
+
+                # ------------------------------------------------------------------
+                # Instrumentation (meaningful)
+                # ------------------------------------------------------------------
+                finite = np.isfinite(mid_plot[:, 0]) & np.isfinite(mid_plot[:, 1])
+                if finite.any():
+                    mx0, my0 = mid_plot[finite].min(axis=0)
+                    mx1, my1 = mid_plot[finite].max(axis=0)
+
+                    print(
+                        f"[COMBINE_INSPECT] ccid={ccid} "
+                        f"crop=({w}x{h}) "
+                        f"mid_x=[{mx0:.1f},{mx1:.1f}] "
+                        f"mid_y=[{my0:.1f},{my1:.1f}]"
+                    )
+
+                    if mx0 < -1 or my0 < -1 or mx1 > w + 1 or my1 > h + 1:
+                        print(f"[COMBINE_INSPECT] ❌ midline outside crop bounds")
+
+                # ------------------------------------------------------------------
+                # Plot normals (authoritative, no recompute)
+                # ------------------------------------------------------------------
+                plot_metrics.plot_gt_normals_on_gtbw(
+                    (man_crop * 255).astype(np.uint8),
+                    mid_plot,
+                    e1c,
+                    e2c,
+                    os.path.join(manual_dir, "gt_normals.png"),
+                )
+
+                # ------------------------------------------------------------------
+                # Width colormap (optional, same frame)
+                # ------------------------------------------------------------------
                 try:
                     from edge_workers import plot_widths_colormap_on_crop
 
@@ -3116,8 +3259,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     pred_bin = (man_crop > 0).astype(np.uint8)
 
                     intersect = np.logical_and(gt_bin, pred_bin)
-                    pred_only = np.logical_and(pred_bin, np.logical_not(gt_bin))
-                    gt_only   = np.logical_and(gt_bin, np.logical_not(pred_bin))
+                    pred_only = np.logical_and(pred_bin, ~gt_bin)
+                    gt_only   = np.logical_and(gt_bin, ~pred_bin)
 
                     vis_gray  = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2RGB).astype(np.float32) / 255.0
                     dark_base = np.clip(vis_gray * 0.35, 0, 1.0)
@@ -3131,33 +3274,29 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     blended  = np.clip(blended * 255.0, 0, 255).astype(np.uint8)
 
                     vis_large = cv2.resize(blended, None, fx=3, fy=3, interpolation=cv2.INTER_NEAREST)
-
+                    
                     out_iou = os.path.join(manual_dir, "gt_vs_manual_mask.png")
                     cv2.imwrite(out_iou, vis_large)
                     print(f"[COMBINE_DBG] wrote → {out_iou}")
 
-                    if normals_e1 is not None and normals_e2 is not None:
-                        S = 3.0
-                        mid_scaled = mid_crop * S
-                        e1_scaled  = normals_e1 * S
-                        e2_scaled  = normals_e2 * S
+                    out_width = os.path.join(manual_dir, "widths_colormap_on_crop.png")
 
-                        out_width = os.path.join(manual_dir, "widths_colormap_on_crop.png")
-
-                        plot_widths_colormap_on_crop(
-                            gt_vs_manual_rgb = vis_large,
-                            e1               = e1_scaled,
-                            e2               = e2_scaled,
-                            midline_xy       = mid_scaled,
-                            track_e1         = None,
-                            track_e2         = None,
-                            out_png          = out_width,
-                        )
-                        print(f"[COMBINE_DBG] wrote → {out_width}")
+                    plot_widths_colormap_on_crop(
+                        gt_vs_manual_rgb = vis_large,
+                        e1               = e1c * 3.0,
+                        e2               = e2c * 3.0,
+                        midline_xy       = mid_plot * 3.0,
+                        track_e1         = None,
+                        track_e2         = None,
+                        out_png          = out_width,
+                    )
 
                 except Exception as e:
                     print(f"[COMBINE_DBG] pretty/width overlay failed (manual): {e}")
 
+                # ------------------------------------------------------------------
+                # Record + aggregate
+                # ------------------------------------------------------------------
                 row = {
                     "image": base_name,
                     "crack_type": "combined",
@@ -3167,27 +3306,17 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 }
                 mask_rows.append(row)
 
-                print(f"[DEBUG MASK] combined id={ccid}({members_str}) "
-                    f"IoU={base['iou']:.4f} bF1={bnd['boundary_f1']:.4f}")
-
                 agg_manual |= (combined_mask > 0).astype(np.uint8)
+
+                print(
+                    f"[DEBUG MASK] combined id={ccid}({members_str}) "
+                    f"IoU={base['iou']:.4f} bF1={bnd['boundary_f1']:.4f}"
+                )
 
             except Exception as e:
                 print(f"[DEBUG METRICS] combined id={ccid} failed (manual): {e}")
                 traceback.print_exc()
 
-        # --- TOTAL (manual) -------------------------------------------------
-        base_total = compute_mask_metrics(gt_full, agg_manual)
-        bnd_total  = boundary_fscore(gt_full, agg_manual, tau=2.0)
-        surf_total = assd_hd95(gt_full, agg_manual)
-        mask_rows.append({
-            "image": base_name,
-            "crack_type": "TOTAL",
-            "crack_id": "",
-            "members": "",
-            **base_total, **bnd_total, **surf_total
-        })
-        print(f"[DEBUG MASK] TOTAL IoU={mask_iou(agg_manual,gt_full):.4f}")
 
         # ------------------------------------------------------------------
         # 6) MASK METRICS: AUTO ATOMIC + AUTO COMBINED (optional)

@@ -585,7 +585,7 @@ def _run_geodesic(metric_array, seeds, tips, sides, dims, strict=True, prefer_gp
         "normal_edge_points_clipped": normal_edges_clipped,
     }'''
     
-def edges_tracking(
+'''def edges_tracking(
     image_crop, pts_cropp,
     edge_mask1_cropp, edge_mask2_cropp,
     midline=None, mu=5, l=2, p=6,
@@ -767,7 +767,240 @@ def edges_tracking(
         "normal_edge_points_clipped": normal_edges_clipped,
         "subtiming": subtiming,
     }
+'''
 
+def edges_tracking(
+    image_crop, pts_cropp,
+    edge_mask1_cropp, edge_mask2_cropp,
+    midline=None, mu=5, l=2, p=6,
+    return_normal_edges=True,
+    prefer_gpu=True,
+    mode="new",   # "new" or "old"
+
+    # ----------------------------
+    # Conservative post-processing
+    # ----------------------------
+    postprocess_edges="auto",   # auto=True for new, False for old
+    resample_ratio=1.15,        # VERY conservative upsample
+    resample_min_points=80,
+    smooth_k=5,                 # 1 = OFF (recommended default)
+    debug_dir=None,             # None → no plots
+):
+    """
+    Edge tracking with conservative anti-quantization (new mode only).
+
+    Guarantees:
+      - mode="old" is geometrically untouched
+      - mode="new" removes stair-step artifacts only
+      - normals computed on FINAL edges
+      - raw edges always preserved
+    """
+    import time
+    import os
+    import numpy as np
+    import scipy.ndimage
+    from agd.Metrics import Riemann
+
+    t0_all = time.perf_counter()
+
+    # --------------------------------------------------
+    # Setup
+    # --------------------------------------------------
+    seeds_yx = np.array([pts_cropp[0][1], pts_cropp[0][0]], dtype=float)
+    tips_yx  = np.array([pts_cropp[1][1], pts_cropp[1][0]], dtype=float)
+
+    H, W = image_crop.shape[:2]
+    sides = np.array([[0, H], [0, W]])
+    dims  = np.array([H, W])
+
+    # --------------------------------------------------
+    # 1. Gradients
+    # --------------------------------------------------
+    t0 = time.perf_counter()
+    Dx, Dy = np.gradient(image_crop.astype(np.float64))
+    t_grad = time.perf_counter() - t0
+
+    # --------------------------------------------------
+    # 2. Structure tensor
+    # --------------------------------------------------
+    if mode == "old":
+        a11 = scipy.ndimage.gaussian_filter(mu * Dx * Dx, 1, order=(0, 0))
+        a12 = scipy.ndimage.gaussian_filter(mu * Dx * Dy, 1, order=(0, 0))
+        a21 = scipy.ndimage.gaussian_filter(mu * Dx * Dy, 1, order=(0, 0))
+        a22 = scipy.ndimage.gaussian_filter(mu * Dy * Dy, 1, order=(0, 0))
+        df = np.array([[1 + a11, a12],
+                       [a21,     1 + a22]])
+    else:
+        a11 = scipy.ndimage.gaussian_filter(mu * Dx * Dx, 1)
+        a22 = scipy.ndimage.gaussian_filter(mu * Dy * Dy, 1)
+        a12 = scipy.ndimage.gaussian_filter(mu * Dx * Dy, 1)
+        a12 = a21 = a12
+        df = np.abs(np.array([[1 + a11, a12],
+                               [a21,     1 + a22]], dtype=object))
+
+    # --------------------------------------------------
+    # 3. Mask normalization
+    # --------------------------------------------------
+    if mode == "old":
+        em1 = np.squeeze(edge_mask1_cropp)
+        em2 = np.squeeze(edge_mask2_cropp)
+    else:
+        def _norm01(m):
+            m = m.astype(np.float64)
+            m -= m.min()
+            mx = m.max()
+            return m / (mx + 1e-12) if mx > 0 else m
+        em1 = _norm01(np.squeeze(edge_mask1_cropp))
+        em2 = _norm01(np.squeeze(edge_mask2_cropp))
+
+    # --------------------------------------------------
+    # 4. Metric
+    # --------------------------------------------------
+    if mode == "old":
+        metric1 = (1 + em1 * l)**p * df
+        metric2 = (1 + em2 * l)**p * df
+    else:
+        pp = min(int(p), 4)
+        metric1 = (1 + em1 * l)**pp * df
+        metric2 = (1 + em2 * l)**pp * df
+
+    # --------------------------------------------------
+    # 5. Geodesics
+    # --------------------------------------------------
+    t_geo0 = time.perf_counter()
+    g1_yx = _run_geodesic(metric1, seeds_yx, tips_yx, sides, dims, prefer_gpu=prefer_gpu)
+    g2_yx = _run_geodesic(metric2, seeds_yx, tips_yx, sides, dims, prefer_gpu=prefer_gpu)
+    t_geodesics = time.perf_counter() - t_geo0
+
+    e1_raw = np.stack([g1_yx[:, 1], g1_yx[:, 0]], axis=1)
+    e2_raw = np.stack([g2_yx[:, 1], g2_yx[:, 0]], axis=1)
+
+    # --------------------------------------------------
+    # 5b. Conservative anti-quantization (NEW only)
+    # --------------------------------------------------
+    def finite_xy(xy):
+        xy = np.asarray(xy, float)
+        return xy[np.isfinite(xy).all(1)]
+
+    def arclen_resample(xy, N):
+        if len(xy) < 2:
+            return xy
+        d = np.sqrt(np.sum(np.diff(xy, axis=0)**2, axis=1))
+        s = np.concatenate([[0.0], np.cumsum(d)])
+        if s[-1] <= 1e-9:
+            return xy
+        t = np.linspace(0.0, s[-1], N)
+        x = np.interp(t, s, xy[:, 0])
+        y = np.interp(t, s, xy[:, 1])
+        return np.column_stack([x, y])
+
+    e1 = finite_xy(e1_raw)
+    e2 = finite_xy(e2_raw)
+
+    do_pp = (mode == "new") if postprocess_edges == "auto" else bool(postprocess_edges)
+
+    if do_pp and len(e1) >= 2 and len(e2) >= 2:
+        baseN = max(len(e1), len(e2))
+        targetN = max(resample_min_points, int(baseN * resample_ratio))
+        targetN = min(targetN, int(1.2 * baseN))  # hard safety cap
+
+        e1 = arclen_resample(e1, targetN)
+        e2 = arclen_resample(e2, targetN)
+
+        from scipy.signal import savgol_filter
+
+        def _savgol_smooth(xy, k):
+            if k <= 1 or len(xy) < k:
+                return xy
+            k = int(k)
+            if k % 2 == 0:
+                k += 1  # must be odd
+            x = savgol_filter(xy[:,0], window_length=k, polyorder=2, mode="interp")
+            y = savgol_filter(xy[:,1], window_length=k, polyorder=2, mode="interp")
+            return np.column_stack([x, y])
+
+        if smooth_k > 1:
+            e1 = _savgol_smooth(e1, smooth_k)
+            e2 = _savgol_smooth(e2, smooth_k)
+
+
+        e1[:, 0] = np.clip(e1[:, 0], 0, W - 1)
+        e1[:, 1] = np.clip(e1[:, 1], 0, H - 1)
+        e2[:, 0] = np.clip(e2[:, 0], 0, W - 1)
+        e2[:, 1] = np.clip(e2[:, 1], 0, H - 1)
+
+    # --------------------------------------------------
+    # Optional debug plots
+    # --------------------------------------------------
+    if debug_dir is not None:
+        from helpers.plot_metrics import plot_edges_and_normals
+        os.makedirs(debug_dir, exist_ok=True)
+
+        plot_edges_and_normals(
+            base_image=image_crop,
+            midline_segs=[midline] if midline is not None else [],
+            edge1_segs=[e1_raw],
+            edge2_segs=[e2_raw],
+            norm1_segs=[],
+            norm2_segs=[],
+            out_png=os.path.join(debug_dir, "edges_raw.png"),
+            title="Raw geodesic edges",
+        )
+
+        if do_pp:
+            plot_edges_and_normals(
+                base_image=image_crop,
+                midline_segs=[midline] if midline is not None else [],
+                edge1_segs=[e1],
+                edge2_segs=[e2],
+                norm1_segs=[],
+                norm2_segs=[],
+                out_png=os.path.join(debug_dir, "edges_postprocessed.png"),
+                title="Postprocessed (anti-quantized)",
+            )
+
+    # --------------------------------------------------
+    # 6. Normals (FINAL edges)
+    # --------------------------------------------------
+    normal_edges = None
+    normal_edges_clipped = None
+
+    if return_normal_edges and midline is not None:
+        try:
+            from .segmentation import find_normal_pair
+        except Exception:
+            from segmentation import find_normal_pair
+
+        m = np.asarray(midline)
+        mid_x, mid_y = (m[:, 0], m[:, 1]) if m.ndim == 2 else (m[0], m[1])
+
+        e1x, e1y, e2x, e2y = find_normal_pair(mid_x, mid_y, e1, e2)
+        normal_edges = [[e1x.copy(), e1y.copy()], [e2x.copy(), e2y.copy()]]
+        normal_edges_clipped = [
+            [np.clip(e1x, 0, W - 1), np.clip(e1y, 0, H - 1)],
+            [np.clip(e2x, 0, W - 1), np.clip(e2y, 0, H - 1)],
+        ]
+
+    # --------------------------------------------------
+    # Timing
+    # --------------------------------------------------
+    t_all = time.perf_counter() - t0_all
+    subtiming = {
+        "mode": mode,
+        "edges_total_sec": float(t_all),
+        "edges_postprocess": bool(do_pp),
+        "edges_resample_ratio": float(resample_ratio),
+        "edges_smooth_k": int(smooth_k),
+    }
+
+    return {
+        "geodesic_edges": [e1, e2],
+        "geodesic_edges_raw": [e1_raw, e2_raw],
+        "geodesic_edges_proc": [e1, e2],
+        "normal_edge_points": normal_edges,
+        "normal_edge_points_clipped": normal_edges_clipped,
+        "subtiming": subtiming,
+    }
 
 import numpy as np
 import cv2
@@ -877,7 +1110,159 @@ def create_mask(image, x, y, mode="new"):
 
         return mask.astype(np.float32)
 
-def redrow_lines(img,contours_x,contours_y,t,scale):
+def create_mask_from_edges(
+    image: np.ndarray,
+    edge1_xy,
+    edge2_xy,
+    *,
+    mode: str = "new",
+):
+    """
+    Canonical mask builder from crack boundary edges.
+
+    ALWAYS returns a full-frame mask.
+    No tight crops. No bbox squeezing. No surprises.
+
+    Returns:
+        mask_full : uint8 (H,W)
+        mask_bbox : [0,0,W,H]
+        mask_crop : uint8 (H,W)   # identical to mask_full
+    """
+    import numpy as np
+
+    H, W = image.shape[:2]
+
+    e1 = np.asarray(edge1_xy, float)
+    e2 = np.asarray(edge2_xy, float)
+
+    # remove NaN separators
+    if e1.ndim != 2 or e2.ndim != 2 or e1.shape[1] != 2 or e2.shape[1] != 2:
+        mask0 = np.zeros((H, W), np.uint8)
+        return mask0, [0, 0, W, H], mask0
+
+    m1 = np.isfinite(e1[:, 0]) & np.isfinite(e1[:, 1])
+    m2 = np.isfinite(e2[:, 0]) & np.isfinite(e2[:, 1])
+    e1 = e1[m1]
+    e2 = e2[m2]
+
+    if len(e1) < 2 or len(e2) < 2:
+        mask0 = np.zeros((H, W), np.uint8)
+        return mask0, [0, 0, W, H], mask0
+
+    # polygon = edge1 forward + edge2 reversed
+    poly = np.vstack([e1, e2[::-1]])
+
+    xs = np.round(poly[:, 0]).astype(int)
+    ys = np.round(poly[:, 1]).astype(int)
+
+    # clip to image bounds
+    xs = np.clip(xs, 0, W - 1)
+    ys = np.clip(ys, 0, H - 1)
+
+    from cracktools.segmentation import create_mask
+
+    mask_full = create_mask(
+        image,
+        ys,
+        xs,
+        mode=mode,
+    ).astype(np.uint8)
+
+    return mask_full, [0, 0, W, H], mask_full
+
+def debug_mask_from_edges_inline(
+    *,
+    img_gray,                  # (H,W) uint8 crop
+    edge1_xy, edge2_xy,         # (N,2) float arrays (x,y) — ALREADY FINAL
+    midline_xy=None,            # optional (N,2)
+    out_dir,
+    tag="cidX",
+    do_morph=False,             # DEFAULT OFF (important)
+):
+    """
+    Minimal debug + mask builder.
+
+    Assumptions:
+      - edge1_xy / edge2_xy are ALREADY postprocessed
+        (anti-quantization handled in edges_tracking)
+      - this function must NOT modify geometry
+
+    Outputs:
+      - <tag>_mask.png
+      - <tag>_mask_overlay.png (GT-style overlay)
+
+    Returns
+    -------
+    mask : uint8 (H,W)
+    """
+
+    import os
+    import numpy as np
+    import cv2
+    from helpers.plot_metrics import plot_edges_and_normals
+
+    os.makedirs(out_dir, exist_ok=True)
+    H, W = img_gray.shape[:2]
+
+    # --------------------------------------------------
+    # sanitize (finite only, no resampling)
+    # --------------------------------------------------
+    def finite_xy(A):
+        A = np.asarray(A, float)
+        if A.ndim != 2 or A.shape[1] != 2:
+            return np.empty((0, 2))
+        return A[np.isfinite(A).all(1)]
+
+    e1 = finite_xy(edge1_xy)
+    e2 = finite_xy(edge2_xy)
+
+    if len(e1) < 2 or len(e2) < 2:
+        mask0 = np.zeros((H, W), np.uint8)
+        cv2.imwrite(os.path.join(out_dir, f"{tag}_mask.png"), mask0 * 255)
+        return mask0
+
+    # --------------------------------------------------
+    # MASK: polygon fill (NO fattening)
+    # --------------------------------------------------
+    poly = np.vstack([e1, e2[::-1]])
+    poly[:, 0] = np.clip(poly[:, 0], 0, W - 1)
+    poly[:, 1] = np.clip(poly[:, 1], 0, H - 1)
+    poly_i = np.round(poly).astype(np.int32).reshape(-1, 1, 2)
+
+    mask = np.zeros((H, W), np.uint8)
+    cv2.fillPoly(mask, [poly_i], 1)
+
+    if do_morph:
+        # ONLY hole filling — no opening / erosion
+        from scipy.ndimage import binary_fill_holes
+        mask = binary_fill_holes(mask > 0).astype(np.uint8)
+
+    cv2.imwrite(os.path.join(out_dir, f"{tag}_mask.png"), mask * 255)
+
+    # --------------------------------------------------
+    # DEBUG: GT-style overlay (KEEP THIS)
+    # --------------------------------------------------
+    vis_gray = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR).astype(np.float32) / 255.0
+    dark_base = np.clip(vis_gray * 0.35, 0.0, 1.0)
+    overlay = dark_base.copy()
+
+    overlay[mask == 1] = (0.95, 0.95, 0.95)
+    blended = cv2.addWeighted(overlay, 0.85, dark_base, 0.15, 0.0)
+
+    plot_edges_and_normals(
+        base_image=(blended * 255).astype(np.uint8),
+        midline_segs=[midline_xy] if midline_xy is not None else [],
+        edge1_segs=[e1],
+        edge2_segs=[e2],
+        norm1_segs=[],
+        norm2_segs=[],
+        out_png=os.path.join(out_dir, f"{tag}_mask_overlay.png"),
+        title=f"{tag} — mask overlay",
+    )
+
+    return mask
+
+'''def redrow_lines(img,contours_x,contours_y,t,scale):
     flat_x = [item for sublist in contours_x for item in sublist]
     flat_y = [item for sublist in contours_y for item in sublist]
     img2 = img.copy()
@@ -887,9 +1272,9 @@ def redrow_lines(img,contours_x,contours_y,t,scale):
         y1 = int2(flat_y[i]-0.5)
         y2 = int2(flat_y[i+1]-0.5)
         img2 = cv2.line(img2,(x1,y1),(x2,y2),color=(0,255,0),thickness=int2(np.ceil(t*scale)))
-    return (img2)
+    return (img2)'''
 
-def drow_mask_lines(img,contours_x,contours_y,color,t=1,close_contur = False):
+'''def drow_mask_lines(img,contours_x,contours_y,color,t=1,close_contur = False):
 #     flat_x = [item for sublist in contours_x for item in sublist]
 #     flat_y = [item for sublist in contours_y for item in sublist]
     img2 = img.copy()
@@ -907,6 +1292,6 @@ def drow_mask_lines(img,contours_x,contours_y,color,t=1,close_contur = False):
     if close_contur == True:
         img2 = cv2.line(img2,(x1,y1),(x2,y2),color=color,thickness=int2(np.ceil(t)))
     return (img2)
-
+'''
 def int2(a):
     return (int(np.round(a)))

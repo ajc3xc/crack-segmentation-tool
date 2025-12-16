@@ -297,6 +297,33 @@ def plot_combined_debug(
         out_png=out_png,
         title=f"Combined Crack (members={', '.join(member_ids)})",
     )
+    
+def union_bboxes(bboxes, *, pad=5):
+    """
+    bboxes: iterable of [x0, y0, x1, y1] (x1/y1 EXCLUSIVE)
+    returns: (x0, y0, x1, y1) clamped to image bounds
+    """
+    xs0, ys0, xs1, ys1 = [], [], [], []
+
+    for bb in bboxes:
+        if not bb or len(bb) != 4:
+            continue
+        x0, y0, x1, y1 = map(int, bb)
+        if x1 > x0 and y1 > y0:
+            xs0.append(x0)
+            ys0.append(y0)
+            xs1.append(x1)
+            ys1.append(y1)
+
+    if not xs0:
+        return 0, 0, W, H
+
+    x0 = max(min(xs0) - pad, 0)
+    y0 = max(min(ys0) - pad, 0)
+    x1 = min(max(xs1) + pad, W)
+    y1 = min(max(ys1) + pad, H)
+
+    return x0, y0, x1, y1
 
 def build_combined_crack_stateless(
     original_image: np.ndarray,
