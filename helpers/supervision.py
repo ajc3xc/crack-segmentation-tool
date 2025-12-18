@@ -93,7 +93,7 @@ def export_all_supervision(*, atomic, combined, metrics_dir, original_image):
         }
         sup_list.append(entry)
 
-        tag = f"combined{ccid}_{'_'.join(entry['members'])}"
+        tag = f"combined_{'_'.join(entry['members'])}"
         _supervision_preview(entry, original_image, os.path.join(sup_prev, f"{tag}.png"))
 
     # =======================================================
@@ -319,9 +319,6 @@ def _cropped_preview(entry, gt_mask_u8, original_image, out_dir):
     )
 
 # ============================================================
-# GLOBAL OVERVIEW (simple color-coded)
-# ============================================================
-# ============================================================
 # GLOBAL OVERVIEW (with legend + title)
 # ============================================================
 def _global_overview(entries, gt_mask, out_png, title="Global GT Overview"):
@@ -538,58 +535,6 @@ def _linestring_length(arr):
     except Exception:
         return 0.0
     
-def _endpoints_key(S, eps=2.0):
-    """Quantize endpoints so 'almost same' endpoints match."""
-    S = np.asarray(S, float)
-    a = S[0]; b = S[-1]
-    qa = (int(round(a[0] / eps)), int(round(a[1] / eps)))
-    qb = (int(round(b[0] / eps)), int(round(b[1] / eps)))
-    return qa, qb
-
-def _endpoint_components(segs, eps=2.0):
-    """
-    Build components where segments are connected if they share an endpoint
-    (within eps quantization).
-    Returns list of lists of indices.
-    """
-    # map endpoint -> seg indices
-    end_map = {}
-    ends = []
-    for i, S in enumerate(segs):
-        ea, eb = _endpoints_key(S, eps=eps)
-        ends.append((ea, eb))
-        end_map.setdefault(ea, []).append(i)
-        end_map.setdefault(eb, []).append(i)
-
-    # adjacency
-    adj = {i: set() for i in range(len(segs))}
-    for _, idxs in end_map.items():
-        if len(idxs) < 2:
-            continue
-        for a in idxs:
-            for b in idxs:
-                if a != b:
-                    adj[a].add(b)
-
-    # components
-    comps = []
-    seen = set()
-    for i in range(len(segs)):
-        if i in seen:
-            continue
-        stack = [i]
-        comp = []
-        while stack:
-            u = stack.pop()
-            if u in seen:
-                continue
-            seen.add(u)
-            comp.append(u)
-            stack.extend(list(adj[u]))
-        comps.append(comp)
-
-    return comps
-
 def dominant_segments_from_group(
     *,
     members,
@@ -806,125 +751,91 @@ def dominant_segments_from_group(
     print(f"[DOM] FINAL kept USER midlines={len(kept)}")
 
     # ------------------------------------------------------------
-    # 5) debug visualization
+    # 5) DEBUG VISUALIZATION (BRANCH-AWARE, CLIPPED-TRUTHFUL)
     # ------------------------------------------------------------
     if debug_dir:
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+
         os.makedirs(debug_dir, exist_ok=True)
-        coords = np.vstack([s for s in kept if len(s) >= 2])
-        bbox = _bbox_from_coords(coords, H, W, pad=20)
-        if bbox:
-            x0, y0, x1, y1 = bbox
-            fig, ax = plt.subplots(figsize=(4, 4), dpi=200)
-            ax.imshow(crack_mask[y0:y1, x0:x1], cmap="gray")
-            for S in kept:
-                S2 = S - np.array([x0, y0])
-                ax.plot(S2[:, 0], S2[:, 1], lw=2)
-            ax.set_title(debug_tag)
-            ax.axis("off")
-            fig.savefig(os.path.join(debug_dir, f"{debug_tag}_final.png"))
-            plt.close(fig)
+
+        # kept geometry ONLY (authoritative)
+        draw_segs = [s for s in kept if s is not None and len(s) >= 2]
+        if draw_segs:
+            coords = np.vstack(draw_segs)
+            bbox = _bbox_from_coords(coords, H, W, pad=20)
+
+            if bbox:
+                x0, y0, x1, y1 = bbox
+                fig, ax = plt.subplots(figsize=(5, 5), dpi=200)
+
+                ax.imshow(crack_mask[y0:y1, x0:x1], cmap="gray")
+
+                # stable palette
+                branch_colors = [
+                    "#2ecc71",  # green
+                    "#e67e22",  # orange
+                    "#e74c3c",  # red
+                    "#3498db",  # blue
+                    "#9b59b6",  # purple
+                    "#1abc9c",  # cyan
+                ]
+
+                # ----------------------------------------------------
+                # Determine branch ownership of each kept segment
+                # ----------------------------------------------------
+                seg_branch = {}
+
+                for bi, user_segs in enumerate(branch_user_segs):
+                    for S_user in user_segs:
+                        for S_kept in draw_segs:
+                            # containment test: kept piece came from this branch
+                            if _linestring_length(S_kept) <= _linestring_length(S_user):
+                                seg_branch[id(S_kept)] = bi
+
+                used_branches = set(seg_branch.values())
+
+                # ----------------------------------------------------
+                # Draw kept geometry ONLY
+                # ----------------------------------------------------
+                for S in draw_segs:
+                    bi = seg_branch.get(id(S), 0)
+                    color = branch_colors[bi % len(branch_colors)]
+                    lw = 3 if bi == order[0] else 2
+
+                    S2 = S - np.array([x0, y0])
+                    ax.plot(S2[:, 0], S2[:, 1], color=color, lw=lw)
+
+                # ----------------------------------------------------
+                # Legend — branches that actually survived
+                # ----------------------------------------------------
+                legend_items = [
+                    Line2D(
+                        [0], [0],
+                        color=branch_colors[bi % len(branch_colors)],
+                        lw=3 if bi == order[0] else 2,
+                        label=f"Branch {bi} (len={branch_user_len[bi]:.1f})",
+                    )
+                    for bi in sorted(used_branches)
+                ]
+
+                ax.legend(
+                    handles=legend_items,
+                    loc="lower right",
+                    fontsize=7,
+                    frameon=True,
+                )
+
+                ax.set_title(debug_tag)
+                ax.axis("off")
+
+                fig.savefig(
+                    os.path.join(debug_dir, f"{debug_tag}_final.png"),
+                    bbox_inches="tight",
+                )
+                plt.close(fig)
 
     return kept, kept
-
-def _plot_dominance_debug(*, debug_dir, tag, crack_mask, candidates, kept, claimed):
-    """
-    Cropped dominance debug plots:
-      - candidates
-      - kept
-      - claimed territory
-
-    Cropping is based on all candidate + kept polyline coordinates.
-    """
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import os
-
-    H, W = crack_mask.shape[:2]
-
-    # -----------------------------
-    # Collect coords for bbox
-    # -----------------------------
-    coords = []
-    for segs in (candidates, kept):
-        for S in segs:
-            S = np.asarray(S, float)
-            if S.ndim == 2 and len(S) >= 2:
-                coords.append(S)
-
-    if not coords:
-        return
-
-    coords = np.vstack(coords)
-    coords = coords[np.isfinite(coords).all(axis=1)]
-    if coords.size == 0:
-        return
-
-    pad = 10
-    xs, ys = coords[:, 0], coords[:, 1]
-    x0 = max(0, int(np.floor(xs.min() - pad)))
-    x1 = min(W - 1, int(np.ceil(xs.max() + pad)))
-    y0 = max(0, int(np.floor(ys.min() - pad)))
-    y1 = min(H - 1, int(np.ceil(ys.max() + pad)))
-
-    if x1 <= x0 or y1 <= y0:
-        return
-
-    # -----------------------------
-    # Crop images
-    # -----------------------------
-    mask_crop = crack_mask[y0:y1+1, x0:x1+1]
-    claimed_crop = claimed[y0:y1+1, x0:x1+1]
-
-    def draw_lines(ax, segs, color="yellow"):
-        for S in segs:
-            S = np.asarray(S, float)
-            if len(S) >= 2:
-                ax.plot(S[:, 0] - x0, S[:, 1] - y0, color=color, lw=1.5)
-
-    os.makedirs(debug_dir, exist_ok=True)
-
-    # -----------------------------
-    # Candidates
-    # -----------------------------
-    fig, ax = plt.subplots()
-    ax.imshow(mask_crop, cmap="gray")
-    draw_lines(ax, candidates, color="cyan")
-    ax.set_title(f"{tag}: candidates")
-    ax.axis("off")
-    fig.savefig(
-        os.path.join(debug_dir, f"{tag}_candidates.png"),
-        dpi=200, bbox_inches="tight"
-    )
-    plt.close(fig)
-
-    # -----------------------------
-    # Kept
-    # -----------------------------
-    fig, ax = plt.subplots()
-    ax.imshow(mask_crop, cmap="gray")
-    draw_lines(ax, kept, color="lime")
-    ax.set_title(f"{tag}: kept")
-    ax.axis("off")
-    fig.savefig(
-        os.path.join(debug_dir, f"{tag}_kept.png"),
-        dpi=200, bbox_inches="tight"
-    )
-    plt.close(fig)
-
-    # -----------------------------
-    # Claimed territory
-    # -----------------------------
-    fig, ax = plt.subplots()
-    ax.imshow(mask_crop, cmap="gray")
-    ax.imshow(claimed_crop, alpha=0.35)
-    draw_lines(ax, kept, color="lime")
-    ax.set_title(f"{tag}: claimed territory")
-    ax.axis("off")
-    fig.savefig(
-        os.path.join(debug_dir, f"{tag}_claimed.png"),
-        dpi=200, bbox_inches="tight"
-    )
-    plt.close(fig)
 
 # ============================================================
 # MAIN EXPORT FUNCTION
@@ -1009,61 +920,13 @@ def export_gt_supervision_for_image(
         members = [str(m) for m in grp.get("members", [])]
         if not members:
             continue
-
-        '''stitched = _stitch_lines_by_user(members, atomic)
-        if stitched:
-            mid_xy = max(stitched, key=lambda arr: arr.shape[0])
-        else:
-            all_mid = []
-            for m in members:
-                ml = atomic.get(m, {}).get("midline", [])
-                if len(ml) >= 2:
-                    all_mid.append(np.asarray(ml, float))
-            if not all_mid:
-                continue
-            mid_xy = np.vstack(all_mid)
-
-        lbl = _cc_label_for_midline(mid_xy, cc_labels)
-        if lbl is None or lbl <= 0:
-            continue
-
-        crack_mask = (cc_labels == lbl).astype(np.uint8)
-        ys, xs = np.where(crack_mask > 0)
-        if xs.size == 0:
-            continue
-
-        x0, x1 = xs.min(), xs.max()
-        y0, y1 = ys.min(), ys.max()
-
-        (e1x, e1y, e2x, e2y, widths), _ = normals_from_mask_for_midline(mid_xy, crack_mask > 0, 50)
-
-        # Proper combined naming
-        tag_name = f"combined_{'_'.join(members)}"
-
-        combined_entry = {
-            "id": tag_name,
-            "kind": "combined",
-            "members": members,
-            "mask_bbox": [int(x0), int(y0), int(x1), int(y1)],
-            "midline": mid_xy.tolist(),
-            "gt_normals": {
-                "edge1_x": _arr_to_list(e1x),
-                "edge1_y": _arr_to_list(e1y),
-                "edge2_x": _arr_to_list(e2x),
-                "edge2_y": _arr_to_list(e2y),
-                "width_px": _arr_to_list(widths),
-            },
-        }
-
-        final_entries.append(combined_entry)
-
-        # Crop preview
-        _cropped_preview(combined_entry, gt_mask, original_image, combined_crop_root)'''
-        
+       
         # robust CC label for the whole group (don’t depend on a single midline)
         lbl = _cc_label_for_members(members, atomic, cc_labels)
         if lbl is None or lbl <= 0:
             continue
+        
+        print(lbl)
 
         crack_mask = (cc_labels == lbl).astype(np.uint8)
         ys, xs = np.where(crack_mask > 0)
@@ -1099,7 +962,7 @@ def export_gt_supervision_for_image(
 
         packed_mid = _pack_segs_with_separators(segs)
 
-        tag_name = f"combined_{'_'.join(members)}"
+        tag_name = f"{'_'.join(members)}"
         combined_entry = {
             "id": tag_name,
             "kind": "combined",
