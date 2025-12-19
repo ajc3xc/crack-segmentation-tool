@@ -388,31 +388,6 @@ def _global_overview(entries, gt_mask, out_png, title="Global GT Overview"):
     plt.savefig(out_png, dpi=320, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
 
-import numpy as np
-import cv2
-import os
-
-def _pack_segs_with_separators(segs):
-    """Flatten [N_i x 2] segments into one list with [None,None] separators."""
-    out = []
-    for k, S in enumerate(segs):
-        if S is None or len(S) < 2:
-            continue
-        if k > 0:
-            out.append([None, None])
-        out.extend([[float(x), float(y)] for x, y in np.asarray(S, float)])
-    return out
-
-def _pack_arrs_with_none_separators(arr_list):
-    """Flatten list of 1D arrays into one list with None separators."""
-    out = []
-    for k, a in enumerate(arr_list):
-        a = list(a) if a is not None else []
-        if k > 0:
-            out.append(None)
-        out.extend([float(v) if np.isfinite(v) else None for v in a])
-    return out
-
 def _cc_label_for_members(members, atomic, cc_labels):
     """Robust CC label selection for a group: vote over all member midline points."""
     H, W = cc_labels.shape[:2]
@@ -545,26 +520,25 @@ def dominant_segments_from_group(
     debug_tag="group",
 ):
     """
-    FINAL GT-correct dominance logic.
+    FINAL dominance logic (portable version).
 
-    Rules:
-    - Branches are defined STRICTLY by shared USER endpoints
-    - ALL atomics within a branch are preserved
-    - Dominance applies ONLY BETWEEN branches
-    - Dominance trims TERRITORY, not atomic identity
+    - Branches defined by shared USER endpoints (atomic space)
+    - Branch ordering by total USER length (never clipped)
+    - Territory built from CLIPPED geometry only
+    - Dominance between branches only
+    - Output segments are USER-space polylines (primary: unmodified; subordinate: clipped to remaining)
     """
 
     import os
     import numpy as np
     import cv2
-    import matplotlib.pyplot as plt
 
     H, W = crack_mask_u8.shape[:2]
     crack_mask = (crack_mask_u8 > 0).astype(np.uint8)
 
-    # ------------------------------------------------------------
-    # helpers
-    # ------------------------------------------------------------
+    # -----------------------------
+    # local helper: user endpoints
+    # -----------------------------
     def get_user_endpoints(cr):
         ups = cr.get("user_points", []) or []
         ucs = cr.get("user_connections", []) or []
@@ -575,11 +549,11 @@ def dominant_segments_from_group(
                     out.add(tuple(map(float, ups[idx])))
         return out
 
-    # ------------------------------------------------------------
+    # -----------------------------
     # 1) collect atomics + endpoints
-    # ------------------------------------------------------------
-    atomics = []
-    endpoints = []
+    # -----------------------------
+    atomics = []    # [(cid_str, S_user)]
+    endpoints = []  # [set((x,y), ...)]
 
     for m in members:
         cr = atomic.get(str(m), {}) or {}
@@ -588,18 +562,14 @@ def dominant_segments_from_group(
             atomics.append((str(m), _finite_xy(ml)))
             endpoints.append(get_user_endpoints(cr))
 
-    print(f"[DOM] members={members}")
-    print(f"[DOM] atomics={len(atomics)}")
-
     if not atomics:
         return [], []
 
-    # ------------------------------------------------------------
-    # 2) build BRANCHES in atomic space
-    # ------------------------------------------------------------
+    # -----------------------------
+    # 2) build branches in atomic space
+    # -----------------------------
     N = len(atomics)
     adj = {i: set() for i in range(N)}
-
     for i in range(N):
         for j in range(i + 1, N):
             if endpoints[i] & endpoints[j]:
@@ -622,29 +592,23 @@ def dominant_segments_from_group(
             stack.extend(adj[u])
         branches.append(comp)
 
-    print(f"[DOM] branches={len(branches)}")
-    for bi, b in enumerate(branches):
-        print(f"  [DOM] branch {bi}: atomics={[atomics[i][0] for i in b]}")
+    # -----------------------------
+    # 3) per-branch user length + user segs + clipped segs (territory only)
+    # -----------------------------
+    branch_user_len = []
+    branch_user_segs = []
+    branch_clipped_segs = []
 
-    # ------------------------------------------------------------
-    # 3) Build BRANCHES with TOTAL USER-SPACE LENGTH
-    #    (USER geometry is authoritative; clipping is territory-only)
-    # ------------------------------------------------------------
-    branch_user_len = []        # total USER length per branch
-    branch_user_segs = []       # USER midlines per branch (never clipped)
-    branch_clipped_segs = []    # clipped geometry per branch (territory only)
-
-    for bi, atom_ids in enumerate(branches):
+    for atom_ids in branches:
         total_len = 0.0
         user_segs = []
         clipped_segs = []
 
         for ai in atom_ids:
-            _, S_user = atomics[ai]   # USER midline
+            _, S_user = atomics[ai]
             total_len += _linestring_length(S_user)
             user_segs.append(S_user)
 
-            # clipping ONLY for territory computation
             pieces = _clip_polyline_to_mask(S_user, crack_mask)
             clipped_segs.extend([p for p in pieces if len(p) >= 2])
 
@@ -652,15 +616,9 @@ def dominant_segments_from_group(
         branch_user_segs.append(user_segs)
         branch_clipped_segs.append(clipped_segs)
 
-        print(
-            f"[DOM] branch {bi}: atomics={atom_ids} "
-            f"user_len={total_len:.1f} "
-            f"clipped_segs={len(clipped_segs)}"
-        )
-
-    # ------------------------------------------------------------
-    # 4) Dominance BETWEEN branches (ordered by USER length)
-    # ------------------------------------------------------------
+    # -----------------------------
+    # 4) dominance between branches (ordered by USER length)
+    # -----------------------------
     dt = cv2.distanceTransform(crack_mask, cv2.DIST_L2, 5)
 
     def seg_radius(S):
@@ -672,7 +630,6 @@ def dominant_segments_from_group(
             return 0.3 * window_half_size
         return max(3.0, min(float(np.median(d)), window_half_size))
 
-    # dominance order: PURE USER length
     order = sorted(
         range(len(branches)),
         key=lambda i: branch_user_len[i],
@@ -680,162 +637,131 @@ def dominant_segments_from_group(
     )
 
     claimed = np.zeros((H, W), np.uint8)
-    kept = []   # FINAL midlines (USER space, never fragmented)
+
+    # keep truth: list[(branch_id, seg_array)]
+    kept_meta = []
 
     for rank, bi in enumerate(order):
-        print(
-            f"[DOM] processing branch {bi} "
-            f"(rank={rank}, user_len={branch_user_len[bi]:.1f})"
-        )
-
-        # --------------------------------------------------------
-        # Build TERRITORY from clipped geometry ONLY
-        # --------------------------------------------------------
+        # Build territory from clipped geometry only
         branch_terr = np.zeros((H, W), np.uint8)
-
         for S_clip in branch_clipped_segs[bi]:
             r = seg_radius(S_clip)
             rad = int(max(3, 0.8 * r))
-
-            kernel = cv2.getStructuringElement(
-                cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1)
-            )
-
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1))
             line = _polyline_mask(S_clip, H, W)
             terr = cv2.dilate(line, kernel, iterations=1) & crack_mask
             branch_terr |= terr
 
         unique = branch_terr & (~claimed)
 
-        # --------------------------------------------------------
-        # Dominance decision
-        # --------------------------------------------------------
+        # Suppress small-unique subordinate branches
         if rank > 0 and unique.sum() < max(10, 0.5 * window_half_size):
-            print(
-                f"[DOM] suppress branch {bi} "
-                f"(unique={int(unique.sum())})"
-            )
             continue
 
-        # --------------------------------------------------------
-        # KEEP: append USER midlines (never clipped)
-        # --------------------------------------------------------
         if rank == 0:
-            # PRIMARY branch: keep full USER geometry
+            # PRIMARY: keep full USER geometry
             for S_user in branch_user_segs[bi]:
-                kept.append(S_user)
+                if S_user is not None and len(S_user) >= 2:
+                    kept_meta.append((bi, S_user))
             claimed |= branch_terr
-            print(f"[DOM] keep PRIMARY branch {bi}")
             continue
 
-        # --------------------------------------------------------
-        # SUBORDINATE branch: clip USER midlines to remaining space
-        # --------------------------------------------------------
+        # SUBORDINATE: clip USER midlines against remaining territory
         remaining = branch_terr & (~claimed)
-
         kept_any = False
+
         for S_user in branch_user_segs[bi]:
-            # Clip USER midline against remaining territory
             pieces = _clip_polyline_to_mask(S_user, remaining)
             for p in pieces:
-                if len(p) >= 2:
-                    kept.append(p)
+                if p is not None and len(p) >= 2:
+                    kept_meta.append((bi, p))
                     kept_any = True
 
         if kept_any:
             claimed |= remaining
-            print(f"[DOM] keep SUBORDINATE branch {bi} (clipped)")
-        else:
-            print(f"[DOM] suppress branch {bi} (no remaining geometry)")
 
-    print(f"[DOM] FINAL kept USER midlines={len(kept)}")
+    kept = [S for _, S in kept_meta]
 
-    # ------------------------------------------------------------
-    # 5) DEBUG VISUALIZATION (BRANCH-AWARE, CLIPPED-TRUTHFUL)
-    # ------------------------------------------------------------
-    if debug_dir:
+    # -----------------------------
+    # 5) debug (inline bbox logic)
+    # -----------------------------
+    if debug_dir and kept:
         import matplotlib.pyplot as plt
         from matplotlib.lines import Line2D
 
         os.makedirs(debug_dir, exist_ok=True)
 
-        # kept geometry ONLY (authoritative)
-        draw_segs = [s for s in kept if s is not None and len(s) >= 2]
-        if draw_segs:
-            coords = np.vstack(draw_segs)
-            bbox = _bbox_from_coords(coords, H, W, pad=20)
+        # inline bbox-from-coords
+        coords = np.vstack([S for S in kept if S is not None and len(S) >= 2])
+        xs = coords[:, 0]
+        ys = coords[:, 1]
+        ok = np.isfinite(xs) & np.isfinite(ys)
+        xs = xs[ok]; ys = ys[ok]
+        if xs.size and ys.size:
+            pad = 20
+            x0 = int(max(0, np.floor(xs.min()) - pad))
+            x1 = int(min(W, np.ceil(xs.max()) + pad))
+            y0 = int(max(0, np.floor(ys.min()) - pad))
+            y1 = int(min(H, np.ceil(ys.max()) + pad))
 
-            if bbox:
-                x0, y0, x1, y1 = bbox
-                fig, ax = plt.subplots(figsize=(5, 5), dpi=200)
+            fig, ax = plt.subplots(figsize=(5, 5), dpi=200)
+            ax.imshow(crack_mask[y0:y1, x0:x1], cmap="gray")
 
-                ax.imshow(crack_mask[y0:y1, x0:x1], cmap="gray")
+            branch_colors = ["#2ecc71", "#e67e22", "#e74c3c", "#3498db", "#9b59b6", "#1abc9c"]
 
-                # stable palette
-                branch_colors = [
-                    "#2ecc71",  # green
-                    "#e67e22",  # orange
-                    "#e74c3c",  # red
-                    "#3498db",  # blue
-                    "#9b59b6",  # purple
-                    "#1abc9c",  # cyan
-                ]
+            used = set()
+            for (bi, S) in kept_meta:
+                used.add(bi)
+                color = branch_colors[bi % len(branch_colors)]
+                lw = 3 if bi == order[0] else 2
+                S2 = S - np.array([x0, y0])
+                ax.plot(S2[:, 0], S2[:, 1], color=color, lw=lw)
 
-                # ----------------------------------------------------
-                # Determine branch ownership of each kept segment
-                # ----------------------------------------------------
-                seg_branch = {}
-
-                for bi, user_segs in enumerate(branch_user_segs):
-                    for S_user in user_segs:
-                        for S_kept in draw_segs:
-                            # containment test: kept piece came from this branch
-                            if _linestring_length(S_kept) <= _linestring_length(S_user):
-                                seg_branch[id(S_kept)] = bi
-
-                used_branches = set(seg_branch.values())
-
-                # ----------------------------------------------------
-                # Draw kept geometry ONLY
-                # ----------------------------------------------------
-                for S in draw_segs:
-                    bi = seg_branch.get(id(S), 0)
-                    color = branch_colors[bi % len(branch_colors)]
-                    lw = 3 if bi == order[0] else 2
-
-                    S2 = S - np.array([x0, y0])
-                    ax.plot(S2[:, 0], S2[:, 1], color=color, lw=lw)
-
-                # ----------------------------------------------------
-                # Legend — branches that actually survived
-                # ----------------------------------------------------
-                legend_items = [
-                    Line2D(
-                        [0], [0],
-                        color=branch_colors[bi % len(branch_colors)],
-                        lw=3 if bi == order[0] else 2,
-                        label=f"Branch {bi} (len={branch_user_len[bi]:.1f})",
-                    )
-                    for bi in sorted(used_branches)
-                ]
-
-                ax.legend(
-                    handles=legend_items,
-                    loc="lower right",
-                    fontsize=7,
-                    frameon=True,
+            legend_items = [
+                Line2D(
+                    [0], [0],
+                    color=branch_colors[bi % len(branch_colors)],
+                    lw=3 if bi == order[0] else 2,
+                    label=f"Branch {bi} (len={branch_user_len[bi]:.1f})",
                 )
+                for bi in sorted(used)
+            ]
+            ax.legend(handles=legend_items, loc="lower right", fontsize=7, frameon=True)
+            ax.set_title(debug_tag)
+            ax.axis("off")
 
-                ax.set_title(debug_tag)
-                ax.axis("off")
-
-                fig.savefig(
-                    os.path.join(debug_dir, f"{debug_tag}_final.png"),
-                    bbox_inches="tight",
-                )
-                plt.close(fig)
+            fig.savefig(os.path.join(debug_dir, f"{debug_tag}_final.png"), bbox_inches="tight")
+            plt.close(fig)
 
     return kept, kept
+
+
+
+
+import numpy as np
+import cv2
+import os
+
+def _pack_segs_with_separators(segs):
+    """Flatten [N_i x 2] segments into one list with [None,None] separators."""
+    out = []
+    for k, S in enumerate(segs):
+        if S is None or len(S) < 2:
+            continue
+        if k > 0:
+            out.append([None, None])
+        out.extend([[float(x), float(y)] for x, y in np.asarray(S, float)])
+    return out
+
+def _pack_arrs_with_none_separators(arr_list):
+    """Flatten list of 1D arrays into one list with None separators."""
+    out = []
+    for k, a in enumerate(arr_list):
+        a = list(a) if a is not None else []
+        if k > 0:
+            out.append(None)
+        out.extend([float(v) if np.isfinite(v) else None for v in a])
+    return out
 
 # ============================================================
 # MAIN EXPORT FUNCTION
