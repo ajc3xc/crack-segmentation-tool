@@ -972,7 +972,10 @@ def build_combined_crack_stateless(
 
 
     if np.any(union_mask):
-        x, y, w, h = bbox_from_mask(union_mask) or [0, 0, W, H]
+        bb = bbox_from_mask(union_mask)
+        if bb is None:
+            raise ValueError("combined crack mask produced no bbox")
+        x, y, w, h = bb
         crop = union_mask[y:y+h, x:x+w].astype(np.uint8)
     else:
         x = y = 0
