@@ -357,15 +357,64 @@ class CrackAnnotator(QtWidgets.QWidget):
             self.update()
             return
 
+        # -------------------------------------------------
         # Build the polyline in drawn order
+        # -------------------------------------------------
         if len(self.polyline) >= 2:
             middle = list(self.polyline[1:-1])
-            poly = [tuple(map(float, self.points[start_idx]))] + middle + [tuple(map(float, self.points[end_idx]))]
+            poly = (
+                [tuple(map(float, self.points[start_idx]))]
+                + middle
+                + [tuple(map(float, self.points[end_idx]))]
+            )
         else:
-            poly = [tuple(map(float, self.points[start_idx])),
-                    tuple(map(float, self.points[end_idx]))]
+            poly = [
+                tuple(map(float, self.points[start_idx])),
+                tuple(map(float, self.points[end_idx])),
+            ]
 
-        # --- Enhanced shared-edge / overlap rule ---
+        # -------------------------------------------------
+        # Trim interior points near endpoints (manual artifact fix)
+        # -------------------------------------------------
+        import numpy as np
+
+        def _trim_polyline_near_endpoint(poly, endpoint_idx, radius=1.0):
+            if len(poly) < 3:
+                return poly
+
+            pts = np.asarray(poly, float)
+
+            if endpoint_idx == 0:
+                E = pts[0]
+                i = 1
+                while i < len(pts) and np.linalg.norm(pts[i] - E) <= radius:
+                    i += 1
+                if i <= 1:
+                    return poly
+                P = 0.5 * (E + pts[i])
+                new_pts = np.vstack([E, P, pts[i:]])
+
+            else:
+                E = pts[-1]
+                i = len(pts) - 2
+                while i >= 0 and np.linalg.norm(pts[i] - E) <= radius:
+                    i -= 1
+                if i >= len(pts) - 2:
+                    return poly
+                P = 0.5 * (E + pts[i])
+                new_pts = np.vstack([pts[: i + 1], P, E])
+
+            if len(new_pts) < 2:
+                return poly
+
+            return new_pts.tolist()
+
+        poly = _trim_polyline_near_endpoint(poly, endpoint_idx=0, radius=1)
+        poly = _trim_polyline_near_endpoint(poly, endpoint_idx=-1, radius=1)
+
+        # -------------------------------------------------
+        # Enhanced shared-edge / overlap rule
+        # -------------------------------------------------
         if self.boxes:
             def _boxes_containing_xy(x, y, tol=0.5):
                 hits = []
@@ -407,13 +456,11 @@ class CrackAnnotator(QtWidgets.QWidget):
 
             effective_region = None
 
-            # prefer an actual common box
             shared = S & E
             if shared:
                 bidx = next(iter(shared))
                 effective_region = self.boxes[bidx]
             else:
-                # else allow intersection of one box from S with one box from E
                 for i in S:
                     for j in E:
                         rect = _intersection_rect(i, j)
@@ -434,7 +481,9 @@ class CrackAnnotator(QtWidgets.QWidget):
                 self.update()
                 return
 
-        # If we reach here, it's valid — commit it
+        # -------------------------------------------------
+        # Commit
+        # -------------------------------------------------
         self.midlines[key] = poly
         self._last_polyline_start_idx = start_idx
         self._last_polyline_end_idx = end_idx
