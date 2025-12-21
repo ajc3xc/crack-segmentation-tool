@@ -562,39 +562,121 @@ def dominant_segments_from_group(
     if debug_dir and kept:
         import matplotlib.pyplot as plt
         from matplotlib.lines import Line2D
+        from matplotlib.patches import Rectangle
 
         os.makedirs(debug_dir, exist_ok=True)
 
+        # ----------------------------------
+        # Union of USER-authored bboxes (xywh)
+        # ----------------------------------
         boxes = []
         for m in members:
             bb = atomic.get(str(m), {}).get("mask_bbox")
             if bb and len(bb) == 4:
                 x, y, w, h = map(int, bb)
-                boxes.append((x, y, x + w, y + h))
+                if w > 0 and h > 0:
+                    boxes.append((x, y, x + w, y + h))
 
         if not boxes:
             return kept, kept
 
-        x0 = max(0, min(b[0] for b in boxes) - 20)
-        y0 = max(0, min(b[1] for b in boxes) - 20)
-        x1 = min(W, max(b[2] for b in boxes) + 20)
-        y1 = min(H, max(b[3] for b in boxes) + 20)
+        # TRUE combined bbox (NO padding)
+        bx0 = min(b[0] for b in boxes)
+        by0 = min(b[1] for b in boxes)
+        bx1 = max(b[2] for b in boxes)
+        by1 = max(b[3] for b in boxes)
+
+        # ----------------------------------
+        # Padded VIEW window (context only)
+        # ----------------------------------
+        pad = 20
+        x0 = max(0, bx0 - pad)
+        y0 = max(0, by0 - pad)
+        x1 = min(W, bx1 + pad)
+        y1 = min(H, by1 + pad)
 
         fig, ax = plt.subplots(figsize=(5, 5), dpi=200)
         ax.imshow(crack_mask[y0:y1, x0:x1], cmap="gray")
 
-        branch_colors = ["#2ecc71", "#e67e22", "#e74c3c", "#3498db"]
+        # ----------------------------------
+        # Draw TRUE combined user bbox
+        # (no padding, thin line)
+        # ----------------------------------
+        ax.add_patch(
+            Rectangle(
+                (bx0 - x0, by0 - y0),
+                bx1 - bx0,
+                by1 - by0,
+                fill=False,
+                linewidth=1.0,
+                edgecolor="#1f77b4",
+            )
+        )
 
+        # ----------------------------------
+        # Draw kept midlines by branch
+        # ----------------------------------
+        branch_colors = [
+            "#2ecc71",
+            "#e67e22",
+            "#e74c3c",
+            "#3498db",
+            "#9b59b6",
+            "#1abc9c",
+        ]
+
+        used_branches = set()
         for (bi, S) in kept_meta:
+            used_branches.add(bi)
+            color = branch_colors[bi % len(branch_colors)]
+            lw = 3.0 if bi == order[0] else 2.0
             S2 = S - np.array([x0, y0])
-            ax.plot(S2[:, 0], S2[:, 1],
+            ax.plot(S2[:, 0], S2[:, 1], color=color, lw=lw)
+
+        # ----------------------------------
+        # Legend (RESTORED)
+        # ----------------------------------
+        legend_items = []
+
+        for bi in sorted(used_branches):
+            legend_items.append(
+                Line2D(
+                    [0], [0],
                     color=branch_colors[bi % len(branch_colors)],
-                    lw=2 if bi == order[0] else 1.5)
+                    lw=3.0 if bi == order[0] else 2.0,
+                    label=(
+                        f"Branch {bi} (primary)"
+                        if bi == order[0]
+                        else f"Branch {bi}"
+                    ),
+                )
+            )
+
+        legend_items.append(
+            Line2D(
+                [0], [0],
+                color="#1f77b4",
+                lw=1.0,
+                label="Bounding Box",
+            )
+        )
+
+        ax.legend(
+            handles=legend_items,
+            loc="lower right",
+            fontsize=8,
+            frameon=True,
+            framealpha=0.9,
+        )
 
         ax.set_title(debug_tag)
         ax.axis("off")
-        fig.savefig(os.path.join(debug_dir, f"{debug_tag}_final.png"),
-                    bbox_inches="tight")
+
+        fig.savefig(
+            os.path.join(debug_dir, f"{debug_tag}_final.png"),
+            bbox_inches="tight",
+            dpi=200,
+        )
         plt.close(fig)
 
     return kept, kept
