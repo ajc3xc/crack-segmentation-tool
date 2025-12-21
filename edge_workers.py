@@ -222,7 +222,7 @@ def plot_widths_colormap_on_crop(
     mid = mid[:n]
 
     # ------------------------------------------------------------
-    # Split into NaN-separated runs (CRITICAL FIX)
+    # Split into NaN-separated runs
     # ------------------------------------------------------------
     finite = (
         np.isfinite(e1[:, 0]) & np.isfinite(e1[:, 1]) &
@@ -247,7 +247,7 @@ def plot_widths_colormap_on_crop(
         return
 
     # ------------------------------------------------------------
-    # Compute GLOBAL color scale (stable across segments)
+    # GLOBAL width scale (0 → max width)
     # ------------------------------------------------------------
     all_widths = []
     for i0, i1 in runs:
@@ -260,15 +260,12 @@ def plot_widths_colormap_on_crop(
         return
 
     all_widths = np.concatenate(all_widths)
-    vmin, vmax = np.percentile(all_widths, [5, 95])
-    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
-        vmin = float(np.nanmin(all_widths))
-        vmax = float(np.nanmax(all_widths))
-        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
-            vmin, vmax = 0.0, 1.0
+    max_w = float(np.nanmax(all_widths))
+    if not np.isfinite(max_w) or max_w <= 0:
+        max_w = 1.0
 
     cmap = plt.get_cmap("inferno")
-    norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+    norm = mpl.colors.Normalize(vmin=0.0, vmax=max_w)
 
     H, W = gt_vs_manual_rgb.shape[:2]
 
@@ -278,7 +275,7 @@ def plot_widths_colormap_on_crop(
     ax.imshow(gt_vs_manual_rgb[..., ::-1], interpolation="bilinear")
 
     # ------------------------------------------------------------
-    # Plot EACH SEGMENT independently (NO teleport lines)
+    # Plot each segment independently
     # ------------------------------------------------------------
     for i0, i1 in runs:
         coords = mid[i0:i1].copy()
@@ -291,9 +288,11 @@ def plot_widths_colormap_on_crop(
         if len(coords) < 2:
             continue
 
-        widths_smooth = gaussian_filter1d(widths.astype(float), sigma=1.2, mode="nearest")
+        widths_smooth = gaussian_filter1d(
+            widths.astype(float), sigma=1.2, mode="nearest"
+        )
 
-        # Remove ONLY consecutive duplicates (preserve order)
+        # Remove only consecutive duplicates
         dxy = np.diff(coords, axis=0)
         keep = np.ones(len(coords), dtype=bool)
         keep[1:] = np.any(np.abs(dxy) > 1e-6, axis=1)
@@ -326,13 +325,28 @@ def plot_widths_colormap_on_crop(
         ax.plot(te2[:, 0], te2[:, 1], "-", lw=1.4,
                 color="lime", alpha=0.9, label="Edge 2 (Right)")
 
-    # ---- colorbar ----
+    # ---- colorbar with explicit ticks ----
     sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cb = plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.02)
     cb.set_label("Estimated width (px)", fontsize=10, fontweight="bold")
 
-    # ---- legend (restored & stable) ----
+    # Keep automatic ticks, but ensure endpoints are present & labeled
+    ticks = list(cb.get_ticks())
+
+    if ticks:
+        ticks[0] = 0.0
+        ticks[-1] = max_w
+        cb.set_ticks(ticks)
+
+    # Override only the endpoint labels
+    ticklabels = [f"{t:g}" for t in ticks]
+    ticklabels[0] = "0"
+    ticklabels[-1] = f"{max_w:.1f}"
+
+    cb.set_ticklabels(ticklabels)
+
+    # ---- legend ----
     handles = [
         Line2D([], [], color="gray", lw=2.4,
                label="Midline (width color map)"),
