@@ -509,8 +509,8 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         track_e1_global = np.column_stack([track_e1[:, 0] + x, track_e1[:, 1] + y])
         track_e2_global = np.column_stack([track_e2[:, 0] + x, track_e2[:, 1] + y])
         
-        from cracktools.segmentation import debug_mask_from_edges_inline  # adjust import path
-        mask_crop = debug_mask_from_edges_inline(
+        from cracktools.segmentation import generate_mask_from_edges  # adjust import path
+        mask_crop = generate_mask_from_edges(
             img_gray=img_norm,
             edge1_xy=track_e1,
             edge2_xy=track_e2,

@@ -486,7 +486,7 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
             # 3️⃣ Build crop mask
             edge_x_crop = np.concatenate((self.track_e1[1][::-1], self.track_e2[1]))
             edge_y_crop = np.concatenate((self.track_e1[0][::-1], self.track_e2[0]))
-            mask_crop = ct.segmentation.create_mask(self.image_crop, edge_y_crop, edge_x_crop).astype(np.uint8)
+            mask_crop = ct.segmentation.generate_mask_from_edges(self.image_crop, edge_y_crop, edge_x_crop).astype(np.uint8)
             h, w = mask_crop.shape[:2]
             nz = int((mask_crop > 0).sum())
             print(f"[DEBUG MASK_CROP] shape={mask_crop.shape}, nonzero={nz}")

@@ -180,7 +180,7 @@ import cv2
 from matplotlib import pyplot as plt
 
 from helpers.metrics import normals_from_mask_for_midline
-from combiner import _stitch_lines_by_user
+#from combiner import _stitch_lines_by_user
 from helpers.plot_metrics import plot_edges_and_normals
 
 
@@ -233,6 +233,54 @@ def _bbox_from_coords(coords, H, W, pad=10):
         return None
 
     return (x0, y0, x1, y1)
+
+
+
+
+
+def _split_midline_packed(mid_packed):
+    """
+    mid_packed: list like [[x,y], [x,y], [None,None], [x,y], ...]
+    returns: list of (N,2) float arrays
+    """
+    segs = []
+    cur = []
+    for pt in (mid_packed or []):
+        if pt is None or len(pt) != 2 or pt[0] is None or pt[1] is None:
+            if len(cur) >= 2:
+                segs.append(np.asarray(cur, float))
+            cur = []
+            continue
+        cur.append([float(pt[0]), float(pt[1])])
+    if len(cur) >= 2:
+        segs.append(np.asarray(cur, float))
+    return segs
+
+
+def _split_xy_none_seps(xs, ys):
+    """
+    xs,ys: lists like [x,x,x,None,x,x,...] and [y,y,y,None,y,y,...]
+    returns: list of (N,2) float arrays
+    """
+    segs = []
+    cur = []
+    n = min(len(xs or []), len(ys or []))
+    for i in range(n):
+        x = xs[i]
+        y = ys[i]
+        if x is None or y is None:
+            if len(cur) >= 2:
+                segs.append(np.asarray(cur, float))
+            cur = []
+            continue
+        if not (np.isfinite(x) and np.isfinite(y)):
+            continue
+        cur.append([float(x), float(y)])
+    if len(cur) >= 2:
+        segs.append(np.asarray(cur, float))
+    return segs
+
+
 
 
 # ============================================================
@@ -408,333 +456,6 @@ def _cc_label_for_members(members, atomic, cc_labels):
     vals, cnts = np.unique(labs, return_counts=True)
     return int(vals[np.argmax(cnts)]) if len(vals) else None
 
-def _polyline_mask(S, H, W):
-    m = np.zeros((H, W), np.uint8)
-    pts = np.round(np.asarray(S, float)).astype(np.int32)
-    if pts.ndim != 2 or pts.shape[1] != 2 or len(pts) < 2:
-        return m
-    pts[:, 0] = np.clip(pts[:, 0], 0, W - 1)
-    pts[:, 1] = np.clip(pts[:, 1], 0, H - 1)
-    cv2.polylines(m, [pts], False, 1, thickness=1, lineType=cv2.LINE_8)
-    return m
-
-def _finite_xy(arr):
-    if arr is None or len(arr) == 0: return np.empty((0,2), float)
-    a = np.asarray(arr, float)
-    if a.ndim != 2 or a.shape[1] != 2: return np.empty((0,2), float)
-    ok = np.isfinite(a).all(axis=1)
-    a = a[ok]
-    if len(a) <= 1: return a
-    keep = [0]
-    for i in range(1, len(a)):
-        if not (abs(a[i,0]-a[i-1,0]) < 1e-9 and abs(a[i,1]-a[i-1,1]) < 1e-9):
-            keep.append(i)
-    return a[keep]
-
-def _clip_polyline_to_mask(S, mask):
-    """Keep only points that lie inside mask; then split into contiguous runs."""
-    S = np.asarray(S, float)
-    if len(S) < 2:
-        return []
-    H, W = mask.shape[:2]
-    ys = np.clip(np.round(S[:, 1]).astype(int), 0, H - 1)
-    xs = np.clip(np.round(S[:, 0]).astype(int), 0, W - 1)
-    keep = mask[ys, xs].astype(bool)
-
-    segs = []
-    start = None
-    for i, ok in enumerate(keep):
-        if ok and start is None:
-            start = i
-        elif (not ok) and (start is not None):
-            if i - start >= 2:
-                segs.append(S[start:i])
-            start = None
-    if start is not None and (len(S) - start >= 2):
-        segs.append(S[start:])
-
-    # final cleanup
-    segs = [_finite_xy(s) for s in segs]
-    segs = [s for s in segs if len(s) >= 2]
-    return segs
-
-def _split_midline_packed(mid_packed):
-    """
-    mid_packed: list like [[x,y], [x,y], [None,None], [x,y], ...]
-    returns: list of (N,2) float arrays
-    """
-    segs = []
-    cur = []
-    for pt in (mid_packed or []):
-        if pt is None or len(pt) != 2 or pt[0] is None or pt[1] is None:
-            if len(cur) >= 2:
-                segs.append(np.asarray(cur, float))
-            cur = []
-            continue
-        cur.append([float(pt[0]), float(pt[1])])
-    if len(cur) >= 2:
-        segs.append(np.asarray(cur, float))
-    return segs
-
-
-def _split_xy_none_seps(xs, ys):
-    """
-    xs,ys: lists like [x,x,x,None,x,x,...] and [y,y,y,None,y,y,...]
-    returns: list of (N,2) float arrays
-    """
-    segs = []
-    cur = []
-    n = min(len(xs or []), len(ys or []))
-    for i in range(n):
-        x = xs[i]
-        y = ys[i]
-        if x is None or y is None:
-            if len(cur) >= 2:
-                segs.append(np.asarray(cur, float))
-            cur = []
-            continue
-        if not (np.isfinite(x) and np.isfinite(y)):
-            continue
-        cur.append([float(x), float(y)])
-    if len(cur) >= 2:
-        segs.append(np.asarray(cur, float))
-    return segs
-
-def _linestring_length(arr):
-    try:
-        a = np.asarray(arr, float)
-        if a.ndim != 2 or a.shape[1] != 2 or len(a) < 2:
-            return 0.0
-        d = np.diff(a, axis=0)
-        return float(np.sqrt((d * d).sum(axis=1)).sum())
-    except Exception:
-        return 0.0
-    
-def dominant_segments_from_group(
-    *,
-    members,
-    atomic,
-    crack_mask_u8,
-    window_half_size,
-    debug_dir=None,
-    debug_tag="group",
-):
-    """
-    FINAL dominance logic (portable version).
-
-    - Branches defined by shared USER endpoints (atomic space)
-    - Branch ordering by total USER length (never clipped)
-    - Territory built from CLIPPED geometry only
-    - Dominance between branches only
-    - Output segments are USER-space polylines (primary: unmodified; subordinate: clipped to remaining)
-    """
-
-    import os
-    import numpy as np
-    import cv2
-
-    H, W = crack_mask_u8.shape[:2]
-    crack_mask = (crack_mask_u8 > 0).astype(np.uint8)
-
-    # -----------------------------
-    # local helper: user endpoints
-    # -----------------------------
-    def get_user_endpoints(cr):
-        ups = cr.get("user_points", []) or []
-        ucs = cr.get("user_connections", []) or []
-        out = set()
-        for pair in ucs:
-            for idx in pair:
-                if 0 <= idx < len(ups):
-                    out.add(tuple(map(float, ups[idx])))
-        return out
-
-    # -----------------------------
-    # 1) collect atomics + endpoints
-    # -----------------------------
-    atomics = []    # [(cid_str, S_user)]
-    endpoints = []  # [set((x,y), ...)]
-
-    for m in members:
-        cr = atomic.get(str(m), {}) or {}
-        ml = np.asarray(cr.get("midline", []), float)
-        if ml.ndim == 2 and len(ml) >= 2:
-            atomics.append((str(m), _finite_xy(ml)))
-            endpoints.append(get_user_endpoints(cr))
-
-    if not atomics:
-        return [], []
-
-    # -----------------------------
-    # 2) build branches in atomic space
-    # -----------------------------
-    N = len(atomics)
-    adj = {i: set() for i in range(N)}
-    for i in range(N):
-        for j in range(i + 1, N):
-            if endpoints[i] & endpoints[j]:
-                adj[i].add(j)
-                adj[j].add(i)
-
-    branches = []
-    seen = set()
-    for i in range(N):
-        if i in seen:
-            continue
-        stack = [i]
-        comp = []
-        while stack:
-            u = stack.pop()
-            if u in seen:
-                continue
-            seen.add(u)
-            comp.append(u)
-            stack.extend(adj[u])
-        branches.append(comp)
-
-    # -----------------------------
-    # 3) per-branch user length + user segs + clipped segs (territory only)
-    # -----------------------------
-    branch_user_len = []
-    branch_user_segs = []
-    branch_clipped_segs = []
-
-    for atom_ids in branches:
-        total_len = 0.0
-        user_segs = []
-        clipped_segs = []
-
-        for ai in atom_ids:
-            _, S_user = atomics[ai]
-            total_len += _linestring_length(S_user)
-            user_segs.append(S_user)
-
-            pieces = _clip_polyline_to_mask(S_user, crack_mask)
-            clipped_segs.extend([p for p in pieces if len(p) >= 2])
-
-        branch_user_len.append(total_len)
-        branch_user_segs.append(user_segs)
-        branch_clipped_segs.append(clipped_segs)
-
-    # -----------------------------
-    # 4) dominance between branches (ordered by USER length)
-    # -----------------------------
-    dt = cv2.distanceTransform(crack_mask, cv2.DIST_L2, 5)
-
-    def seg_radius(S):
-        ys = np.clip(np.round(S[:, 1]).astype(int), 0, H - 1)
-        xs = np.clip(np.round(S[:, 0]).astype(int), 0, W - 1)
-        d = dt[ys, xs]
-        d = d[np.isfinite(d)]
-        if len(d) == 0:
-            return 0.3 * window_half_size
-        return max(3.0, min(float(np.median(d)), window_half_size))
-
-    order = sorted(
-        range(len(branches)),
-        key=lambda i: branch_user_len[i],
-        reverse=True,
-    )
-
-    claimed = np.zeros((H, W), np.uint8)
-
-    # keep truth: list[(branch_id, seg_array)]
-    kept_meta = []
-
-    for rank, bi in enumerate(order):
-        # Build territory from clipped geometry only
-        branch_terr = np.zeros((H, W), np.uint8)
-        for S_clip in branch_clipped_segs[bi]:
-            r = seg_radius(S_clip)
-            rad = int(max(3, 0.8 * r))
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1))
-            line = _polyline_mask(S_clip, H, W)
-            terr = cv2.dilate(line, kernel, iterations=1) & crack_mask
-            branch_terr |= terr
-
-        unique = branch_terr & (~claimed)
-
-        # Suppress small-unique subordinate branches
-        if rank > 0 and unique.sum() < max(10, 0.5 * window_half_size):
-            continue
-
-        if rank == 0:
-            # PRIMARY: keep full USER geometry
-            for S_user in branch_user_segs[bi]:
-                if S_user is not None and len(S_user) >= 2:
-                    kept_meta.append((bi, S_user))
-            claimed |= branch_terr
-            continue
-
-        # SUBORDINATE: clip USER midlines against remaining territory
-        remaining = branch_terr & (~claimed)
-        kept_any = False
-
-        for S_user in branch_user_segs[bi]:
-            pieces = _clip_polyline_to_mask(S_user, remaining)
-            for p in pieces:
-                if p is not None and len(p) >= 2:
-                    kept_meta.append((bi, p))
-                    kept_any = True
-
-        if kept_any:
-            claimed |= remaining
-
-    kept = [S for _, S in kept_meta]
-
-    # -----------------------------
-    # 5) debug (inline bbox logic)
-    # -----------------------------
-    if debug_dir and kept:
-        import matplotlib.pyplot as plt
-        from matplotlib.lines import Line2D
-
-        os.makedirs(debug_dir, exist_ok=True)
-
-        # inline bbox-from-coords
-        coords = np.vstack([S for S in kept if S is not None and len(S) >= 2])
-        xs = coords[:, 0]
-        ys = coords[:, 1]
-        ok = np.isfinite(xs) & np.isfinite(ys)
-        xs = xs[ok]; ys = ys[ok]
-        if xs.size and ys.size:
-            pad = 20
-            x0 = int(max(0, np.floor(xs.min()) - pad))
-            x1 = int(min(W, np.ceil(xs.max()) + pad))
-            y0 = int(max(0, np.floor(ys.min()) - pad))
-            y1 = int(min(H, np.ceil(ys.max()) + pad))
-
-            fig, ax = plt.subplots(figsize=(5, 5), dpi=200)
-            ax.imshow(crack_mask[y0:y1, x0:x1], cmap="gray")
-
-            branch_colors = ["#2ecc71", "#e67e22", "#e74c3c", "#3498db", "#9b59b6", "#1abc9c"]
-
-            used = set()
-            for (bi, S) in kept_meta:
-                used.add(bi)
-                color = branch_colors[bi % len(branch_colors)]
-                lw = 3 if bi == order[0] else 2
-                S2 = S - np.array([x0, y0])
-                ax.plot(S2[:, 0], S2[:, 1], color=color, lw=lw)
-
-            legend_items = [
-                Line2D(
-                    [0], [0],
-                    color=branch_colors[bi % len(branch_colors)],
-                    lw=3 if bi == order[0] else 2,
-                    label=f"Branch {bi} (len={branch_user_len[bi]:.1f})",
-                )
-                for bi in sorted(used)
-            ]
-            ax.legend(handles=legend_items, loc="lower right", fontsize=7, frameon=True)
-            ax.set_title(debug_tag)
-            ax.axis("off")
-
-            fig.savefig(os.path.join(debug_dir, f"{debug_tag}_final.png"), bbox_inches="tight")
-            plt.close(fig)
-
-    return kept, kept
-
 
 
 
@@ -866,6 +587,7 @@ def export_gt_supervision_for_image(
         debug_dir = os.path.join(sup_root, "combined_debug")
         tag = f"ccid{ccid}_" + "_".join(members)
 
+        from combiner import dominant_segments_from_group
         segs, _cands = dominant_segments_from_group(
             members=members,
             atomic=atomic,

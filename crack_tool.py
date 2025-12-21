@@ -2705,7 +2705,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         from helpers import metrics as metrics_mod   # for _auto_cache_key
         from helpers.plot_metrics import save_gt_vs_manual_overlay
         from helpers.supervision import export_gt_supervision_for_image as _export_gt_sup
-        from cracktools.segmentation import create_mask_from_edges
+        from cracktools.segmentation import generate_mask_from_edges
 
         print(f"[DEBUG METRICS] ===== START for {getattr(self, 'name', '?')} =====")
         if getattr(self, "current_mask", None) is None:
@@ -2790,7 +2790,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         # ------------------------------------------------------------------
         # 3) Repair missing crops for MANUAL atomics from edges
         # ------------------------------------------------------------------
-        def _bbox_from_mask_full(mask):
+        '''def _bbox_from_mask_full(mask):
             ys, xs = np.where(mask > 0)
             if xs.size == 0 or ys.size == 0:
                 return None
@@ -2798,31 +2798,15 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             y0, y1 = int(ys.min()), int(ys.max()) + 1
             return [x0, y0, x1, y1]
 
-        '''repaired = []
-        for cid, cr in atomic.items():
-            m = _mask_from_crack(cr, H, W)
-            if int(m.sum()) == 0:
-                m2 = reconstruct_manual_mask_from_edges(cr, H, W)
-                if m2 is not None and int(m2.sum()) > 0:
-                    bb = _bbox_from_mask_full(m2)
-                    if bb:
-                        x0, y0, x1, y1 = bb
-                        w = x1 - x0
-                        h = y1 - y0
-                        cr["mask_bbox"] = [x0, y0, w, h]
-                        cr["mask_crop"] = m2[y0:y1, x0:x1].astype("uint8").tolist()
-                        safe_write_json(metric_atomic_path_for(self.save_folder, base_name, cid), cr)
-                        repaired.append(cid)
-        if repaired:
-            print(f"[COMBINE_DBG] repaired mask_crop/bbox for: {sorted(repaired)}")'''
         repaired = []
 
         for cid, cr in atomic.items():
             ge = (cr or {}).get("geodesic_edges", {}) or {}
+            #midline = (cr or {}).get("midline", {}) or {}
             if "edge1" not in ge or "edge2" not in ge:
                 continue
 
-            mask_full, bb, mask_crop = create_mask_from_edges(
+            bb, mask_crop = generate_mask_from_edges(
                 self.original_image,
                 ge["edge1"],
                 ge["edge2"],
@@ -2839,7 +2823,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 repaired.append(cid)
 
         if repaired:
-            print(f"[COMBINE_DBG] repaired mask_crop/bbox via create_mask for: {sorted(repaired)}")
+            print(f"[COMBINE_DBG] repaired mask_crop/bbox via create_mask for: {sorted(repaired)}")'''
 
         # ------------------------------------------------------------------
         # 4) Grouping + rebuild (MANUAL + AUTO combined) via combiner
@@ -2954,7 +2938,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 member_ids=[str(m) for m in members],
                 window_half_size=45, mu=0.0, l=5, p=14,
                 color_channel=0, pad=10, prefer_gpu=True,
-                debug_callback=_manual_cb,
+                debug_dir=manual_dir,
+                crack_mask_full=self.current_mask, debug_callback=_manual_cb,
             )
 
             rebuilt["members"] = members
@@ -2997,7 +2982,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     member_ids=[str(m) for m in members],
                     window_half_size=45, mu=0.0, l=5, p=14,
                     color_channel=0, pad=10, prefer_gpu=True,
-                    debug_callback=_auto_cb,
+                    debug_dir=auto_dir,
+                    crack_mask_full=self.current_mask, debug_callback=_auto_cb,
                 )
 
                 rebuilt_auto["members"] = members

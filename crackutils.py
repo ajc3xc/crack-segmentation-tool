@@ -1211,10 +1211,26 @@ class CrackUtils:
         atomic = ann.get("atomic_cracks", {}) or {}
         combined = ann.get("combined_cracks", {}) or {}
 
-        full_mask_display = build_combined_mask(atomic, H, W)
-        for crack in combined.values():
-            full_mask_display |= reconstruct_full_mask_from_crack(crack, H, W)
+        # ---- Update all-segments preview (combined overrides atomic members) ----
+        full_mask_display = np.zeros((H, W), np.uint8)
+
+        # 1) Combined first
+        combined_members = set()
+        for crack in (combined or {}).values():
+            combined_members |= set(str(m) for m in (crack.get("members", []) or []))
+            full_mask_display |= reconstruct_full_mask_from_crack(crack, H, W).astype(np.uint8)
+
+        # 2) Atomic only if NOT part of any combined
+        for cid, crack in (atomic or {}).items():
+            scid = str(cid)
+            if scid in combined_members:
+                continue
+            full_mask_display |= reconstruct_full_mask_from_crack(crack, H, W).astype(np.uint8)
+
         full_mask_display[full_mask_display > 0] = 1
+        # This is your best available "prediction/working crack mask" for this image
+        self.full_prediction_mask = full_mask_display.copy()
+
 
         _, pixmap_mask = numpy_to_qimage_and_scaled_pixmap(
             (full_mask_display*255).astype(np.uint8),
@@ -1710,6 +1726,9 @@ class CrackUtils:
         except Exception:
             color_idx = 0
 
+        out_dir = os.path.join(self.save_folder, "debug_outputs")
+        os.makedirs(out_dir, exist_ok=True)
+        
         # ----------------------------
         # DEBUG CALLBACK (new, correct signature)
         # ----------------------------
@@ -1731,9 +1750,6 @@ class CrackUtils:
             """
             import os
 
-            out_dir = os.path.join(self.save_folder, "debug_outputs")
-            os.makedirs(out_dir, exist_ok=True)
-
             plot_combined_debug(
                 original_image=image_rgb,
                 segs=segs,
@@ -1747,17 +1763,41 @@ class CrackUtils:
                 # NOTE: union_mask is accepted here (required by signature)
                 # but not used by plot_combined_debug(), which is fine.
             )
+            
+        # ---------------------------------
+        # Choose authoritative crack mask
+        # ---------------------------------
+        crack_mask_full = None
+
+        #gt mask first choice, predicted mask 2nd choice
+        if getattr(self, "current_mask", None) is not None:
+            # GT path
+            crack_mask_full = self.current_mask
+        else:
+            # Prediction path (example)
+            crack_mask_full = self.full_prediction_mask
+
+        if crack_mask_full is None or not np.any(crack_mask_full):
+            raise ValueError("_build_combined_crack: no valid crack mask available")
+
+        if crack_mask_full.ndim == 3:
+            crack_mask_full = cv2.cvtColor(crack_mask_full, cv2.COLOR_BGR2GRAY)
+
+        crack_mask_full = (crack_mask_full > 0).astype(np.uint8)
+
 
         # ===== CALL STATELESS BUILDER =====
         result = build_combined_crack_stateless(
             original_image=self.original_image,
             authoring_atomic=atomic,
             member_ids=member_ids,
+            crack_mask_full=crack_mask_full,   # ← ONE LINE
             window_half_size=window_half,
             mu=mu, l=l, p=p,
             color_channel=color_idx,
             pad=pad,
             prefer_gpu=True,
+            debug_dir=out_dir,
             debug_callback=_debug_cb,
         )
 

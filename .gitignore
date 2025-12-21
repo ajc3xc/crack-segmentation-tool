@@ -38,6 +38,7 @@ MANIFEST
 */__pycache__/
 __init__.cpython-310.pyc
 *.cpython*
+pairwise_debug.csv
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

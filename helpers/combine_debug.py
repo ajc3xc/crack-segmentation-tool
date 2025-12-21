@@ -101,14 +101,16 @@ def auto_groups_from_atomic(annotation_dict_or_atomic,
     debug_rows = []
 
     # ---- FIXED: Never reference save_folder ----
-    base_dir = debug_root or "."
-    if debug_root is None:
-        debug_root = "combine_debug"
+    save_debug = debug_root is not None
 
-    overlay_dir = os.path.join(debug_root, "mask_overlays")
-    os.makedirs(overlay_dir, exist_ok=True)
+    if not save_debug:
+        print("[COMBINE_DBG] debug_root=None → debug outputs disabled")
 
-    out_csv = os.path.join(debug_root, "pairwise_debug.csv")
+    else:
+        overlay_dir = os.path.join(debug_root, "mask_overlays")
+        os.makedirs(overlay_dir, exist_ok=True)
+
+        out_csv = os.path.join(debug_root, "pairwise_debug.csv")
 
     # Local import to avoid circular issues
     from helpers.combine_debug import _mask_from_crack
@@ -171,8 +173,9 @@ def auto_groups_from_atomic(annotation_dict_or_atomic,
                     vis = np.zeros((H, W, 3), np.uint8)
                     vis[..., 1] = np.clip(vis[..., 1] + (mA * 255), 0, 255)
                     vis[..., 2] = np.clip(vis[..., 2] + (mB * 255), 0, 255)
-                    out = os.path.join(overlay_dir, f"pair_{a}_{b}_nooverlap.png")
-                    cv2.imwrite(out, vis)
+                    if save_debug:
+                        out = os.path.join(overlay_dir, f"pair_{a}_{b}_nooverlap.png")
+                        cv2.imwrite(out, vis)
 
             # ----------------------------- #
             # Reasoning summary
@@ -205,7 +208,8 @@ def auto_groups_from_atomic(annotation_dict_or_atomic,
     # ----------------------------- #
     df_dbg = pd.DataFrame(debug_rows)
     print(df_dbg.to_string(index=False))
-    df_dbg.to_csv(out_csv, index=False)
+    if save_debug:
+        df_dbg.to_csv(out_csv, index=False)
     print(f"[COMBINE_DBG] detailed pairwise debug table → {out_csv}")
 
     # ----------------------------- #

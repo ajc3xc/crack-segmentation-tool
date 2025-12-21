@@ -1007,7 +1007,7 @@ import cv2
 from scipy.ndimage import binary_fill_holes
 from skimage.morphology import binary_opening, disk
 
-def create_mask(image, x, y, mode="new"):
+'''def create_mask(image, x, y, mode="new"):
     """
     Ablation-ready masking function.
     
@@ -1108,15 +1108,16 @@ def create_mask(image, x, y, mode="new"):
                            [0, 1, 0]], dtype=np.uint8)
         mask = cv2.erode(mask, kernel, iterations=1)
 
-        return mask.astype(np.float32)
+        return mask.astype(np.float32)'''
 
-def debug_mask_from_edges_inline(
+def generate_mask_from_edges(
     *,
     img_gray,                  # (H,W) uint8 crop
     edge1_xy, edge2_xy,         # (N,2) float arrays (x,y) — ALREADY FINAL
     midline_xy=None,            # optional (N,2)
-    out_dir,
+    out_dir=None,
     tag="cidX",
+    mode="new",
     do_morph=False,             # DEFAULT OFF (important)
 ):
     """
@@ -1141,7 +1142,6 @@ def debug_mask_from_edges_inline(
     import cv2
     from helpers.plot_metrics import plot_edges_and_normals
 
-    os.makedirs(out_dir, exist_ok=True)
     H, W = img_gray.shape[:2]
 
     # --------------------------------------------------
@@ -1156,10 +1156,12 @@ def debug_mask_from_edges_inline(
     e1 = finite_xy(edge1_xy)
     e2 = finite_xy(edge2_xy)
 
-    if len(e1) < 2 or len(e2) < 2:
-        mask0 = np.zeros((H, W), np.uint8)
-        cv2.imwrite(os.path.join(out_dir, f"{tag}_mask.png"), mask0 * 255)
-        return mask0
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+        if len(e1) < 2 or len(e2) < 2:
+            mask0 = np.zeros((H, W), np.uint8)
+            cv2.imwrite(os.path.join(out_dir, f"{tag}_mask.png"), mask0 * 255)
+            return mask0
 
     # --------------------------------------------------
     # MASK: polygon fill (NO fattening)
@@ -1177,61 +1179,33 @@ def debug_mask_from_edges_inline(
         from scipy.ndimage import binary_fill_holes
         mask = binary_fill_holes(mask > 0).astype(np.uint8)
 
-    cv2.imwrite(os.path.join(out_dir, f"{tag}_mask.png"), mask * 255)
+    if out_dir:
+        cv2.imwrite(os.path.join(out_dir, f"{tag}_mask.png"), mask * 255)
 
     # --------------------------------------------------
     # DEBUG: GT-style overlay (KEEP THIS)
     # --------------------------------------------------
-    vis_gray = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR).astype(np.float32) / 255.0
-    dark_base = np.clip(vis_gray * 0.35, 0.0, 1.0)
-    overlay = dark_base.copy()
+    if out_dir:
+        vis_gray = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR).astype(np.float32) / 255.0
+        dark_base = np.clip(vis_gray * 0.35, 0.0, 1.0)
+        overlay = dark_base.copy()
 
-    overlay[mask == 1] = (0.95, 0.95, 0.95)
-    blended = cv2.addWeighted(overlay, 0.8, dark_base, 0.2, 0.0)
+        overlay[mask == 1] = (0.95, 0.95, 0.95)
+        blended = cv2.addWeighted(overlay, 0.8, dark_base, 0.2, 0.0)
 
-    plot_edges_and_normals(
-        base_image=(blended * 255).astype(np.uint8),
-        midline_segs=[midline_xy] if midline_xy is not None else [],
-        edge1_segs=[e1],
-        edge2_segs=[e2],
-        norm1_segs=[],
-        norm2_segs=[],
-        out_png=os.path.join(out_dir, f"{tag}_mask_overlay.png"),
-        title=f"{tag} — mask overlay",
-    )
+        plot_edges_and_normals(
+            base_image=(blended * 255).astype(np.uint8),
+            midline_segs=[midline_xy] if midline_xy is not None else [],
+            edge1_segs=[e1],
+            edge2_segs=[e2],
+            norm1_segs=[],
+            norm2_segs=[],
+            out_png=os.path.join(out_dir, f"{tag}_mask_overlay.png"),
+            title=f"{tag} — mask overlay",
+        )
 
     return mask
 
-'''def redrow_lines(img,contours_x,contours_y,t,scale):
-    flat_x = [item for sublist in contours_x for item in sublist]
-    flat_y = [item for sublist in contours_y for item in sublist]
-    img2 = img.copy()
-    for i in range(len(flat_x)-1):
-        x1 = int2(flat_x[i]-0.5)
-        x2 = int2(flat_x[i+1]-0.5)
-        y1 = int2(flat_y[i]-0.5)
-        y2 = int2(flat_y[i+1]-0.5)
-        img2 = cv2.line(img2,(x1,y1),(x2,y2),color=(0,255,0),thickness=int2(np.ceil(t*scale)))
-    return (img2)'''
 
-'''def drow_mask_lines(img,contours_x,contours_y,color,t=1,close_contur = False):
-#     flat_x = [item for sublist in contours_x for item in sublist]
-#     flat_y = [item for sublist in contours_y for item in sublist]
-    img2 = img.copy()
-    for i in range(len(contours_x)-1):
-        x1 = int2(np.round(contours_x[i]))
-        x2 = int2(np.round(contours_x[i+1]))
-        y1 = int2(np.round(contours_y[i]))
-        y2 = int2(np.round(contours_y[i+1]))
-        img2 = cv2.line(img2,(x1,y1),(x2,y2),color=color,thickness=int2(np.ceil(t)))
-        
-    x1 = int2(np.round(contours_x[0]))
-    x2 = int2(np.round(contours_x[-1]))
-    y1 = int2(np.round(contours_y[0]))
-    y2 = int2(np.round(contours_y[-1]))
-    if close_contur == True:
-        img2 = cv2.line(img2,(x1,y1),(x2,y2),color=color,thickness=int2(np.ceil(t)))
-    return (img2)
-'''
 def int2(a):
     return (int(np.round(a)))
