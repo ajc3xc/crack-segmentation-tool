@@ -72,6 +72,24 @@ def plot_edges_and_normals(
 
     fig, ax = plt.subplots(figsize=(9, 9), dpi=320)
     ax.imshow(crop_rgb)
+    
+    # ------------------------------
+    # Draw bbox (visual reference)
+    # ------------------------------
+    if bbox is not None:
+        x0, y0, w, h = map(int, bbox)
+        x1, y1 = x0 + w, y0 + h
+
+        # bbox coordinates in plot space
+        bx = [x0 - shift_x, x1 - shift_x, x1 - shift_x, x0 - shift_x, x0 - shift_x]
+        by = [y0 - shift_y, y0 - shift_y, y1 - shift_y, y1 - shift_y, y0 - shift_y]
+
+        ax.plot(
+            bx, by,
+            color="dodgerblue",
+            lw=2.0,
+            alpha=0.9,
+        )
 
     # ------------------------------
     # Helper for splitting long lines
@@ -146,6 +164,13 @@ def plot_edges_and_normals(
             Line2D([], [], color='green', lw=1.4, label='Edge 2 (Right)'),
             Line2D([], [], color='cyan', lw=1.4, label='Normals'),
         ]
+        
+    if bbox is not None:
+            handles.append(
+                Line2D(
+                    [], [], color='dodgerblue', lw=2.0, label='BBox'
+                )
+            )
 
     leg = ax.legend(
         handles=handles,

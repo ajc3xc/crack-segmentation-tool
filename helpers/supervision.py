@@ -214,7 +214,7 @@ def _cc_label_for_midline(mid_xy: np.ndarray, cc_labels: np.ndarray):
     return int(vals[np.argmax(counts)])
 
 
-def _bbox_from_coords(coords, H, W, pad=10):
+def _bbox_from_coords(coords, H, W, pad=2):
     """Safe bounding-box for arbitrary xy coords."""
 
     coords = np.asarray(coords, float)
@@ -283,87 +283,125 @@ def _split_xy_none_seps(xs, ys):
 
 
 
-# ============================================================
-# CROPPED PREVIEW GENERATOR
-# ============================================================
 def _cropped_preview(entry, gt_mask_u8, original_image, out_dir):
+    import os
+    import numpy as np
+    import cv2
+    from edge_workers import plot_edges_and_normals
+    from combiner import bbox_xywh_to_xyxy
+
     os.makedirs(out_dir, exist_ok=True)
+
     H, W = gt_mask_u8.shape[:2]
+    crack_id = entry.get("id", "UNKNOWN")
+    kind = entry.get("kind", "UNKNOWN")
 
-    crack_id = entry["id"]
-    kind = entry["kind"]
-
-    # ---------
-    # Midlines: prefer explicit segments if present (best)
-    # ---------
+    # -----------------------------
+    # 1) Midlines
+    # -----------------------------
     if entry.get("midline_segments"):
-        mid_segs = [np.asarray(S, float) for S in entry["midline_segments"] if S is not None and len(S) >= 2]
+        mid_segs = [
+            np.asarray(S, float)
+            for S in entry["midline_segments"]
+            if S is not None and len(S) >= 2
+        ]
     else:
-        # atomic: midline is a plain list; combined: may be packed
-        mid_raw = entry.get("midline", [])
-        if len(mid_raw) and isinstance(mid_raw[0], (list, tuple)) and len(mid_raw[0]) == 2 and mid_raw[0][0] is None:
-            mid_segs = _split_midline_packed(mid_raw)
-        else:
-            mid = np.asarray(mid_raw, float)
-            mid_segs = [mid] if (mid.ndim == 2 and len(mid) >= 2) else []
+        mid = np.asarray(entry.get("midline", []), float)
+        mid_segs = [mid] if (mid.ndim == 2 and len(mid) >= 2) else []
 
     if not mid_segs:
         return
 
-    # ---------
-    # Normals: split None-separated lists into segments
-    # ---------
+    # -----------------------------
+    # 2) Normals
+    # -----------------------------
     normals = entry.get("gt_normals") or {}
-    e1_segs = _split_xy_none_seps(normals.get("edge1_x", []), normals.get("edge1_y", []))
-    e2_segs = _split_xy_none_seps(normals.get("edge2_x", []), normals.get("edge2_y", []))
+    e1_segs = _split_xy_none_seps(
+        normals.get("edge1_x", []),
+        normals.get("edge1_y", []),
+    )
+    e2_segs = _split_xy_none_seps(
+        normals.get("edge2_x", []),
+        normals.get("edge2_y", []),
+    )
 
-    # ---------
-    # BBox from all coords (midlines + normals)
-    # ---------
-    coords = []
-    for S in mid_segs:
-        coords.append(S)
-    for S in e1_segs:
-        coords.append(S)
-    for S in e2_segs:
-        coords.append(S)
-    coords = np.vstack(coords) if coords else np.empty((0, 2), float)
+    # -----------------------------
+    # 3) Canonical bbox: xywh → xyxy
+    # -----------------------------
+    bb = entry.get("mask_bbox")
+    if bb is None:
+        raise ValueError(f"[CROP_DBG] {kind}:{crack_id} missing mask_bbox")
 
-    bbox = _bbox_from_coords(coords, H, W, pad=10)
-    if bbox is None:
-        return
-    x0, y0, x1, y1 = bbox
+    x0, y0, x1, y1 = bbox_xywh_to_xyxy(bb, H, W, pad=5)
 
-    # ---------
-    # Overlay GT mask on grayscale original
-    # ---------
+    # -----------------------------
+    # 4) Expand crop to include normals if needed (VISUAL ONLY)
+    # -----------------------------
+    all_pts = []
+    for S in e1_segs + e2_segs:
+        if S is not None and len(S):
+            all_pts.append(np.asarray(S, float))
+
+    if all_pts:
+        P = np.vstack(all_pts)
+        x0 = int(max(0, min(x0, np.floor(P[:, 0].min()) - 5)))
+        y0 = int(max(0, min(y0, np.floor(P[:, 1].min()) - 5)))
+        x1 = int(min(W - 1, max(x1, np.ceil(P[:, 0].max()) + 5)))
+        y1 = int(min(H - 1, max(y1, np.ceil(P[:, 1].max()) + 5)))
+
+    print(
+        f"[CROP_DBG] {kind}:{crack_id} crop "
+        f"x[{x0}:{x1}] y[{y0}:{y1}] "
+        f"size={(y1 - y0, x1 - x0)}"
+    )
+
+    # -----------------------------
+    # 5) Overlay + crop
+    # -----------------------------
     gray = cv2.cvtColor(original_image, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
     mask_f = (gt_mask_u8 > 0).astype(np.float32)
     overlay = np.clip(gray * 0.25 + mask_f * 0.75, 0, 1)
-    overlay_rgb = (np.stack([overlay]*3, axis=-1) * 255).astype(np.uint8)
+    overlay_rgb = (np.stack([overlay] * 3, axis=-1) * 255).astype(np.uint8)
 
-    crop_img = overlay_rgb[y0:y1+1, x0:x1+1]
+    crop_img = overlay_rgb[y0:y1, x0:x1]
 
-    # shift into crop coords
+    # -----------------------------
+    # 6) Shift geometry
+    # -----------------------------
     shift = np.array([x0, y0], float)
-    mid_crop_segs = [S - shift for S in mid_segs]
-    e1_crop_segs = [S - shift for S in e1_segs]
-    e2_crop_segs = [S - shift for S in e2_segs]
+    mid_crop = [S - shift for S in mid_segs]
+    e1_crop = [S - shift for S in e1_segs]
+    e2_crop = [S - shift for S in e2_segs]
+    
+    # ------------------------------------------
+    # USER bbox → crop-local coords (VISUAL)
+    # ------------------------------------------
+    bx, by, bw, bh = bb  # original xywh (GLOBAL)
 
+    bbox_plot = [
+        int(bx - x0),   # shift into crop coords
+        int(by - y0),
+        int(bw),
+        int(bh),
+    ]
+
+    # -----------------------------
+    # 7) Plot
+    # -----------------------------
     out_png = os.path.join(out_dir, f"{kind}_{crack_id}_crop.png")
 
     plot_edges_and_normals(
         base_image=crop_img,
-        midline_segs=mid_crop_segs,
+        midline_segs=mid_crop,
         edge1_segs=[],
         edge2_segs=[],
-        norm1_segs=e1_crop_segs,
-        norm2_segs=e2_crop_segs,
+        norm1_segs=e1_crop,
+        norm2_segs=e2_crop,
         sparsity=5,
         gt_plot=True,
-        bbox=None,
+        bbox=bbox_plot,
         out_png=out_png,
-        title=f"{kind} {crack_id}"
+        title=f"{kind} {crack_id}",
     )
 
 # ============================================================
@@ -516,35 +554,62 @@ def export_gt_supervision_for_image(
     final_entries = []
 
     # =====================================================
-    # 1) ATOMIC BEFORE MERGE
+    # 1) ATOMIC BEFORE MERGE  (USE USER mask_bbox ONLY)
     # =====================================================
     for cid, cr in (atomic or {}).items():
         scid = str(cid)
 
-        # ALWAYS export atomic preview (before merge)
         mid_xy = np.asarray(cr.get("midline", []), float)
-        if len(mid_xy) < 2:
+        if mid_xy.ndim != 2 or len(mid_xy) < 2:
             continue
 
+        # -------------------------------------------------
+        # REQUIRED: user-authored mask_bbox (xywh)
+        # -------------------------------------------------
+        bb = cr.get("mask_bbox", None)
+        if bb is None or not isinstance(bb, (list, tuple)) or len(bb) != 4:
+            raise ValueError(
+                f"[GT_SUP] atomic {scid} missing or invalid user mask_bbox: {bb}"
+            )
+
+        x, y, w, h = map(int, bb)
+        if w <= 0 or h <= 0:
+            raise ValueError(
+                f"[GT_SUP] atomic {scid} has non-positive mask_bbox: {bb}"
+            )
+
+        # Clamp ONLY for safety — semantics unchanged
+        #x = max(0, x)
+        #y = max(0, y)
+        #w = min(w, W - x)
+        #h = min(h, H - y)
+
+        if w <= 0 or h <= 0:
+            raise ValueError(
+                f"[GT_SUP] atomic {scid} bbox collapses after clamp: {bb}"
+            )
+
+        # -------------------------------------------------
+        # GT CC label ONLY for normals computation
+        # -------------------------------------------------
         lbl = _cc_label_for_midline(mid_xy, cc_labels)
         if lbl is None or lbl <= 0:
             continue
 
         crack_mask = (cc_labels == lbl).astype(np.uint8)
-        ys, xs = np.where(crack_mask > 0)
-        if xs.size == 0:
-            continue
 
-        x0, x1 = xs.min(), xs.max()
-        y0, y1 = ys.min(), ys.max()
-
-        (e1x, e1y, e2x, e2y, widths), _ = normals_from_mask_for_midline(mid_xy, crack_mask > 0, 50)
+        (e1x, e1y, e2x, e2y, widths), _ = normals_from_mask_for_midline(
+            mid_xy,
+            crack_mask > 0,
+            50
+        )
 
         atomic_entry = {
             "id": scid,
             "kind": "atomic",
             "members": [],
-            "mask_bbox": [int(x0), int(y0), int(x1), int(y1)],
+            # 🔴 STORE EXACTLY AS USER PROVIDED (xywh)
+            "mask_bbox": [int(x), int(y), int(w), int(h)],
             "midline": mid_xy.tolist(),
             "gt_normals": {
                 "edge1_x": _arr_to_list(e1x),
@@ -556,34 +621,68 @@ def export_gt_supervision_for_image(
         }
 
         final_entries.append(atomic_entry)
-
-        # Crop preview
         _cropped_preview(atomic_entry, gt_mask, original_image, atomic_crop_root)
 
     # =====================================================
-    # 2) COMBINED
+    # 2) COMBINED  (USE UNION OF USER mask_bbox ONLY)
     # =====================================================
     for ccid, grp in (combined_groups or {}).items():
         members = [str(m) for m in grp.get("members", [])]
         if not members:
             continue
-       
-        # robust CC label for the whole group (don’t depend on a single midline)
+
+        # -------------------------------------------------
+        # REQUIRED: union of USER-authored atomic bboxes (xywh)
+        # -------------------------------------------------
+        boxes = []
+        for m in members:
+            cr = atomic.get(str(m))
+            if cr is None:
+                raise ValueError(f"[GT_SUP] combined {ccid} missing atomic {m}")
+
+            bb = cr.get("mask_bbox")
+            if bb is None or not isinstance(bb, (list, tuple)) or len(bb) != 4:
+                raise ValueError(
+                    f"[GT_SUP] combined {ccid} atomic {m} has invalid mask_bbox: {bb}"
+                )
+
+            x, y, w, h = map(int, bb)
+            if w <= 0 or h <= 0:
+                raise ValueError(
+                    f"[GT_SUP] combined {ccid} atomic {m} has non-positive bbox: {bb}"
+                )
+
+            boxes.append((x, y, x + w, y + h))
+
+        # Union in xyXY space
+        ux0 = max(0, min(b[0] for b in boxes))
+        uy0 = max(0, min(b[1] for b in boxes))
+        ux1 = min(W, max(b[2] for b in boxes))
+        uy1 = min(H, max(b[3] for b in boxes))
+
+        if ux1 <= ux0 or uy1 <= uy0:
+            raise ValueError(
+                f"[GT_SUP] combined {ccid} bbox collapses after union: {boxes}"
+            )
+
+        # Convert BACK to canonical xywh for storage
+        ux = int(ux0)
+        uy = int(uy0)
+        uw = int(ux1 - ux0)
+        uh = int(uy1 - uy0)
+
+        # -------------------------------------------------
+        # GT CC label ONLY for normals + dominance logic
+        # -------------------------------------------------
         lbl = _cc_label_for_members(members, atomic, cc_labels)
         if lbl is None or lbl <= 0:
             continue
-        
-        print(lbl)
 
         crack_mask = (cc_labels == lbl).astype(np.uint8)
-        ys, xs = np.where(crack_mask > 0)
-        if xs.size == 0:
-            continue
 
-        x0, x1 = xs.min(), xs.max()
-        y0, y1 = ys.min(), ys.max()
-
-        # dominance-selected sub-midlines for this ONE crack
+        # -------------------------------------------------
+        # Dominance-selected sub-midlines
+        # -------------------------------------------------
         debug_dir = os.path.join(sup_root, "combined_debug")
         tag = f"ccid{ccid}_" + "_".join(members)
 
@@ -593,38 +692,54 @@ def export_gt_supervision_for_image(
             atomic=atomic,
             crack_mask_u8=crack_mask,
             window_half_size=50,
-            debug_dir=debug_dir,   # comment out if you don’t want plots
+            debug_dir=debug_dir,
             debug_tag=tag,
         )
 
         if not segs:
             continue
 
-        # compute normals per segment, then pack with separators so JSON stays simple
+        # -------------------------------------------------
+        # Compute GT normals per segment
+        # -------------------------------------------------
         e1x_list, e1y_list, e2x_list, e2y_list, w_list = [], [], [], [], []
         for S in segs:
-            (e1x, e1y, e2x, e2y, widths), _ = normals_from_mask_for_midline(S, crack_mask > 0, 50)
-            e1x_list.append(e1x); e1y_list.append(e1y)
-            e2x_list.append(e2x); e2y_list.append(e2y)
+            (e1x, e1y, e2x, e2y, widths), _ = normals_from_mask_for_midline(
+                S, crack_mask > 0, 50
+            )
+            e1x_list.append(e1x)
+            e1y_list.append(e1y)
+            e2x_list.append(e2x)
+            e2y_list.append(e2y)
             w_list.append(widths)
 
         packed_mid = _pack_segs_with_separators(segs)
 
-        tag_name = f"{'_'.join(members)}"
+        tag_name = "_".join(members)
         combined_entry = {
             "id": tag_name,
             "kind": "combined",
             "members": members,
-            "mask_bbox": [int(x0), int(y0), int(x1), int(y1)],
-            "midline": packed_mid,  # now supports multiple sub-midlines cleanly
+            # 🔴 AUTHORITATIVE bbox = UNION OF USER BOXES (xywh)
+            "mask_bbox": [ux, uy, uw, uh],
+            "midline": packed_mid,
             "gt_normals": {
-                "edge1_x": _pack_arrs_with_none_separators([_arr_to_list(a) for a in e1x_list]),
-                "edge1_y": _pack_arrs_with_none_separators([_arr_to_list(a) for a in e1y_list]),
-                "edge2_x": _pack_arrs_with_none_separators([_arr_to_list(a) for a in e2x_list]),
-                "edge2_y": _pack_arrs_with_none_separators([_arr_to_list(a) for a in e2y_list]),
-                "width_px": _pack_arrs_with_none_separators([_arr_to_list(a) for a in w_list]),
+                "edge1_x": _pack_arrs_with_none_separators(
+                    [_arr_to_list(a) for a in e1x_list]
+                ),
+                "edge1_y": _pack_arrs_with_none_separators(
+                    [_arr_to_list(a) for a in e1y_list]
+                ),
+                "edge2_x": _pack_arrs_with_none_separators(
+                    [_arr_to_list(a) for a in e2x_list]
+                ),
+                "edge2_y": _pack_arrs_with_none_separators(
+                    [_arr_to_list(a) for a in e2y_list]
+                ),
+                "width_px": _pack_arrs_with_none_separators(
+                    [_arr_to_list(a) for a in w_list]
+                ),
             },
-            # optional: explicit segments for easier downstream consumption
             "midline_segments": [np.asarray(S, float).tolist() for S in segs],
         }
 

@@ -336,6 +336,31 @@ def _linestring_length(arr):
     except Exception:
         return 0.0
     
+def bbox_xywh_to_xyxy(bbox, H, W, *, pad=0):
+    """
+    Convert authoritative bbox from xywh → xyxy (inclusive).
+    NO fallback. NO guessing.
+
+    bbox = [x, y, w, h]
+    """
+    if bbox is None or len(bbox) != 4:
+        raise ValueError("bbox_xywh_to_xyxy: missing or invalid bbox")
+
+    x, y, w, h = map(int, bbox)
+
+    if w <= 0 or h <= 0:
+        raise ValueError(f"bbox_xywh_to_xyxy: non-positive w/h: {bbox}")
+
+    x0 = max(0, x - pad)
+    y0 = max(0, y - pad)
+    x1 = min(W - 1, x + w - 1 + pad)
+    y1 = min(H - 1, y + h - 1 + pad)
+
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError(f"bbox_xywh_to_xyxy: degenerate bbox after clip: {bbox}")
+
+    return x0, y0, x1, y1
+    
 def dominant_segments_from_group(
     *,
     members,
@@ -532,7 +557,7 @@ def dominant_segments_from_group(
     kept = [S for _, S in kept_meta]
 
     # -----------------------------
-    # 5) debug (inline bbox logic)
+    # 5) debug (bbox = union of user bboxes)
     # -----------------------------
     if debug_dir and kept:
         import matplotlib.pyplot as plt
@@ -540,47 +565,37 @@ def dominant_segments_from_group(
 
         os.makedirs(debug_dir, exist_ok=True)
 
-        # inline bbox-from-coords
-        coords = np.vstack([S for S in kept if S is not None and len(S) >= 2])
-        xs = coords[:, 0]
-        ys = coords[:, 1]
-        ok = np.isfinite(xs) & np.isfinite(ys)
-        xs = xs[ok]; ys = ys[ok]
-        if xs.size and ys.size:
-            pad = 20
-            x0 = int(max(0, np.floor(xs.min()) - pad))
-            x1 = int(min(W, np.ceil(xs.max()) + pad))
-            y0 = int(max(0, np.floor(ys.min()) - pad))
-            y1 = int(min(H, np.ceil(ys.max()) + pad))
+        boxes = []
+        for m in members:
+            bb = atomic.get(str(m), {}).get("mask_bbox")
+            if bb and len(bb) == 4:
+                x, y, w, h = map(int, bb)
+                boxes.append((x, y, x + w, y + h))
 
-            fig, ax = plt.subplots(figsize=(5, 5), dpi=200)
-            ax.imshow(crack_mask[y0:y1, x0:x1], cmap="gray")
+        if not boxes:
+            return kept, kept
 
-            branch_colors = ["#2ecc71", "#e67e22", "#e74c3c", "#3498db", "#9b59b6", "#1abc9c"]
+        x0 = max(0, min(b[0] for b in boxes) - 20)
+        y0 = max(0, min(b[1] for b in boxes) - 20)
+        x1 = min(W, max(b[2] for b in boxes) + 20)
+        y1 = min(H, max(b[3] for b in boxes) + 20)
 
-            used = set()
-            for (bi, S) in kept_meta:
-                used.add(bi)
-                color = branch_colors[bi % len(branch_colors)]
-                lw = 3 if bi == order[0] else 2
-                S2 = S - np.array([x0, y0])
-                ax.plot(S2[:, 0], S2[:, 1], color=color, lw=lw)
+        fig, ax = plt.subplots(figsize=(5, 5), dpi=200)
+        ax.imshow(crack_mask[y0:y1, x0:x1], cmap="gray")
 
-            legend_items = [
-                Line2D(
-                    [0], [0],
+        branch_colors = ["#2ecc71", "#e67e22", "#e74c3c", "#3498db"]
+
+        for (bi, S) in kept_meta:
+            S2 = S - np.array([x0, y0])
+            ax.plot(S2[:, 0], S2[:, 1],
                     color=branch_colors[bi % len(branch_colors)],
-                    lw=3 if bi == order[0] else 2,
-                    label=f"Branch {bi} (len={branch_user_len[bi]:.1f})",
-                )
-                for bi in sorted(used)
-            ]
-            ax.legend(handles=legend_items, loc="lower right", fontsize=7, frameon=True)
-            ax.set_title(debug_tag)
-            ax.axis("off")
+                    lw=2 if bi == order[0] else 1.5)
 
-            fig.savefig(os.path.join(debug_dir, f"{debug_tag}_final.png"), bbox_inches="tight")
-            plt.close(fig)
+        ax.set_title(debug_tag)
+        ax.axis("off")
+        fig.savefig(os.path.join(debug_dir, f"{debug_tag}_final.png"),
+                    bbox_inches="tight")
+        plt.close(fig)
 
     return kept, kept
 
@@ -789,41 +804,6 @@ def build_combined_crack_stateless(
     # Timing: stitching
     # ---------------------
     t_stitch0 = time.perf_counter()
-
-    '''stitched = _stitch_lines_by_user(member_ids, authoring_atomic)
-    stitched.sort(key=_linestring_length, reverse=True)
-
-    try:
-        from shapely.geometry import LineString
-        from shapely.ops import unary_union
-        use_shapely = True
-    except Exception:
-        use_shapely = False
-
-    kept_segs, dom_buffer = [], None
-    overlap_px = max(6, int(window_half_size * 0.6))
-    min_keep_len = max(8.0, 0.6 * window_half_size)
-
-    if use_shapely:
-        for S in stitched:
-            g = LineString(S)
-            if dom_buffer is None:
-                kept_segs.append(S)
-                dom_buffer = g.buffer(overlap_px, cap_style=2, join_style=2)
-            else:
-                rem = g.difference(dom_buffer)
-                if rem.is_empty:
-                    continue
-                for piece in _split_lines(rem):
-                    if piece.length >= min_keep_len:
-                        kept_segs.append(np.asarray(piece.coords, float))
-                dom_buffer = unary_union([
-                    dom_buffer,
-                    g.buffer(overlap_px, cap_style=2, join_style=2)
-                ])
-        segs = kept_segs if kept_segs else stitched
-    else:
-        segs = stitched'''
         
     H, W = original_image.shape[:2]
 
