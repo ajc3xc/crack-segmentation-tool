@@ -196,74 +196,79 @@ def plot_widths_colormap_on_crop(
     track_e2=None,
     out_png=None
 ):
-    import numpy as np, matplotlib.pyplot as plt, matplotlib as mpl
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import matplotlib as mpl
     from scipy.ndimage import gaussian_filter1d
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
 
     # ---- convert arrays ----
-    e1 = np.asarray(e1, float)
-    e2 = np.asarray(e2, float)
+    e1  = np.asarray(e1, float)
+    e2  = np.asarray(e2, float)
     mid = np.asarray(midline_xy, float)
 
-    # ---- fix NaNs (same as before) ----
-    def fix_nans(arr):
-        mask = ~np.isnan(arr[:,0])
-        if not mask.any():
-            return None
-        return (
-            np.interp(np.arange(len(arr)), np.where(mask)[0], arr[mask][:,0]),
-            np.interp(np.arange(len(arr)), np.where(mask)[0], arr[mask][:,1]),
-        )
+    if e1.ndim != 2 or e2.ndim != 2 or mid.ndim != 2:
+        return
+    if e1.shape[1] != 2 or e2.shape[1] != 2 or mid.shape[1] != 2:
+        return
 
-    if np.isnan(e1).any():
-        x_fixed, y_fixed = fix_nans(e1)
-        e1 = np.column_stack([x_fixed, y_fixed])
-
-    if np.isnan(e2).any():
-        x_fixed, y_fixed = fix_nans(e2)
-        e2 = np.column_stack([x_fixed, y_fixed])
-
-    # ---- clamp ----
     n = min(len(e1), len(e2), len(mid))
     if n < 2:
         return
 
-    e1 = e1[:n]
-    e2 = e2[:n]
+    e1  = e1[:n]
+    e2  = e2[:n]
     mid = mid[:n]
 
-    # ---- width computation ----
-    widths = np.linalg.norm(e1 - e2, axis=1)
-    widths_smooth = gaussian_filter1d(widths, sigma=1.2)
+    # ------------------------------------------------------------
+    # Split into NaN-separated runs (CRITICAL FIX)
+    # ------------------------------------------------------------
+    finite = (
+        np.isfinite(e1[:, 0]) & np.isfinite(e1[:, 1]) &
+        np.isfinite(e2[:, 0]) & np.isfinite(e2[:, 1]) &
+        np.isfinite(mid[:, 0]) & np.isfinite(mid[:, 1])
+    )
 
-    # ---- remove duplicates ----
-    coords = mid
-    _, uniq = np.unique(coords, axis=0, return_index=True)
-    coords = coords[np.sort(uniq)]
-    widths_smooth = widths_smooth[np.sort(uniq)]
+    runs = []
+    i = 0
+    while i < n:
+        if not finite[i]:
+            i += 1
+            continue
+        j = i + 1
+        while j < n and finite[j]:
+            j += 1
+        if j - i >= 2:
+            runs.append((i, j))
+        i = j
 
-    if len(coords) < 2:
+    if not runs:
         return
 
-    # ---- arc-length sorting ----
-    d = np.sqrt(np.sum(np.diff(coords, axis=0)**2, axis=1))
-    s = np.concatenate([[0], np.cumsum(d)])
-    ordering = np.argsort(s)
-    coords = coords[ordering]
-    widths_smooth = widths_smooth[ordering]
+    # ------------------------------------------------------------
+    # Compute GLOBAL color scale (stable across segments)
+    # ------------------------------------------------------------
+    all_widths = []
+    for i0, i1 in runs:
+        w = np.linalg.norm(e1[i0:i1] - e2[i0:i1], axis=1)
+        w = w[np.isfinite(w)]
+        if w.size:
+            all_widths.append(w)
 
-    # ---- normalize for colormap ----
-    vmin, vmax = np.percentile(widths_smooth, [5, 95])
+    if not all_widths:
+        return
+
+    all_widths = np.concatenate(all_widths)
+    vmin, vmax = np.percentile(all_widths, [5, 95])
     if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
-        vmin = float(widths_smooth.min())
-        vmax = float(widths_smooth.max())
-        if vmin == vmax:
-            vmax = vmin + 1e-6
+        vmin = float(np.nanmin(all_widths))
+        vmax = float(np.nanmax(all_widths))
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+            vmin, vmax = 0.0, 1.0
 
     cmap = plt.get_cmap("inferno")
     norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
-    colors = cmap(norm(widths_smooth))
 
     H, W = gt_vs_manual_rgb.shape[:2]
 
@@ -272,25 +277,53 @@ def plot_widths_colormap_on_crop(
     # ---- background ----
     ax.imshow(gt_vs_manual_rgb[..., ::-1], interpolation="bilinear")
 
-    # ---- colored midline ----
-    for i in range(len(coords) - 1):
-        ax.plot(
-            [coords[i,0], coords[i+1,0]],
-            [coords[i,1], coords[i+1,1]],
-            color=colors[i],
-            linewidth=2.4,
-            alpha=0.97,
-            solid_capstyle="round",
-        )
+    # ------------------------------------------------------------
+    # Plot EACH SEGMENT independently (NO teleport lines)
+    # ------------------------------------------------------------
+    for i0, i1 in runs:
+        coords = mid[i0:i1].copy()
+        widths = np.linalg.norm(e1[i0:i1] - e2[i0:i1], axis=1)
 
-    # ---- geodesic edges ----
+        ok = np.isfinite(coords[:, 0]) & np.isfinite(coords[:, 1]) & np.isfinite(widths)
+        coords = coords[ok]
+        widths = widths[ok]
+
+        if len(coords) < 2:
+            continue
+
+        widths_smooth = gaussian_filter1d(widths.astype(float), sigma=1.2, mode="nearest")
+
+        # Remove ONLY consecutive duplicates (preserve order)
+        dxy = np.diff(coords, axis=0)
+        keep = np.ones(len(coords), dtype=bool)
+        keep[1:] = np.any(np.abs(dxy) > 1e-6, axis=1)
+
+        coords = coords[keep]
+        widths_smooth = widths_smooth[keep]
+
+        if len(coords) < 2:
+            continue
+
+        colors = cmap(norm(widths_smooth))
+
+        for k in range(len(coords) - 1):
+            ax.plot(
+                [coords[k, 0], coords[k + 1, 0]],
+                [coords[k, 1], coords[k + 1, 1]],
+                color=colors[k],
+                linewidth=2.4,
+                alpha=0.97,
+                solid_capstyle="round",
+            )
+
+    # ---- optional geodesic edges ----
     if track_e1 is not None and len(track_e1) > 1:
-        te1 = np.asarray(track_e1)
-        ax.plot(te1[:,0], te1[:,1], "-", lw=1.4,
+        te1 = np.asarray(track_e1, float)
+        ax.plot(te1[:, 0], te1[:, 1], "-", lw=1.4,
                 color="magenta", alpha=0.9, label="Edge 1 (Left)")
     if track_e2 is not None and len(track_e2) > 1:
-        te2 = np.asarray(track_e2)
-        ax.plot(te2[:,0], te2[:,1], "-", lw=1.4,
+        te2 = np.asarray(track_e2, float)
+        ax.plot(te2[:, 0], te2[:, 1], "-", lw=1.4,
                 color="lime", alpha=0.9, label="Edge 2 (Right)")
 
     # ---- colorbar ----
@@ -299,7 +332,7 @@ def plot_widths_colormap_on_crop(
     cb = plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.02)
     cb.set_label("Estimated width (px)", fontsize=10, fontweight="bold")
 
-    # ---- LEGEND (bold, blue title) ----
+    # ---- legend (restored & stable) ----
     handles = [
         Line2D([], [], color="gray", lw=2.4,
                label="Midline (width color map)"),
@@ -313,9 +346,9 @@ def plot_widths_colormap_on_crop(
                               label="Edge 2 (Right)"))
 
     handles.extend([
-        Patch(facecolor=(1,1,1), edgecolor="gray", label="Overlap (IoU)"),
-        Patch(facecolor=(1,1,0), edgecolor="gray", label="Manual only"),
-        Patch(facecolor=(1,0,0), edgecolor="gray", label="GT only"),
+        Patch(facecolor=(1, 1, 1), edgecolor="gray", label="Overlap (IoU)"),
+        Patch(facecolor=(1, 1, 0), edgecolor="gray", label="Manual only"),
+        Patch(facecolor=(1, 0, 0), edgecolor="gray", label="GT only"),
     ])
 
     leg = ax.legend(
@@ -330,8 +363,6 @@ def plot_widths_colormap_on_crop(
         title_fontsize=11,
     )
 
-    # blue + bold
-    import matplotlib.pyplot as plt
     plt.setp(leg.get_title(), color="blue", fontweight="bold")
     for t in leg.get_texts():
         t.set_fontweight("bold")

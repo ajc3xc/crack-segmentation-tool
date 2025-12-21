@@ -62,6 +62,8 @@ def edge_masks(
                 use_gpu = False
         except Exception:
             cp, cndi, use_gpu = np, ndi, False
+            
+        use_gpu = False
 
         if not use_gpu:
             print("[edge_mask] ⚙️ running in CPU mode (no CUDA device detected)")
