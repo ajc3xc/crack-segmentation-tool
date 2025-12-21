@@ -332,7 +332,7 @@ def plot_widths_colormap_on_crop(
     cb.set_label("Estimated width (px)", fontsize=10, fontweight="bold")
 
     # Keep automatic ticks, but ensure endpoints are present & labeled
-    ticks = list(cb.get_ticks())
+    '''ticks = list(cb.get_ticks())
 
     if ticks:
         ticks[0] = 0.0
@@ -344,7 +344,29 @@ def plot_widths_colormap_on_crop(
     ticklabels[0] = "0"
     ticklabels[-1] = f"{max_w:.1f}"
 
-    cb.set_ticklabels(ticklabels)
+    cb.set_ticklabels(ticklabels)'''
+    
+    ticks = list(cb.get_ticks())
+
+    if len(ticks) >= 2:
+        tol = 0.3
+
+        # Replace endpoints
+        vmin, vmax = 0.0, max_w
+        ticks[0]  = vmin
+        ticks[-1] = vmax
+
+        # Remove ticks too close to endpoints (except endpoints themselves)
+        cleaned = []
+        for i, t in enumerate(ticks):
+            if i == 0 or i == len(ticks) - 1:
+                cleaned.append(t)
+            else:
+                if abs(t - vmin) > tol and abs(t - vmax) > tol:
+                    cleaned.append(t)
+
+        cb.set_ticks(cleaned)
+        cb.set_ticklabels([f"{t:.1f}" for t in cleaned])
 
     # ---- legend ----
     handles = [

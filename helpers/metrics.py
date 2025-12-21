@@ -1122,42 +1122,109 @@ def compare_widths_for_cracks(
     bbox = _union_bboxes(bboxes)
 
     fig, ax = plt.subplots(figsize=(6,6), dpi=200)
-    bg = np.stack([(crack_mask>0)*255]*3, axis=-1)
+    bg = np.stack([(crack_mask > 0) * 255] * 3, axis=-1)
     ax.imshow(bg)
 
     all_d = np.concatenate(diffs)
     all_d = all_d[np.isfinite(all_d)]
-    vmin, vmax = np.percentile(all_d,[5,95])
-    vmin = min(vmin,0.0); vmax = max(vmax,0.0)
-    if vmax <= vmin: vmax = vmin + 1e-6
-    norm = TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
+    vmin, vmax = np.percentile(all_d, [5, 95])
+    vmin = min(vmin, 0.0)
+    vmax = max(vmax, 0.0)
+    if vmax <= vmin:
+        vmax = vmin + 1e-6
+
+    norm = TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
     cmap = plt.get_cmap("coolwarm")
 
-    for s,d in zip(coords,diffs):
-        for i in range(len(s)-1):
-            if not np.isfinite(d[i]): continue
-            ax.plot([s[i,0],s[i+1,0]],[s[i,1],s[i+1,1]],
-                    color=cmap(norm(d[i])), lw=2)
+    # ---- plot colored width-diff segments ----
+    for s, d in zip(coords, diffs):
+        n = min(len(s), len(d))
+        if n < 2:
+            continue
 
+        for i in range(n - 1):
+            if not np.isfinite(d[i]):
+                continue
+            ax.plot(
+                [s[i, 0], s[i + 1, 0]],
+                [s[i, 1], s[i + 1, 1]],
+                color=cmap(norm(d[i])),
+                lw=2,
+                solid_capstyle="round",
+            )
+
+        # ---- endpoint labeling (index 0 and last) ----
+        '''i0 = 0
+        i1 = n - 1
+        ax.text(
+            s[i0, 0], s[i0, 1], "0",
+            fontsize=7, color="white",
+            ha="center", va="center",
+            bbox=dict(boxstyle="round,pad=0.15", fc="black", ec="none", alpha=0.65),
+            zorder=5,
+        )
+        ax.text(
+            s[i1, 0], s[i1, 1], f"{i1}",
+            fontsize=7, color="white",
+            ha="center", va="center",
+            bbox=dict(boxstyle="round,pad=0.15", fc="black", ec="none", alpha=0.65),
+            zorder=5,
+        )'''
+
+    # ---- zoom to union bbox ----
     if bbox:
-        x,y,w,h = bbox
-        pad = 0.15*max(w,h)
-        ax.set_xlim(max(0,x-pad), min(W,x+w+pad))
-        ax.set_ylim(min(H,y+h+pad), max(0,y-pad))
-        ax.add_patch(plt.Rectangle((x,y),w,h,edgecolor="dodgerblue",
-                                   facecolor="none",lw=2))
+        x, y, w, h = bbox
+        pad = 0.15 * max(w, h)
+        ax.set_xlim(max(0, x - pad), min(W, x + w + pad))
+        ax.set_ylim(min(H, y + h + pad), max(0, y - pad))
+        ax.add_patch(
+            plt.Rectangle(
+                (x, y), w, h,
+                edgecolor="dodgerblue",
+                facecolor="none",
+                lw=2,
+            )
+        )
     else:
-        ax.set_xlim(0,W); ax.set_ylim(H,0)
+        ax.set_xlim(0, W)
+        ax.set_ylim(H, 0)
 
-    ax.axis("off"); ax.set_aspect("equal")
-    sm = plt.cm.ScalarMappable(norm=norm,cmap=cmap)
-    plt.colorbar(sm,ax=ax,fraction=0.035,pad=0.02)
+    ax.axis("off")
+    ax.set_aspect("equal")
 
-    out = os.path.join(metrics_dir,f"{base_name}_{mode}_width_diffs_DEBUG.png")
-    fig.savefig(out,dpi=200,bbox_inches="tight",pad_inches=0)
+    # ---- colorbar with label + endpoint ticks ----
+    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    cb = plt.colorbar(sm, ax=ax, fraction=0.035, pad=0.02)
+    cb.set_label("Estimated width − GT width (px)", fontsize=10, fontweight="bold")
+
+    ticks = list(cb.get_ticks())
+
+    if len(ticks) >= 2:
+        tol = 0.3
+
+        # Replace endpoints
+        ticks[0]  = vmin
+        ticks[-1] = vmax
+
+        # Remove ticks too close to endpoints (except endpoints themselves)
+        cleaned = []
+        for i, t in enumerate(ticks):
+            if i == 0 or i == len(ticks) - 1:
+                cleaned.append(t)
+            else:
+                if abs(t - vmin) > tol and abs(t - vmax) > tol:
+                    cleaned.append(t)
+
+        cb.set_ticks(cleaned)
+        cb.set_ticklabels([f"{t:.1f}" for t in cleaned])
+
+    out = os.path.join(metrics_dir, f"{base_name}_{mode}_width_diffs_DEBUG.png")
+    fig.savefig(out, dpi=200, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
 
     return [], []
+
 
 # ==== WIDTH SUMMARY + IMAGE-SIZED OVERLAY (no matplotlib) ======================
 
