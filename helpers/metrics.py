@@ -1153,24 +1153,6 @@ def compare_widths_for_cracks(
                 solid_capstyle="round",
             )
 
-        # ---- endpoint labeling (index 0 and last) ----
-        '''i0 = 0
-        i1 = n - 1
-        ax.text(
-            s[i0, 0], s[i0, 1], "0",
-            fontsize=7, color="white",
-            ha="center", va="center",
-            bbox=dict(boxstyle="round,pad=0.15", fc="black", ec="none", alpha=0.65),
-            zorder=5,
-        )
-        ax.text(
-            s[i1, 0], s[i1, 1], f"{i1}",
-            fontsize=7, color="white",
-            ha="center", va="center",
-            bbox=dict(boxstyle="round,pad=0.15", fc="black", ec="none", alpha=0.65),
-            zorder=5,
-        )'''
-
     # ---- zoom to union bbox ----
     if bbox:
         x, y, w, h = bbox
@@ -1219,7 +1201,7 @@ def compare_widths_for_cracks(
         cb.set_ticks(cleaned)
         cb.set_ticklabels([f"{t:.1f}" for t in cleaned])
 
-    out = os.path.join(metrics_dir, f"{base_name}_{mode}_width_diffs_DEBUG.png")
+    out = os.path.join(metrics_dir, f"DEBUG_{base_name}_{tag}_width_diffs.png")
     fig.savefig(out, dpi=200, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
 

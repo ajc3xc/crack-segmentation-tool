@@ -3731,7 +3731,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     continue
 
                 mid_auto = np.asarray(ab.get("midline", []), float)
-                if mid_auto.ndim != 2 or mid_auto.shape[1] != 2 or len(mid_auto) < 2:
+                if mid_auto.ndim != 2 or mid_auto.shape[1] != 2 or len(mid_auto) < 3:
                     continue
 
                 ge_auto = ab.get("geodesic_edges")
@@ -3840,8 +3840,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 if not members:
                     continue
 
-                members_str = "_".join(str(m) for m in members)
-                cmb_root = os.path.join(metrics_dir, f"combined{ccid}_{members_str}")
+                semantic_id = cmb.get("semantic_id") or "_".join(map(str, members)) or str(ccid)
+
+                cmb_root = os.path.join(metrics_dir, f"combined_{semantic_id}")
                 mode_dir = os.path.join(cmb_root, mode_label)
                 os.makedirs(mode_dir, exist_ok=True)
 
@@ -4066,8 +4067,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     if not members:
                         continue
 
-                    members_str = "_".join(map(str, members))
-                    cmb_root = os.path.join(metrics_dir, f"combined{ccid}_{members_str}")
+                    semantic_id = cmb.get("semantic_id") or "_".join(map(str, members)) or str(ccid)
+
+                    cmb_root = os.path.join(metrics_dir, f"combined_{semantic_id}")
                     mode_dir = os.path.join(cmb_root, "auto" if is_auto else "manual")
                     os.makedirs(mode_dir, exist_ok=True)
 
@@ -4166,7 +4168,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                         mid_global=mid,
                         e1_global=e1,
                         e2_global=e2,
-                        out_normals_name="auto_normals.png" if is_auto else "gt_normals.png",
+                        out_normals_name="auto_normals.png" if is_auto else "manual_normals.png",
                         out_iou_name="gt_vs_auto_mask.png" if is_auto else "gt_vs_manual_mask.png",
                         out_width_name="widths_colormap_on_crop_auto.png" if is_auto else "widths_colormap_on_crop.png",
                     )
@@ -4181,7 +4183,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     _append_mask_row(
                         crack_type=crack_type,
                         crack_id=str(ccid),
-                        members=members_str,
+                        members=semantic_id,
                         base=base,
                         bnd=bnd,
                         surf=surf,
@@ -4190,7 +4192,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     agg |= (combined_mask > 0).astype(np.uint8)
 
                     print(
-                        f"[DEBUG MASK] {crack_type} id={ccid}({members_str}) "
+                        f"[DEBUG MASK] {crack_type} id={ccid}({semantic_id}) "
                         f"IoU={base['iou']:.4f} bF1={bnd['boundary_f1']:.4f}"
                     )
 
@@ -4345,17 +4347,17 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print("[DEBUG METRICS] width comparisons ...")
 
             # MANUAL
-            _run_width_eval(atomic_src=atomic, tag="manual")
+            _run_width_eval(atomic_src=atomic, tag="manual_atomic")
 
             combined_for_width = _prep_combined_for_width(combined_map)
-            _run_width_eval(combined_src=combined_for_width, tag="combined")
+            _run_width_eval(combined_src=combined_for_width, tag="manual_combined")
 
             # AUTO
             if include_auto and auto_atomic:
-                _run_width_eval(atomic_src=auto_atomic, tag="auto")
+                _run_width_eval(atomic_src=auto_atomic, tag="auto_atomic")
 
                 combined_auto_for_width = _prep_combined_for_width(auto_combined_map)
-                _run_width_eval(combined_src=combined_auto_for_width, tag="combined_auto")
+                _run_width_eval(combined_src=combined_auto_for_width, tag="auto_combined")
 
         except Exception as e:
             print(f"[DEBUG WIDTH] failed: {e}")
@@ -6191,6 +6193,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             )
         except Exception as e:
             print(f"[quick] ❌ compute_mask_and_width_metrics_for_image failed: {e}")
+            import traceback
+            traceback.print_exc()
         t_metrics = time.perf_counter() - t_metrics_start
 
         # ------------------------------------------------------------

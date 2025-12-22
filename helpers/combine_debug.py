@@ -231,4 +231,13 @@ def auto_groups_from_atomic(annotation_dict_or_atomic,
         groups.append(sorted(comp, key=lambda x: int(x) if x.isdigit() else x))
 
     print(f"[COMBINE_DBG] found {len(groups)} groups: {groups}")
-    return {str(i): {"members": g} for i, g in enumerate(groups) if len(g) >= 2}
+    return {
+    str(i): {
+        "ccid": str(i),                      # internal / placeholder ID
+        "members": g,
+        "semantic_id": "_".join(map(str, g)) # stable semantic ID
+    }
+    for i, g in enumerate(groups)
+    if len(g) >= 2
+}
+
