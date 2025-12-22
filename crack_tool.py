@@ -4369,6 +4369,112 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         try:
             timing_rows = []
 
+            def _accum_timing(
+                crack_map,
+                crack_type,
+                *,
+                supervision,           # "manual" or "auto"
+                prefer_semantic_id=False,
+            ):
+                for cid, cr in (crack_map or {}).items():
+                    if not isinstance(cr, dict):
+                        continue
+
+                    # pull timing
+                    tdict = cr.get("subtiming")
+                    if not isinstance(tdict, dict) or not tdict:
+                        tdict = cr.get("timing")
+                    if not isinstance(tdict, dict) or not tdict:
+                        print(f"[TIMING DBG] skip {crack_type} cid={cid}: no timing")
+                        continue
+
+                    # extract algorithm variant safely
+                    algo_variant = tdict.get("mode")  # "new"/"old"
+                    tdict = dict(tdict)
+                    tdict.pop("mode", None)            # 🔥 remove collision
+
+                    # crack id
+                    if prefer_semantic_id:
+                        crack_id = cr.get("semantic_id") or cr.get("members_str") or str(cid)
+                        print(crack_id)
+                    else:
+                        crack_id = str(cid)
+
+                    row = {
+                        "crack_type": crack_type,        # atomic / combined
+                        "supervision": supervision,      # manual / auto
+                        "algo_variant": algo_variant,    # new / old / None
+                        "crack_id": crack_id,
+                    }
+
+                    row.update(tdict)
+                    timing_rows.append(row)
+
+                    print(
+                        f"[TIMING DBG] add {crack_type} "
+                        f"id={crack_id} supervision={supervision} algo={algo_variant}"
+                    )
+
+            # -----------------------------
+            # MANUAL
+            # -----------------------------
+            _accum_timing(
+                atomic,
+                "atomic",
+                supervision="manual",
+                prefer_semantic_id=False,
+            )
+            _accum_timing(
+                combined_map,
+                "combined",
+                supervision="manual",
+                prefer_semantic_id=True,
+            )
+
+            # -----------------------------
+            # AUTO
+            # -----------------------------
+            if include_auto and auto_atomic:
+                _accum_timing(
+                    auto_atomic,
+                    "atomic",
+                    supervision="auto",
+                    prefer_semantic_id=False,
+                )
+                _accum_timing(
+                    auto_combined_map,
+                    "combined",
+                    supervision="auto",
+                    prefer_semantic_id=True,
+                )
+
+            if timing_rows:
+                timing_df = pd.DataFrame(timing_rows)
+
+                # enforce schema (defensive)
+                for col in ("crack_type", "supervision", "algo_variant", "crack_id"):
+                    if col not in timing_df.columns:
+                        timing_df[col] = None
+
+                timing_csv = os.path.join(metrics_dir, "timings_core.csv")
+                timing_df.to_csv(timing_csv, index=False)
+
+                print("[TIMING DBG] wrote CSV:", timing_csv)
+                print(timing_df[["crack_type", "supervision", "algo_variant", "crack_id"]])
+
+                from helpers.plot_metrics import plot_core_timing_bars
+                plot_core_timing_bars(metrics_dir)
+
+            else:
+                print("[TIMING DBG] no timing rows collected")
+
+        except Exception as e:
+            print(f"[DEBUG TIMING] timing summary failed: {e}")
+            traceback.print_exc()
+
+        '''try:
+            timing_rows = []
+
             def _accum_timing(crack_map, crack_type):
                 for cid, cr in (crack_map or {}).items():
                     tdict = (cr.get("timing") or {}) if isinstance(cr, dict) else {}
@@ -4399,7 +4505,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         except Exception as e:
             print(f"[DEBUG TIMING] timing summary failed: {e}")
-            traceback.print_exc()
+            traceback.print_exc()'''
 
         # ------------------------------------------------------------------
         # 10) FINAL SUMMARY / PRESENTATION PLOTS

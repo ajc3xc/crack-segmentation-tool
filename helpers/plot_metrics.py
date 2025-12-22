@@ -745,7 +745,7 @@ def plot_width_differences(midline, w_mask, w_edge, mask, contours=None,
 
     return diffs
 
-def plot_core_timing_bars(metrics_dir, base_name, out_png):
+'''def plot_core_timing_bars(metrics_dir, base_name, out_png):
     import os, numpy as np, pandas as pd
     import matplotlib.pyplot as plt
 
@@ -898,4 +898,196 @@ def plot_core_timing_bars(metrics_dir, base_name, out_png):
         plt.tight_layout()
         out_comb = os.path.join(metrics_dir, f"{base_name}_timings_combined.png")
         plt.savefig(out_comb, dpi=160, bbox_inches="tight")
-        plt.close()
+        plt.close()'''
+
+def plot_core_timing_bars(metrics_dir):
+    import os
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    csv_path = os.path.join(metrics_dir, "timings_core.csv")
+    if not os.path.exists(csv_path):
+        print("[TIMING_PLOT] ❌ no timing CSV:", csv_path)
+        return
+
+    df = pd.read_csv(csv_path)
+    print("[TIMING_PLOT] loaded CSV rows =", len(df))
+    print(df[["crack_type", "supervision", "algo_variant", "crack_id"]])
+
+    def _to_num(v):
+        try:
+            return float(pd.to_numeric(v, errors="coerce"))
+        except Exception:
+            return 0.0
+
+    def _fmt_id(v):
+        try:
+            fv = float(v)
+            if abs(fv - round(fv)) < 1e-9:
+                return str(int(round(fv)))
+        except Exception:
+            pass
+        return str(v)
+
+    # ------------------------------------------------------------
+    # LOOP BY SUPERVISION (NO COLLAPSING, NO MAGIC)
+    # ------------------------------------------------------------
+    for supervision in sorted(df["supervision"].dropna().unique()):
+        print(f"\n[TIMING_PLOT] === SUPERVISION: {supervision} ===")
+
+        dfm = df[df["supervision"] == supervision].copy()
+
+        atomic_df = dfm[dfm["crack_type"] == "atomic"].copy()
+        combined_df = dfm[dfm["crack_type"] == "combined"].copy()
+
+        print("[TIMING_PLOT] atomic rows   =", len(atomic_df))
+        print("[TIMING_PLOT] combined rows =", len(combined_df))
+
+        # ==========================================================
+        # (A) CORE RUNTIME SUMMARY
+        # ==========================================================
+        labels, vals = [], []
+
+        if not atomic_df.empty:
+            labels.append("Edge masks / atomic")
+            vals.append(np.nansum(atomic_df["edge_masks_sec"].apply(_to_num)))
+
+            labels.append("Edge tracking / atomic")
+            vals.append(np.nansum(atomic_df["edges_tracking_sec"].apply(_to_num)))
+
+        if not combined_df.empty:
+            labels.append("Combined crack")
+            vals.append(np.nansum(combined_df["build_combined_sec"].apply(_to_num)))
+
+        if labels:
+            fig, ax = plt.subplots(figsize=(8, 4), dpi=160)
+            xs = np.arange(len(labels))
+            ax.bar(xs, vals)
+            ax.set_xticks(xs)
+            ax.set_xticklabels(labels, rotation=15, ha="right", fontweight="bold")
+            ax.set_ylabel("Time (s)")
+            ax.set_title(f"Core runtime per image — {supervision}")
+
+            for i, v in enumerate(vals):
+                ax.text(xs[i], max(v * 1.03, 0.01), f"{v:.2f}", ha="center")
+
+            out_core = os.path.join(metrics_dir, f"timings_core_{supervision}.png")
+            plt.tight_layout()
+            plt.savefig(out_core, dpi=160, bbox_inches="tight")
+            plt.close()
+            print("[TIMING_PLOT] wrote:", out_core)
+
+        # ==========================================================
+        # (B) ATOMIC EDGE-TRACKING SUBTIMINGS (RESTORED)
+        # ==========================================================
+        if not atomic_df.empty:
+            print("[TIMING_PLOT] building atomic edge-tracking breakdown")
+
+            atomic_df["_cid_num"] = atomic_df["crack_id"].apply(_to_num)
+            atomic_df = atomic_df.sort_values("_cid_num")
+
+            core_cols = [
+                "edges_gradients_sec",
+                "edges_tensor_sec",
+                "edges_mask_norm_sec",
+                "edges_metric_build_sec",
+                "edges_geodesic1_sec",
+                "edges_geodesic2_sec",
+                "edges_pair_normals_sec",
+            ]
+
+            crack_ids = [_fmt_id(x) for x in atomic_df["crack_id"]]
+            fig2, ax2 = plt.subplots(
+                figsize=(6 + len(crack_ids) * 1.5, 4), dpi=160
+            )
+            xs = np.arange(len(crack_ids))
+
+            for idx, (_, row) in enumerate(atomic_df.iterrows()):
+                total = _to_num(row.get("edges_tracking_sec", 0.0))
+                internal = sum(_to_num(row.get(c, 0.0)) for c in core_cols)
+                remainder = max(total - internal, 0.0)
+
+                bottom = 0.0
+                for c in core_cols:
+                    v = _to_num(row.get(c, 0.0))
+                    ax2.bar(idx, v, bottom=bottom,
+                            label=(c if idx == 0 else ""))
+                    bottom += v
+
+                ax2.bar(idx, remainder, bottom=bottom,
+                        label=("edges_remainder_sec" if idx == 0 else ""))
+
+            ax2.set_xticks(xs)
+            ax2.set_xticklabels([f"cid {c}" for c in crack_ids],
+                                fontsize=10, fontweight="bold")
+            ax2.set_ylabel("Time (s)")
+            ax2.set_title(f"Atomic edges tracking breakdown — {supervision}",
+                          fontsize=13, fontweight="bold")
+            ax2.legend(fontsize=8, bbox_to_anchor=(1.05, 1), loc="upper left")
+
+            out_atomic = os.path.join(
+                metrics_dir, f"timings_edges_tracking_{supervision}.png"
+            )
+            plt.tight_layout()
+            plt.savefig(out_atomic, dpi=160, bbox_inches="tight")
+            plt.close()
+            print("[TIMING_PLOT] wrote:", out_atomic)
+
+        # ==========================================================
+        # (C) COMBINED CRACK TIMING STACK
+        # ==========================================================
+        print(combined_df)
+        if not combined_df.empty:
+            print("[TIMING_PLOT] building combined timing breakdown")
+
+            combined_df["_cid_num"] = combined_df["crack_id"].apply(_to_num)
+            combined_df = combined_df.sort_values("_cid_num")
+
+            fig3, ax3 = plt.subplots(
+                figsize=(6 + len(combined_df) * 1.5, 4), dpi=160
+            )
+            xs = np.arange(len(combined_df))
+
+            for idx, (_, r) in enumerate(combined_df.iterrows()):
+                t_stitch = _to_num(r.get("stitching_sec", 0))
+                t_masks  = _to_num(r.get("combine_edge_masks_sec", 0))
+                t_track  = _to_num(r.get("combine_edge_tracking_sec", 0))
+                t_post   = _to_num(r.get("combine_postprocess_sec", 0))
+                total    = _to_num(r.get("build_combined_sec", 0))
+
+                rem = max(total - (t_stitch + t_masks + t_track + t_post), 0.0)
+
+                parts = [
+                    ("stitching_sec", t_stitch),
+                    ("combine_edge_masks_sec", t_masks),
+                    ("combine_edge_tracking_sec", t_track),
+                    ("combine_postprocess_sec", t_post),
+                    ("overhead_remainder_sec", rem),
+                ]
+
+                bottom = 0.0
+                for name, v in parts:
+                    ax3.bar(idx, v, bottom=bottom,
+                            label=(name if idx == 0 else ""))
+                    bottom += v
+
+            labels = combined_df.get(
+                "semantic_id", combined_df["crack_id"]
+            ).apply(_fmt_id)
+
+            ax3.set_xticks(xs)
+            ax3.set_xticklabels([f"comb_{l}" for l in labels],
+                                fontsize=10, fontweight="bold")
+            ax3.set_ylabel("Time (s)")
+            ax3.set_title(f"Combined crack subtiming breakdown — {supervision}",
+                          fontsize=13, fontweight="bold")
+            ax3.legend(fontsize=8, bbox_to_anchor=(1.05, 1), loc="upper left")
+
+            out_comb = os.path.join(
+                metrics_dir, f"timings_combined_{supervision}.png"
+            )
+            plt.tight_layout()
+            plt.savefig(out_comb, dpi=160, bbox_inches="tight")
+            plt.close()
+            print("[TIMING_PLOT] wrote:", out_comb)
