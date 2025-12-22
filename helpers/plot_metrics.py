@@ -935,6 +935,10 @@ def plot_core_timing_bars(metrics_dir):
     # ------------------------------------------------------------
     for supervision in sorted(df["supervision"].dropna().unique()):
         print(f"\n[TIMING_PLOT] === SUPERVISION: {supervision} ===")
+        
+        #dumb but works
+        supervision_type_dir = os.path.join(metrics_dir, supervision)
+        os.makedirs(supervision_type_dir, exist_ok=True)
 
         dfm = df[df["supervision"] == supervision].copy()
 
@@ -972,7 +976,7 @@ def plot_core_timing_bars(metrics_dir):
             for i, v in enumerate(vals):
                 ax.text(xs[i], max(v * 1.03, 0.01), f"{v:.2f}", ha="center")
 
-            out_core = os.path.join(metrics_dir, f"timings_core_{supervision}.png")
+            out_core = os.path.join(metrics_dir, supervision, f"timings_core_{supervision}.png")
             plt.tight_layout()
             plt.savefig(out_core, dpi=160, bbox_inches="tight")
             plt.close()
@@ -1027,7 +1031,7 @@ def plot_core_timing_bars(metrics_dir):
             ax2.legend(fontsize=8, bbox_to_anchor=(1.05, 1), loc="upper left")
 
             out_atomic = os.path.join(
-                metrics_dir, f"timings_edges_tracking_{supervision}.png"
+                metrics_dir, supervision, f"timings_edges_tracking_{supervision}.png"
             )
             plt.tight_layout()
             plt.savefig(out_atomic, dpi=160, bbox_inches="tight")
@@ -1088,7 +1092,7 @@ def plot_core_timing_bars(metrics_dir):
             ax3.legend(fontsize=8, bbox_to_anchor=(1.05, 1), loc="upper left")
 
             out_comb = os.path.join(
-                metrics_dir, f"timings_combined_{supervision}.png"
+                metrics_dir, supervision, f"timings_combined_{supervision}.png"
             )
             plt.tight_layout()
             plt.savefig(out_comb, dpi=160, bbox_inches="tight")

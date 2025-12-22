@@ -865,6 +865,7 @@ def build_combined_crack_stateless(
     debug_dir=None,
     debug_callback=None,
     crack_mask_full: np.ndarray = None,   # ← NEW (H,W) uint8/bool
+    mode = "new"
 ):
     """
     Stateless “metrics-safe” combiner with fully instrumented timing.
@@ -948,7 +949,8 @@ def build_combined_crack_stateless(
         em1, em2 = edge_masks(
             crop.astype(np.uint8),
             track_local_yx,
-            window_half_size=window_half_size
+            window_half_size=window_half_size,
+            mode=mode
         )
         t_em1 = time.perf_counter()
         t_masks_total += (t_em1 - t_em0)
@@ -965,7 +967,8 @@ def build_combined_crack_stateless(
             midline=midline_xy_crop,
             mu=int(mu), l=int(l), p=int(p),
             return_normal_edges=True,
-            prefer_gpu=prefer_gpu
+            prefer_gpu=prefer_gpu,
+            mode=mode
         )
         t_et1 = time.perf_counter()
         t_edges_total += (t_et1 - t_et0)
@@ -1101,6 +1104,7 @@ def build_combined_crack_stateless(
     return {
         "source": "combined",
         "semantic_id": semantic_id,
+        "mode": mode,
         "members": [str(m) for m in member_ids],
         "midline_segments": [
             [[float(xx), float(yy)] for (xx, yy) in s] for s in segs

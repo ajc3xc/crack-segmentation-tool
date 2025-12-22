@@ -4307,7 +4307,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             *,
             atomic_src=None,
             combined_src=None,
-            tag,
+            midline_type,
+            crack_type
         ):
             rows = []
 
@@ -4323,7 +4324,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 base_name,
                 metrics_dir,
                 display=display,
-                tag=tag,
+                midline_type=midline_type,
+                crack_type=crack_type,
                 return_normals=False,
                 normals_plot=False,
                 gt_sup_root=gt_sup_root,
@@ -4333,9 +4335,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 return
 
             rows = ret[0]
-            width_summary_to_csv(metrics_dir, base_name, rows, tag)
+            width_summary_to_csv(metrics_dir, base_name, rows, f"{midline_type}_{crack_type}")
 
-            out_png = os.path.join(metrics_dir, f"{tag}_width_diffs_overlay.png")
+            out_png = os.path.join(metrics_dir, f"{midline_type}_{crack_type}_width_diffs_overlay.png")
             write_width_diff_overlay(
                 H, W,
                 rows,
@@ -4347,17 +4349,17 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print("[DEBUG METRICS] width comparisons ...")
 
             # MANUAL
-            _run_width_eval(atomic_src=atomic, tag="manual_atomic")
+            _run_width_eval(atomic_src=atomic, midline_type="manual", crack_type="atomic")
 
             combined_for_width = _prep_combined_for_width(combined_map)
-            _run_width_eval(combined_src=combined_for_width, tag="manual_combined")
+            _run_width_eval(combined_src=combined_for_width, midline_type="manual", crack_type="combined")
 
             # AUTO
             if include_auto and auto_atomic:
-                _run_width_eval(atomic_src=auto_atomic, tag="auto_atomic")
+                _run_width_eval(atomic_src=auto_atomic, midline_type="auto", crack_type="atomic")
 
                 combined_auto_for_width = _prep_combined_for_width(auto_combined_map)
-                _run_width_eval(combined_src=combined_auto_for_width, tag="auto_combined")
+                _run_width_eval(combined_src=combined_auto_for_width, midline_type="auto", crack_type="combined")
 
         except Exception as e:
             print(f"[DEBUG WIDTH] failed: {e}")
@@ -4471,41 +4473,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         except Exception as e:
             print(f"[DEBUG TIMING] timing summary failed: {e}")
             traceback.print_exc()
-
-        '''try:
-            timing_rows = []
-
-            def _accum_timing(crack_map, crack_type):
-                for cid, cr in (crack_map or {}).items():
-                    tdict = (cr.get("timing") or {}) if isinstance(cr, dict) else {}
-                    if tdict:
-                        row = {
-                            "image": base_name,
-                            "crack_type": crack_type,
-                            "crack_id": str(cid),
-                        }
-                        row.update(tdict)
-                        timing_rows.append(row)
-
-            _accum_timing(atomic, "atomic")
-            _accum_timing(combined_map, "combined")
-
-            if include_auto and auto_atomic:
-                _accum_timing(auto_atomic, "atomic_auto")
-                _accum_timing(auto_combined_map, "combined_auto")
-
-            if timing_rows:
-                timing_df = pd.DataFrame(timing_rows)
-                timing_csv = os.path.join(metrics_dir, f"{base_name}_timings_core.csv")
-                timing_df.to_csv(timing_csv, index=False)
-
-                from helpers.plot_metrics import plot_core_timing_bars
-                timing_png = os.path.join(metrics_dir, f"{base_name}_timings_core.png")
-                plot_core_timing_bars(metrics_dir, base_name, timing_png)
-
-        except Exception as e:
-            print(f"[DEBUG TIMING] timing summary failed: {e}")
-            traceback.print_exc()'''
 
         # ------------------------------------------------------------------
         # 10) FINAL SUMMARY / PRESENTATION PLOTS

@@ -947,7 +947,8 @@ def compare_widths_for_cracks(
     base_name,
     metrics_dir,
     display=False,
-    tag=None,
+    midline_type=None,
+    crack_type=None,
     return_normals=False,
     normals_plot=False,
     normals_dir=None,
@@ -1201,7 +1202,9 @@ def compare_widths_for_cracks(
         cb.set_ticks(cleaned)
         cb.set_ticklabels([f"{t:.1f}" for t in cleaned])
 
-    out = os.path.join(metrics_dir, f"DEBUG_{base_name}_{tag}_width_diffs.png")
+    out_dir = os.path.join(metrics_dir, midline_type)
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, f"{midline_type}_{crack_type}_width_diffs.png")
     fig.savefig(out, dpi=200, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
 
