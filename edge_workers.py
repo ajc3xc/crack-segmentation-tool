@@ -563,11 +563,6 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         track_e2 = np.asarray(track_e2, float)
 
         hc, wc = img_norm.shape[:2]
-        '''mask_crop = _crop_mask_from_edges(
-            hc, wc,
-            track_e1, track_e2,
-            midline_xy=midline_xy_crop,
-        )'''
         
         normals_e1, normals_e2 = extract_normals_from_res(res)
         subtiming = res.get("subtiming", {})
@@ -689,7 +684,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 e1 = np.column_stack([e1x, e1y])
                 e2 = np.column_stack([e2x, e2y])
-                gt_normals_path = os.path.join(dbg_dir, "gt_normals.png")
+                gt_normals_path = os.path.join(dbg_dir, f"{midline_tag}_normals.png")
                 plot_gt_normals_on_gtbw(
                     gt_mask_u8,
                     midline_xy_crop,

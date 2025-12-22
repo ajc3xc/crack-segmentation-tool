@@ -496,280 +496,6 @@ def _run_geodesic(metric_array, seeds, tips, sides, dims, strict=True, prefer_gp
             softened = np.power(np.asarray(metric_array, dtype=np.float64), 0.5)
             return _run_geodesic(softened, seeds, tips, sides, dims, strict=False, prefer_gpu=prefer_gpu)
     return track_yx
-    
-'''def edges_tracking(
-    image_crop, pts_cropp,
-    edge_mask1_cropp, edge_mask2_cropp,
-    midline=None, mu=5, l=2, p=6,
-    return_normal_edges=True
-):
-    """
-    Robust edge tracking: uses normalized masks, safer parameters,
-    and geodesic retry if path deviates.
-    """
-    seeds = np.array([*pts_cropp[0][::-1]])  # (y,x)
-    tips  = np.array([*pts_cropp[1][::-1]])  # (y,x)
-    b = np.array([0, image_crop.shape[0]])
-    c = np.array([0, image_crop.shape[1]])
-    sides = np.array([b, c])
-    dims = np.array([image_crop.shape[0], image_crop.shape[1]])
-
-    DxZ, DyZ = np.gradient(image_crop)
-    a11 = scipy.ndimage.gaussian_filter(mu * DxZ**2, 1)
-    a12 = scipy.ndimage.gaussian_filter(mu * DxZ * DyZ, 1)
-    a21 = scipy.ndimage.gaussian_filter(mu * DxZ * DyZ, 1)
-    a22 = scipy.ndimage.gaussian_filter(mu * DyZ**2, 1)
-
-    # --- enforce symmetry & positivity ---
-    a12 = a21 = 0.5 * (a12 + a21)
-    df = np.abs(np.array([[1 + a11, a12],
-                          [a21, 1 + a22]]))
-
-    # --- normalize edge masks safely ---
-    def norm_mask(m):
-        m = m.astype(float)
-        m = m - m.min()
-        m = m / (m.max() + 1e-9)
-        return np.clip(m, 0, 1)
-
-    em1 = norm_mask(edge_mask1_cropp.squeeze())
-    em2 = norm_mask(edge_mask2_cropp.squeeze())
-
-    # --- safer exponentiation and debug checks ---
-    metric1 = (1 + em1 * l) ** min(p, 4) * df
-    metric2 = (1 + em2 * l) ** min(p, 4) * df
-
-    # --- NaN / negative debug diagnostics ---
-    for name, arr in [("metric1", metric1), ("metric2", metric2)]:
-        if np.any(np.isnan(arr)):
-            nan_ratio = np.mean(np.isnan(arr))
-            print(f"[DEBUG seg] NaNs detected in {name} ({nan_ratio*100:.2f}% NaN)")
-        if np.any(arr < 0):
-            neg_ratio = np.mean(arr < 0)
-            print(f"[DEBUG seg] Negative values detected in {name} ({neg_ratio*100:.2f}% of pixels)")
-        if np.any(np.isinf(arr)):
-            inf_ratio = np.mean(np.isinf(arr))
-            print(f"[DEBUG seg] Infs detected in {name} ({inf_ratio*100:.2f}% of pixels)")
-        print(f"[DEBUG seg] {name} stats: min={np.nanmin(arr):.3e}, max={np.nanmax(arr):.3e}")
-
-    # --- geodesics ---
-    track_e1 = _run_geodesic(metric1, seeds, tips, sides, dims)
-    track_e2 = _run_geodesic(metric2, seeds, tips, sides, dims)
-
-    # convert to (x,y)
-    track_e1 = np.stack([track_e1[:, 1], track_e1[:, 0]], axis=1)
-    track_e2 = np.stack([track_e2[:, 1], track_e2[:, 0]], axis=1)
-
-    normal_edges = None
-    normal_edges_clipped = None
-
-    if return_normal_edges and midline is not None:
-        from .segmentation import find_normal_pair  # import your existing function
-        m = np.asarray(midline)
-        if m.ndim == 2 and m.shape[1] == 2:
-            mid_x, mid_y = m[:, 0], m[:, 1]
-        elif m.ndim == 2 and m.shape[0] == 2:
-            mid_x, mid_y = m[0], m[1]
-        else:
-            raise ValueError("midline must be (N,2) or (2,N)")
-
-        e1x, e1y, e2x, e2y = find_normal_pair(mid_x, mid_y, track_e1, track_e2)
-        normal_edges = [[e1x.copy(), e1y.copy()], [e2x.copy(), e2y.copy()]]
-        e1x_clip = np.clip(e1x, 0, image_crop.shape[1]-1)
-        e1y_clip = np.clip(e1y, 0, image_crop.shape[0]-1)
-        e2x_clip = np.clip(e2x, 0, image_crop.shape[1]-1)
-        e2y_clip = np.clip(e2y, 0, image_crop.shape[0]-1)
-        normal_edges_clipped = [[e1x_clip, e1y_clip], [e2x_clip, e2y_clip]]
-
-    return {
-        "geodesic_edges": [track_e1, track_e2],
-        "normal_edge_points": normal_edges,
-        "normal_edge_points_clipped": normal_edges_clipped,
-    }'''
-    
-'''def edges_tracking(
-    image_crop, pts_cropp,
-    edge_mask1_cropp, edge_mask2_cropp,
-    midline=None, mu=5, l=2, p=6,
-    return_normal_edges=True,
-    prefer_gpu=True,
-    mode="new"   # "new" or "old"
-):
-    """
-    Edge-tracking with complete ablation support and full subtiming.
-    mode="old" → EXACT legacy math (repository version)
-    mode="new" → stabilized metric (normalized masks, symmetric df, exponent clamp)
-
-    Both modes:
-        • Use the same _run_geodesic (GPU-optional)
-        • Use same normal pairing
-        • Return identical shapes
-        • Full per-stage timing identical to your pre-refactor version
-    """
-    import time
-    import numpy as np
-    import scipy.ndimage
-
-    from agd.Metrics import Riemann
-
-    # GLOBAL timing
-    t0_all = time.perf_counter()
-
-    # seeds/tips (x,y) → (y,x)
-    seeds_yx = np.array([pts_cropp[0][1], pts_cropp[0][0]], dtype=float)
-    tips_yx  = np.array([pts_cropp[1][1], pts_cropp[1][0]], dtype=float)
-
-    H, W = image_crop.shape[:2]
-    sides = np.array([[0, H], [0, W]])
-    dims  = np.array([H, W])
-
-    # ----------------------------------------------------------
-    # 1. GRADIENTS  (same timing block for both modes)
-    # ----------------------------------------------------------
-    t0 = time.perf_counter()
-    Dx, Dy = np.gradient(image_crop.astype(np.float64))
-    t1 = time.perf_counter()
-    t_grad = t1 - t0
-
-    # ----------------------------------------------------------
-    # 2. STRUCTURE TENSOR + METRIC BASE (mode-dependent)
-    # ----------------------------------------------------------
-    if mode == "old":
-        # Original non-symmetric structure tensor (order=(0,0))
-        a11 = scipy.ndimage.gaussian_filter(mu * Dx*Dx, 1, order=(0,0))
-        a12 = scipy.ndimage.gaussian_filter(mu * Dx*Dy, 1, order=(0,0))
-        a21 = scipy.ndimage.gaussian_filter(mu * Dx*Dy, 1, order=(0,0))
-        a22 = scipy.ndimage.gaussian_filter(mu * Dy*Dy, 1, order=(0,0))
-
-        df = np.array([[1 + a11, a12],
-                       [a21,     1 + a22]])
-
-    else:  # NEW
-        # Symmetric tensor with abs for numeric safety
-        a11 = scipy.ndimage.gaussian_filter(mu * Dx*Dx, 1)
-        a22 = scipy.ndimage.gaussian_filter(mu * Dy*Dy, 1)
-        a12 = scipy.ndimage.gaussian_filter(mu * Dx*Dy, 1)
-        a21 = a12
-        a12 = a21 = 0.5 * (a12 + a21)
-
-        df = np.abs(np.array([
-            [1 + a11, a12],
-            [a21,     1 + a22]
-        ], dtype=object))
-
-    t2 = time.perf_counter()
-    t_tensor = t2 - t1
-
-    # ----------------------------------------------------------
-    # 3. MASK NORMALIZATION (real difference between old/new)
-    # ----------------------------------------------------------
-    if mode == "old":
-        em1 = np.squeeze(edge_mask1_cropp)
-        em2 = np.squeeze(edge_mask2_cropp)
-
-    else:  # NEW
-        def _norm01(m):
-            m = m.astype(np.float64)
-            m -= m.min()
-            mx = m.max()
-            return m / (mx + 1e-12) if mx > 0 else m
-
-        em1 = _norm01(np.squeeze(edge_mask1_cropp))
-        em2 = _norm01(np.squeeze(edge_mask2_cropp))
-
-    t3 = time.perf_counter()
-    t_normmasks = t3 - t2
-
-    # ----------------------------------------------------------
-    # 4. METRIC BUILD  (old exponent vs new exponent clamp)
-    # ----------------------------------------------------------
-    if mode == "old":
-        metric1 = (1 + em1 * l)**p * df
-        metric2 = (1 + em2 * l)**p * df
-    else:
-        pp = min(int(p), 4)
-        metric1 = (1 + em1 * l)**pp * df
-        metric2 = (1 + em2 * l)**pp * df
-
-    t4 = time.perf_counter()
-    t_metric = t4 - t3
-
-    # ----------------------------------------------------------
-    # 5. GEODESIC SOLVES (combined timing)
-    # ----------------------------------------------------------
-    t_geo0 = time.perf_counter()
-    track1_yx = _run_geodesic(metric1, seeds_yx, tips_yx, sides, dims, prefer_gpu=prefer_gpu)
-    track2_yx = _run_geodesic(metric2, seeds_yx, tips_yx, sides, dims, prefer_gpu=prefer_gpu)
-    t_geo1 = time.perf_counter()
-    t_geodesics = t_geo1 - t_geo0
-
-    # convert to (x,y)
-    track_e1 = np.stack([track1_yx[:, 1], track1_yx[:, 0]], axis=1)
-    track_e2 = np.stack([track2_yx[:, 1], track2_yx[:, 0]], axis=1)
-
-    # ----------------------------------------------------------
-    # 6. NORMALS (shared)
-    # ----------------------------------------------------------
-    t_normals_start = time.perf_counter()
-    normal_edges = None
-    normal_edges_clipped = None
-
-    if return_normal_edges and midline is not None:
-        try: 
-            from .segmentation import find_normal_pair
-        except Exception:
-            from segmentation import find_normal_pair
-
-        m = np.asarray(midline)
-        if m.ndim == 2 and m.shape[1] == 2:
-            mid_x, mid_y = m[:, 0], m[:, 1]
-        else:
-            mid_x, mid_y = m[0], m[1]
-
-        e1x, e1y, e2x, e2y = find_normal_pair(mid_x, mid_y, track_e1, track_e2)
-        normal_edges = [[e1x.copy(), e1y.copy()], [e2x.copy(), e2y.copy()]]
-
-        e1x_c = np.clip(e1x, 0, W-1); e1y_c = np.clip(e1y, 0, H-1)
-        e2x_c = np.clip(e2x, 0, W-1); e2y_c = np.clip(e2y, 0, H-1)
-        normal_edges_clipped = [[e1x_c, e1y_c], [e2x_c, e2y_c]]
-
-    t_normals_end = time.perf_counter()
-    t_normals = t_normals_end - t_normals_start
-
-    # ----------------------------------------------------------
-    # 7. FINAL TIMING CONSISTENCY
-    # ----------------------------------------------------------
-    measured = (
-        t_grad +
-        t_tensor +
-        t_normmasks +
-        t_metric +
-        t_geodesics +
-        t_normals
-    )
-
-    t_all = time.perf_counter() - t0_all
-    t_remainder = max(t_all - measured, 0)
-
-    subtiming = {
-        "mode": mode,
-        "edges_gradients_sec":      float(t_grad),
-        "edges_tensor_sec":         float(t_tensor),
-        "edges_mask_norm_sec":      float(t_normmasks),
-        "edges_metric_build_sec":   float(t_metric),
-        "edges_geodesic_both_sec":  float(t_geodesics),
-        "edges_pair_normals_sec":   float(t_normals),
-        "edges_remainder_sec":      float(t_remainder),
-        "edges_total_internal_sec": float(measured + t_remainder),
-    }
-
-    return {
-        "geodesic_edges": [track_e1, track_e2],
-        "normal_edge_points": normal_edges,
-        "normal_edge_points_clipped": normal_edges_clipped,
-        "subtiming": subtiming,
-    }
-'''
 
 def edges_tracking(
     image_crop, pts_cropp,
@@ -825,6 +551,7 @@ def edges_tracking(
     # --------------------------------------------------
     # 2. Structure tensor
     # --------------------------------------------------
+    t0 = time.perf_counter()
     if mode == "old":
         a11 = scipy.ndimage.gaussian_filter(mu * Dx * Dx, 1, order=(0, 0))
         a12 = scipy.ndimage.gaussian_filter(mu * Dx * Dy, 1, order=(0, 0))
@@ -839,10 +566,12 @@ def edges_tracking(
         a12 = a21 = a12
         df = np.abs(np.array([[1 + a11, a12],
                                [a21,     1 + a22]], dtype=object))
+    t_tensor = time.perf_counter() - t0
 
     # --------------------------------------------------
     # 3. Mask normalization
     # --------------------------------------------------
+    t0 = time.perf_counter()
     if mode == "old":
         em1 = np.squeeze(edge_mask1_cropp)
         em2 = np.squeeze(edge_mask2_cropp)
@@ -854,10 +583,12 @@ def edges_tracking(
             return m / (mx + 1e-12) if mx > 0 else m
         em1 = _norm01(np.squeeze(edge_mask1_cropp))
         em2 = _norm01(np.squeeze(edge_mask2_cropp))
+    t_mask_norm = time.perf_counter() - t0
 
     # --------------------------------------------------
-    # 4. Metric
+    # 4. Metric build
     # --------------------------------------------------
+    t0 = time.perf_counter()
     if mode == "old":
         metric1 = (1 + em1 * l)**p * df
         metric2 = (1 + em2 * l)**p * df
@@ -865,14 +596,18 @@ def edges_tracking(
         pp = min(int(p), 4)
         metric1 = (1 + em1 * l)**pp * df
         metric2 = (1 + em2 * l)**pp * df
+    t_metric = time.perf_counter() - t0
 
     # --------------------------------------------------
-    # 5. Geodesics
+    # 5. Geodesics (separate timers)
     # --------------------------------------------------
-    t_geo0 = time.perf_counter()
+    t0 = time.perf_counter()
     g1_yx = _run_geodesic(metric1, seeds_yx, tips_yx, sides, dims, prefer_gpu=prefer_gpu)
+    t_geo1 = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     g2_yx = _run_geodesic(metric2, seeds_yx, tips_yx, sides, dims, prefer_gpu=prefer_gpu)
-    t_geodesics = time.perf_counter() - t_geo0
+    t_geo2 = time.perf_counter() - t0
 
     e1_raw = np.stack([g1_yx[:, 1], g1_yx[:, 0]], axis=1)
     e2_raw = np.stack([g2_yx[:, 1], g2_yx[:, 0]], axis=1)
@@ -904,7 +639,7 @@ def edges_tracking(
     if do_pp and len(e1) >= 2 and len(e2) >= 2:
         baseN = max(len(e1), len(e2))
         targetN = max(resample_min_points, int(baseN * resample_ratio))
-        targetN = min(targetN, int(1.2 * baseN))  # hard safety cap
+        targetN = min(targetN, int(1.2 * baseN))
 
         e1 = arclen_resample(e1, targetN)
         e2 = arclen_resample(e2, targetN)
@@ -916,7 +651,7 @@ def edges_tracking(
                 return xy
             k = int(k)
             if k % 2 == 0:
-                k += 1  # must be odd
+                k += 1
             x = savgol_filter(xy[:,0], window_length=k, polyorder=2, mode="interp")
             y = savgol_filter(xy[:,1], window_length=k, polyorder=2, mode="interp")
             return np.column_stack([x, y])
@@ -925,45 +660,15 @@ def edges_tracking(
             e1 = _savgol_smooth(e1, smooth_k)
             e2 = _savgol_smooth(e2, smooth_k)
 
-
         e1[:, 0] = np.clip(e1[:, 0], 0, W - 1)
         e1[:, 1] = np.clip(e1[:, 1], 0, H - 1)
         e2[:, 0] = np.clip(e2[:, 0], 0, W - 1)
         e2[:, 1] = np.clip(e2[:, 1], 0, H - 1)
 
     # --------------------------------------------------
-    # Optional debug plots
+    # 6. Normals
     # --------------------------------------------------
-    if debug_dir is not None:
-        from helpers.plot_metrics import plot_edges_and_normals
-        os.makedirs(debug_dir, exist_ok=True)
-
-        plot_edges_and_normals(
-            base_image=image_crop,
-            midline_segs=[midline] if midline is not None else [],
-            edge1_segs=[e1_raw],
-            edge2_segs=[e2_raw],
-            norm1_segs=[],
-            norm2_segs=[],
-            out_png=os.path.join(debug_dir, "edges_raw.png"),
-            title="Raw geodesic edges",
-        )
-
-        if do_pp:
-            plot_edges_and_normals(
-                base_image=image_crop,
-                midline_segs=[midline] if midline is not None else [],
-                edge1_segs=[e1],
-                edge2_segs=[e2],
-                norm1_segs=[],
-                norm2_segs=[],
-                out_png=os.path.join(debug_dir, "edges_postprocessed.png"),
-                title="Postprocessed (anti-quantized)",
-            )
-
-    # --------------------------------------------------
-    # 6. Normals (FINAL edges)
-    # --------------------------------------------------
+    t0 = time.perf_counter()
     normal_edges = None
     normal_edges_clipped = None
 
@@ -982,14 +687,25 @@ def edges_tracking(
             [np.clip(e1x, 0, W - 1), np.clip(e1y, 0, H - 1)],
             [np.clip(e2x, 0, W - 1), np.clip(e2y, 0, H - 1)],
         ]
+    t_normals = time.perf_counter() - t0
 
     # --------------------------------------------------
     # Timing
     # --------------------------------------------------
     t_all = time.perf_counter() - t0_all
+
     subtiming = {
         "mode": mode,
-        "edges_total_sec": float(t_all),
+        "edges_tracking_sec": float(t_all),
+
+        "edges_gradients_sec": float(t_grad),
+        "edges_tensor_sec": float(t_tensor),
+        "edges_mask_norm_sec": float(t_mask_norm),
+        "edges_metric_build_sec": float(t_metric),
+        "edges_geodesic1_sec": float(t_geo1),
+        "edges_geodesic2_sec": float(t_geo2),
+        "edges_pair_normals_sec": float(t_normals),
+
         "edges_postprocess": bool(do_pp),
         "edges_resample_ratio": float(resample_ratio),
         "edges_smooth_k": int(smooth_k),

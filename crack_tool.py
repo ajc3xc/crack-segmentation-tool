@@ -3960,7 +3960,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             mid_global,
             e1_global,
             e2_global,
-            out_normals_name="gt_normals.png",
+            out_normals_name="placeholder_normals.png",
             out_iou_name="gt_vs_pred_mask.png",
             out_width_name="widths_colormap_on_crop.png",
         ):
