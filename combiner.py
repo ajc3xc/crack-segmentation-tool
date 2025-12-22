@@ -1095,9 +1095,12 @@ def build_combined_crack_stateless(
             print(f"[COMBINE_DBG] debug_callback failed: {e}")
 
     elapsed = float(time.perf_counter() - t0)
+    
+    semantic_id = "_".join(str(m) for m in member_ids)
 
     return {
         "source": "combined",
+        "semantic_id": semantic_id,
         "members": [str(m) for m in member_ids],
         "midline_segments": [
             [[float(xx), float(yy)] for (xx, yy) in s] for s in segs

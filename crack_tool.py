@@ -4396,7 +4396,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     # crack id
                     if prefer_semantic_id:
                         crack_id = cr.get("semantic_id") or cr.get("members_str") or str(cid)
-                        print(crack_id)
+                        print(crack_id, cr.keys())
                     else:
                         crack_id = str(cid)
 

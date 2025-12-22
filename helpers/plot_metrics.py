@@ -1037,12 +1037,17 @@ def plot_core_timing_bars(metrics_dir):
         # ==========================================================
         # (C) COMBINED CRACK TIMING STACK
         # ==========================================================
-        print(combined_df)
+        #print(combined_df)
         if not combined_df.empty:
             print("[TIMING_PLOT] building combined timing breakdown")
 
-            combined_df["_cid_num"] = combined_df["crack_id"].apply(_to_num)
-            combined_df = combined_df.sort_values("_cid_num")
+            # Preserve insertion / CSV order for semantic IDs
+            combined_df = combined_df.reset_index(drop=True)
+            combined_df["_sort_key"] = combined_df["crack_id"].apply(
+                lambda s: [int(x) for x in s.split("_")]
+            )
+            combined_df = combined_df.sort_values("_sort_key").drop(columns="_sort_key")
+
 
             fig3, ax3 = plt.subplots(
                 figsize=(6 + len(combined_df) * 1.5, 4), dpi=160
@@ -1072,9 +1077,7 @@ def plot_core_timing_bars(metrics_dir):
                             label=(name if idx == 0 else ""))
                     bottom += v
 
-            labels = combined_df.get(
-                "semantic_id", combined_df["crack_id"]
-            ).apply(_fmt_id)
+            labels = combined_df["crack_id"].astype(str)
 
             ax3.set_xticks(xs)
             ax3.set_xticklabels([f"comb_{l}" for l in labels],
