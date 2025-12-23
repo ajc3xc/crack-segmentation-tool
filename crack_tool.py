@@ -3657,7 +3657,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             reconstruct_manual_mask_from_edges,
             mask_iou,
             has_valid_mask,
-            manual_mask_from_crack,
             safe_write_json,
             metric_atomic_path_for,
             width_summary_to_csv,
@@ -3669,9 +3668,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         from helpers.combine_debug import _mask_from_crack, auto_groups_from_atomic
         from combiner import build_combined_crack_stateless
         from helpers import metrics as metrics_mod   # for _auto_cache_key
-        from helpers.plot_metrics import save_gt_vs_manual_overlay
+        #from helpers.plot_metrics import save_gt_vs_manual_overlay
         from helpers.supervision import export_gt_supervision_for_image as _export_gt_sup
-        from cracktools.segmentation import generate_mask_from_edges
+        #from cracktools.segmentation import generate_mask_from_edges
 
         print(f"[DEBUG METRICS] ===== START for {getattr(self, 'name', '?')} =====")
         if getattr(self, "current_mask", None) is None:
@@ -3909,15 +3908,22 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             row.update(surf)
             mask_rows.append(row)
 
-
-        def _compute_and_record_atomic_metrics(*, atomic_src, combined_src, crack_type, supervision):
+        def _compute_and_record_atomic_metrics(
+            *,
+            atomic_src,
+            combined_src,
+            crack_type,
+            supervision,
+        ):
             """
-            Manual: uses manual_mask_from_crack and skips atomics that are part of combined groups.
-            Auto:   uses _mask_from_crack and DOES NOT skip (mirrors your current behavior).
-            Returns agg_mask (H,W uint8).
+            Atomic metrics:
+            - Metrics are computed ONLY on the bbox crop
+            - Returned mask is full-image for TOTAL aggregation
+            - Skips atomics that are members of combined cracks (manual + auto)
             """
             agg = np.zeros((H, W), np.uint8)
 
+            # atomics that belong to combined cracks should be excluded
             combined_members_flat = {
                 str(m)
                 for g in (combined_src or {}).values()
@@ -3927,39 +3933,71 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             for cid, crack in (atomic_src or {}).items():
                 scid = str(cid)
 
-                if crack_type == "atomic" and scid in combined_members_flat:
+                if scid in combined_members_flat:
                     continue
 
                 try:
+                    # --------------------------------------------------
+                    # Build FULL-image prediction mask (authoritative)
+                    # --------------------------------------------------
                     m_full = _mask_from_crack(crack, H, W)
-                    '''if crack_type == "atomic":
-                        m_full = manual_mask_from_crack(crack, H, W)
-                    else:
-                        m_full = _mask_from_crack(crack, H, W)'''
-
-                    if m_full is None or int(np.sum(m_full)) == 0:
+                    if m_full is None or not np.any(m_full):
                         continue
 
-                    agg |= (m_full > 0).astype(np.uint8)
+                    # --------------------------------------------------
+                    # Extract bbox + crop (for METRICS ONLY)
+                    # --------------------------------------------------
+                    bb = crack.get("mask_bbox")
+                    if not bb or len(bb) != 4:
+                        continue
 
-                    base = compute_mask_metrics(gt_full, m_full)
-                    bnd  = boundary_fscore(gt_full, m_full, tau=2.0)
-                    surf = assd_hd95(gt_full, m_full)
+                    x, y, w, h = map(int, bb)
+                    if w <= 0 or h <= 0:
+                        continue
+
+                    x0 = max(0, x)
+                    y0 = max(0, y)
+                    x1 = min(W, x + w)
+                    y1 = min(H, y + h)
+
+                    if x1 <= x0 or y1 <= y0:
+                        continue
+
+                    gt_crop   = gt_full[y0:y1, x0:x1]
+                    pred_crop = m_full[y0:y1, x0:x1]
+
+                    if not np.any(pred_crop):
+                        continue
+
+                    # --------------------------------------------------
+                    # Metrics computed ONLY on the crop
+                    # --------------------------------------------------
+                    base = compute_mask_metrics(gt_crop, pred_crop)
+                    bnd  = boundary_fscore(gt_crop, pred_crop, tau=2.0)
+                    surf = assd_hd95(gt_crop, pred_crop)
 
                     _append_mask_row(
-                        crack_type=crack_type,
+                        crack_type=crack_type,   # "atomic"
                         crack_id=scid,
                         members="",
                         base=base,
                         bnd=bnd,
                         surf=surf,
-                        supervision=supervision
+                        supervision=supervision, # manual / auto
                     )
 
-                    print(f"[DEBUG MASK] {crack_type} cid={scid} IoU={base['iou']:.4f}")
+                    # --------------------------------------------------
+                    # Aggregate FULL-image mask for TOTAL
+                    # --------------------------------------------------
+                    agg |= (m_full > 0).astype(np.uint8)
+
+                    print(
+                        f"[DEBUG MASK] atomic cid={scid} "
+                        f"IoU={base['iou']:.4f} bF1={bnd['boundary_f1']:.4f}"
+                    )
 
                 except Exception as e:
-                    print(f"[{crack_type} fail] {e}")
+                    print(f"[atomic fail] cid={scid}: {e}")
                     traceback.print_exc()
 
             return agg
@@ -4057,23 +4095,19 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             combined_src,
             atomic_src_for_auto=None,
             crack_type,
-            supervision
+            supervision,
         ):
             """
-            Unified combined-metrics kernel.
+            Combined metrics:
+            - Metrics computed ONLY on bbox crop
+            - Returned mask is full-image for TOTAL aggregation
 
-            - crack_type == "combined"        → MANUAL combined
-            - crack_type == "combined_auto"   → AUTO combined
-
-            Manual:
-                uses cmb['mask_bbox'] + cmb['mask_crop'] (authoritative)
-
-            Auto:
-                unions member atomic masks from atomic_src_for_auto
-                bbox inferred from union
+            crack_type:
+            - "combined"  (manual)
+            - "combined"  (auto)   ← supervision distinguishes
             """
             agg = np.zeros((H, W), np.uint8)
-            is_auto = crack_type.endswith("_auto")
+            is_auto = (supervision == "auto")
 
             for ccid, cmb in (combined_src or {}).items():
                 try:
@@ -4081,31 +4115,42 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     if not members:
                         continue
 
-                    semantic_id = cmb.get("semantic_id") or "_".join(map(str, members)) or str(ccid)
+                    semantic_id = (
+                        cmb.get("semantic_id")
+                        or "_".join(map(str, members))
+                        or str(ccid)
+                    )
 
-                    cmb_root = os.path.join(metrics_dir, f"combined_{semantic_id}")
-                    mode_dir = os.path.join(cmb_root, "auto" if is_auto else "manual")
-                    os.makedirs(mode_dir, exist_ok=True)
-
-                    # ------------------------------------------------------------
-                    # Build combined_mask + crop + bbox (ONLY divergence)
-                    # ------------------------------------------------------------
+                    # --------------------------------------------------
+                    # Build FULL-image combined mask
+                    # --------------------------------------------------
                     if not is_auto:
+                        # ---------- MANUAL ----------
                         bb   = cmb.get("mask_bbox")
                         crop = cmb.get("mask_crop")
                         if not bb or crop is None:
                             print(f"[COMBINE_DBG] ⚠️ combined {ccid} missing mask_crop/bbox — skipping.")
                             continue
 
-                        x0, y0, w, h = map(int, bb)
-                        x1, y1 = x0 + w, y0 + h
+                        x, y, w, h = map(int, bb)
+                        if w <= 0 or h <= 0:
+                            continue
+
+                        x0 = max(0, x)
+                        y0 = max(0, y)
+                        x1 = min(W, x + w)
+                        y1 = min(H, y + h)
+
+                        if x1 <= x0 or y1 <= y0:
+                            continue
 
                         pred_crop = (np.asarray(crop, np.uint8) > 0).astype(np.uint8)
 
                         combined_mask = np.zeros((H, W), np.uint8)
-                        combined_mask[y0:y1, x0:x1] = pred_crop
+                        combined_mask[y0:y1, x0:x1] = pred_crop[:(y1-y0), :(x1-x0)]
 
                     else:
+                        # ---------- AUTO ----------
                         if atomic_src_for_auto is None:
                             continue
 
@@ -4140,79 +4185,43 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
                         pred_crop = combined_mask[y0:y1, x0:x1]
 
-                    # ------------------------------------------------------------
-                    # Shared crop + GT
-                    # ------------------------------------------------------------
+                    # --------------------------------------------------
+                    # Crop GT (metrics ONLY here)
+                    # --------------------------------------------------
                     gt_crop = gt_full[y0:y1, x0:x1]
 
-                    # ------------------------------------------------------------
-                    # Global overlay (shared)
-                    # ------------------------------------------------------------
-                    save_gt_vs_manual_overlay(
-                        H, W,
-                        gt_full,
-                        combined_mask,
-                        os.path.join(
-                            mode_dir,
-                            "gt_vs_auto_mask_global.png" if is_auto else "gt_vs_manual_mask_global.png",
-                        ),
-                        bbox=[x0, y0, x1 - x0, y1 - y0],
-                        original_image=self.original_image,
-                    )
+                    if not np.any(pred_crop):
+                        continue
 
-                    # ------------------------------------------------------------
-                    # Normals + width overlay (shared)
-                    # ------------------------------------------------------------
-                    src = auto_combined_map.get(str(ccid), {}) if is_auto else cmb
-                    ne  = src.get("normal_edge_points", {}) or {}
-                    mid = np.asarray(src.get("midline", []), float)
-
-                    e1 = np.asarray(ne.get("edge1", []), float)
-                    e2 = np.asarray(ne.get("edge2", []), float)
-
-                    if e1.size == 0 or e2.size == 0 or mid.size == 0:
-                        e1 = e2 = mid = None
-
-                    _plot_normals_and_width_overlay_on_crop(
-                        out_dir=mode_dir,
-                        gt_crop=gt_crop,
-                        pred_crop=pred_crop,
-                        x0=x0,
-                        y0=y0,
-                        mid_global=mid,
-                        e1_global=e1,
-                        e2_global=e2,
-                        out_normals_name="auto_normals.png" if is_auto else "manual_normals.png",
-                        out_iou_name="gt_vs_auto_mask.png" if is_auto else "gt_vs_manual_mask.png",
-                        out_width_name="widths_colormap_on_crop_auto.png" if is_auto else "widths_colormap_on_crop.png",
-                    )
-
-                    # ------------------------------------------------------------
-                    # Metrics (SINGLE PATH)
-                    # ------------------------------------------------------------
+                    # --------------------------------------------------
+                    # Metrics (bbox-level ONLY)
+                    # --------------------------------------------------
                     base = compute_mask_metrics(gt_crop, pred_crop)
                     bnd  = boundary_fscore(gt_crop, pred_crop, tau=2.0)
                     surf = assd_hd95(gt_crop, pred_crop)
 
                     _append_mask_row(
-                        crack_type=crack_type,
+                        crack_type="combined",
                         crack_id=str(ccid),
                         members=semantic_id,
                         base=base,
                         bnd=bnd,
                         surf=surf,
-                        supervision=supervision
+                        supervision=supervision,
                     )
 
+                    # --------------------------------------------------
+                    # Aggregate FULL-image mask for TOTAL
+                    # --------------------------------------------------
                     agg |= (combined_mask > 0).astype(np.uint8)
 
                     print(
-                        f"[DEBUG MASK] {crack_type} id={ccid}({semantic_id}) "
+                        f"[DEBUG MASK] combined id={ccid}({semantic_id}) "
                         f"IoU={base['iou']:.4f} bF1={bnd['boundary_f1']:.4f}"
                     )
 
                 except Exception as e:
-                    print(f"[DEBUG METRICS] {crack_type} id={ccid} failed: {e}")
+                    print(f"[DEBUG METRICS] combined id={ccid} failed: {e}")
                     traceback.print_exc()
 
             return agg
