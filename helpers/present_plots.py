@@ -128,7 +128,7 @@ def plot_width_summary_triplet(metrics_dir, base_name, out_png):
     plt.savefig(out_png, dpi=160, bbox_inches="tight")
     plt.close()
 
-def plot_mask_metrics_triplet(metrics_dir, base_name, out_png):
+def plot_mask_metrics_triplet(metrics_dir, base_name, supervision, out_png):
     """
     Single-row, 3-column summary plot:
         [0] Region metrics
@@ -141,9 +141,9 @@ def plot_mask_metrics_triplet(metrics_dir, base_name, out_png):
     import matplotlib.pyplot as plt
     import seaborn as sns
 
-    csv_path = os.path.join(metrics_dir, "mask_metrics.csv")
+    csv_path = os.path.join(metrics_dir, f"{supervision}_mask_metrics.csv")
     if not os.path.exists(csv_path):
-        print("[MASK_TRIPLET] mask_metrics.csv not found")
+        print(f"[MASK_TRIPLET] {supervision}_mask_metrics.csv not found")
         return
 
     df = pd.read_csv(csv_path)
@@ -395,7 +395,7 @@ def plot_crack_statistics_overview(metrics_dir, base_name, out_png):
 # New Metrics Plots
 #################################################################
         
-def build_deck_plots_for_image(metrics_dir: str, base_name: str):
+'''def build_deck_plots_for_image(metrics_dir: str, base_name: str):
     import os, pandas as pd
 
     os.makedirs(metrics_dir, exist_ok=True)
@@ -510,3 +510,75 @@ def export_gt_normals_for_image(gt_mask_u8: np.ndarray,
         csv_path = os.path.join(out_dir, f"gt_normals.csv")
         pd.DataFrame(rows).to_csv(csv_path, index=False)
         print(f"[GT-NORMALS] wrote {len(rows)} rows → {csv_path}")
+'''
+
+def build_deck_plots_for_image(metrics_dir: str, base_name: str):
+    import os, pandas as pd
+
+    metrics_csv = os.path.join(metrics_dir, "mask_metrics.csv")
+    midline_csv = os.path.join(metrics_dir, f"{base_name}_midline_edge_metrics.csv")
+
+    if not os.path.exists(metrics_csv):
+        print("[DEBUG PLOT] no mask_metrics.csv")
+        return
+
+    df_all = pd.read_csv(metrics_csv)
+
+    if "supervision" not in df_all.columns:
+        print("[DEBUG PLOT] mask_metrics.csv missing supervision column")
+        return
+
+    for supervision in ("manual", "auto"):
+        df = df_all[df_all["supervision"] == supervision].copy()
+        if df.empty:
+            continue
+
+        subdir = os.path.join(metrics_dir, supervision)
+        os.makedirs(subdir, exist_ok=True)
+
+        csv_sub = os.path.join(subdir, f"{supervision}_mask_metrics.csv")
+        df.to_csv(csv_sub, index=False)
+
+        print(f"[DEBUG PLOT] building plots for {supervision}")
+
+        plot_iou_vs_bf1_scatter(
+            csv_sub,
+            os.path.join(subdir, f"{supervision}_iou_vs_bf1_scatter.png")
+        )
+
+        plot_assd_hd95_box(
+            csv_sub,
+            os.path.join(subdir, f"{supervision}_assd_hd95_box.png")
+        )
+
+        plot_mask_metrics_triplet(
+            subdir, base_name,
+            supervision,
+            os.path.join(subdir, f"{supervision}_mask_metrics_triplet.png")
+        )
+
+        plot_surface_distance_histogram(
+            csv_sub,
+            os.path.join(subdir, f"{supervision}_surface_distance_histogram.png")
+        )
+
+        plot_boundary_pr_curve(
+            csv_sub,
+            os.path.join(subdir, f"{supervision}_boundary_pr_curve.png")
+        )
+
+    # midline / crack-level plots (NOT supervision-specific)
+    plot_midline_edge_metrics_bars(
+        midline_csv,
+        os.path.join(metrics_dir, f"{supervision}_midline_edge_metrics_bars.png")
+    )
+
+    plot_midline_angle_distribution(
+        midline_csv,
+        os.path.join(metrics_dir, f"{supervision}_midline_angle_hist.png")
+    )
+
+    plot_crack_statistics_overview(
+        metrics_dir, base_name,
+        os.path.join(metrics_dir, f"{supervision}_crack_statistics.png")
+    )

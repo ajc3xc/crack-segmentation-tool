@@ -3887,10 +3887,20 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         # ------------------------------------------------------------------
         mask_rows = []
 
-        def _append_mask_row(*, crack_type, crack_id, members, base, bnd, surf):
+        def _append_mask_row(
+            *,
+            crack_type,
+            crack_id,
+            members,
+            base,
+            bnd,
+            surf,
+            supervision,   # <-- NEW, REQUIRED
+        ):
             row = {
                 "image": base_name,
-                "crack_type": crack_type,
+                "crack_type": crack_type,     # atomic / combined / TOTAL
+                "supervision": supervision,   # manual / auto
                 "crack_id": str(crack_id) if crack_id is not None else "",
                 "members": members or "",
             }
@@ -3899,7 +3909,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             row.update(surf)
             mask_rows.append(row)
 
-        def _compute_and_record_atomic_metrics(*, atomic_src, combined_src, crack_type):
+
+        def _compute_and_record_atomic_metrics(*, atomic_src, combined_src, crack_type, supervision):
             """
             Manual: uses manual_mask_from_crack and skips atomics that are part of combined groups.
             Auto:   uses _mask_from_crack and DOES NOT skip (mirrors your current behavior).
@@ -3941,6 +3952,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                         base=base,
                         bnd=bnd,
                         surf=surf,
+                        supervision=supervision
                     )
 
                     print(f"[DEBUG MASK] {crack_type} cid={scid} IoU={base['iou']:.4f}")
@@ -4044,6 +4056,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             combined_src,
             atomic_src_for_auto=None,
             crack_type,
+            supervision
         ):
             """
             Unified combined-metrics kernel.
@@ -4187,6 +4200,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                         base=base,
                         bnd=bnd,
                         surf=surf,
+                        supervision=supervision
                     )
 
                     agg |= (combined_mask > 0).astype(np.uint8)
@@ -4207,11 +4221,13 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             atomic_src=atomic,
             combined_src=combined_map,
             crack_type="atomic",
+            supervision="manual"
         )
         agg_manual |= _compute_and_record_combined_metrics(
             combined_src=combined_map,
             atomic_src_for_auto=None,
             crack_type="combined",
+            supervision="manual"
         )
 
         # TOTAL (manual)
@@ -4226,6 +4242,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 base=base_total,
                 bnd=bnd_total,
                 surf=surf_total,
+                supervision="manual"
             )
 
         # ---- AUTO masks (optional) ----
@@ -4240,13 +4257,15 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             agg_auto |= _compute_and_record_atomic_metrics(
                 atomic_src=auto_atomic,
                 combined_src=auto_combined_map,   # membership info only
-                crack_type="atomic_auto",
+                crack_type="atomic",
+                supervision="auto"
             )
 
             agg_auto |= _compute_and_record_combined_metrics(
                 combined_src=authoring_combined,  # authoritative members list
                 atomic_src_for_auto=auto_atomic,
-                crack_type="combined_auto",
+                crack_type="combined",
+                supervision="auto"
             )
 
             print(f"[DEBUG MASK] AUTO aggregate pixels = {int(agg_auto.sum())}")
@@ -4258,15 +4277,16 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 surf_total_auto = assd_hd95(gt_full, agg_auto)
 
                 _append_mask_row(
-                    crack_type="TOTAL_AUTO",
+                    crack_type="TOTAL",
                     crack_id="",
                     members="",
                     base=base_total_auto,
                     bnd=bnd_total_auto,
                     surf=surf_total_auto,
+                    supervision="auto"
                 )
             else:
-                print("[DEBUG MASK] AUTO aggregate mask empty — skipping TOTAL_AUTO.")
+                print("[DEBUG MASK] AUTO aggregate mask empty — skipping TOTAL AUTO.")
 
         # ------------------------------------------------------------------
         # 7) SAVE MASK METRICS CSV (single file; contains manual + auto)
