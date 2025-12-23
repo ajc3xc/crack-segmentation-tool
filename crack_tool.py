@@ -3931,10 +3931,11 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     continue
 
                 try:
-                    if crack_type == "atomic":
+                    m_full = _mask_from_crack(crack, H, W)
+                    '''if crack_type == "atomic":
                         m_full = manual_mask_from_crack(crack, H, W)
                     else:
-                        m_full = _mask_from_crack(crack, H, W)
+                        m_full = _mask_from_crack(crack, H, W)'''
 
                     if m_full is None or int(np.sum(m_full)) == 0:
                         continue

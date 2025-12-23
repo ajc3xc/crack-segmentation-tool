@@ -1536,13 +1536,13 @@ def reconstruct_manual_mask_from_edges(crack: dict, H: int, W: int) -> "np.ndarr
     cv2.fillPoly(mask, [np.round(poly).astype(np.int32)], 255)
     return mask
 
-def manual_mask_from_crack(crack: dict, H: int, W: int) -> np.ndarray:
+'''def manual_mask_from_crack(crack: dict, H: int, W: int) -> np.ndarray:
     """
     Build a binary manual mask for a single crack.
     Priority: geodesic_edges polygon → (optional) mask_crop+mask_bbox → zeros.
     """
     print()
-    print(f"[TTTTTT] {crack.keys()}, {crack['source']}, {crack.items()}")
+    print(f"[TTTTTT] {crack.keys()}, {crack['source']}")
     print()
     ge = (crack or {}).get("geodesic_edges", {}) or {}
     if ("edge1" in ge) and ("edge2" in ge):
@@ -1565,7 +1565,7 @@ def manual_mask_from_crack(crack: dict, H: int, W: int) -> np.ndarray:
                 m[y0:y1, x0:x1] = crop[:(y1-y0), :(x1-x0)]
                 if m.any():
                     return m
-    return np.zeros((H, W), np.uint8)
+    return np.zeros((H, W), np.uint8)'''
     
 '''def merged_metric_atomic(authoring_atomic: dict, save_folder: str, image_base: str) -> dict:
     """
