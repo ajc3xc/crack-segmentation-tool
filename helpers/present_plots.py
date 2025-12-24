@@ -638,3 +638,162 @@ def plot_width_summary_bars(metrics_dir, base_name, out_png):
     plt.close()
 
     print("[WIDTH BAR] wrote:", out_png)
+
+def plot_gt_width_vs_delta_w_scatter(
+    diffs_csv,
+    out_png,
+    *,
+    title=None,
+    alpha=0.25,
+    s=8,
+    max_points=200_000,
+):
+    """
+    Scatter: GT width (x) vs delta width (pred - GT) (y)
+
+    Intended use:
+      - diagnostic scaling behavior
+      - thin cracks vs thick cracks stability
+
+    diffs_csv must contain:
+      - gt_width_px
+      - width_diff_px
+    """
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import os
+
+    if not os.path.exists(diffs_csv):
+        print("[WIDTH SCATTER] missing:", diffs_csv)
+        return
+
+    df = pd.read_csv(diffs_csv)
+    if df.empty:
+        print("[WIDTH SCATTER] empty CSV")
+        return
+
+    # permissive column detection
+    cols = {c.lower(): c for c in df.columns}
+
+    gt_col = next((cols[k] for k in cols if k in ("gt_width_px", "gt_width", "gt")), None)
+    diff_col = next((cols[k] for k in cols if "diff" in k), None)
+
+    if gt_col is None or diff_col is None:
+        print("[WIDTH SCATTER] required columns missing")
+        return
+
+    gt = df[gt_col].astype(float).values
+    dw = df[diff_col].astype(float).values
+
+    keep = np.isfinite(gt) & np.isfinite(dw)
+    gt, dw = gt[keep], dw[keep]
+
+    if gt.size == 0:
+        print("[WIDTH SCATTER] no valid samples")
+        return
+
+    # subsample for sanity if massive
+    if gt.size > max_points:
+        idx = np.random.choice(gt.size, max_points, replace=False)
+        gt = gt[idx]
+        dw = dw[idx]
+
+    fig, ax = plt.subplots(figsize=(6, 5), dpi=160)
+
+    ax.scatter(gt, dw, s=s, alpha=alpha)
+
+    ax.axhline(0.0, color="k", lw=1, ls="--", alpha=0.6)
+
+    ax.set_xlabel("GT width (px)")
+    ax.set_ylabel("Δ width = pred − GT (px)")
+
+    if title:
+        ax.set_title(title, fontsize=13, fontweight="bold")
+
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=160, bbox_inches="tight")
+    plt.close()
+
+    print("[WIDTH SCATTER] wrote:", out_png)
+    
+def plot_relative_width_error_kde(
+    diffs_csv,
+    out_png,
+    label=None,
+    eps=1e-3,
+):
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    df = pd.read_csv(diffs_csv)
+
+    gt = df["gt_width_px"].astype(float).values
+    diff = df["width_diff_px"].astype(float).values
+
+    keep = np.isfinite(gt) & np.isfinite(diff) & (gt > 0)
+    gt, diff = gt[keep], diff[keep]
+
+    rel = np.abs(diff) / np.maximum(gt, eps)
+
+    plt.figure(figsize=(6, 4), dpi=160)
+    sns.kdeplot(
+        rel,
+        fill=True,
+        bw_adjust=1.2,
+        label=label,
+    )
+
+    plt.xlabel("Relative width error  |Δw| / GT width")
+    plt.ylabel("Density")
+    plt.title("Relative width error distribution")
+    if label:
+        plt.legend()
+
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=160, bbox_inches="tight")
+    plt.close()
+
+def plot_width_error_hexbin(
+    diffs_csv,
+    out_png,
+    gridsize=40,
+):
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    df = pd.read_csv(diffs_csv)
+
+    gt = df["gt_width_px"].astype(float).values
+    diff = np.abs(df["width_diff_px"].astype(float).values)
+
+    keep = np.isfinite(gt) & np.isfinite(diff)
+    gt, diff = gt[keep], diff[keep]
+
+    plt.figure(figsize=(6, 5), dpi=160)
+
+    hb = plt.hexbin(
+        gt,
+        diff,
+        gridsize=gridsize,
+        bins="log",
+        cmap="viridis",
+        mincnt=1,
+    )
+
+    cb = plt.colorbar(hb)
+    cb.set_label("log10(N)")
+
+    plt.xlabel("GT width (px)")
+    plt.ylabel("|Pred − GT| width (px)")
+    plt.title("Width error vs crack thickness")
+
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=160, bbox_inches="tight")
+    plt.close()
+

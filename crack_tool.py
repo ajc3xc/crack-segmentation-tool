@@ -3514,6 +3514,27 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     f"{base_name}_width_summary_bars.png"
                 ),
             )
+            
+            from helpers.present_plots import (
+                plot_relative_width_error_kde,
+                plot_width_error_hexbin,
+            )
+
+            base = os.path.join(metrics_dir, midline_type)
+            diffs_csv = os.path.join(
+                base,
+                f"{base_name}_width_diffs_total.csv"
+            )
+
+            plot_relative_width_error_kde(
+                diffs_csv,
+                os.path.join(base, f"{base_name}_relative_width_error_kde.png"),
+            )
+
+            plot_width_error_hexbin(
+                diffs_csv,
+                os.path.join(base, f"{base_name}_width_error_hexbin.png"),
+            )
 
 
         # ------------------------------------------------------------------
