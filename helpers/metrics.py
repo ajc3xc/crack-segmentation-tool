@@ -1064,6 +1064,7 @@ def compare_widths_for_cracks(
 
     # ---------------- accumulators ----------------
     coords, diffs, bboxes = [], [], []
+    rows = []
 
     # ---------------- iterate cracks ----------------
     for cid, crack in cracks.items():
@@ -1110,9 +1111,37 @@ def compare_widths_for_cracks(
             if m < 2:
                 off += max(m,0)
                 continue
-            diffs.append(widths_geo[off:off+m] - gtw[:m])
+            '''diffs.append(widths_geo[off:off+m] - gtw[:m])
             coords.append(s[:m])
             bboxes.append(crack.get("mask_bbox"))
+            off += m'''
+            d = widths_geo[off:off+m] - gtw[:m]
+            pts = s[:m]
+
+            diffs.append(d)
+            coords.append(pts)
+            bboxes.append(crack.get("mask_bbox"))
+
+            for (x, y), dw, gw, pw in zip(
+                    pts,
+                    d,
+                    gtw[:m],
+                    widths_geo[off:off+m],
+                ):
+                if not np.isfinite(dw):
+                    continue
+
+                rows.append({
+                    "x": float(x),
+                    "y": float(y),
+                    "gt_width_px": float(gw),
+                    "pred_width_px": float(pw),
+                    "width_diff_px": float(dw),
+                    "cid": str(cid),
+                    "crack_type": mode,
+                    "midline_type": midline_type,
+                })
+
             off += m
 
     # ---------------- plotting ----------------
@@ -1208,86 +1237,233 @@ def compare_widths_for_cracks(
     fig.savefig(out, dpi=200, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
 
-    return [], []
+    return rows, None
 
 
 # ==== WIDTH SUMMARY + IMAGE-SIZED OVERLAY (no matplotlib) ======================
 
-def width_summary_to_csv(metrics_dir, base_name, width_rows, tag):
+'''def width_diffs_to_csv(metrics_dir, base_name, width_rows, midline_type, crack_type):
     """
-    Writes width-summary CSV containing:
-        mae_px, rmse_px, bias_px, corr
-
-    width_rows: list of dicts FROM compare_widths_for_cracks (the raw diffs)
+    Writes per-point raw width diffs.
+    Path: metrics_dir/<midline_type>/<base_name>_width_diffs_<crack_type>.csv
     """
-    return
-    '''import numpy as np, pandas as pd, os
+    import os
+    import pandas as pd
 
     if not width_rows:
-        print("[WIDTH SUMMARY] no data to write")
+        print("[WIDTH DIFFS] no data to write")
         return
 
-    # width_rows contain only diff_mean, diff_std — NOT enough.
-    # We must re-load the actual width diffs.
+    out_dir = os.path.join(metrics_dir, midline_type)
+    os.makedirs(out_dir, exist_ok=True)
+
+    out_csv = os.path.join(out_dir, f"{base_name}_width_diffs_{crack_type}.csv")
+    pd.DataFrame(width_rows).to_csv(out_csv, index=False)
+    print("[WIDTH DIFFS] wrote:", out_csv)'''
+
+# ============================================================================
+# WIDTH EXPORT: raw diffs + summary + histogram
+# ============================================================================
+
+def export_width_metrics_all(
+    metrics_dir,
+    base_name,
+    width_rows,
+    midline_type,
+    crack_type,
+):
+    """
+    ALWAYS does:
+      1) raw per-point width diffs CSV
+      2) summary CSV (MAE, RMSE, bias, corr)
+      3) histogram PNG
+
+    Paths:
+      metrics_dir/<midline_type>/
+    """
+    import os
+    import numpy as np
+    import pandas as pd
+
+    if not width_rows:
+        print("[WIDTH EXPORT] no data")
+        return
+
+    out_dir = os.path.join(metrics_dir, midline_type)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # 1) RAW WIDTH DIFFS CSV
+    # ------------------------------------------------------------------
+    diffs_csv = os.path.join(
+        out_dir,
+        f"{base_name}_width_diffs_{crack_type}.csv"
+    )
     df = pd.DataFrame(width_rows)
+    df.to_csv(diffs_csv, index=False)
+    print("[WIDTH DIFFS] wrote:", diffs_csv)
 
-    # We must aggregate all diffs for this tag!
-    # diffs_rows CSV was already written earlier in compare_widths_for_cracks().
-    diffs_file = os.path.join(metrics_dir, f"{base_name}_width_diffs_{tag}.csv")
-    if not os.path.exists(diffs_file):
-        print(f"[WIDTH SUMMARY] missing diffs file: {diffs_file}")
+    # ------------------------------------------------------------------
+    # 2) SUMMARY CSV
+    # ------------------------------------------------------------------
+    # permissive column detection
+    cols = {c.lower(): c for c in df.columns}
+
+    gt_col = next(
+        (cols[k] for k in cols if k in ("gt", "gt_width", "gt_width_px")),
+        None,
+    )
+    pred_col = next(
+        (cols[k] for k in cols if k in ("geodesic", "pred", "pred_width", "pred_width_px")),
+        None,
+    )
+    diff_col = next(
+        (cols[k] for k in cols if "diff" in k),
+        None,
+    )
+
+    if gt_col is None or pred_col is None:
+        print("[WIDTH SUMMARY] missing gt/pred columns")
         return
 
-    df_d = pd.read_csv(diffs_file)
-    diffs = df_d["width_diff_px"].values.astype(float)
+    gt   = df[gt_col].astype(float).values
+    pred = df[pred_col].astype(float).values
+    diff = (
+        df[diff_col].astype(float).values
+        if diff_col is not None
+        else pred - gt
+    )
 
-    if len(diffs) == 0:
+    keep = np.isfinite(gt) & np.isfinite(pred) & np.isfinite(diff)
+    gt, pred, diff = gt[keep], pred[keep], diff[keep]
+
+    if diff.size == 0:
+        print("[WIDTH SUMMARY] no valid samples")
         return
 
-    mae  = float(np.nanmean(np.abs(diffs)))
-    rmse = float(np.sqrt(np.nanmean(diffs**2)))
-    bias = float(np.nanmean(diffs))
-    corr = float(np.corrcoef(diffs, np.arange(len(diffs)))[0,1]) if len(diffs) > 1 else np.nan
+    mae  = float(np.mean(np.abs(diff)))
+    rmse = float(np.sqrt(np.mean(diff ** 2)))
+    bias = float(np.mean(diff))
+    corr = float(np.corrcoef(gt, pred)[0, 1]) if gt.size > 1 else np.nan
 
-    out = pd.DataFrame([{
-        "method": tag,
+    summary_csv = os.path.join(
+        out_dir,
+        f"{base_name}_width_summary_{crack_type}.csv"
+    )
+
+    pd.DataFrame([{
+        "method": crack_type,
+        "n_samples": int(diff.size),
         "mae_px": mae,
         "rmse_px": rmse,
         "bias_px": bias,
-        "corr": corr
-    }])
+        "corr": corr,
+    }]).to_csv(summary_csv, index=False)
 
-    out_csv = os.path.join(metrics_dir, f"{base_name}_width_summary_{tag}.csv")
-    out.to_csv(out_csv, index=False)
-    print("[WIDTH SUMMARY] wrote:", out_csv)'''
+    print("[WIDTH SUMMARY] wrote:", summary_csv)
 
+    # ------------------------------------------------------------------
+    # 3) HISTOGRAM
+    # ------------------------------------------------------------------
+    try:
+        from helpers.present_plots import plot_width_diff_histogram
 
-def write_width_diff_overlay(H, W, rows, out_png, vlim=8.0):
+        hist_png = os.path.join(
+            out_dir,
+            f"{base_name}_width_diff_hist_{crack_type}.png"
+        )
+
+        plot_width_diff_histogram(
+            diffs_csv,
+            hist_png,
+            title=f"{midline_type} {base_name} width diffs",
+            bins=30,
+            vlim=None,
+        )
+    except Exception as e:
+        print(f"[WIDTH HIST] failed: {e}")
+
+def write_width_diff_overlay(H, W, rows, out_png, vlim=8.0, radius=2):
     """
-    Image-sized heatmap colored by (geodesic - GT) in px using OpenCV only.
-    Keeps zeros black, symmetric saturation at ±vlim.
+    Image-sized dot overlay colored by (pred - gt) width diff in px.
+    Robust to key naming differences in `rows`.
     """
     import numpy as np, cv2
-    if not rows: return
-    xs = [r.get("x", r.get("mid_x")) for r in rows]
-    ys = [r.get("y", r.get("mid_y")) for r in rows]
-    diffs = [r.get("diff", r.get("diff_px",
-             (r.get("geodesic", 0.0) - r.get("gt", 0.0)))) for r in rows]
-    xs = np.asarray(xs, float); ys = np.asarray(ys, float); diffs = np.asarray(diffs, float)
+
+    if not rows:
+        return
+
+    # --- find candidate keys from first row ---
+    sample = rows[0] if isinstance(rows[0], dict) else {}
+    keys = set(sample.keys())
+
+    def pick_key(cands):
+        for c in cands:
+            for k in keys:
+                if k.lower() == c.lower():
+                    return k
+        return None
+
+    xk = pick_key(["x", "mid_x", "mx"])
+    yk = pick_key(["y", "mid_y", "my"])
+
+    gtk   = pick_key(["gt", "gt_width", "gt_width_px"])
+    predk = pick_key(["geodesic", "pred", "pred_width", "pred_width_px"])
+    diffk = next((k for k in keys if "diff" in k.lower()), None)
+
+    # --- accumulate points ---
+    xs, ys, diffs = [], [], []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+
+        x = r.get(xk) if xk else r.get("x", r.get("mid_x"))
+        y = r.get(yk) if yk else r.get("y", r.get("mid_y"))
+        if x is None or y is None:
+            continue
+
+        if diffk is not None and r.get(diffk) is not None:
+            d = r.get(diffk)
+        else:
+            gt   = r.get(gtk)   if gtk   else r.get("gt")
+            pred = r.get(predk) if predk else r.get("geodesic")
+            if gt is None or pred is None:
+                continue
+            d = float(pred) - float(gt)
+
+        try:
+            xs.append(float(x)); ys.append(float(y)); diffs.append(float(d))
+        except Exception:
+            continue
+
+    xs = np.asarray(xs, float)
+    ys = np.asarray(ys, float)
+    diffs = np.asarray(diffs, float)
+
     keep = np.isfinite(xs) & np.isfinite(ys) & np.isfinite(diffs)
     xs, ys, diffs = xs[keep], ys[keep], diffs[keep]
-    if len(xs) == 0: return
-    canvas = np.zeros((H, W), np.float32)
-    for x, y, d in zip(xs, ys, diffs):
+    if len(xs) == 0:
+        print("[WIDTH OVERLAY] no valid samples")
+        return
+
+    # --- render dots ---
+    canvas = np.zeros((H, W, 3), np.uint8)
+
+    # normalize to [0,255]
+    diffs_clip = np.clip(diffs, -vlim, vlim)
+    m = (diffs_clip + vlim) / (2.0 * vlim)
+    m8 = (m * 255.0).astype(np.uint8)
+
+    # OpenCV colormap expects 2D uint8
+    colors = cv2.applyColorMap(m8.reshape(-1, 1), cv2.COLORMAP_COOL).reshape(-1, 3)
+
+    for (x, y, col) in zip(xs, ys, colors):
         xi = int(round(x)); yi = int(round(y))
         if 0 <= xi < W and 0 <= yi < H:
-            canvas[yi, xi] = d
-    m = np.clip((canvas + vlim) / (2*vlim), 0, 1)
-    m8 = (m * 255).astype(np.uint8)
-    color = cv2.applyColorMap(m8, cv2.COLORMAP_COOL)
-    color[canvas == 0] = (0, 0, 0)
-    cv2.imwrite(out_png, color)
-    print(f"[DEBUG WIDTH] wrote image-sized diff overlay → {out_png}")
+            cv2.circle(canvas, (xi, yi), radius, tuple(int(c) for c in col), thickness=-1)
+
+    cv2.imwrite(out_png, canvas)
+    print(f"[DEBUG WIDTH] wrote diff dot overlay → {out_png}")
     
 def compute_midline_metrics_for_image(app):
     """
@@ -1535,106 +1711,7 @@ def reconstruct_manual_mask_from_edges(crack: dict, H: int, W: int) -> "np.ndarr
     mask = np.zeros((H, W), np.uint8)
     cv2.fillPoly(mask, [np.round(poly).astype(np.int32)], 255)
     return mask
-
-'''def manual_mask_from_crack(crack: dict, H: int, W: int) -> np.ndarray:
-    """
-    Build a binary manual mask for a single crack.
-    Priority: geodesic_edges polygon → (optional) mask_crop+mask_bbox → zeros.
-    """
-    print()
-    print(f"[TTTTTT] {crack.keys()}, {crack['source']}")
-    print()
-    ge = (crack or {}).get("geodesic_edges", {}) or {}
-    if ("edge1" in ge) and ("edge2" in ge):
-        m = _safe_poly_fill(H, W, ge.get("edge1", []), ge.get("edge2", []))
-        if m.any():
-            return m.astype(np.uint8)
-
-    # Fallback ONLY if a (legacy) crop exists
-    mc = crack.get("mask_crop", None)
-    bb = crack.get("mask_bbox", None)
-    if mc is not None and isinstance(bb, (list, tuple)) and len(bb) == 4:
-        x, y, w, h = [int(v) for v in bb]
-        if w > 0 and h > 0:
-            x0, y0 = max(0, x), max(0, y)
-            x1, y1 = min(W, x + w), min(H, y + h)
-            if x1 > x0 and y1 > y0:
-                crop = (np.asarray(mc) > 0).astype(np.uint8)
-                crop = crop[:(y1-y0), ::(x1-x0)]
-                m = np.zeros((H, W), np.uint8)
-                m[y0:y1, x0:x1] = crop[:(y1-y0), :(x1-x0)]
-                if m.any():
-                    return m
-    return np.zeros((H, W), np.uint8)'''
-    
-'''def merged_metric_atomic(authoring_atomic: dict, save_folder: str, image_base: str) -> dict:
-    """
-    Merge authoring entries with per-cid snapshots.
-
-    Desired layout:
-        metrics/<image_base>/cid{cid}/cid{cid}.json
-
-    Legacy fallbacks:
-        metrics/<image_base>/cid/<cid>.json
-        metrics/<image_base>/cid{cid}.json
-    """
-    import os, json
-
-    merged = {}
-    base_dir = os.path.join(save_folder, "metrics", image_base)
-    print(f"[merge] base_dir = {base_dir}")
-
-    for cid, cr in (authoring_atomic or {}).items():
-        merged[cid] = dict(cr)
-
-        print(f"\n[merge] --- CID {cid} ---")
-
-        # NEW canonical:
-        canonical_dir  = os.path.join(base_dir, f"cid{cid}")
-        canonical_json = os.path.join(canonical_dir, f"cid{cid}.json")
-
-        print(f"[merge] canonical_dir  = {canonical_dir}")
-        print(f"[merge] canonical_json = {canonical_json}")
-
-        tried_paths = [canonical_json]
-
-        # Legacy / old paths
-        legacy_a = os.path.join(base_dir, "cid", f"{cid}.json")
-        legacy_b = os.path.join(base_dir, f"cid{cid}.json")
-
-        tried_paths.extend([legacy_a, legacy_b])
-
-        print("[merge] paths to try (in order):")
-        for p in tried_paths:
-            print("   →", p)
-
-        found = False
-        for p in tried_paths:
-            if os.path.exists(p):
-                print(f"[merge] FOUND {p} — attempting load")
-                try:
-                    with open(p, "r") as f:
-                        snap = json.load(f) or {}
-                    merged[cid].update(snap)
-                    print(f"[merge] ✓ merged from {p}")
-                    found = True
-                    break
-                except Exception as e:
-                    print(f"[merge] ⚠ failed reading {p}: {e}")
-            else:
-                print(f"[merge] (missing) {p}")
-
-        if not found:
-            print(f"[merge] No JSON found for CID {cid}, ensuring canonical directory exists...")
-            try:
-                os.makedirs(canonical_dir, exist_ok=True)
-                print(f"[merge] ✓ ensured path exists: {canonical_dir}")
-            except Exception as e:
-                print(f"[merge] ⚠ failed mkdir {canonical_dir}: {e}")
-
-    print("\n[merge] merge complete\n")
-    return merged'''
-    
+   
 def merged_metric_atomic(authoring_atomic: dict, save_folder: str, image_base: str) -> dict:
     """
     Merge authoring entries with per-cid snapshots.

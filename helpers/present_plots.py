@@ -444,73 +444,7 @@ def plot_crack_statistics_overview(metrics_dir, base_name, out_png):
     # NEW stats figure
     plot_crack_statistics_overview(
         metrics_dir, base_name,
-        os.path.join(metrics_dir, "crack_statistics.png"))
-
-# --------------------------------------- #
-# C) EXPORT TRUE GT NORMALS (CSV + plot)  #
-# --------------------------------------- #
-
-def export_gt_normals_for_image(gt_mask_u8: np.ndarray,
-                                atomic_cracks: dict,
-                                image_hw: tuple,
-                                out_dir: str,
-                                step: int = 2,
-                                max_radius: int = 50):
-    """
-    Args
-    ----
-    gt_mask_u8: HxW uint8 mask (1 for crack, 0 elsewhere)
-    atomic_cracks: dict like metric_annotations['atomic_cracks'] (manual only)
-                   each crack should have 'midline' (Nx2), optional 'source'
-    image_hw: (H, W)
-    out_dir: where to write CSV & overlays
-    """
-    from helpers.metrics import normals_from_mask_for_midline
-
-    H, W = image_hw
-    gt_bin = (gt_mask_u8 > 0).astype(np.uint8)
-    os.makedirs(out_dir, exist_ok=True)
-
-    rows = []
-    for cid, cr in (atomic_cracks or {}).items():
-        src = (cr.get("source") or "").lower()
-        if src.startswith("auto") or src == "combined":  # only manual atomics
-            continue
-
-        ml = np.asarray(cr.get("midline", []), float)
-        if ml.ndim != 2 or ml.shape[1] != 2 or len(ml) < 2:
-            continue
-
-        ml_s = ml[::max(step,1)]
-        (e1x,e1y,e2x,e2y,_), widths = normals_from_mask_for_midline(ml_s, gt_bin > 0,
-                                                                     max_radius=max_radius)
-        e1 = np.column_stack([e1x,e1y]); e2 = np.column_stack([e2x,e2y])
-        w  = np.asarray(widths, float)
-
-        for k,(m,a,b) in enumerate(zip(ml_s, e1, e2)):
-            rows.append({
-                "cid": str(cid), "idx": int(k),
-                "mid_x": float(m[0]), "mid_y": float(m[1]),
-                "e1x": float(a[0]), "e1y": float(a[1]),
-                "e2x": float(b[0]), "e2y": float(b[1]),
-                "width_px": float(w[k] if k < len(w) else np.nan)
-            })
-
-        # per-crack overlay
-        try:
-            canvas = cv2.cvtColor(gt_bin*255, cv2.COLOR_GRAY2BGR)
-            for A,B in zip(e1.astype(int), e2.astype(int)):
-                cv2.line(canvas, tuple(A), tuple(B), (0,255,255), 1, cv2.LINE_AA)
-            cv2.polylines(canvas, [ml.astype(int)], False, (0,0,255), 1, cv2.LINE_AA)
-            cv2.imwrite(os.path.join(out_dir, f"cid{cid}_gt_normals_overlay.png"), canvas)
-        except Exception as e:
-            print(f"[GT-NORMALS] overlay failed for cid{cid}: {e}")
-
-    if rows:
-        csv_path = os.path.join(out_dir, f"gt_normals.csv")
-        pd.DataFrame(rows).to_csv(csv_path, index=False)
-        print(f"[GT-NORMALS] wrote {len(rows)} rows → {csv_path}")
-'''
+        os.path.join(metrics_dir, "crack_statistics.png"))'''
 
 def build_deck_plots_for_image(metrics_dir: str, base_name: str):
     import os, pandas as pd
@@ -582,3 +516,125 @@ def build_deck_plots_for_image(metrics_dir: str, base_name: str):
         metrics_dir, base_name,
         os.path.join(metrics_dir, f"{supervision}_crack_statistics.png")
     )
+
+
+########################################################
+# Width differences plots
+########################################################
+def plot_width_diff_histogram(width_diffs_csv, out_png, title=None, bins=60, vlim=None):
+    import os
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    if not os.path.exists(width_diffs_csv):
+        print("[WIDTH HIST] missing:", width_diffs_csv)
+        return
+
+    df = pd.read_csv(width_diffs_csv)
+    if df.empty:
+        print("[WIDTH HIST] empty:", width_diffs_csv)
+        return
+
+    # permissive column detection
+    cols = {c.lower(): c for c in df.columns}
+    diff_col = None
+    for k in cols:
+        if "diff" in k:
+            diff_col = cols[k]
+            break
+
+    gt_col = next((cols[k] for k in cols if k in ("gt", "gt_width", "gt_width_px")), None)
+    pred_col = next((cols[k] for k in cols if k in ("geodesic", "pred", "pred_width", "pred_width_px")), None)
+
+    if diff_col is not None:
+        diffs = df[diff_col].astype(float).values
+    elif gt_col is not None and pred_col is not None:
+        gt = df[gt_col].astype(float).values
+        pred = df[pred_col].astype(float).values
+        diffs = pred - gt
+    else:
+        print("[WIDTH HIST] could not find diff or gt/pred columns in:", width_diffs_csv)
+        return
+
+    diffs = diffs[np.isfinite(diffs)]
+    if diffs.size == 0:
+        print("[WIDTH HIST] no finite diffs:", width_diffs_csv)
+        return
+
+    if vlim is not None:
+        diffs = np.clip(diffs, -float(vlim), float(vlim))
+
+    plt.figure(figsize=(6, 4), dpi=160)
+    plt.hist(diffs, bins=bins, alpha=0.85)
+    plt.axvline(0.0, linewidth=1)
+    plt.xlabel("Pred width − GT width (px)")
+    plt.ylabel("count")
+    plt.title(title or "Width diff histogram")
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=160, bbox_inches="tight")
+    plt.close()
+    print("[WIDTH HIST] wrote:", out_png)
+
+def plot_width_summary_bars(metrics_dir, base_name, out_png):
+    """
+    Bar chart comparing TOTAL width metrics across methods
+    (e.g. manual vs auto).
+
+    Expects:
+      metrics_dir/manual/<base>_width_summary_TOTAL.csv
+      metrics_dir/auto/<base>_width_summary_TOTAL.csv
+    """
+    import os
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    rows = []
+
+    for method in ("manual", "auto"):
+        p = os.path.join(
+            metrics_dir,
+            method,
+            f"{base_name}_width_summary_total.csv"
+        )
+        if not os.path.exists(p):
+            continue
+
+        df = pd.read_csv(p)
+        if df.empty:
+            continue
+
+        r = df.iloc[0].to_dict()
+        r["method"] = method
+        rows.append(r)
+
+    if not rows:
+        print("[WIDTH BAR] no total summaries found")
+        return
+
+    d = pd.DataFrame(rows)
+
+    metrics = ["mae_px", "rmse_px", "bias_px", "corr"]
+    labels  = ["MAE", "RMSE", "Bias", "Corr"]
+
+    x = np.arange(len(metrics))
+    w = 0.35
+
+    fig, ax = plt.subplots(figsize=(8, 4), dpi=160)
+
+    for i, row in d.iterrows():
+        vals = [row[m] for m in metrics]
+        ax.bar(x + i * w, vals, w, label=row["method"])
+
+    ax.set_xticks(x + w / 2)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("px / corr")
+    ax.set_title(f"Crack {base_name} width error summary")
+    ax.legend()
+
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=160, bbox_inches="tight")
+    plt.close()
+
+    print("[WIDTH BAR] wrote:", out_png)
