@@ -24,21 +24,53 @@ def _safe_cols(df, cols):
         out[c] = df[c].astype(float).values if c in df.columns else np.array([])
     return out
 
-def plot_iou_vs_bf1_scatter(metrics_csv, out_png):
+def plot_iou_vs_bf1_scatter(metrics_csv, out_png, *, supervision=None):
     df = pd.read_csv(metrics_csv)
-    dfi = df[df["crack_type"].isin(["atomic","combined"])].copy()
-    if dfi.empty: return
-    vals = _safe_cols(dfi, ["iou","boundary_f1","ASSD"])
-    plt.figure(figsize=(6,5), dpi=160)
-    sc = plt.scatter(vals["iou"], vals["boundary_f1"],
-                     c=vals["ASSD"] if len(vals["ASSD"]) else None,
-                     s=50, alpha=0.9)
-    plt.xlabel("IoU"); plt.ylabel("Boundary F1")
-    plt.title("IoU vs Boundary F1 (color = ASSD px)")
-    if len(vals["ASSD"]):
-        cb = plt.colorbar(sc); cb.set_label("ASSD (px)")
+
+    if supervision is not None and "supervision" in df.columns:
+        df = df[df["supervision"].astype(str) == str(supervision)].copy()
+
+    # keep only per-crack rows, not TOTAL
+    df = df[df["crack_type"].isin(["atomic", "combined"])].copy()
+    if df.empty:
+        return
+
+    # robust cols
+    iou = df["iou"].astype(float).values if "iou" in df else np.array([])
+    bf1 = df["boundary_f1"].astype(float).values if "boundary_f1" in df else np.array([])
+    assd_col = "ASSD" if "ASSD" in df.columns else ("assd" if "assd" in df.columns else None)
+    assd = df[assd_col].astype(float).values if assd_col else None
+
+    if len(iou) == 0 or len(bf1) == 0:
+        return
+
+    # marker by crack_type (optional but useful)
+    is_atomic = (df["crack_type"].astype(str) == "atomic").values
+    markers = np.where(is_atomic, "o", "s")
+
+    plt.figure(figsize=(6, 5), dpi=160)
+
+    if assd is not None and len(assd) == len(iou):
+        # two scatters so marker changes still work with a single colorbar
+        sc0 = plt.scatter(iou[is_atomic], bf1[is_atomic], c=assd[is_atomic], s=55, alpha=0.9, marker="o")
+        sc1 = plt.scatter(iou[~is_atomic], bf1[~is_atomic], c=assd[~is_atomic], s=55, alpha=0.9, marker="s")
+        cb = plt.colorbar(sc1)
+        cb.set_label("ASSD (px)")
+    else:
+        plt.scatter(iou[is_atomic], bf1[is_atomic], s=55, alpha=0.9, marker="o", label="atomic")
+        plt.scatter(iou[~is_atomic], bf1[~is_atomic], s=55, alpha=0.9, marker="s", label="combined")
+        plt.legend()
+
+    plt.xlabel("IoU")
+    plt.ylabel("Boundary F1")
+    title = "IoU vs Boundary F1"
+    if supervision is not None:
+        title += f" ({supervision})"
+    plt.title(title)
     plt.grid(True, alpha=.3)
-    plt.tight_layout(); plt.savefig(out_png); plt.close()
+    plt.tight_layout()
+    plt.savefig(out_png)
+    plt.close()
 
 def plot_assd_hd95_box(metrics_csv, out_png):
     df = pd.read_csv(metrics_csv)
@@ -253,23 +285,235 @@ def plot_midline_edge_metrics_bars(midline_csv, out_png):
 # New Metrics Plots
 #################################################################
 
-def plot_surface_distance_histogram(metrics_csv, out_png):
-    import numpy as np, pandas as pd, matplotlib.pyplot as plt
-    if not os.path.exists(metrics_csv): return
-
-    df = pd.read_csv(metrics_csv)
-    if "assd" not in df or "hd95" not in df:
+def plot_surface_distance_histogram(metrics_csv, out_png, *, supervision=None):
+    if not os.path.exists(metrics_csv):
         return
 
-    assd = df["assd"].astype(float)
-    hd95 = df["hd95"].astype(float)
+    df = pd.read_csv(metrics_csv)
 
-    plt.figure(figsize=(8,4), dpi=160)
-    plt.hist(assd, bins=30, alpha=0.6, label="ASSD")
-    plt.hist(hd95, bins=30, alpha=0.6, label="HD95")
+    if supervision is not None and "supervision" in df.columns:
+        df = df[df["supervision"].astype(str) == str(supervision)].copy()
+
+    # exclude TOTAL for per-crack distribution plots
+    if "crack_type" in df.columns:
+        df = df[df["crack_type"].isin(["atomic", "combined"])].copy()
+
+    assd_col = "ASSD" if "ASSD" in df.columns else ("assd" if "assd" in df.columns else None)
+    hd95_col = "HD95" if "HD95" in df.columns else ("hd95" if "hd95" in df.columns else None)
+    if assd_col is None or hd95_col is None:
+        return
+
+    assd = df[assd_col].astype(float).values
+    hd95 = df[hd95_col].astype(float).values
+
+    plt.figure(figsize=(8, 4), dpi=160)
+    plt.hist(assd[np.isfinite(assd)], bins=30, alpha=0.6, label="ASSD")
+    plt.hist(hd95[np.isfinite(hd95)], bins=30, alpha=0.6, label="HD95")
     plt.title("Surface distance histogram")
     plt.xlabel("pixels")
     plt.ylabel("count")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_png)
+    plt.close()
+    
+def _add_mask_derived_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds derived size/fill columns if missing, using tp/fp/fn if present.
+    Works on your per-crack rows and TOTAL rows (but plots usually exclude TOTAL).
+    """
+    out = df.copy()
+    eps = 1e-9
+
+    # try to infer sizes from confusion counts
+    for c in ("tp", "fp", "fn", "tn"):
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    if all(c in out.columns for c in ("tp", "fp", "fn")):
+        if "gt_area_px" not in out.columns:
+            out["gt_area_px"] = (out["tp"] + out["fn"]).astype("float")
+        if "pred_area_px" not in out.columns:
+            out["pred_area_px"] = (out["tp"] + out["fp"]).astype("float")
+        if "union_area_px" not in out.columns:
+            out["union_area_px"] = (out["tp"] + out["fp"] + out["fn"]).astype("float")
+
+        if "underfill_rate" not in out.columns:
+            out["underfill_rate"] = out["fn"] / (out["gt_area_px"] + eps)
+        if "overfill_rate" not in out.columns:
+            out["overfill_rate"] = out["fp"] / (out["pred_area_px"] + eps)
+        if "fill_ratio" not in out.columns:
+            out["fill_ratio"] = out["pred_area_px"] / (out["gt_area_px"] + eps)
+
+    return out
+
+
+def plot_size_vs_iou_scatter(metrics_csv, out_png, *, supervision=None, x_mode="gt_area_px"):
+    """
+    Scatter: size proxy vs IoU, colored by crack_type.
+    x_mode:
+      - "bbox_area"  (if you later add bbox_area)
+      - "gt_area_px" (default, always available if tp/fp/fn exist)
+      - "pred_area_px"
+    """
+    if not os.path.exists(metrics_csv):
+        return
+
+    df = pd.read_csv(metrics_csv)
+
+    if supervision is not None and "supervision" in df.columns:
+        df = df[df["supervision"].astype(str) == str(supervision)].copy()
+
+    if "crack_type" in df.columns:
+        df = df[df["crack_type"].isin(["atomic", "combined"])].copy()
+
+    if df.empty or "iou" not in df.columns:
+        return
+
+    df = _add_mask_derived_cols(df)
+
+    # choose x
+    if x_mode in df.columns:
+        x = pd.to_numeric(df[x_mode], errors="coerce").values.astype(float)
+        xlab = x_mode
+    else:
+        # fallback to gt area if requested col not present
+        if "gt_area_px" in df.columns:
+            x = pd.to_numeric(df["gt_area_px"], errors="coerce").values.astype(float)
+            xlab = "gt_area_px"
+        else:
+            return
+
+    y = pd.to_numeric(df["iou"], errors="coerce").values.astype(float)
+    keep = np.isfinite(x) & np.isfinite(y)
+    x, y = x[keep], y[keep]
+    if len(x) == 0:
+        return
+
+    # color by crack_type
+    ctype = df.loc[keep, "crack_type"].astype(str).values
+    is_atomic = (ctype == "atomic")
+
+    plt.figure(figsize=(6, 5), dpi=160)
+    plt.scatter(x[is_atomic], y[is_atomic], s=55, alpha=0.9, marker="o", label="atomic")
+    plt.scatter(x[~is_atomic], y[~is_atomic], s=55, alpha=0.9, marker="s", label="combined")
+
+    plt.xlabel(xlab)
+    plt.ylabel("IoU")
+    title = f"Size vs IoU ({xlab})"
+    if supervision is not None:
+        title += f" ({supervision})"
+    plt.title(title)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_png)
+    plt.close()
+
+
+def plot_error_contribution_bars(metrics_csv, out_png, *, supervision=None, which="fn", topk=15):
+    """
+    "What weighted the TOTAL?" plot.
+    Shows top contributors to FN or FP across per-crack rows.
+    """
+    if not os.path.exists(metrics_csv):
+        return
+
+    df = pd.read_csv(metrics_csv)
+
+    if supervision is not None and "supervision" in df.columns:
+        df = df[df["supervision"].astype(str) == str(supervision)].copy()
+
+    # only per-crack rows
+    if "crack_type" in df.columns:
+        df = df[df["crack_type"].isin(["atomic", "combined"])].copy()
+
+    if df.empty or which not in df.columns:
+        return
+
+    df[which] = pd.to_numeric(df[which], errors="coerce")
+    df = df[np.isfinite(df[which].values)]
+    if df.empty:
+        return
+
+    total = float(df[which].sum())
+    if total <= 0:
+        return
+
+    # label = type + id
+    if "crack_id" in df.columns:
+        labels = (df["crack_type"].astype(str) + ":" + df["crack_id"].astype(str)).values
+    else:
+        labels = df["crack_type"].astype(str).values
+
+    df2 = df.copy()
+    df2["label"] = labels
+    df2["share"] = df2[which] / total
+    df2 = df2.sort_values("share", ascending=False).head(int(topk))
+
+    plt.figure(figsize=(8, 4.8), dpi=160)
+    plt.barh(df2["label"].values[::-1], (100.0 * df2["share"].values[::-1]))
+    plt.xlabel(f"% of total {which.upper()}")
+    title = f"Top contributors to {which.upper()}"
+    if supervision is not None:
+        title += f" ({supervision})"
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(out_png)
+    plt.close()
+
+
+def plot_under_overfill_scatter(metrics_csv, out_png, *, supervision=None):
+    """
+    Scatter: underfill_rate vs overfill_rate, point size ~ gt_area.
+    Great for seeing "missed thin cracks" vs "oversegmentation".
+    """
+    if not os.path.exists(metrics_csv):
+        return
+
+    df = pd.read_csv(metrics_csv)
+
+    if supervision is not None and "supervision" in df.columns:
+        df = df[df["supervision"].astype(str) == str(supervision)].copy()
+
+    if "crack_type" in df.columns:
+        df = df[df["crack_type"].isin(["atomic", "combined"])].copy()
+
+    if df.empty:
+        return
+
+    df = _add_mask_derived_cols(df)
+    req = ["underfill_rate", "overfill_rate", "gt_area_px"]
+    if not all(c in df.columns for c in req):
+        return
+
+    x = pd.to_numeric(df["underfill_rate"], errors="coerce").values.astype(float)
+    y = pd.to_numeric(df["overfill_rate"], errors="coerce").values.astype(float)
+    s = pd.to_numeric(df["gt_area_px"], errors="coerce").values.astype(float)
+
+    keep = np.isfinite(x) & np.isfinite(y) & np.isfinite(s)
+    x, y, s = x[keep], y[keep], s[keep]
+    if len(x) == 0:
+        return
+
+    # normalize marker sizes
+    s = np.clip(s, 1.0, np.percentile(s, 95))
+    s = 25.0 + 175.0 * (s - s.min()) / (s.max() - s.min() + 1e-9)
+
+    ctype = df.loc[keep, "crack_type"].astype(str).values
+    is_atomic = (ctype == "atomic")
+
+    plt.figure(figsize=(6.2, 5.2), dpi=160)
+    plt.scatter(x[is_atomic], y[is_atomic], s=s[is_atomic], alpha=0.8, marker="o", label="atomic")
+    plt.scatter(x[~is_atomic], y[~is_atomic], s=s[~is_atomic], alpha=0.8, marker="s", label="combined")
+
+    plt.xlabel("Underfill rate (FN / GT area)")
+    plt.ylabel("Overfill rate (FP / Pred area)")
+    title = "Underfill vs Overfill"
+    if supervision is not None:
+        title += f" ({supervision})"
+    plt.title(title)
+    plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
     plt.savefig(out_png)
@@ -394,57 +638,6 @@ def plot_crack_statistics_overview(metrics_dir, base_name, out_png):
 ##################################################################
 # New Metrics Plots
 #################################################################
-        
-'''def build_deck_plots_for_image(metrics_dir: str, base_name: str):
-    import os, pandas as pd
-
-    os.makedirs(metrics_dir, exist_ok=True)
-
-    metrics_csv = os.path.join(metrics_dir, "mask_metrics.csv")
-    midline_csv = os.path.join(metrics_dir, f"{base_name}_midline_edge_metrics.csv")
-
-    if os.path.exists(metrics_csv):
-        df = pd.read_csv(metrics_csv)
-
-        plot_iou_vs_bf1_scatter(metrics_csv,
-            os.path.join(metrics_dir, "iou_vs_bf1_scatter.png"))
-
-        plot_assd_hd95_box(metrics_csv,
-            os.path.join(metrics_dir, "assd_hd95_box.png"))
-
-        plot_width_summary_triplet(metrics_dir, base_name,
-            os.path.join(metrics_dir, "width_summary_triplet.png"))
-
-        plot_mask_metrics_triplet(metrics_dir, base_name,
-            os.path.join(metrics_dir, "mask_metrics_triplet.png"))
-
-    # midline/edge figures
-    plot_midline_edge_metrics_bars(midline_csv,
-        os.path.join(metrics_dir, "midline_edge_metrics_bars.png"))
-
-    # extras
-    plot_surface_distance_histogram(metrics_csv,
-        os.path.join(metrics_dir,"surface_distance_histogram.png"))
-
-    plot_boundary_pr_curve(metrics_csv,
-        os.path.join(metrics_dir,"boundary_pr_curve.png"))
-
-    plot_width_error_distribution(
-        os.path.join(metrics_dir,f"{base_name}_width_diffs_manual.csv"),
-        os.path.join(metrics_dir,"width_error_hist_manual.png"))
-
-    plot_width_error_distribution(
-        os.path.join(metrics_dir,f"{base_name}_width_diffs_combined.csv"),
-        os.path.join(metrics_dir,"width_error_hist_combined.png"))
-
-    plot_midline_angle_distribution(
-        midline_csv,
-        os.path.join(metrics_dir,"midline_angle_hist.png"))
-
-    # NEW stats figure
-    plot_crack_statistics_overview(
-        metrics_dir, base_name,
-        os.path.join(metrics_dir, "crack_statistics.png"))'''
 
 def build_deck_plots_for_image(metrics_dir: str, base_name: str):
     import os, pandas as pd
@@ -462,8 +655,11 @@ def build_deck_plots_for_image(metrics_dir: str, base_name: str):
         print("[DEBUG PLOT] mask_metrics.csv missing supervision column")
         return
 
+    # ---------------------------
+    # supervision-specific plots
+    # ---------------------------
     for supervision in ("manual", "auto"):
-        df = df_all[df_all["supervision"] == supervision].copy()
+        df = df_all[df_all["supervision"].astype(str) == supervision].copy()
         if df.empty:
             continue
 
@@ -477,45 +673,75 @@ def build_deck_plots_for_image(metrics_dir: str, base_name: str):
 
         plot_iou_vs_bf1_scatter(
             csv_sub,
-            os.path.join(subdir, f"{supervision}_iou_vs_bf1_scatter.png")
+            os.path.join(subdir, f"{supervision}_iou_vs_bf1_scatter.png"),
+            supervision=supervision,
         )
 
         plot_assd_hd95_box(
             csv_sub,
-            os.path.join(subdir, f"{supervision}_assd_hd95_box.png")
+            os.path.join(subdir, f"{supervision}_assd_hd95_box.png"),
         )
 
         plot_mask_metrics_triplet(
             subdir, base_name,
             supervision,
-            os.path.join(subdir, f"{supervision}_mask_metrics_triplet.png")
+            os.path.join(subdir, f"{supervision}_mask_metrics_triplet.png"),
         )
 
         plot_surface_distance_histogram(
             csv_sub,
-            os.path.join(subdir, f"{supervision}_surface_distance_histogram.png")
+            os.path.join(subdir, f"{supervision}_surface_distance_histogram.png"),
+            supervision=supervision,
         )
 
-        plot_boundary_pr_curve(
+        # diagnostic: "why did TOTAL end up like this?"
+        plot_size_vs_iou_scatter(
             csv_sub,
-            os.path.join(subdir, f"{supervision}_boundary_pr_curve.png")
+            os.path.join(subdir, f"{supervision}_size_vs_iou_gt_area.png"),
+            supervision=supervision,
+            x_mode="gt_area_px",   # works immediately
         )
 
-    # midline / crack-level plots (NOT supervision-specific)
-    plot_midline_edge_metrics_bars(
-        midline_csv,
-        os.path.join(metrics_dir, f"{supervision}_midline_edge_metrics_bars.png")
-    )
+        plot_under_overfill_scatter(
+            csv_sub,
+            os.path.join(subdir, f"{supervision}_underfill_vs_overfill.png"),
+            supervision=supervision,
+        )
 
-    plot_midline_angle_distribution(
-        midline_csv,
-        os.path.join(metrics_dir, f"{supervision}_midline_angle_hist.png")
-    )
+        plot_error_contribution_bars(
+            csv_sub,
+            os.path.join(subdir, f"{supervision}_fn_contribution.png"),
+            supervision=supervision,
+            which="fn",
+            topk=15,
+        )
 
-    plot_crack_statistics_overview(
-        metrics_dir, base_name,
-        os.path.join(metrics_dir, f"{supervision}_crack_statistics.png")
-    )
+        plot_error_contribution_bars(
+            csv_sub,
+            os.path.join(subdir, f"{supervision}_fp_contribution.png"),
+            supervision=supervision,
+            which="fp",
+            topk=15,
+        )
+
+    # ---------------------------
+    # non-supervision plots
+    # ---------------------------
+    if os.path.exists(midline_csv):
+        plot_midline_edge_metrics_bars(
+            midline_csv,
+            os.path.join(metrics_dir, f"{base_name}_midline_edge_metrics_bars.png"),
+        )
+
+        plot_midline_angle_distribution(
+            midline_csv,
+            os.path.join(metrics_dir, f"{base_name}_midline_angle_hist.png"),
+        )
+
+        plot_crack_statistics_overview(
+            metrics_dir, base_name,
+            os.path.join(metrics_dir, f"{base_name}_crack_statistics.png"),
+        )
 
 
 ########################################################

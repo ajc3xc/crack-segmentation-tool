@@ -408,17 +408,51 @@ def width_stats(gt_widths, pred_widths):
 
 # ---- local helpers
 def compute_mask_metrics(gt_mask, pred_mask):
-    gt = gt_mask.astype(bool); pr = pred_mask.astype(bool)
-    tp = np.logical_and(gt, pr).sum()
-    fp = np.logical_and(~gt, pr).sum()
-    fn = np.logical_and(gt, ~pr).sum()
-    tn = np.logical_and(~gt, ~pr).sum()
-    precision = tp / (tp + fp + 1e-9)
-    recall    = tp / (tp + fn + 1e-9)
-    f1        = 2 * precision * recall / (precision + recall + 1e-9)
-    iou       = tp / (tp + fp + fn + 1e-9)
-    return {"precision": precision, "recall": recall, "f1": f1, "iou": iou,
-            "tp": int(tp), "fp": int(fp), "fn": int(fn), "tn": int(tn)}
+    """
+    Region metrics + confusion counts + useful derived scalars
+    (underfill/overfill, size proxies).
+    """
+    import numpy as np
+
+    gt = gt_mask.astype(bool)
+    pr = pred_mask.astype(bool)
+
+    tp = int(np.logical_and(gt, pr).sum())
+    fp = int(np.logical_and(~gt, pr).sum())
+    fn = int(np.logical_and(gt, ~pr).sum())
+    tn = int(np.logical_and(~gt, ~pr).sum())
+
+    eps = 1e-9
+    precision = tp / (tp + fp + eps)
+    recall    = tp / (tp + fn + eps)
+    f1        = 2 * precision * recall / (precision + recall + eps)
+    iou       = tp / (tp + fp + fn + eps)
+
+    # --- size proxies ---
+    gt_area   = tp + fn
+    pred_area = tp + fp
+    union     = tp + fp + fn
+
+    # --- fill diagnostics ---
+    underfill_rate = fn / (gt_area + eps)     # fraction of GT missed
+    overfill_rate  = fp / (pred_area + eps)   # fraction of prediction that is wrong
+    fill_ratio     = pred_area / (gt_area + eps)
+
+    return {
+        "precision": float(precision),
+        "recall":    float(recall),
+        "f1":        float(f1),
+        "iou":       float(iou),
+        "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+
+        # extra context columns (very useful for plots)
+        "gt_area_px": int(gt_area),
+        "pred_area_px": int(pred_area),
+        "union_area_px": int(union),
+        "underfill_rate": float(underfill_rate),
+        "overfill_rate":  float(overfill_rate),
+        "fill_ratio":     float(fill_ratio),
+    }
 
 def save_mask_comparison_plot(gt_mask, pred_mask, out_path, show=False):
     gt = gt_mask.astype(bool)
