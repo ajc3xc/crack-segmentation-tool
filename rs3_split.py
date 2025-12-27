@@ -1,13 +1,13 @@
 # --- CPU AFFINITY PINNING (Windows-safe) --- for core ultra
 import os
-try:
+'''try:
     import psutil
     _p = psutil.Process(os.getpid())
     # Pin to P-cores only
     _p.cpu_affinity([0, 1, 2, 3])
     print(f"[AFFINITY] Worker PID={os.getpid()} pinned to {_p.cpu_affinity()}")
 except Exception as e:
-    print(f"[AFFINITY] Could not set affinity: {e}")
+    print(f"[AFFINITY] Could not set affinity: {e}")'''
 
 
 # rs3_split.py (refactored for fast-marching ablation)

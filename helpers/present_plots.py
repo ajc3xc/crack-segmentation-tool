@@ -1023,3 +1023,179 @@ def plot_width_error_hexbin(
     plt.savefig(out_png, dpi=160, bbox_inches="tight")
     plt.close()
 
+
+
+
+
+
+
+#########################################################
+# Edge parameter sweep
+#########################################################
+
+def plot_edge_sweep_summary(df, out_png):
+    """
+    Compact diagnostic plot:
+      x = Boundary F1 ↑
+      y = ASSD ↓
+      color = HD95 ↓
+      highlight best (edge_score)
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    need = {"boundary_f1", "ASSD", "HD95"}
+    if not need.issubset(df.columns):
+        return
+
+    x = df["boundary_f1"].astype(float).values
+    y = df["ASSD"].astype(float).values
+    c = df["HD95"].astype(float).values
+
+    fig, ax = plt.subplots(figsize=(6.0, 5.0), dpi=160)
+
+    sc = ax.scatter(
+        x, y,
+        c=c,
+        s=46,
+        alpha=0.85,
+        linewidths=0.0,
+        cmap="viridis",
+    )
+
+    cb = fig.colorbar(sc, ax=ax)
+    cb.set_label("HD95 (px)", fontsize=9)
+
+    ax.set_xlabel("Boundary F1 ↑", fontsize=10)
+    ax.set_ylabel("ASSD (px) ↓", fontsize=10)
+    ax.set_title("Edge sweep", fontsize=12)
+
+    ax.grid(True, alpha=0.20)
+
+    # ---- Mark best (quietly) ----
+    if "edge_score" in df.columns:
+        s = df["edge_score"].astype(float).values
+        if np.isfinite(s).any():
+            i = int(np.nanargmin(s))
+            ax.scatter(
+                x[i], y[i],
+                s=180,
+                facecolors="none",
+                edgecolors="black",
+                linewidths=2.0,
+                zorder=5,
+            )
+
+            # Minimal annotation (params only)
+            try:
+                r = df.iloc[i]
+                txt = f"ws={int(r['param_window_half_size'])}, μ={r['param_mu']}, l={int(r['param_l'])}, p={int(r['param_p'])}"
+                ax.annotate(
+                    txt,
+                    (x[i], y[i]),
+                    xytext=(8, 6),
+                    textcoords="offset points",
+                    fontsize=8,
+                    bbox=dict(boxstyle="round", fc="white", ec="0.6", alpha=0.85),
+                )
+            except Exception:
+                pass
+
+    plt.tight_layout()
+    plt.savefig(out_png)
+    plt.close(fig)
+    
+def plot_from_cached_geometry(
+    geom_npz,
+    img_crop_gray,
+    gt_crop=None,
+    original_image=None,
+    out_dir=".",
+):
+    """
+    Plot overlays from cached geometry without recomputation.
+    """
+    import os
+    import numpy as np
+    import cv2
+
+    from helpers.plot_metrics import (
+        plot_normals_pretty,
+        plot_widths_colormap_on_crop,
+        plot_gt_normals_on_gtbw,
+    )
+    from helpers.metrics import normals_from_mask_for_midline
+    from helpers.save_load_files import save_gt_vs_manual_overlay
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    data = np.load(geom_npz)
+
+    mask_crop        = data["mask_crop"]
+    track_e1         = data["track_e1"]
+    track_e2         = data["track_e2"]
+    normals_e1       = data["normals_e1"]
+    normals_e2       = data["normals_e2"]
+    midline_xy_crop  = data["midline_xy_crop"]
+    x, y, w, h       = data["bbox"].tolist()
+
+    img_norm = cv2.normalize(
+        img_crop_gray.astype(np.float32),
+        None, 0, 255,
+        cv2.NORM_MINMAX
+    ).astype(np.uint8)
+
+    # ---- pretty edges ----
+    plot_normals_pretty(
+        img_norm,
+        track_e1,
+        track_e2,
+        midline_xy_crop,
+        normals_e1,
+        normals_e2,
+        os.path.join(out_dir, "edges_midlines_normals_pretty.png"),
+        cid="cached",
+    )
+
+    # ---- widths ----
+    plot_widths_colormap_on_crop(
+        gt_vs_manual_rgb=cv2.cvtColor(img_norm, cv2.COLOR_GRAY2RGB),
+        e1=normals_e1,
+        e2=normals_e2,
+        midline_xy=midline_xy_crop,
+        track_e1=track_e1,
+        track_e2=track_e2,
+        out_png=os.path.join(out_dir, "widths_colormap_on_crop.png"),
+    )
+
+    # ---- GT overlays ----
+    if gt_crop is not None:
+        gt_bin = (gt_crop > 0).astype(np.uint8)
+
+        (e1x, e1y, e2x, e2y, _), _ = normals_from_mask_for_midline(
+            midline_xy_crop,
+            gt_bin > 0,
+            max_radius=50,
+        )
+
+        plot_gt_normals_on_gtbw(
+            gt_bin * 255,
+            midline_xy_crop,
+            np.column_stack([e1x, e1y]),
+            np.column_stack([e2x, e2y]),
+            os.path.join(out_dir, "gt_normals.png"),
+        )
+
+        if original_image is not None:
+            H, W = original_image.shape[:2]
+            pred_full = np.zeros((H, W), np.uint8)
+            pred_full[y:y+h, x:x+w] = mask_crop > 0
+
+            save_gt_vs_manual_overlay(
+                H, W,
+                gt_bin,
+                pred_full,
+                os.path.join(out_dir, "gt_vs_manual_mask_global.png"),
+                bbox=[x, y, w, h],
+                original_image=original_image,
+            )

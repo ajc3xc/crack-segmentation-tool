@@ -2,14 +2,14 @@
 
 # --- CPU AFFINITY PINNING (Windows-safe) --- for core ultra
 import os
-try:
+'''try:
     import psutil
     _p = psutil.Process(os.getpid())
     # Pin to P-cores only
     _p.cpu_affinity([0, 1, 2, 3])
     print(f"[AFFINITY] Worker PID={os.getpid()} pinned to {_p.cpu_affinity()}")
 except Exception as e:
-    print(f"[AFFINITY] Could not set affinity: {e}")
+    print(f"[AFFINITY] Could not set affinity: {e}")'''
 
 from typing import Dict, Any
 import numpy as np
@@ -484,6 +484,8 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     image_shape    = payload.get("image_shape", None)
     gt_full        = payload.get("gt_full", None)
     original_image = payload.get("original_image", None)
+    
+    calib_only = payload.get("calibration_only", False)
 
     seg_mode = str(P.get("seg_mode", "new")).lower()
     if seg_mode not in ("old", "new"):
@@ -521,16 +523,30 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         midline_tag = "auto" if src.startswith("auto") else "manual"
 
         param_tag = (
-            f"{midline_tag}"
-            f"_ws{P['window_half_size']}"
+            f"_wsize{P['window_half_size']}"
             f"_mu{P['mu']}"
             f"_l{P['l']}"
             f"_p{P['p']}"
+            f"_{seg_mode}"
         )
 
         cid       = crack_id
         save_root = payload["save_folder"]
-        dbg_dir   = os.path.join(save_root, "metrics", base_name, f"cid{cid}", param_tag)
+        # ---- root per crack
+        cid_root = os.path.join(save_root, "metrics", base_name, f"cid{cid}")
+
+        # ---- manual/auto split
+        cid_root = os.path.join(cid_root, midline_tag)   # .../cidX/manual or .../cidX/auto
+
+        # ---- calibration artifacts go under debug/
+        if calib_only:
+            dbg_dir = os.path.join(cid_root, "debug", param_tag)
+        else:
+            # for normal (non-calib) runs, keep results under best/ (or params/)
+            dbg_dir = os.path.join(cid_root, "best"+param_tag)
+
+        os.makedirs(dbg_dir, exist_ok=True)
+
         os.makedirs(dbg_dir, exist_ok=True)
 
         # -------------------------------------------------------
@@ -584,18 +600,19 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         # =======================================================
         # 1) Pretty edges + normals (crop-level)
         # =======================================================
-        pretty_path = os.path.join(dbg_dir, "edges_midlines_normals_pretty.png")
-        try:
-            plot_normals_pretty(
-                img_norm,
-                track_e1, track_e2,
-                midline_xy_crop,
-                normals_e1, normals_e2,
-                pretty_path,
-                cid,
-            )
-        except Exception as e:
-            print(f"[DEBUG VIS] ⚠ plot_normals_pretty failed for cid{cid}: {e}")
+        if not calib_only:
+            pretty_path = os.path.join(dbg_dir, "edges_midlines_normals_pretty.png")
+            try:
+                plot_normals_pretty(
+                    img_norm,
+                    track_e1, track_e2,
+                    midline_xy_crop,
+                    normals_e1, normals_e2,
+                    pretty_path,
+                    cid,
+                )
+            except Exception as e:
+                print(f"[DEBUG VIS] ⚠ plot_normals_pretty failed for cid{cid}: {e}")
 
         # =======================================================
         # 2) Crop-level GT + metrics
@@ -614,127 +631,151 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             metrics_all = {**base, **bnd, **surf}
 
             # IoU-style overlay (crop-level, 3x upscaled) – still useful
-            try:
-                vis_gray = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR).astype(np.float32) / 255.0
-                dark_base = np.clip(vis_gray * 0.35, 0.0, 1.0)
-                overlay = dark_base.copy()
+            if not calib_only:
+                try:
+                    vis_gray = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR).astype(np.float32) / 255.0
+                    dark_base = np.clip(vis_gray * 0.35, 0.0, 1.0)
+                    overlay = dark_base.copy()
 
-                intersect = np.logical_and(gt_bin, pred_bin)
-                pred_only = np.logical_and(pred_bin, np.logical_not(gt_bin))
-                gt_only   = np.logical_and(gt_bin, np.logical_not(pred_bin))
+                    intersect = np.logical_and(gt_bin, pred_bin)
+                    pred_only = np.logical_and(pred_bin, np.logical_not(gt_bin))
+                    gt_only   = np.logical_and(gt_bin, np.logical_not(pred_bin))
 
-                overlay[gt_only == 1]   = (0.2, 0.2, 1.0)
-                overlay[pred_only == 1] = (0.2, 1.0, 1.0)
-                overlay[intersect == 1] = (0.95, 0.95, 0.95)
+                    overlay[gt_only == 1]   = (0.2, 0.2, 1.0)
+                    overlay[pred_only == 1] = (0.2, 1.0, 1.0)
+                    overlay[intersect == 1] = (0.95, 0.95, 0.95)
 
-                blended = cv2.addWeighted(overlay, 0.85, dark_base, 0.15, 0.0)
-                vis_large = cv2.resize(
-                    np.clip(blended * 255.0, 0, 255).astype(np.uint8),
-                    None, fx=3.0, fy=3.0,
-                    interpolation=cv2.INTER_NEAREST,
-                )
-                gt_vs_manual_overlay = vis_large
-                out_iou = os.path.join(dbg_dir, "gt_vs_manual_mask.png")
-                cv2.imwrite(out_iou, vis_large)
-                print(f"[DEBUG VIS] wrote → {out_iou}")
-            except Exception as e:
-                print(f"[DEBUG VIS] ⚠ crop IoU overlay failed cid{cid}: {e}")
+                    blended = cv2.addWeighted(overlay, 0.85, dark_base, 0.15, 0.0)
+                    vis_large = cv2.resize(
+                        np.clip(blended * 255.0, 0, 255).astype(np.uint8),
+                        None, fx=3.0, fy=3.0,
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                    gt_vs_manual_overlay = vis_large
+                    out_iou = os.path.join(dbg_dir, "gt_vs_manual_mask.png")
+                    cv2.imwrite(out_iou, vis_large)
+                    print(f"[DEBUG VIS] wrote → {out_iou}")
+                except Exception as e:
+                    print(f"[DEBUG VIS] ⚠ crop IoU overlay failed cid{cid}: {e}")
 
         # =======================================================
         # 3) Widths colormap (crop-level)
         # =======================================================
-        widths_path = os.path.join(dbg_dir, "widths_colormap_on_crop.png")
-        try:
-            if gt_vs_manual_overlay is not None:
-                S = 3.0
-                plot_widths_colormap_on_crop(
-                    gt_vs_manual_rgb = gt_vs_manual_overlay,
-                    e1               = normals_e1 * S,
-                    e2               = normals_e2 * S,
-                    midline_xy       = midline_xy_crop * S,
-                    track_e1         = track_e1 * S,
-                    track_e2         = track_e2 * S,
-                    out_png          = widths_path,
-                )
-            else:
-                gray_rgb = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2RGB)
-                plot_widths_colormap_on_crop(
-                    gt_vs_manual_rgb = gray_rgb,
-                    e1               = normals_e1,
-                    e2               = normals_e2,
-                    midline_xy       = midline_xy_crop,
-                    track_e1         = track_e1,
-                    track_e2         = track_e2,
-                    out_png          = widths_path,
-                )
-            print(f"[DEBUG VIS] wrote → {widths_path}")
-        except Exception as e:
-            print(f"[DEBUG VIS] ⚠ widths colormap failed cid{cid}: {e}")
-
-        # =======================================================
-        # 4) GT normals (crop-level)
-        # =======================================================
-        try:
-            if gt_crop is not None:
-                gt_mask_u8 = (gt_crop > 0).astype(np.uint8) * 255
-                (e1x, e1y, e2x, e2y, _), _ = normals_from_mask_for_midline(
-                    midline_xy_crop,
-                    gt_mask_u8 > 0,
-                    max_radius=50,
-                )
-                e1 = np.column_stack([e1x, e1y])
-                e2 = np.column_stack([e2x, e2y])
-                gt_normals_path = os.path.join(dbg_dir, f"{midline_tag}_normals.png")
-                plot_gt_normals_on_gtbw(
-                    gt_mask_u8,
-                    midline_xy_crop,
-                    e1,
-                    e2,
-                    gt_normals_path,
-                )
-                print(f"[DEBUG VIS] wrote → {gt_normals_path}")
-        except Exception as e:
-            print(f"[DEBUG VIS] ⚠ gt_normals plotting failed cid{cid}: {e}")
-
-        # =======================================================
-        # 5) GLOBAL overlay via save_gt_vs_manual_overlay
-        # =======================================================
-        try:
-            if (
-                image_shape is not None and
-                gt_full is not None and
-                original_image is not None
-            ):
-                H, W = image_shape
-                pred_full = np.zeros((H, W), np.uint8)
-                pred_full[y:y + h, x:x + w] = (mask_crop > 0).astype(np.uint8)
-
-                ys, xs = np.where(pred_full > 0)
-                if xs.size > 0:
-                    x0 = max(xs.min() - 5, 0)
-                    y0 = max(ys.min() - 5, 0)
-                    x1 = min(xs.max() + 5, W)
-                    y1 = min(ys.max() + 5, H)
-                    bbox = [x0, y0, x1 - x0, y1 - y0]
+        if not calib_only:
+            widths_path = os.path.join(dbg_dir, "widths_colormap_on_crop.png")
+            try:
+                if gt_vs_manual_overlay is not None:
+                    S = 3.0
+                    plot_widths_colormap_on_crop(
+                        gt_vs_manual_rgb = gt_vs_manual_overlay,
+                        e1               = normals_e1 * S,
+                        e2               = normals_e2 * S,
+                        midline_xy       = midline_xy_crop * S,
+                        track_e1         = track_e1 * S,
+                        track_e2         = track_e2 * S,
+                        out_png          = widths_path,
+                    )
                 else:
-                    bbox = [0, 0, W, H]
+                    gray_rgb = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2RGB)
+                    plot_widths_colormap_on_crop(
+                        gt_vs_manual_rgb = gray_rgb,
+                        e1               = normals_e1,
+                        e2               = normals_e2,
+                        midline_xy       = midline_xy_crop,
+                        track_e1         = track_e1,
+                        track_e2         = track_e2,
+                        out_png          = widths_path,
+                    )
+                print(f"[DEBUG VIS] wrote → {widths_path}")
+            except Exception as e:
+                print(f"[DEBUG VIS] ⚠ widths colormap failed cid{cid}: {e}")
 
-                global_overlay_path = os.path.join(dbg_dir, "gt_vs_manual_mask_global.png")
-                save_gt_vs_manual_overlay(
-                    H,
-                    W,
-                    gt_full,
-                    pred_full,
-                    global_overlay_path,
-                    bbox=bbox,
-                    original_image=original_image,
+            # =======================================================
+            # 4) GT normals (crop-level)
+            # =======================================================
+            try:
+                if gt_crop is not None:
+                    gt_mask_u8 = (gt_crop > 0).astype(np.uint8) * 255
+                    (e1x, e1y, e2x, e2y, _), _ = normals_from_mask_for_midline(
+                        midline_xy_crop,
+                        gt_mask_u8 > 0,
+                        max_radius=50,
+                    )
+                    e1 = np.column_stack([e1x, e1y])
+                    e2 = np.column_stack([e2x, e2y])
+                    gt_normals_path = os.path.join(dbg_dir, f"{midline_tag}_normals.png")
+                    plot_gt_normals_on_gtbw(
+                        gt_mask_u8,
+                        midline_xy_crop,
+                        e1,
+                        e2,
+                        gt_normals_path,
+                    )
+                    print(f"[DEBUG VIS] wrote → {gt_normals_path}")
+            except Exception as e:
+                print(f"[DEBUG VIS] ⚠ gt_normals plotting failed cid{cid}: {e}")
+
+            # =======================================================
+            # 5) GLOBAL overlay via save_gt_vs_manual_overlay
+            # =======================================================
+            try:
+                if (
+                    image_shape is not None and
+                    gt_full is not None and
+                    original_image is not None
+                ):
+                    H, W = image_shape
+                    pred_full = np.zeros((H, W), np.uint8)
+                    pred_full[y:y + h, x:x + w] = (mask_crop > 0).astype(np.uint8)
+
+                    ys, xs = np.where(pred_full > 0)
+                    if xs.size > 0:
+                        x0 = max(xs.min() - 5, 0)
+                        y0 = max(ys.min() - 5, 0)
+                        x1 = min(xs.max() + 5, W)
+                        y1 = min(ys.max() + 5, H)
+                        bbox = [x0, y0, x1 - x0, y1 - y0]
+                    else:
+                        bbox = [0, 0, W, H]
+
+                    global_overlay_path = os.path.join(dbg_dir, "gt_vs_manual_mask_global.png")
+                    save_gt_vs_manual_overlay(
+                        H,
+                        W,
+                        gt_full,
+                        pred_full,
+                        global_overlay_path,
+                        bbox=bbox,
+                        original_image=original_image,
+                    )
+
+                    print(f"[edge_worker] wrote global mask overlay → {global_overlay_path}")
+                else:
+                    print(f"image shape {image_shape is None}, gt_full {gt_full is None}, original_image {original_image is None}")
+            except Exception as e:
+                print(f"[edge_worker] ⚠ save_gt_vs_manual_overlay failed cid{cid}: {e}")
+
+        # -------------------------------------------------------
+        # Cache geometry for later plotting (calibration runs)
+        # -------------------------------------------------------
+        if calib_only:
+            try:
+                geom_cache = {
+                    "mask_crop": mask_crop.astype(np.uint8),
+                    "track_e1": track_e1.astype(np.float32),
+                    "track_e2": track_e2.astype(np.float32),
+                    "normals_e1": normals_e1.astype(np.float32),
+                    "normals_e2": normals_e2.astype(np.float32),
+                    "midline_xy_crop": midline_xy_crop.astype(np.float32),
+                    "bbox": np.asarray([x, y, w, h], np.int32),
+                }
+
+                np.savez_compressed(
+                    os.path.join(dbg_dir, "geom_cache.npz"),
+                    **geom_cache
                 )
-
-                print(f"[edge_worker] wrote global mask overlay → {global_overlay_path}")
-            else:
-                print(f"image shape {image_shape is None}, gt_full {gt_full is None}, original_image {original_image is None}")
-        except Exception as e:
-            print(f"[edge_worker] ⚠ save_gt_vs_manual_overlay failed cid{cid}: {e}")
+            except Exception as e:
+                print(f"[edge_worker] ⚠ geom cache write failed: {e}")
 
         # =======================================================
         # 6) Pack result for caller (no snapshot write here)
@@ -766,7 +807,16 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         return result
 
     except Exception as e:
-        print(f"[edge_worker] ❌ unexpected failure for params={P}: {e}")
-        out: Dict[str, Any] = {"status": "fail_exception", "error": str(e)}
+        import traceback
+
+        tb = traceback.format_exc()
+        print(f"[edge_worker] ❌ unexpected failure for params={P}")
+        print(tb)
+
+        out: Dict[str, Any] = {
+            "status": "fail_exception",
+            "error": str(e),
+            "traceback": tb,   # <-- retained for caller / CSV / debug
+        }
         out.update(P)
         return out
