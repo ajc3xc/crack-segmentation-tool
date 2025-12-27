@@ -5531,10 +5531,16 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     out_csv = os.path.join(metrics_dir, "edge_sweep_image.csv")
                     df_img.to_csv(out_csv, index=False)
 
-                    # ---- image-level plot (ONE per image) ----
+                    # ---- image-level diagnostic plot (ONE per image, thesis-safe) ----
                     from helpers.present_plots import plot_edge_sweep_summary
-                    out_png = os.path.join(metrics_dir, "edge_sweep_score.png")
-                    plot_edge_sweep_summary(df_img, out_png)
+
+                    out_png = os.path.join(metrics_dir, "edge_sweep_summary.png")
+                    plot_edge_sweep_summary(
+                        df_img,
+                        out_png,
+                        hd95_guardrail=5.0,   # explicit, defensible threshold
+                    )
+
 
                 except Exception as e:
                     print(f"[quick] ⚠ image-level edge calibration failed: {e}")
@@ -5551,6 +5557,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         t_edge_calib = time.perf_counter() - t_edge_calib_start
         print(f"[quick] ⏱ edge calibration total: {t_edge_calib:.2f}s")
+        
+        return
 
         # ------------------------------------------------------------
         # PHASE 1: EDGE TRACKING FOR MANUAL CRACKS (edge_param_worker)

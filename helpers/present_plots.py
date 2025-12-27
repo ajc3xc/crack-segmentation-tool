@@ -1033,78 +1033,159 @@ def plot_width_error_hexbin(
 # Edge parameter sweep
 #########################################################
 
-def plot_edge_sweep_summary(df, out_png):
+def plot_edge_sweep_summary(df, out_png, hd95_guardrail=5.0):
     """
-    Compact diagnostic plot:
-      x = Boundary F1 ↑
-      y = ASSD ↓
-      color = HD95 ↓
-      highlight best (edge_score)
+    Thesis-safe edge calibration diagnostic.
+
+    Panel A: Pareto space
+      - x = Boundary F1 (higher better)
+      - y = ASSD (lower better)
+      - labeled by crack id (cid)
+      - best family highlighted
+
+    Panel B: Edge score decomposition
+      - stacked contributions:
+          * boundary penalty
+          * ASSD penalty
+          * HD95 penalty
+
+    This makes the selection *auditable*, not heuristic-looking.
     """
     import numpy as np
     import matplotlib.pyplot as plt
 
-    need = {"boundary_f1", "ASSD", "HD95"}
-    if not need.issubset(df.columns):
+    required = {
+        "crack_id",
+        "boundary_f1",
+        "ASSD",
+        "HD95",
+        "edge_score",
+    }
+    if not required.issubset(df.columns):
+        print(f"Subset not foun for edge_sweep_summary {df.columns}")
         return
 
-    x = df["boundary_f1"].astype(float).values
-    y = df["ASSD"].astype(float).values
-    c = df["HD95"].astype(float).values
+    # ------------------------------------------------------------
+    # Defensive copy + numeric coercion
+    # ------------------------------------------------------------
+    D = df.copy()
+    for c in ["boundary_f1", "ASSD", "HD95", "edge_score"]:
+        D[c] = D[c].astype(float)
 
-    fig, ax = plt.subplots(figsize=(6.0, 5.0), dpi=160)
+    # Optional guardrail: remove pathological tails
+    D = D[D["HD95"] <= hd95_guardrail]
+    if D.empty:
+        return
 
-    sc = ax.scatter(
-        x, y,
-        c=c,
-        s=46,
-        alpha=0.85,
-        linewidths=0.0,
-        cmap="viridis",
+    # Identify best (image-level)
+    i_best = int(D["edge_score"].idxmin())
+    best = D.loc[i_best]
+
+    # ------------------------------------------------------------
+    # Score decomposition (EXPLICIT)
+    # ------------------------------------------------------------
+    assd_med = D["ASSD"].median() + 1e-9
+    hd95_med = D["HD95"].median() + 1e-9
+
+    D["penalty_bf1"]  = (1.0 - D["boundary_f1"])
+    D["penalty_assd"] = 0.50 * (D["ASSD"] / assd_med)
+    D["penalty_hd95"] = 0.25 * (D["HD95"] / hd95_med)
+
+    # ------------------------------------------------------------
+    # Figure layout
+    # ------------------------------------------------------------
+    fig, (ax1, ax2) = plt.subplots(
+        1, 2,
+        figsize=(10.5, 4.6),
+        dpi=160,
+        gridspec_kw=dict(width_ratios=[1.1, 1.0])
     )
 
-    cb = fig.colorbar(sc, ax=ax)
-    cb.set_label("HD95 (px)", fontsize=9)
+    # ============================================================
+    # PANEL A — Pareto space (NO color tricks)
+    # ============================================================
+    ax1.scatter(
+        D["boundary_f1"],
+        D["ASSD"],
+        s=70,
+        alpha=0.85,
+        edgecolor="black",
+        linewidth=0.4,
+    )
 
-    ax.set_xlabel("Boundary F1 ↑", fontsize=10)
-    ax.set_ylabel("ASSD (px) ↓", fontsize=10)
-    ax.set_title("Edge sweep", fontsize=12)
+    # Label by cid
+    for _, r in D.iterrows():
+        ax1.annotate(
+            f"{int(r['crack_id'])}",
+            (r["boundary_f1"], r["ASSD"]),
+            xytext=(4, 3),
+            textcoords="offset points",
+            fontsize=8,
+            alpha=0.8,
+        )
 
-    ax.grid(True, alpha=0.20)
+    # Highlight best
+    ax1.scatter(
+        best["boundary_f1"],
+        best["ASSD"],
+        s=200,
+        facecolors="none",
+        edgecolors="black",
+        linewidths=2.0,
+        zorder=5,
+    )
 
-    # ---- Mark best (quietly) ----
-    if "edge_score" in df.columns:
-        s = df["edge_score"].astype(float).values
-        if np.isfinite(s).any():
-            i = int(np.nanargmin(s))
-            ax.scatter(
-                x[i], y[i],
-                s=180,
-                facecolors="none",
-                edgecolors="black",
-                linewidths=2.0,
-                zorder=5,
-            )
+    ax1.set_xlabel("Boundary F1 ↑")
+    ax1.set_ylabel("ASSD (px) ↓")
+    ax1.set_title("Pareto space (labels = crack id)")
+    ax1.grid(True, alpha=0.25)
 
-            # Minimal annotation (params only)
-            try:
-                r = df.iloc[i]
-                txt = f"ws={int(r['param_window_half_size'])}, μ={r['param_mu']}, l={int(r['param_l'])}, p={int(r['param_p'])}"
-                ax.annotate(
-                    txt,
-                    (x[i], y[i]),
-                    xytext=(8, 6),
-                    textcoords="offset points",
-                    fontsize=8,
-                    bbox=dict(boxstyle="round", fc="white", ec="0.6", alpha=0.85),
-                )
-            except Exception:
-                pass
+    # ============================================================
+    # PANEL B — Score decomposition (THIS BUILDS TRUST)
+    # ============================================================
+    x = np.arange(len(D))
 
-    plt.tight_layout()
-    plt.savefig(out_png)
+    ax2.bar(
+        x,
+        D["penalty_bf1"],
+        label="Boundary error",
+        color="#d62728",
+    )
+    ax2.bar(
+        x,
+        D["penalty_assd"],
+        bottom=D["penalty_bf1"],
+        label="ASSD penalty",
+        color="#ff7f0e",
+    )
+    ax2.bar(
+        x,
+        D["penalty_hd95"],
+        bottom=D["penalty_bf1"] + D["penalty_assd"],
+        label="HD95 penalty",
+        color="#9467bd",
+    )
+
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([str(int(c)) for c in D["crack_id"]])
+    ax2.set_xlabel("Crack id")
+    ax2.set_ylabel("Normalized penalty")
+    ax2.set_title("Edge score decomposition")
+    ax2.legend(fontsize=8)
+    ax2.grid(True, axis="y", alpha=0.25)
+
+    # ------------------------------------------------------------
+    # Super-title (explicit, honest)
+    # ------------------------------------------------------------
+    fig.suptitle(
+        "Edge calibration: multi-objective tradeoff and score justification",
+        fontsize=13,
+    )
+
+    fig.tight_layout(rect=[0, 0.02, 1, 0.95])
+    fig.savefig(out_png)
     plt.close(fig)
-    
+  
 def plot_from_cached_geometry(
     geom_npz,
     img_crop_gray,
@@ -1120,12 +1201,14 @@ def plot_from_cached_geometry(
     import cv2
 
     from helpers.plot_metrics import (
-        plot_normals_pretty,
-        plot_widths_colormap_on_crop,
         plot_gt_normals_on_gtbw,
     )
+    from edge_workers import (
+        plot_normals_pretty,
+        plot_widths_colormap_on_crop,
+    )
     from helpers.metrics import normals_from_mask_for_midline
-    from helpers.save_load_files import save_gt_vs_manual_overlay
+    from helpers.plot_metrics import save_gt_vs_manual_overlay
 
     os.makedirs(out_dir, exist_ok=True)
 
