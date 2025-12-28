@@ -968,31 +968,35 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         """
         edge_sweep_packs:
             dict[cid] -> DataFrame from sweep_edges_with_executor
-        """
 
+        Selects best EDGE FAMILY using the SAME weighted aggregation you already use,
+        and also emits image-level artifacts that are thesis-auditable:
+
+        metrics/{image_base}/edge_sweep_all.csv
+        metrics/{image_base}/edge_sweep_family_agg.csv
+        metrics/{image_base}/edge_sweep_summary.png
+        """
+        import os
         import numpy as np
         import pandas as pd
 
         frames = []
-        for cid, df in edge_sweep_packs.items():
-            if df is None or df.empty:
+        for cid, df in (edge_sweep_packs or {}).items():
+            if df is None or getattr(df, "empty", True):
                 continue
 
             d = df.copy()
             d["crack_id"] = cid
 
             # ---- weights (same philosophy as RS3) ----
+            # prefer sweep-provided columns if they exist; otherwise fall back to 1.0
             d["length_px"] = d.get("midline_length_px", np.nan)
             d["bbox_area"] = d.get("bbox_area_px", np.nan)
 
-            # robust fallback
-            d["length_px"] = d["length_px"].fillna(1.0)
-            d["bbox_area"] = d["bbox_area"].fillna(1.0)
+            d["length_px"] = pd.to_numeric(d["length_px"], errors="coerce").fillna(1.0)
+            d["bbox_area"] = pd.to_numeric(d["bbox_area"], errors="coerce").fillna(1.0)
 
-            d["global_weight"] = np.maximum(
-                d["length_px"] * np.sqrt(d["bbox_area"]),
-                1e-3
-            )
+            d["global_weight"] = np.maximum(d["length_px"] * np.sqrt(d["bbox_area"]), 1e-3)
 
             frames.append(d)
 
@@ -1002,37 +1006,61 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         df_all = pd.concat(frames, ignore_index=True)
 
-        # ---- define the EDGE FAMILY ----
-        fam_cols = [
-            "param_window_half_size",
-            "param_mu",
-            "param_l",
-            "param_p",
-            "param_seg_mode",
-        ]
+        # ------------------------------------------------------------
+        # HARD DEBUG: verify we are using RAW SWEEP (not post-selection)
+        # ------------------------------------------------------------
+        print("\n[EDGE global] DEBUG (raw sweep concat)")
+        print("  n_rows:", len(df_all))
+        print("  n_cracks:", df_all["crack_id"].nunique() if "crack_id" in df_all.columns else "NA")
+        for col in ["param_window_half_size", "param_mu", "param_l", "param_p", "param_seg_mode"]:
+            if col not in df_all.columns:
+                print(f"  ❌ missing column: {col}")
+        # show family counts if possible
+        fam_cols = ["param_window_half_size", "param_mu", "param_l", "param_p", "param_seg_mode"]
+        if set(fam_cols).issubset(df_all.columns):
+            fam_counts = (
+                df_all.groupby(fam_cols)
+                    .size()
+                    .reset_index(name="n_rows")
+                    .sort_values("n_rows", ascending=False)
+            )
+            print("  n_families:", len(fam_counts))
+            print(fam_counts.head(12).to_string(index=False))
+
+        # ------------------------------------------------------------
+        # Define EDGE FAMILY and compute weighted family score
+        # ------------------------------------------------------------
+        if "edge_score" not in df_all.columns:
+            print("[EDGE global] ❌ df_all missing edge_score — cannot select best family")
+            return None
+
+        df_all["edge_score"] = pd.to_numeric(df_all["edge_score"], errors="coerce")
 
         grouped = []
         for key, g in df_all.groupby(fam_cols):
-            w = g["global_weight"].values
-            s = g["edge_score"].values
+            s = g["edge_score"].values.astype(float)
+            w = pd.to_numeric(g.get("global_weight", 1.0), errors="coerce").fillna(1.0).values.astype(float)
 
-            if not np.isfinite(s).any():
+            ok = np.isfinite(s) & np.isfinite(w) & (w > 0)
+            if not np.any(ok):
                 continue
 
-            score_wmean = float(np.average(s, weights=w))
+            score_wmean = float(np.average(s[ok], weights=w[ok]))
 
             grouped.append({
                 **dict(zip(fam_cols, key)),
                 "edge_score_wmean": score_wmean,
-                "n_subcracks": len(g),
+                "n_rows": int(len(g)),
+                "n_cracks": int(g["crack_id"].nunique()) if "crack_id" in g.columns else int(len(g)),
+                "weight_sum": float(np.sum(w[ok])),
             })
 
         fam_df = pd.DataFrame(grouped)
-        fam_df = fam_df.sort_values("edge_score_wmean", ascending=True)
-
         if fam_df.empty:
+            print("[EDGE global] ❌ no valid families after grouping (non-finite scores?)")
             return None
 
+        fam_df = fam_df.sort_values("edge_score_wmean", ascending=True).reset_index(drop=True)
         best = fam_df.iloc[0]
 
         print(
@@ -1042,8 +1070,49 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             f"l={best['param_l']} "
             f"p={best['param_p']} "
             f"mode={best['param_seg_mode']} "
-            f"(score={best['edge_score_wmean']:.4f}, n={best['n_subcracks']})"
+            f"(score={best['edge_score_wmean']:.4f}, rows={best['n_rows']}, cracks={best['n_cracks']})"
         )
+
+        # ------------------------------------------------------------
+        # Image-level exports (CSV + plot) — IMPORTANT: use RAW df_all
+        # ------------------------------------------------------------
+        try:
+            save_root = getattr(self, "save_folder", None) or getattr(self, "output_folder", None) or ""
+            base_name = str(getattr(self, "image_base", None) or getattr(self, "name", "unknown"))
+            # if base_name looks like a path/filename, strip extension
+            base_name = os.path.splitext(os.path.basename(base_name))[0]
+
+            metrics_dir = os.path.join(save_root, "metrics", base_name)
+            os.makedirs(metrics_dir, exist_ok=True)
+
+            # full raw sweep
+            df_all.to_csv(os.path.join(metrics_dir, "edge_sweep_all.csv"), index=False)
+
+            # family aggregation table used for selection
+            fam_df.to_csv(os.path.join(metrics_dir, "edge_sweep_family_agg.csv"), index=False)
+
+            # thesis plot from RAW data (shows ALL families) + highlight selected
+            from helpers.present_plots import plot_edge_sweep_summary
+            out_png = os.path.join(metrics_dir, "edge_sweep_summary.png")
+
+            selected = {
+                "param_window_half_size": best["param_window_half_size"],
+                "param_mu": best["param_mu"],
+                "param_l": best["param_l"],
+                "param_p": best["param_p"],
+                "param_seg_mode": best["param_seg_mode"],
+            }
+
+            plot_edge_sweep_summary(
+                df_all,
+                out_png,
+                weight_col="global_weight",
+                selected_family=selected,
+                hd95_guardrail=None,   # set to a float if you want to hard-clip outliers
+            )
+
+        except Exception as e:
+            print(f"[EDGE global] ⚠ image-level exports failed: {e}")
 
         return {
             "window_half_size": int(best["param_window_half_size"]),
@@ -5501,49 +5570,32 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     d["crack_id"] = cid
                     edge_packs[cid] = d
 
-            # ---- IMAGE-LEVEL AGGREGATION ----
+            # ------------------------------------------------------------
+            # IMAGE-LEVEL EDGE CALIBRATION (RS3-STYLE, AUTHORITATIVE)
+            # ------------------------------------------------------------
             best_edge = None
-            df_img = None
 
             if edge_packs:
                 try:
-                    # image-level family selection (RS3 analog)
+                    # ----------------------------------------------------
+                    # Delegate EVERYTHING to the authoritative selector
+                    #  - weighted aggregation
+                    #  - family scoring
+                    #  - CSV exports
+                    #  - thesis-grade visualization
+                    # ----------------------------------------------------
                     best_edge = self.select_best_edge_family_across_subcracks(edge_packs)
 
-                    # build image-level CSV table
-                    frames = list(edge_packs.values())
-                    df_img = pd.concat(frames, ignore_index=True)
-
-                    # recompute image-level edge_score (defensive)
-                    if {"boundary_f1", "ASSD", "HD95"}.issubset(df_img.columns):
-                        assd_med = df_img["ASSD"].median() + 1e-9
-                        hd95_med = df_img["HD95"].median() + 1e-9
-
-                        df_img["edge_score"] = (
-                            (1.0 - df_img["boundary_f1"]) +
-                            0.50 * (df_img["ASSD"] / assd_med) +
-                            0.25 * (df_img["HD95"] / hd95_med)
-                        )
-
-                    # ---- write image-level CSV ----
-                    metrics_dir = self._metrics_dir()
-                    os.makedirs(metrics_dir, exist_ok=True)
-                    out_csv = os.path.join(metrics_dir, "edge_sweep_image.csv")
-                    df_img.to_csv(out_csv, index=False)
-
-                    # ---- image-level diagnostic plot (ONE per image, thesis-safe) ----
-                    from helpers.present_plots import plot_edge_sweep_summary
-
-                    out_png = os.path.join(metrics_dir, "edge_sweep_summary.png")
-                    plot_edge_sweep_summary(
-                        df_img,
-                        out_png,
-                        hd95_guardrail=5.0,   # explicit, defensible threshold
-                    )
-
+                    if best_edge is None:
+                        print("[quick] ⚠ edge family selection returned None")
 
                 except Exception as e:
-                    print(f"[quick] ⚠ image-level edge calibration failed: {e}")
+                    print(f"[quick] ⚠ image-level edge calibration failed:")
+                    import traceback
+                    traceback.print_exc()
+
+            else:
+                print("[quick] ⚠ no edge sweep packs available for image-level calibration")
 
             if best_edge is None:
                 print("[quick] ⚠ falling back to default edge params")
