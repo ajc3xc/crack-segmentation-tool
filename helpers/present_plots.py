@@ -1246,11 +1246,9 @@ def plot_edge_sweep_summary(
     )
 
     labels = [
-        f"w={int(r.param_window_half_size)}\n"
-        f"μ={r.param_mu}\n"
+        f"w={int(r.param_window_half_size)} μ={r.param_mu}\n"
         f"l={int(r.param_l)}, p={int(r.param_p)}\n"
-        f"mode={r.param_seg_mode}\n"
-        f"(cracks={r.n_cracks})"
+        f"mode={r.param_seg_mode} (cracks={r.n_cracks})"
         for r in P.itertuples()
     ]
 
@@ -1365,3 +1363,455 @@ def plot_from_cached_geometry(
                 bbox=[x, y, w, h],
                 original_image=original_image,
             )
+
+
+
+
+
+
+
+##################################################################
+# Auto variants plots
+##################################################################
+
+def plot_rs3_sweep_summary(
+    df_all,
+    out_dir,
+    *,
+    weight_col="global_weight",
+    selected_family=None,
+):
+    """
+    Thesis-grade RS3 auto-variant calibration summary.
+
+    Produces FOUR plots into out_dir:
+      1) rs3_pareto.png        — raw variant scatter (ALL points)
+      2) rs3_decomposition.png — weighted score breakdown by family
+      3) rs3_heatmap.png       — per-crack vs family performance
+      4) rs3_os_compare.png    — OS-mode ablation comparison
+
+    df_all MUST be RAW concatenated metrics_df across cracks.
+    """
+
+    import os
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    # -----------------------------
+    # Required columns
+    # -----------------------------
+    req = {
+        "crack_id",
+        "os_mode",
+        "g11", "g22", "g33",
+        "score_mid",
+        "chamfer_mean",
+        "hausdorff",
+        "coverage",
+        weight_col,
+    }
+    if not req.issubset(df_all.columns):
+        print("[plot_rs3] ❌ missing columns:", sorted(req - set(df_all.columns)))
+        return
+
+    D = df_all.copy()
+
+    # -----------------------------
+    # Numeric coercion
+    # -----------------------------
+    for c in ["score_mid", "chamfer_mean", "hausdorff", "coverage", weight_col]:
+        D[c] = pd.to_numeric(D[c], errors="coerce")
+
+    D = D.dropna(subset=["score_mid", "chamfer_mean", "hausdorff"])
+    if D.empty:
+        print("[plot_rs3] ❌ empty after coercion")
+        return
+
+    # -----------------------------
+    # Family key
+    # -----------------------------
+    fam_cols = ["os_mode", "g11", "g22", "g33"]
+    D["family"] = D[fam_cols].astype(str).agg("|".join, axis=1)
+
+    fam_keys = D["family"].unique().tolist()
+    fam_to_idx = {k: i for i, k in enumerate(fam_keys)}
+
+    # ============================================================
+    # 1) RAW PARETO SCATTER (ALL POINTS)
+    # ============================================================
+    plt.figure(figsize=(7.0, 5.5), dpi=160)
+
+    colors = plt.cm.tab10(np.linspace(0, 1, len(fam_keys)))
+
+    for fam, g in D.groupby("family"):
+        i = fam_to_idx[fam]
+        plt.scatter(
+            g["chamfer_mean"],
+            g["hausdorff"],
+            s=55,
+            alpha=0.55,
+            color=colors[i],
+            label=fam,
+        )
+        for _, r in g.iterrows():
+            plt.annotate(
+                str(int(r["crack_id"])),
+                (r["chamfer_mean"], r["hausdorff"]),
+                xytext=(3, 2),
+                textcoords="offset points",
+                fontsize=7,
+                alpha=0.6,
+            )
+
+        # weighted mean marker
+        w = g[weight_col].values
+        ok = np.isfinite(w)
+        if ok.any():
+            bx = np.average(g["chamfer_mean"].values[ok], weights=w[ok])
+            by = np.average(g["hausdorff"].values[ok], weights=w[ok])
+            plt.scatter(bx, by, marker="x", s=160, linewidths=2.5, color="black")
+
+    plt.xlabel("Chamfer mean ↓")
+    plt.ylabel("Hausdorff ↓")
+    plt.title("RS3 Pareto space (raw variants)")
+    plt.grid(True, alpha=0.25)
+    plt.legend(fontsize=7, loc="best")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "rs3_pareto.png"))
+    plt.close()
+
+    # ============================================================
+    # 2) SCORE DECOMPOSITION (WEIGHTED)
+    # ============================================================
+    rows = []
+    for fam, g in D.groupby("family"):
+        w = g[weight_col].values
+        ok = np.isfinite(w) & (w > 0)
+        if not ok.any():
+            continue
+
+        rows.append({
+            "family": fam,
+            "chamfer": np.average(np.log1p(g["chamfer_mean"].values[ok]), weights=w[ok]),
+            "hausdorff": 0.5 * np.average(np.log1p(g["hausdorff"].values[ok]), weights=w[ok]),
+            "coverage": np.average((1.0 - g["coverage"].values[ok]), weights=w[ok]),
+            "score": np.average(g["score_mid"].values[ok], weights=w[ok]),
+        })
+
+    P = pd.DataFrame(rows).sort_values("score")
+
+    x = np.arange(len(P))
+
+    plt.figure(figsize=(7.5, 4.5), dpi=160)
+    plt.bar(x, P["chamfer"], label="log(Chamfer)")
+    plt.bar(x, P["hausdorff"], bottom=P["chamfer"], label="0.5·log(Hausdorff)")
+    plt.bar(
+        x,
+        P["coverage"],
+        bottom=P["chamfer"] + P["hausdorff"],
+        label="1 − Coverage",
+    )
+
+    plt.xticks(x, P["family"], rotation=90, fontsize=7)
+    plt.ylabel("Weighted mean score components")
+    plt.title("RS3 score decomposition by family")
+    plt.legend(fontsize=8)
+    plt.grid(True, axis="y", alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "rs3_decomposition.png"))
+    plt.close()
+
+    # ============================================================
+    # 3) PER-CRACK vs FAMILY HEATMAP
+    # ============================================================
+    pivot = (
+        D.pivot_table(
+            index="crack_id",
+            columns="family",
+            values="score_mid",
+            aggfunc="mean",
+        )
+        .sort_index()
+    )
+
+    plt.figure(figsize=(1.0 + 0.6 * len(pivot.columns), 0.6 + 0.5 * len(pivot)), dpi=160)
+    sns.heatmap(
+        pivot,
+        cmap="viridis_r",
+        annot=True,
+        fmt=".3f",
+        cbar_kws=dict(label="score_mid"),
+    )
+    plt.title("RS3 per-crack vs family performance")
+    plt.ylabel("Crack ID")
+    plt.xlabel("RS3 family")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "rs3_heatmap.png"))
+    plt.close()
+
+    # ============================================================
+    # 4) OS-MODE ABLATION
+    # ============================================================
+    plt.figure(figsize=(5.0, 4.5), dpi=160)
+    sns.boxplot(
+        data=D,
+        x="os_mode",
+        y="score_mid",
+        showfliers=False,
+    )
+    sns.stripplot(
+        data=D,
+        x="os_mode",
+        y="score_mid",
+        color="black",
+        alpha=0.5,
+        size=4,
+        jitter=True,
+    )
+    plt.ylabel("score_mid ↓")
+    plt.title("RS3 OS-mode comparison")
+    plt.grid(True, axis="y", alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "rs3_os_compare.png"))
+    plt.close()
+
+    print(f"[plot_rs3] ✓ wrote RS3 summary plots to {out_dir}")
+    
+def plot_rs3_timing_summary(
+    df_timing,
+    out_dir,
+    *,
+    weight_col=None,
+    selected_family=None,
+    time_unit="sec",
+):
+    """
+    RS3 TIMING BREAKDOWN (OS / COST / FAST MARCHING + SUBTIMINGS)
+
+    Produces CLEAN, thesis-ready timing plots.
+
+    Figures generated:
+      1) Weighted-mean top-level timing
+      2) Total top-level timing
+      3) Cost subtiming (weighted mean)
+      4) Cost subtiming (total)
+      5) Fast-marching subtiming (weighted mean)
+      6) Fast-marching subtiming (total)
+
+    Timing NEVER affects selection.
+    """
+    import os
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    if df_timing is None or df_timing.empty:
+        print("[plot_rs3_timing_summary] ⚠ no timing data")
+        return
+
+    os.makedirs(out_dir, exist_ok=True)
+    D = df_timing.copy()
+
+    # ------------------------------------------------------------
+    # Required columns
+    # ------------------------------------------------------------
+    required = {"crack_id", "os_sec", "cost_sec", "fm_total_sec"}
+    missing = required - set(D.columns)
+    if missing:
+        print(f"[plot_rs3_timing_summary] ⚠ missing columns: {missing}")
+        return
+
+    # ------------------------------------------------------------
+    # Filter to SELECTED FAMILY ONLY
+    # ------------------------------------------------------------
+    if selected_family is not None:
+        os_mode, g11, g22, g33 = selected_family
+        D = D[
+            (D["os_mode"] == os_mode) &
+            (D["g11"] == g11) &
+            (D["g22"] == g22) &
+            (D["g33"] == g33)
+        ]
+
+    if D.empty:
+        print("[plot_rs3_timing_summary] ⚠ no rows after family filter")
+        return
+
+    # ------------------------------------------------------------
+    # Aggregate per subcrack
+    # ------------------------------------------------------------
+    agg = []
+    for cid, g in D.groupby("crack_id"):
+        rec = {
+            "crack_id": cid,
+            "os_sec": float(np.nanmean(g["os_sec"])),
+            "cost_sec": float(np.nanmean(g["cost_sec"])),
+            "fm_total_sec": float(np.nansum(g["fm_total_sec"])),
+        }
+        if weight_col and weight_col in g.columns:
+            rec[weight_col] = float(np.nanmean(g[weight_col]))
+        agg.append(rec)
+
+    A = pd.DataFrame(agg)
+    if A.empty:
+        return
+
+    # ------------------------------------------------------------
+    # Weights
+    # ------------------------------------------------------------
+    if weight_col and weight_col in A.columns:
+        w = np.maximum(A[weight_col].values.astype(float), 1e-9)
+    else:
+        w = np.ones(len(A), float)
+
+    # ------------------------------------------------------------
+    # Top-level stats
+    # ------------------------------------------------------------
+    os_mean   = float(np.average(A["os_sec"], weights=w))
+    cost_mean = float(np.average(A["cost_sec"], weights=w))
+    fm_mean   = float(np.average(A["fm_total_sec"], weights=w))
+
+    os_sum   = float(A["os_sec"].sum())
+    cost_sum = float(A["cost_sec"].sum())
+    fm_sum   = float(A["fm_total_sec"].sum())
+
+    # ------------------------------------------------------------
+    # Helper: stacked bar with clean legend
+    # ------------------------------------------------------------
+    def _stacked_bar(outfile, title, parts):
+        fig, ax = plt.subplots(figsize=(5.4, 4.8), dpi=160)
+        bottom = 0.0
+        for name, val, color in parts:
+            ax.bar([0], [val], bottom=[bottom],
+                   label=f"{name}={val:.3f}s", color=color)
+            bottom += val
+
+        ax.set_xticks([0])
+        ax.set_xticklabels([title])
+        ax.set_ylabel(f"Runtime ({time_unit})")
+        ax.legend(fontsize=9)
+        ax.grid(True, axis="y", alpha=0.25)
+        fig.tight_layout()
+        fig.savefig(outfile)
+        plt.close(fig)
+
+    # ------------------------------------------------------------
+    # 1) WEIGHTED MEAN (TOP LEVEL)
+    # ------------------------------------------------------------
+    _stacked_bar(
+        os.path.join(out_dir, "rs3_timing_weighted_mean.png"),
+        "Weighted Mean",
+        [
+            ("OS", os_mean, "#4C72B0"),
+            ("Cost", cost_mean, "#55A868"),
+            ("Fast marching", fm_mean, "#C44E52"),
+        ],
+    )
+
+    # ------------------------------------------------------------
+    # 2) TOTAL (TOP LEVEL)
+    # ------------------------------------------------------------
+    _stacked_bar(
+        os.path.join(out_dir, "rs3_timing_total.png"),
+        "Total",
+        [
+            ("OS", os_sum, "#4C72B0"),
+            ("Cost", cost_sum, "#55A868"),
+            ("Fast marching", fm_sum, "#C44E52"),
+        ],
+    )
+
+    # ------------------------------------------------------------
+    # COST SUBTIMINGS
+    # ------------------------------------------------------------
+    cost_cols = ["t_ms_vessel", "t_ms_filter", "t_cost_fun"]
+    if all(c in D.columns for c in cost_cols):
+        C = D.groupby("crack_id")[cost_cols].mean()
+        wC = (
+            D.groupby("crack_id")[weight_col].mean().values
+            if weight_col and weight_col in D.columns
+            else np.ones(len(C))
+        )
+
+        cost_mean_vals = {
+            c: float(np.average(C[c].values, weights=wC))
+            for c in cost_cols
+        }
+        cost_sum_vals = {
+            c: float(D[c].sum())
+            for c in cost_cols
+        }
+
+        _stacked_bar(
+            os.path.join(out_dir, "rs3_cost_subtiming_weighted_mean.png"),
+            "Weighted Mean",
+            [
+                ("t_ms_vessel", cost_mean_vals["t_ms_vessel"], "#4C72B0"),
+                ("t_ms_filter", cost_mean_vals["t_ms_filter"], "#55A868"),
+                ("t_cost_fun",  cost_mean_vals["t_cost_fun"],  "#C44E52"),
+            ],
+        )
+
+        _stacked_bar(
+            os.path.join(out_dir, "rs3_cost_subtiming_total.png"),
+            "Sum",
+            [
+                ("t_ms_vessel", cost_sum_vals["t_ms_vessel"], "#4C72B0"),
+                ("t_ms_filter", cost_sum_vals["t_ms_filter"], "#55A868"),
+                ("t_cost_fun",  cost_sum_vals["t_cost_fun"],  "#C44E52"),
+            ],
+        )
+
+    # ------------------------------------------------------------
+    # FAST MARCHING SUBTIMINGS
+    # ------------------------------------------------------------
+    fm_cols = [
+        "fm_metric_build_sec",
+        "fm_include_cost_sec",
+        "fm_transpose_sec",
+        "fm_solver_sec",
+    ]
+    if all(c in D.columns for c in fm_cols):
+        F = D.groupby("crack_id")[fm_cols].sum()
+        wF = (
+            D.groupby("crack_id")[weight_col].mean().values
+            if weight_col and weight_col in D.columns
+            else np.ones(len(F))
+        )
+
+        fm_mean_vals = {
+            c: float(np.average(F[c].values, weights=wF))
+            for c in fm_cols
+        }
+        fm_sum_vals = {
+            c: float(D[c].sum())
+            for c in fm_cols
+        }
+
+        _stacked_bar(
+            os.path.join(out_dir, "rs3_fm_subtiming_weighted_mean.png"),
+            "Weighted Mean",
+            [
+                ("fm_metric_build", fm_mean_vals["fm_metric_build_sec"], "#4C72B0"),
+                ("fm_include_cost", fm_mean_vals["fm_include_cost_sec"], "#55A868"),
+                ("fm_transpose",    fm_mean_vals["fm_transpose_sec"], "#C44E52"),
+                ("fm_solver",       fm_mean_vals["fm_solver_sec"], "#8172B3"),
+            ],
+        )
+
+        _stacked_bar(
+            os.path.join(out_dir, "rs3_fm_subtiming_total.png"),
+            "Sum",
+            [
+                ("fm_metric_build", fm_sum_vals["fm_metric_build_sec"], "#4C72B0"),
+                ("fm_include_cost", fm_sum_vals["fm_include_cost_sec"], "#55A868"),
+                ("fm_transpose",    fm_sum_vals["fm_transpose_sec"], "#C44E52"),
+                ("fm_solver",       fm_sum_vals["fm_solver_sec"], "#8172B3"),
+            ],
+        )
+
+    print(f"[plot_rs3_timing_summary] ✓ clean timing plots written to {out_dir}")

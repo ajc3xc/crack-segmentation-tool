@@ -127,8 +127,8 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
                                 Qt.KeepAspectRatio, Qt.FastTransformation)
             self.cost_display.setPixmap(scaled)
 
-            timing["t_total"] = time.time() - t_all0
-            print(f"[update_cost] total={timing['t_total']:.3f}s")
+            timing["t_cost_total"] = time.time() - t_all0
+            print(f"[update_cost] total={timing['t_cost_total']:.3f}s")
 
             self.midline_track_button.setStyleSheet("background-color : lightblue")
 
@@ -778,7 +778,7 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
                 print(f"[update_os_cost] ❌ update_cost failed (mode={mode})")
                 return None if not return_timing else (None, {})
             c00, timing_cost = out
-            t_cost = timing_cost.get("t_total", 0.0)
+            t_cost = timing_cost.get("t_cost_total", 0.0)
 
             # ---- 5) Extract full 3-D cost volume for RS3 ----
             cost_volume = getattr(self, "costFunction", None)

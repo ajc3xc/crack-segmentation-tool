@@ -78,7 +78,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 edge_grid=None,
                 g_variants=None,
                 cpu_max_workers=8,
-                do_edge_calibrate=True
+                do_edge_calibrate=False
             )
         )
 
@@ -1759,257 +1759,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 f"bbox={bb} ge1={e1n:<4} ge2={e2n:<4}")
 
     
-    '''def run_metrics_on_current_image_quick(
-        self,
-        edge_grid=None,
-        g_variants=None,
-        cpu_max_workers=8,
-        do_edge_calibrate=False
-    ):
-        """
-        FAST iteration for the current image — with per-phase timing.
-        """
-        import os, json, numpy as np, pandas as pd, time
-
-        if getattr(self, "original_image", None) is None:
-            print("[quick] no image loaded")
-            return {}
-
-        base_name = os.path.splitext(os.path.basename(self.name))[0]
-        print(f"\n[quick] metrics for current image: {base_name}")
-        image_dir = os.path.join(self.save_folder, "metrics", base_name)
-        os.makedirs(image_dir, exist_ok=True)
-
-        t_total_start = time.perf_counter()
-
-        # --- edge calibration ---
-        t_edge_start = time.perf_counter()
-        if edge_grid is None:
-            edge_grid = {"window_half_size": [35, 45, 55], "mu": [0, 5], "l": [2, 5], "p": [6, 14]}
-        best_edge = {"window_half_size":45, "mu":0.0, "l":5, "p":14}
-        if do_edge_calibrate:
-            sweep_rows = []
-            for cid, crack in (self.annotation.get("annotations", {}) or {}).get("atomic_cracks", {}).items():
-                src = (crack.get("source") or "").lower()
-                if src.startswith("auto") or src == "combined":
-                    continue
-                man_xy = metrics._finite_xy(crack.get("midline", []))
-                if len(man_xy) < 2:
-                    continue
-                df_sweep = self.sweep_edges_with_executor(cid, grid=edge_grid, max_workers=cpu_max_workers)
-                if df_sweep is not None and not df_sweep.empty:
-                    sweep_rows.append(df_sweep)
-
-            if sweep_rows:
-                df = pd.concat(sweep_rows, ignore_index=True)
-                param_cols = ["param_window_half_size","param_mu","param_l","param_p"]
-                sub = df[[c for c in (param_cols+["chamfer_mean","hausdorff","coverage"]) if c in df.columns]].dropna()
-                g = (sub.groupby(param_cols, as_index=False)
-                        .agg({"chamfer_mean":"mean","hausdorff":"mean","coverage":"mean"}))
-                g = g.sort_values(["chamfer_mean","hausdorff","coverage"], ascending=[True,True,False])
-                row = g.iloc[0].to_dict()
-                best_edge = {
-                    "window_half_size": int(row["param_window_half_size"]),
-                    "mu": float(row["param_mu"]),
-                    "l":  int(row["param_l"]),
-                    "p":  int(row["param_p"]),
-                }
-        t_edge_calib = time.perf_counter() - t_edge_start
-
-        # --- ensure adjusted_track exists (rebuilt from midline if missing) ---
-        if not hasattr(self, "adjusted_track"):
-            try:
-                ann = (self.annotation or {}).get("annotations", {}) or {}
-                ac  = ann.get("atomic_cracks", {}) or {}
-                for cid, crack in ac.items():
-                    mid = crack.get("midline", [])
-                    if isinstance(mid, list) and len(mid) >= 2:
-                        arr = np.array(mid, dtype=float).T
-                        if arr.shape[0] == 2:
-                            self.adjusted_track = arr
-                            print(f"[quick] rebuilt adjusted_track from midline of cid={cid} shape={arr.shape}")
-                            break
-            except Exception as e:
-                print(f"[quick] failed to rebuild adjusted_track: {e}")
-
-        # --- ensure manual geodesic edges + mask exist for each manual crack ---
-        need_ids = self._manual_crack_ids_needing_edges()
-        if need_ids:
-            try:
-                t_edgegen_start = time.perf_counter()
-                _ = self.run_edge_tracking_parallel(
-                    crack_ids=need_ids,
-                    cpu_max_workers=cpu_max_workers,
-                    edge_params_fixed=best_edge,
-                )
-                t_edgegen = time.perf_counter() - t_edgegen_start
-                print(f"[quick] edge-tracking for {len(need_ids)} manual cracks took {t_edgegen:.2f}s")
-            except Exception as e:
-                print(f"[quick] manual edge-tracking failed: {e}")
-
-        # sanity print
-        self._audit_masks_and_edges("AFTER_EDGE")
-
-        # --- auto variants ---
-        t_auto_start = time.perf_counter()
-        for cid, crack in (self.annotation.get("annotations", {}) or {}).get("atomic_cracks", {}).items():
-            src = (crack.get("source") or "").lower()
-            if src.startswith("auto") or src == "combined":
-                continue
-            man_xy = metrics._finite_xy(crack.get("midline", []))
-            if len(man_xy) < 2:
-                continue
-            _ = self.generate_auto_variants_for_manual_parallel(
-                crack_id=cid,
-                g_variants=g_variants,
-                edge_params_fixed=best_edge,
-                cpu_max_workers=cpu_max_workers,
-                force_recompute=True
-            )
-        t_auto_variants = time.perf_counter() - t_auto_start
-
-        # --- combined masks ---
-        t_mask_start = time.perf_counter()
-        try:
-            self._build_combined_auto_masks_same_indices(cache_key=metrics._auto_cache_key(self))
-        except Exception as e:
-            print(f"[quick] combined auto-mask build failed: {e}")
-        t_mask_build = time.perf_counter() - t_mask_start
-
-        # --- mask & width metrics ---
-        t_mw_start = time.perf_counter()
-        try:
-            self.compute_mask_and_width_metrics_for_image(display=False)
-        except Exception as e:
-            print(f"[quick] mask/width stage failed: {e}")
-        t_mask_width = time.perf_counter() - t_mw_start
-
-        # --- supervision export ---
-        t_sup_start = time.perf_counter()
-        try:
-            self.export_training_supervision_for_image(cache_key=metrics._auto_cache_key(self))
-        except Exception as e:
-            print(f"[quick] supervision export failed: {e}")
-        t_sup = time.perf_counter() - t_sup_start
-
-        total_time = time.perf_counter() - t_total_start
-
-        # --- log timings ---
-        log_path = os.path.join(image_dir, "runtime_log.csv")
-        row = {
-            "image": base_name,
-            "edge_calibration_s": round(t_edge_calib, 2),
-            "auto_variants_s": round(t_auto_variants, 2),
-            "mask_build_s": round(t_mask_build, 2),
-            "mask_width_s": round(t_mask_width, 2),
-            "supervision_s": round(t_sup, 2),
-            "total_s": round(total_time, 2),
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        try:
-            if os.path.exists(log_path):
-                df = pd.read_csv(log_path)
-                df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-            else:
-                df = pd.DataFrame([row])
-            df.to_csv(log_path, index=False)
-        except Exception as e:
-            print(f"[quick] failed to write runtime_log.csv: {e}")
-
-        print(f"[quick] ⏱ total runtime = {total_time:.2f}s (edge={t_edge_calib:.2f}s, auto={t_auto_variants:.2f}s, "
-              f"mask_build={t_mask_build:.2f}s, mask_width={t_mask_width:.2f}s, supervision={t_sup:.2f}s)")
-
-        return {"image": base_name, "best_edge": best_edge}'''
-
-    '''def _build_combined_auto_masks_same_indices(self, cache_key=None):
-        """
-        Build *AUTO* combined masks that mirror manual combined_cracks membership.
-        The union is over the *best auto variant* masks of each member atomic crack.
-
-        Saves per-image:
-        metrics/<image>/combined/combined_<cid>_auto.png
-        metrics/<image>/combined/combined_<cid>_manual.png
-        metrics/<image>/combined/combined_metrics.csv
-        """
-        import os, cv2, numpy as np, pandas as pd
-        
-        def _audit_masks_and_edges(self, tag="PRE"):
-            import numpy as np
-            ann = (self.annotation or {}).get("annotations", {}) or {}
-            ac  = ann.get("atomic_cracks", {}) or {}
-            print(f"[AUDIT-{tag}] atomics={len(ac)}")
-            for cid, crack in ac.items():
-                src = (crack.get("source") or crack.get("src") or "").lower()
-                mid = np.asarray(crack.get("midline", []), float)
-                ge  = crack.get("geodesic_edges", {}) or {}
-                mc  = crack.get("mask_crop", None)
-                bb  = crack.get("mask_bbox", None)
-                e1  = ge.get("edge1"); e2 = ge.get("edge2")
-                e1n = len(e1) if isinstance(e1, list) else 0
-                e2n = len(e2) if isinstance(e2, list) else 0
-                print(f"[AUDIT-{tag}] cid={cid} src={src} midlen={len(mid)} mask_crop={'None' if mc is None else 'ok'} "
-                    f"bbox={bb} ge1={e1n} ge2={e2n}")
-
-        self._audit_masks_and_edges("BEFORE_EDGE")
-        # (we'll add the edge step here)
-        self._audit_masks_and_edges("AFTER_EDGE")
-        # after autos:
-        self._audit_masks_and_edges("AFTER_AUTO")
-
-
-        base_name = os.path.splitext(os.path.basename(self.name))[0]
-        image_dir = os.path.join(self.save_folder, "metrics", base_name)
-        out_dir   = os.path.join(image_dir, "combined")
-        os.makedirs(out_dir, exist_ok=True)
-
-        ann = self.annotation.get("annotations", {}) or {}
-        atomic   = ann.get("atomic_cracks", {}) or {}
-        combined = ann.get("combined_cracks", {}) or {}
-        if not combined:
-            return
-
-        H, W = self.original_image.shape[:2]
-        rows = []
-        cache_key = cache_key or metrics._auto_cache_key(self)
-
-        for cmb_id, cmb in combined.items():
-            members = cmb.get("members", []) or []
-            if not members:
-                continue
-
-            m_manual = metrics._reconstruct_full_mask(cmb, H, W)
-
-            m_auto = np.zeros((H, W), np.uint8)
-            for mid in members:
-                crack = atomic.get(mid)
-                if not crack:
-                    continue
-                pack = crack.get("variants", {}).get("auto", {}).get(cache_key)
-                if not pack:
-                    continue
-                bid = pack.get("best_variant_id")
-                if bid is None:
-                    continue
-                best = pack["variants"].get(f"v{bid}", {})
-                mm = metrics._reconstruct_full_mask(best, H, W)
-                if mm is not None:
-                    m_auto |= (mm > 0).astype(np.uint8)
-
-            cv2.imwrite(os.path.join(out_dir, f"combined_{cmb_id}_manual.png"),
-                        (m_manual>0).astype(np.uint8)*255)
-            cv2.imwrite(os.path.join(out_dir, f"combined_{cmb_id}_auto.png"),
-                        (m_auto>0).astype(np.uint8)*255)
-
-            row = {"image": base_name, "combined_id": cmb_id}
-            if getattr(self, "current_mask", None) is not None:
-                row["iou_manual_vs_gt"] = metrics.mask_iou(m_manual, self.current_mask)
-                row["iou_auto_vs_gt"]   = metrics.mask_iou(m_auto,   self.current_mask)
-            rows.append(row)
-
-        if rows:
-            pd.DataFrame(rows).to_csv(os.path.join(out_dir, "combined_metrics.csv"), index=False)
-            print(f"[combined] wrote → {os.path.join(out_dir, 'combined_metrics.csv')}")'''
-
     def batch_run_metrics_global(
         self,
         sample_frac=0.20,
@@ -4338,130 +4087,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
     def _metric_auto_best(self):
         self._ensure_metric_annotations()
         return self.metric_annotations.get("auto_best_atomic_cracks", {}) or {}
-
-    '''def _export_supervision_for_image(self, normal_half_span=32.0, step=0.5, precomputed_normals=None):
-        """
-        Export *one* consolidated supervision CSV per image.
-
-        Columns:
-        image, crack_type, crack_id, sample_idx,
-        mid_x, mid_y,
-        edgeL_x, edgeL_y, edgeR_x, edgeR_y, width_px
-        """
-        import os, numpy as np, pandas as pd, traceback
-        from helpers.metrics import normals_from_mask_for_midline
-
-        base_name = self._image_base()
-        print(f"[DEBUG SUP] === EXPORT (UNIFIED) for {base_name} ===")
-
-        if getattr(self, "current_mask", None) is None:
-            print("[DEBUG SUP] no GT mask loaded — abort")
-            return
-
-        H, W = self.original_image.shape[:2]
-        mask_bin = (self.current_mask > 0).astype(np.uint8)
-
-        out_root = os.path.join(self.save_folder, "metrics", base_name, "supervision")
-        os.makedirs(out_root, exist_ok=True)
-
-        atomic    = self._metric_atomic() or {}
-        combined  = self._metric_combined() or {}
-        auto_best = self._metric_auto_best() or {}
-
-        # atomics that were merged → skip to avoid duplicates
-        atomics_in_combined = {str(m) for cmb in combined.values() for m in (cmb.get("members", []) or [])}
-
-        def _pack_df(ctype, cid, mid_xy, e1, e2):
-            e1 = np.asarray(e1, float); e2 = np.asarray(e2, float); mid_xy = np.asarray(mid_xy, float)
-            if e1.ndim != 2 or e2.ndim != 2 or mid_xy.ndim != 2: return None
-            if e1.shape[0] < 2 or e2.shape[0] < 2 or mid_xy.shape[0] < 2: return None
-            n = min(len(mid_xy), len(e1), len(e2))
-            if n < 2: return None
-            w = np.hypot(e1[:n,0] - e2[:n,0], e1[:n,1] - e2[:n,1])
-            return pd.DataFrame({
-                "image": base_name,
-                "crack_type": ctype,
-                "crack_id": cid,
-                "sample_idx": np.arange(n, dtype=int),
-                "mid_x": mid_xy[:n,0], "mid_y": mid_xy[:n,1],
-                "edgeL_x": e1[:n,0],  "edgeL_y": e1[:n,1],
-                "edgeR_x": e2[:n,0],  "edgeR_y": e2[:n,1],
-                "width_px": w
-            })
-
-        def _process_crack(ctype, cid, crack):
-            mid_xy = np.asarray(crack.get("midline", []), float)
-            if mid_xy.ndim != 2 or mid_xy.shape[1] != 2 or len(mid_xy) < 2:
-                print(f"[DEBUG SUP] skip invalid midline {ctype} {cid}")
-                return None
-
-            # 1) try precomputed normals dict if provided
-            try:
-                if precomputed_normals and (ctype, str(cid)) in precomputed_normals:
-                    nd = precomputed_normals[(ctype, str(cid))]
-                    e1 = np.asarray(nd.get("gt_e1"))
-                    e2 = np.asarray(nd.get("gt_e2"))
-                    if e1 is not None and e2 is not None and len(e1) >= 2 and len(e2) >= 2:
-                        return _pack_df(ctype, cid, mid_xy, e1, e2)
-            except Exception as e:
-                print(f"[DEBUG SUP] precomputed normals failed {ctype} {cid}: {e}")
-                traceback.print_exc()
-
-            # 2) try auto normals saved on the crack (if present)
-            try:
-                nd_auto = crack.get("normal_edge_points_full") or crack.get("normal_edge_points")
-                if nd_auto:
-                    if isinstance(nd_auto, dict):
-                        e1 = np.asarray(nd_auto.get("edge1"), float)
-                        e2 = np.asarray(nd_auto.get("edge2"), float)
-                    else:
-                        # legacy local form: [[e1x, e1y], [e2x, e2y]]
-                        (e1x, e1y), (e2x, e2y) = nd_auto
-                        e1 = np.column_stack([e1x, e1y])
-                        e2 = np.column_stack([e2x, e2y])
-                    df = _pack_df(ctype, cid, mid_xy, e1, e2)
-                    if df is not None:
-                        return df
-            except Exception as e:
-                print(f"[DEBUG SUP] auto normals parse failed {ctype} {cid}: {e}")
-                traceback.print_exc()
-
-            # 3) fallback: derive normals from mask along midline
-            try:
-                (e1x, e1y, e2x, e2y, w_mask), _ = normals_from_mask_for_midline(mid_xy, mask_bin, max_radius=50)
-                e1 = np.column_stack([e1x, e1y])
-                e2 = np.column_stack([e2x, e2y])
-                return _pack_df(ctype, cid, mid_xy, e1, e2)
-            except Exception as e:
-                print(f"[DEBUG SUP] normals_from_mask_for_midline failed {ctype} {cid}: {e}")
-                traceback.print_exc()
-                return None
-
-        rows = []
-
-        # atomics (excluding those absorbed into combined)
-        print(f"[DEBUG SUP] exporting atomics (excluding {len(atomics_in_combined)} absorbed)")
-        for cid, crack in atomic.items():
-            if str(cid) in atomics_in_combined: 
-                continue
-            df = _process_crack("atomic", str(cid), crack)
-            if df is not None and not df.empty: rows.append(df)
-
-        # combined
-        print(f"[DEBUG SUP] exporting {len(combined)} combined cracks")
-        for cid, crack in combined.items():
-            df = _process_crack("combined", str(cid), crack)
-            if df is not None and not df.empty: rows.append(df)
-
-        if rows:
-            df_all = pd.concat(rows, ignore_index=True)
-            out_csv = os.path.join(out_root, "supervision_all.csv")
-            df_all.to_csv(out_csv, index=False)
-            print(f"[DEBUG SUP] wrote {len(df_all)} samples from {len(rows)} cracks → {out_csv}")
-        else:
-            print(f"[DEBUG SUP] no valid cracks to export for {base_name}")
-
-        print(f"[DEBUG SUP] === END (UNIFIED) for {base_name} ===\n")'''
        
     # ---- 4) Extract inputs for a subcrack (READS SNAPSHOT ONLY) ------------------
     def extract_edge_inputs_for_subcrack(self, crack_id, color_channel=None, prefer_auto_best=False):
@@ -5000,19 +4625,27 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         os.makedirs(crack_dir, exist_ok=True)
 
         # (execution continues unchanged with your existing code)
+        
         # -----------------------------------
         # 1) G-variants (midline curvature params)
         # -----------------------------------
+        # NOTE:
+        # - For real runs: we use the SAME 8 variants for BOTH old/new OS (apples-to-apples).
+        # - For smoke_test: we use DIFFERENT single-variant baselines:
+        #       new -> (1,25,25)
+        #       old -> (1,100,100)
         if g_variants is None:
-            if smoke_test:
-                g_variants = [{"g11": 1.0, "g22":25, "g33":25}]
-            else:
-                vals = (25, 50, 75)
-                g_variants = [{"g11":1.0, "g22":v, "g33":v} for v in vals]
-                g_variants += [
-                    {"g11":1.0, "g22":25, "g33":35},
-                    {"g11":1.0, "g22":35, "g33":25},
-                ]
+            # shared 8-variant grid (used when NOT smoke_test)
+            g_variants_shared = [
+                {"g11": 1.0, "g22": 15.0,  "g33": 15.0},   # local refinement near 25
+                {"g11": 1.0, "g22": 25.0,  "g33": 25.0},   # current baseline
+                {"g11": 1.0, "g22": 35.0,  "g33": 35.0},   # local refinement near 25
+                {"g11": 1.0, "g22": 50.0,  "g33": 50.0},   # moderate curvature
+                {"g11": 1.0, "g22": 100.0, "g33": 100.0},  # LEGACY reference (old default)
+            ]
+        else:
+            # user-supplied grid takes precedence
+            g_variants_shared = list(g_variants)
 
         # -----------------------------------
         # 2) OS + cost computation (multi-mode)
@@ -5064,19 +4697,39 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         # -----------------------------------
         variants_out = {}
         metrics_rows = {}
+        timing_rows  = {}   # ★ NEW: keep timing separate
         var_local_xy_by_id = {}
         variant_labels_by_id = {}
 
         global_vid = 0
 
         for os_mode_name, os_cost in os_cost_map.items():
+
+            # --------------------------------------------------------
+            # Choose variants PER OS MODE
+            # --------------------------------------------------------
+            if smoke_test and g_variants is None:
+                # faithful smoke baselines
+                if str(os_mode_name).lower() == "old":
+                    g_variants_run = [{"g11": 1.0, "g22": 100.0, "g33": 100.0}]
+                else:
+                    g_variants_run = [{"g11": 1.0, "g22": 25.0, "g33": 25.0}]
+            else:
+                # normal run: shared balanced set
+                g_variants_run = g_variants if g_variants is not None else g_variants_shared
+
             print(f"[AUTO {crack_id}] === RS3 (mode={os_mode_name}) ===")
+            print(
+                f"[AUTO {crack_id}] g_variants_run (n={len(g_variants_run)}): "
+                f"{[(v['g11'], v['g22'], v['g33']) for v in g_variants_run]}"
+            )
+
             fm_results = run_rs3_variants_split(
                 ct=__import__("cracktools"),
                 os_cost=os_cost,
                 p0_down_xy=p0_down_xy,
                 p1_down_xy=p1_down_xy,
-                g_variants=g_variants,
+                g_variants=g_variants_run,
                 down=int(down),
                 bbox_xyxy=[xmin, ymin, xmax, ymax],
                 cpu_max_workers=(cpu_max_workers or os.cpu_count()),
@@ -5084,7 +4737,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             )
 
             # manual midline in local coordinates
-            man_xy_crop = np.column_stack([man_xy_g[:,0]-x, man_xy_g[:,1]-y])
+            man_xy_crop = np.column_stack([man_xy_g[:, 0] - x, man_xy_g[:, 1] - y])
 
             for local_vid, r in enumerate(fm_results):
                 vid = global_vid
@@ -5094,10 +4747,10 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     print(f"[AUTO {crack_id}] v{vid} ❌ RS3 failed: {r.get('error')}")
                     continue
 
-                # RS3 track (global XY → convert to (N,2))
+                # RS3 track (global XY → (N,2))
                 track_xy = np.asarray(r["track_full_xy"], float).T
 
-                # ensure the start aligns with manual
+                # ensure start alignment
                 d0 = np.linalg.norm(track_xy[0] - p0)
                 d1 = np.linalg.norm(track_xy[0] - p1)
                 if d1 < d0:
@@ -5105,89 +4758,123 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 track_xy = track_xy + (p0 - track_xy[0])
 
                 # local crop coords
-                track_crop_xy = np.column_stack([track_xy[:,0]-x, track_xy[:,1]-y])
+                track_crop_xy = np.column_stack([track_xy[:, 0] - x, track_xy[:, 1] - y])
                 var_local_xy_by_id[vid] = track_crop_xy
 
-                # ----- direct midline metrics here -----
-                auto_mid_local = track_crop_xy
-                man_mid_local  = man_xy_crop
+                # ---- midline metrics ----
+                m = compute_midline_metrics(track_crop_xy, man_xy_crop)
 
-                m = compute_midline_metrics(auto_mid_local, man_mid_local)
-
-                # midline-only scalar score
-                ch = float(m.get("chamfer_mean", np.inf))
-                hd = float(m.get("hausdorff", np.inf))
+                ch  = float(m.get("chamfer_mean", np.inf))
+                hd  = float(m.get("hausdorff", np.inf))
                 cov = float(m.get("coverage", 0.0))
 
                 score_mid = (
-                    math.log1p(max(ch,0)) +
-                    0.5*math.log1p(max(hd,0)) +
-                    (1.0 - float(np.clip(cov,0,1)))
+                    math.log1p(max(ch, 0)) +
+                    0.5 * math.log1p(max(hd, 0)) +
+                    (1.0 - float(np.clip(cov, 0, 1)))
                 )
 
-                # store metrics row  (★ NEW: length_px + bbox_area added)
-                row = {
+                # IMPORTANT: use ACTUAL g-params used for this OS mode
+                g_used = g_variants_run[local_vid]
+
+                # -------------------------
+                # GEOMETRY METRICS ROW
+                # -------------------------
+                metrics_rows[vid] = {
                     "image": base_name,
                     "crack_id": crack_id,
                     "variant_global_id": vid,
                     "os_mode": os_mode_name,
-                    "g11": g_variants[local_vid].get("g11",1.0),
-                    "g22": g_variants[local_vid].get("g22",25.0),
-                    "g33": g_variants[local_vid].get("g33",25.0),
+                    "g11": float(g_used["g11"]),
+                    "g22": float(g_used["g22"]),
+                    "g33": float(g_used["g33"]),
                     "chamfer_mean": ch,
                     "hausdorff": hd,
                     "coverage": cov,
                     "score_mid": score_mid,
                     "length_px": man_len_px,
                     "bbox_area": bbox_area,
-                    **os_cost_timings.get(os_mode_name, {}),
-                    **r.get("timing", {}),
                 }
-                metrics_rows[vid] = row
 
-                desc = _variant_desc(vid, g_variants[local_vid], edge_params_fixed or {})
+                # -------------------------
+                # TIMING ROW (SEPARATE)
+                # -------------------------
+                timing_row = {
+                    "image": base_name,
+                    "crack_id": crack_id,
+                    "variant_global_id": vid,
+                    "os_mode": os_mode_name,
+                    "g11": float(g_used["g11"]),
+                    "g22": float(g_used["g22"]),
+                    "g33": float(g_used["g33"]),
+                }
+                timing_row.update(os_cost_timings.get(os_mode_name, {}))
+                timing_row.update(r.get("timing", {}))
+                timing_rows[vid] = timing_row
+
+                # ---- variant registration ----
+                desc = _variant_desc(vid, g_used, edge_params_fixed or {})
                 desc["os_mode"] = os_mode_name
 
                 variants_out[f"v{vid}"] = {
                     "midline": track_xy.tolist(),
-                    "mask_bbox": [x,y,w,h],
+                    "mask_bbox": [x, y, w, h],
                     "params": desc,
                 }
 
                 set_auto_variant_for_crack(
-                    self.save_folder, base_name, crack_id,
-                    variants_out[f"v{vid}"], params=desc,
-                    is_best=False, scores=m
+                    self.save_folder,
+                    base_name,
+                    crack_id,
+                    variants_out[f"v{vid}"],
+                    params=desc,
+                    is_best=False,
+                    scores=m,
                 )
 
-                variant_labels_by_id[vid] = f"{os_mode_name}: {desc['label']}"
+                variant_labels_by_id[vid] = (
+                    f"{os_mode_name}: g11={g_used['g11']} "
+                    f"g22={g_used['g22']} g33={g_used['g33']}"
+                )
 
                 print(f"[AUTO {crack_id}] v{vid} midline_score={score_mid:.4f}")
 
         # -----------------------------------
-        # 4) Best variant selection (LOCAL to this subcrack)
+        # 4) Best variant selection (LOCAL)
         # -----------------------------------
         best_variant_id = None
         best_flat = None
         metrics_df = None
+        timing_df  = None
 
         if metrics_rows:
-            df = pd.DataFrame(list(metrics_rows.values()))
-            df = df.sort_values(["score_mid"], ascending=[True])
-            metrics_df = df.copy()  # ★ for global selection later
+            metrics_df = pd.DataFrame(metrics_rows.values())
+            metrics_df = metrics_df.sort_values("score_mid", ascending=True)
 
-            df.to_csv(os.path.join(crack_dir, "rs3_variants_ablation.csv"), index=False)
+            metrics_df.to_csv(
+                os.path.join(crack_dir, "rs3_variants_ablation.csv"),
+                index=False,
+            )
 
-            best_variant_id = int(df.iloc[0]["variant_global_id"])
+            best_variant_id = int(metrics_df.iloc[0]["variant_global_id"])
             print(f"[AUTO {crack_id}] BEST VARIANT (local) = {best_variant_id}")
 
             best_flat = set_auto_variant_for_crack(
-                self.save_folder, base_name, crack_id,
+                self.save_folder,
+                base_name,
+                crack_id,
                 variants_out[f"v{best_variant_id}"],
                 params=variants_out[f"v{best_variant_id}"]["params"],
-                is_best=True
+                is_best=True,
             )["auto_best"]
 
+        if timing_rows:
+            timing_df = pd.DataFrame(timing_rows.values())
+            timing_df.to_csv(
+                os.path.join(crack_dir, "rs3_variants_timing.csv"),
+                index=False,
+            )
+            
         # -----------------------------------
         # 5) Plot overlays
         # -----------------------------------
@@ -5218,89 +4905,178 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             "best_variant_id": best_variant_id,
             "best": best_flat,
             "metrics_df": metrics_df,
+            "timing_df": timing_df,
         }
         
     def _select_best_rs3_across_subcracks(self, auto_packs_for_image):
         """
-        Given {cid -> pack} where pack is the return value of
-        generate_auto_variants_for_manual_parallel, pick a SINGLE
-        (os_mode, g11, g22, g33) family that minimizes a length/area-weighted
-        midline error across ALL manual subcracks in this image.
+        Image-level RS3 family selection across ALL manual subcracks.
 
-        Then, for each subcrack, re-mark that family's variant as the auto_best
-        using set_auto_variant_for_crack so downstream code sees a consistent
-        'best' over the whole crack/image.
+        Uses geometry-only metrics (metrics_df) for scoring.
+        Timing data (timing_df) is aggregated separately for analysis/plots,
+        but NEVER influences selection.
+
+        Input:
+            auto_packs_for_image:
+                dict[cid] -> {
+                    "variants": {...},
+                    "best_variant_id": int,
+                    "best": {...},
+                    "metrics_df": DataFrame,
+                    "timing_df": DataFrame | None,
+                }
         """
-        import os, json, numpy as np, pandas as pd
+        import os, json
+        import numpy as np
+        import pandas as pd
         from helpers.metrics import set_auto_variant_for_crack
 
         if not auto_packs_for_image:
             print("[AUTO global] no packs to aggregate")
             return
 
-        frames = []
-        for cid, pack in auto_packs_for_image.items():
-            df = pack.get("metrics_df")
-            if df is None or df.empty:
-                continue
-            df = df.copy()
-            df["crack_id"] = cid
-            frames.append(df)
+        # ------------------------------------------------------------
+        # 1) Collect geometry metrics (AUTHORITATIVE)
+        # ------------------------------------------------------------
+        geom_frames = []
+        timing_frames = []
 
-        if not frames:
+        for cid, pack in auto_packs_for_image.items():
+            dfm = pack.get("metrics_df")
+            if dfm is not None and not dfm.empty:
+                d = dfm.copy()
+                d["crack_id"] = cid
+                geom_frames.append(d)
+
+            dft = pack.get("timing_df")
+            #print(dft)
+            if dft is not None and not dft.empty:
+                t = dft.copy()
+                t["crack_id"] = cid
+                timing_frames.append(t)
+
+        if not geom_frames:
             print("[AUTO global] no metrics_df rows to aggregate")
             return
 
-        df_all = pd.concat(frames, ignore_index=True)
+        df_all = pd.concat(geom_frames, ignore_index=True)
 
-        # Safety: fill NaNs
-        df_all["length_px"] = df_all["length_px"].fillna(0.01)
+        # ------------------------------------------------------------
+        # 2) Weights (length × sqrt(area)) — SAME philosophy as EDGE
+        # ------------------------------------------------------------
+        df_all["length_px"]  = df_all["length_px"].fillna(0.01)
         df_all["bbox_area"] = df_all["bbox_area"].fillna(0.01)
 
-        # Combined weight: longer + larger-bbox subcracks matter more
-        # (you can tweak this; here we use length * sqrt(area))
         w_len  = df_all["length_px"].values
         w_area = np.sqrt(df_all["bbox_area"].values)
         w      = np.maximum(w_len * w_area, 1e-3)
         df_all["global_weight"] = w
 
-        # Group by RS3 family (os_mode + metric tensor params)
-        grouped_rows = []
-        for (os_mode, g11, g22, g33), g in df_all.groupby(["os_mode", "g11", "g22", "g33"]):
+        # ------------------------------------------------------------
+        # 3) Aggregate by RS3 family (SCORE ONLY)
+        # ------------------------------------------------------------
+        fam_rows = []
+        fam_cols = ["os_mode", "g11", "g22", "g33"]
+
+        for key, g in df_all.groupby(fam_cols):
             ww = g["global_weight"].values
-            scores = g["score_mid"].values
-            score_wmean = float(np.average(scores, weights=ww))
-            grouped_rows.append({
-                "os_mode": os_mode,
-                "g11": float(g11),
-                "g22": float(g22),
-                "g33": float(g33),
-                "score_mid_wmean": score_wmean,
-                "n_subcracks": int(len(g)),
+            ss = g["score_mid"].values.astype(float)
+
+            ok = np.isfinite(ss) & np.isfinite(ww) & (ww > 0)
+            if not np.any(ok):
+                continue
+
+            fam_rows.append({
+                "os_mode": key[0],
+                "g11": float(key[1]),
+                "g22": float(key[2]),
+                "g33": float(key[3]),
+                "score_mid_wmean": float(np.average(ss[ok], weights=ww[ok])),
+                "n_subcracks": int(g["crack_id"].nunique()),
+                "n_rows": int(len(g)),
             })
 
-        fam_df = pd.DataFrame(grouped_rows)
-        fam_df = fam_df.sort_values("score_mid_wmean", ascending=True)
-
+        fam_df = pd.DataFrame(fam_rows)
         if fam_df.empty:
             print("[AUTO global] family table empty")
             return
 
-        best = fam_df.iloc[0]
-        best_key = (best["os_mode"], float(best["g11"]), float(best["g22"]), float(best["g33"]))
+        fam_df = fam_df.sort_values("score_mid_wmean", ascending=True).reset_index(drop=True)
 
-        print(
-            f"[AUTO global] best RS3 family over all subcracks: "
-            f"mode={best_key[0]}, g11={best_key[1]:.1f}, g22={best_key[2]:.1f}, g33={best_key[3]:.1f}, "
-            f"score_mid_wmean={best['score_mid_wmean']:.4f}, n_subcracks={int(best['n_subcracks'])}"
+        best = fam_df.iloc[0]
+        best_key = (
+            best["os_mode"],
+            float(best["g11"]),
+            float(best["g22"]),
+            float(best["g33"]),
         )
 
-        # Optional: save a tiny JSON summary for the image
-        base_name   = self._image_base()
-        metrics_dir = self._metrics_dir()
+        # ------------------------------------------------------------
+        # 4) Output dirs
+        # ------------------------------------------------------------
+        base_name = self._image_base()
+        metrics_dir = os.path.join(self._metrics_dir(), "auto")
         os.makedirs(metrics_dir, exist_ok=True)
+
+        # ------------------------------------------------------------
+        # 5) Save CSVs (thesis-grade, auditable)
+        # ------------------------------------------------------------
+        df_all.to_csv(
+            os.path.join(metrics_dir, "rs3_sweep_all_metrics.csv"),
+            index=False,
+        )
+        fam_df.to_csv(
+            os.path.join(metrics_dir, "rs3_family_agg.csv"),
+            index=False,
+        )
+
+        if timing_frames:
+            timing_all = pd.concat(timing_frames, ignore_index=True)
+            timing_all.to_csv(
+                os.path.join(metrics_dir, "rs3_sweep_all_timing.csv"),
+                index=False,
+            )
+        else:
+            timing_all = None
+
+        # ------------------------------------------------------------
+        # 6) Visualization (score + timing if present)
+        # ------------------------------------------------------------
         try:
-            with open(os.path.join(metrics_dir, "rs3_global_best_family.json"), "w", encoding="utf-8") as f:
+            from helpers.present_plots import plot_rs3_sweep_summary
+
+            plot_rs3_sweep_summary(
+                df_all,
+                os.path.join(metrics_dir, "rs3_plots"),
+                weight_col="global_weight",
+                selected_family=best_key,
+            )
+
+            # ------------------------------------------------------------
+            # Timing-only visualization (NEW, CLEAN, SEPARATE)
+            # ------------------------------------------------------------
+            #print(timing_frames, timing_all)
+            if timing_all is not None and not timing_all.empty:
+                from helpers.present_plots import plot_rs3_timing_summary
+
+                plot_rs3_timing_summary(
+                    timing_all,
+                    os.path.join(metrics_dir, "rs3_plots"),
+                    selected_family=best_key,
+                )
+
+        except Exception as e:
+            print(f"[AUTO global] ⚠ rs3 summary plot failed: {e}")
+
+        # ------------------------------------------------------------
+        # 7) Persist best family JSON
+        # ------------------------------------------------------------
+        try:
+            with open(
+                os.path.join(metrics_dir, "rs3_global_best_family.json"),
+                "w",
+                encoding="utf-8",
+            ) as f:
                 json.dump({
                     "image": base_name,
                     "os_mode": best_key[0],
@@ -5309,11 +5085,22 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     "g33": best_key[3],
                     "score_mid_wmean": float(best["score_mid_wmean"]),
                     "n_subcracks": int(best["n_subcracks"]),
+                    "n_rows": int(best["n_rows"]),
                 }, f, indent=2)
         except Exception as e:
             print(f"[AUTO global] could not write rs3_global_best_family.json: {e}")
 
-        # ---- Re-mark auto_best for each subcrack using this global family ----
+        print(
+            f"[AUTO global] best RS3 family: "
+            f"mode={best_key[0]}, g11={best_key[1]:.1f}, "
+            f"g22={best_key[2]:.1f}, g33={best_key[3]:.1f}, "
+            f"score_mid_wmean={best['score_mid_wmean']:.4f}, "
+            f"n_subcracks={int(best['n_subcracks'])}"
+        )
+
+        # ------------------------------------------------------------
+        # 8) Re-mark auto_best for each subcrack (AUTHORITATIVE)
+        # ------------------------------------------------------------
         for cid, pack in auto_packs_for_image.items():
             df = pack.get("metrics_df")
             if df is None or df.empty:
@@ -5326,10 +5113,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 (df["g33"] == best_key[3])
             ]
             if df_loc.empty:
-                # This subcrack might have failed for some variants
                 continue
 
-            # Select the variant id for this family on this subcrack
             vid = int(df_loc.iloc[0]["variant_global_id"])
             vkey = f"v{vid}"
             vdict = pack["variants"].get(vkey)
@@ -5337,7 +5122,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 continue
 
             params = (vdict.get("params") or {}).copy()
-            # Ensure the params reflect the chosen family
             params.update({
                 "os_mode": best_key[0],
                 "g11": best_key[1],
@@ -5351,7 +5135,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 cid,
                 vdict,
                 params=params,
-                is_best=True,      # <-- this overwrites the previous per-crack best
+                is_best=True,
             )
 
         print("[AUTO global] auto_best updated for all subcracks using global RS3 family.")
@@ -5668,8 +5452,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
             t_manual_edges = time.perf_counter() - t_manual_edges_start
             print(f"[quick] manual-edge generation time = {t_manual_edges:.2f}s")
-
-        return
         
         # ------------------------------------------------------------
         # PHASE 1.5: RS3 AUTO VARIANTS (this image only)
@@ -5693,6 +5475,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 edge_params_fixed=best_edge,
                 cpu_max_workers=cpu_max_workers,
                 force_recompute=True,
+                os_ablation=True
             )
             if pack:
                 auto_packs[cid] = pack
@@ -5710,6 +5493,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 print(f"[quick] ⚠ RS3 family selection failed: {e}")
         else:
             print("[quick] ⚠ no auto_packs; skipping RS3 family selection.")
+            
+        return
 
         # ------------------------------------------------------------
         # PHASE 2: GEODESIC EDGES FOR AUTO BEST MIDLINES
