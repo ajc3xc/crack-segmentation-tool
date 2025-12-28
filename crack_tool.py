@@ -830,23 +830,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
     def sweep_edges_with_executor(self, crack_id, grid=None, max_workers=8):
         """
-        Run a CPU param sweep for edge calibration on one sub-crack.
-
-        Produces:
-        metrics/{base}/cidX/manual/debug/
-            - edge_sweep.csv   (PRUNED: params + metrics only)
-            - geom_cache.npz   (written by worker, one per param combo)
-
-        IMPORTANT:
-        - Metrics + geometry are computed ONCE
-        - NO plotting
-        - NO recomputation for visuals
-        - Visualization happens later via plot_from_cached_geometry()
-
-        Returns
-        -------
-        pd.DataFrame
-            Sweep table (already pruned).
+        Edge sweep for ONE crack.
+        Computes metrics + geometry ONCE.
+        NO plotting.
         """
         import os
         import itertools
@@ -855,17 +841,10 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         from concurrent.futures import ProcessPoolExecutor, as_completed
         from edge_workers import edge_param_worker
 
-        # ------------------------------------------------------------
-        # Prep payload base
-        # ------------------------------------------------------------
         base = self.extract_edge_inputs_for_subcrack(crack_id)
         if base is None:
-            print("[sweep] could not prep payload base")
             return pd.DataFrame()
 
-        # ------------------------------------------------------------
-        # Default grid
-        # ------------------------------------------------------------
         if grid is None:
             grid = {
                 "window_half_size": [35, 45, 55],
@@ -877,30 +856,22 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         keys = list(grid.keys())
         combos = list(itertools.product(*[grid[k] for k in keys]))
 
-        # ------------------------------------------------------------
-        # Run workers (metrics + geometry cache ONLY)
-        # ------------------------------------------------------------
         rows = []
-
         with ProcessPoolExecutor(max_workers=max_workers) as ex:
             futs = {}
-
             for combo in combos:
                 params = dict(zip(keys, combo))
                 payload = dict(base)
                 payload["params"] = params
-                payload["calibration_only"] = True   # <-- critical
+                payload["calibration_only"] = True
                 futs[ex.submit(edge_param_worker, payload)] = params
 
             for fut in as_completed(futs):
                 try:
                     ew = fut.result()
                     if isinstance(ew, dict):
-                        row = self._flatten_edge_worker_result(
-                            crack_id,
-                            futs[fut],
-                            ew
-                        )
+                        row = self._flatten_edge_worker_result(crack_id, futs[fut], ew)
+                        row["geom_cache_path"] = ew.get("geom_cache_path")
                         rows.append(row)
                 except Exception as e:
                     print("[sweep] worker failed:", e)
@@ -910,60 +881,25 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         df = pd.DataFrame(rows)
 
-        # ------------------------------------------------------------
-        # Compute edge_score (simple + explainable)
-        # ------------------------------------------------------------
         if {"boundary_f1", "ASSD", "HD95"}.issubset(df.columns):
-            assd_med = float(np.nanmedian(df["ASSD"].astype(float))) + 1e-9
-            hd95_med = float(np.nanmedian(df["HD95"].astype(float))) + 1e-9
-
+            assd_med = float(np.nanmedian(df["ASSD"])) + 1e-9
+            hd95_med = float(np.nanmedian(df["HD95"])) + 1e-9
             df["edge_score"] = (
-                (1.0 - df["boundary_f1"].astype(float)) +
-                0.50 * (df["ASSD"].astype(float) / assd_med) +
-                0.25 * (df["HD95"].astype(float) / hd95_med)
+                (1.0 - df["boundary_f1"]) +
+                0.50 * (df["ASSD"] / assd_med) +
+                0.25 * (df["HD95"] / hd95_med)
             )
 
-        # ------------------------------------------------------------
-        # PRUNE COLUMNS (keep sweep-relevant info only)
-        # ------------------------------------------------------------
-        KEEP_PREFIXES = ("param_",)
-        KEEP_EXACT = {
-            "boundary_f1",
-            "ASSD",
-            "HD95",
-            "edge_score",
-            "status",
-        }
-
-        keep_cols = [
-            c for c in df.columns
-            if c in KEEP_EXACT or c.startswith(KEEP_PREFIXES)
-        ]
-
-        df = df[keep_cols].copy()
-
-        # ------------------------------------------------------------
-        # Save CSV (NO plots, NO reruns)
-        # ------------------------------------------------------------
-        save_root = base.get("save_folder", "")
-        base_name = str(base.get("image_base", "unknown"))
+        save_root = base["save_folder"]
+        base_name = base["image_base"]
         cid = str(crack_id)
 
-        out_dir = os.path.join(
-            save_root,
-            "metrics",
-            base_name,
-            f"cid{cid}",
-            "manual",
-            "debug",
-        )
+        out_dir = os.path.join(save_root, "metrics", base_name, f"cid{cid}", "manual", "debug")
         os.makedirs(out_dir, exist_ok=True)
-
-        out_csv = os.path.join(out_dir, "edge_sweep.csv")
-        df.to_csv(out_csv, index=False)
+        df.to_csv(os.path.join(out_dir, "edge_sweep.csv"), index=False)
 
         return df
-    
+   
     def select_best_edge_family_across_subcracks(self, edge_sweep_packs):
         """
         edge_sweep_packs:
@@ -1074,14 +1010,51 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         )
 
         # ------------------------------------------------------------
-        # Image-level exports (CSV + plot) — IMPORTANT: use RAW df_all
+        # Resolve geometry cache paths for SELECTED FAMILY
         # ------------------------------------------------------------
+        per_crack_geom = {}
+
         try:
             save_root = getattr(self, "save_folder", None) or getattr(self, "output_folder", None) or ""
             base_name = str(getattr(self, "image_base", None) or getattr(self, "name", "unknown"))
-            # if base_name looks like a path/filename, strip extension
             base_name = os.path.splitext(os.path.basename(base_name))[0]
 
+            param_tag = (
+                f"_wsize{best['param_window_half_size']}"
+                f"_mu{best['param_mu']}"
+                f"_l{best['param_l']}"
+                f"_p{best['param_p']}"
+                f"_{best['param_seg_mode']}"
+            )
+
+            for cid in df_all["crack_id"].unique():
+                geom_path = os.path.join(
+                    save_root,
+                    "metrics",
+                    base_name,
+                    f"cid{cid}",
+                    "manual",
+                    "debug",
+                    param_tag,
+                    "geom_cache.npz",
+                )
+
+                if os.path.isfile(geom_path):
+                    per_crack_geom[int(cid)] = {
+                        "geom_cache_path": geom_path,
+                    }
+
+            if not per_crack_geom:
+                print("[EDGE global] ⚠ no geometry cache files found for selected family")
+
+        except Exception as e:
+            print(f"[EDGE global] ⚠ geometry cache resolution failed: {e}")
+            per_crack_geom = {}
+
+        # ------------------------------------------------------------
+        # Image-level exports (CSV + plot) — IMPORTANT: use RAW df_all
+        # ------------------------------------------------------------
+        try:
             metrics_dir = os.path.join(save_root, "metrics", base_name)
             os.makedirs(metrics_dir, exist_ok=True)
 
@@ -1108,18 +1081,24 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 out_png,
                 weight_col="global_weight",
                 selected_family=selected,
-                hd95_guardrail=None,   # set to a float if you want to hard-clip outliers
+                hd95_guardrail=None,
             )
 
         except Exception as e:
             print(f"[EDGE global] ⚠ image-level exports failed: {e}")
 
+        # ------------------------------------------------------------
+        # FINAL RETURN (authoritative bundle)
+        # ------------------------------------------------------------
         return {
-            "window_half_size": int(best["param_window_half_size"]),
-            "mu": float(best["param_mu"]),
-            "l": int(best["param_l"]),
-            "p": int(best["param_p"]),
-            "seg_mode": str(best["param_seg_mode"]),
+            "params": {
+                "window_half_size": int(best["param_window_half_size"]),
+                "mu": float(best["param_mu"]),
+                "l": int(best["param_l"]),
+                "p": int(best["param_p"]),
+                "seg_mode": str(best["param_seg_mode"]),
+            },
+            "per_crack_geom": per_crack_geom,   # <-- THIS FIXES YOUR KEYERROR
         }
           
     def _debug_combine_probe(self):
@@ -5519,12 +5498,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         # (OPTIONAL) EDGE PARAM CALIBRATION
         # ------------------------------------------------------------
         if edge_grid is None:
-            '''edge_grid = {
-                "window_half_size": [35, 45, 55],
-                "mu": [0, 5],
-                "l": [2, 5],
-                "p": [6, 14],
-            }'''
             edge_grid = {
                 "window_half_size": [45],
                 "mu": [0],
@@ -5533,36 +5506,32 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 "seg_mode": ["new", "old"],
             }
 
+        # default params (always valid)
         best_edge = {"window_half_size": 45, "mu": 0.0, "l": 5, "p": 14, "seg_mode": "new"}
 
         t_edge_calib_start = time.perf_counter()
 
         # ------------------------------------------------------------
-        # EDGE PARAM CALIBRATION (IMAGE-LEVEL, RS3-STYLE)
+        # EDGE PARAM CALIBRATION (NO RECOMPUTE)
         # ------------------------------------------------------------
         if do_edge_calibrate:
-            print("[quick] edge calibration sweep (image-level family selection)...")
-
-            import os
-            import numpy as np
-            import pandas as pd
+            print("[quick] edge calibration sweep...")
 
             edge_packs = {}
 
-            # _metric_atomic() is valid after snapshot sync
             for cid, cr in self._metric_atomic().items():
                 src = (cr.get("source") or "").lower()
                 if src.startswith("auto") or src == "combined":
                     continue
 
-                man = np.asarray(cr.get("midline", []), float)
-                if man.ndim != 2 or man.shape[1] != 2 or len(man) < 2:
+                mid = np.asarray(cr.get("midline", []), float)
+                if mid.ndim != 2 or len(mid) < 2:
                     continue
 
                 df = self.sweep_edges_with_executor(
                     cid,
                     grid=edge_grid,
-                    max_workers=cpu_max_workers
+                    max_workers=cpu_max_workers,
                 )
 
                 if df is not None and not df.empty:
@@ -5570,84 +5539,138 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     d["crack_id"] = cid
                     edge_packs[cid] = d
 
-            # ------------------------------------------------------------
-            # IMAGE-LEVEL EDGE CALIBRATION (RS3-STYLE, AUTHORITATIVE)
-            # ------------------------------------------------------------
-            best_edge = None
+            sel = self.select_best_edge_family_across_subcracks(edge_packs)
 
-            if edge_packs:
+            # --------------------------------------------------------
+            # Normalize selector return shape (IMPORTANT)
+            #   - old selector: returns {window_half_size, mu, l, p, seg_mode}
+            #   - new selector: returns {"params": {...}, "per_crack_geom": {...}}
+            # --------------------------------------------------------
+            if sel is None:
+                print("[quick] ⚠ edge family selection returned None — fallback to defaults")
+                sel = {
+                    "params": dict(window_half_size=45, mu=0.0, l=5, p=14, seg_mode="new"),
+                    "per_crack_geom": {},
+                }
+
+            if isinstance(sel, dict) and "params" in sel:
+                # NEW SHAPE
+                best_edge_bundle = sel
+                best_edge = dict(best_edge_bundle.get("params") or best_edge)
+            else:
+                # OLD SHAPE
+                best_edge_bundle = {"params": dict(sel), "per_crack_geom": {}}
+                best_edge = dict(sel)
+
+        else:
+            # no calibration → no bundle/caches
+            best_edge_bundle = {"params": dict(best_edge), "per_crack_geom": {}}
+
+        # ------------------------------------------------------------
+        # APPLY EDGES FROM CACHE (ONLY if calibration produced caches)
+        # ------------------------------------------------------------
+        used_cache = False
+        per_crack_geom = (best_edge_bundle or {}).get("per_crack_geom", {}) or {}
+
+        if do_edge_calibrate and per_crack_geom:
+            print("[quick] loading cached edges (no recompute)...")
+            used_cache = True
+
+            n_applied = 0
+            for cid, info in per_crack_geom.items():
+                geom_path = (info or {}).get("geom_cache_path", None)
+                if not geom_path:
+                    continue
+
                 try:
-                    # ----------------------------------------------------
-                    # Delegate EVERYTHING to the authoritative selector
-                    #  - weighted aggregation
-                    #  - family scoring
-                    #  - CSV exports
-                    #  - thesis-grade visualization
-                    # ----------------------------------------------------
-                    best_edge = self.select_best_edge_family_across_subcracks(edge_packs)
+                    data = np.load(geom_path, allow_pickle=True)
 
-                    if best_edge is None:
-                        print("[quick] ⚠ edge family selection returned None")
+                    # Update the live crack dict directly (safest)
+                    cr = self._metric_atomic().get(cid, None)
+                    if cr is None:
+                        continue
+
+                    # Use .tolist() so JSON snapshot writing stays stable
+                    # (np arrays inside dicts will bite you later)
+                    if "mask_crop" in data:
+                        cr["mask_crop"] = data["mask_crop"].tolist() if hasattr(data["mask_crop"], "tolist") else data["mask_crop"]
+
+                    if "track_e1" in data:
+                        cr["edge1"] = data["track_e1"].tolist() if hasattr(data["track_e1"], "tolist") else data["track_e1"]
+
+                    if "track_e2" in data:
+                        cr["edge2"] = data["track_e2"].tolist() if hasattr(data["track_e2"], "tolist") else data["track_e2"]
+
+                    # normals
+                    n1 = data["normals_e1"] if "normals_e1" in data else None
+                    n2 = data["normals_e2"] if "normals_e2" in data else None
+                    if n1 is not None or n2 is not None:
+                        cr["normals"] = {
+                            "edge1": n1.tolist() if hasattr(n1, "tolist") else n1,
+                            "edge2": n2.tolist() if hasattr(n2, "tolist") else n2,
+                        }
+
+                    # record params used
+                    cr["edge_params"] = dict(best_edge)
+                    cr["edge_source"] = "cached_calibration"
+
+                    n_applied += 1
 
                 except Exception as e:
-                    print(f"[quick] ⚠ image-level edge calibration failed:")
-                    import traceback
-                    traceback.print_exc()
+                    print(f"[quick] ⚠ cache load failed for cid={cid}: {e}")
 
-            else:
-                print("[quick] ⚠ no edge sweep packs available for image-level calibration")
-
-            if best_edge is None:
-                print("[quick] ⚠ falling back to default edge params")
-                best_edge = {
-                    "window_half_size": 45,
-                    "mu": 0.0,
-                    "l": 5,
-                    "p": 14,
-                    "seg_mode": "new",
-                }
+            print(f"[quick] cached edges applied to {n_applied} cracks")
+        else:
+            if do_edge_calibrate:
+                print("[quick] no cache map present — will recompute edges in Phase 1")
 
         t_edge_calib = time.perf_counter() - t_edge_calib_start
         print(f"[quick] ⏱ edge calibration total: {t_edge_calib:.2f}s")
-        
+
+        # ------------------------------------------------------------
+        # PHASE 1: EDGE TRACKING FOR MANUAL CRACKS
+        #   - If cache was applied: SKIP recompute
+        #   - Else: run_edge_tracking_parallel (existing behavior)
+        # ------------------------------------------------------------
+        if used_cache:
+            print("[quick] manual edge tracking skipped (cache already applied)")
+            t_manual_edges = 0.0
+        else:
+            print("[quick] running edge tracking for MANUAL cracks (debug plots)...")
+            t_manual_edges_start = time.perf_counter()
+
+            manual_ids = []
+            for cid, cr in self._metric_atomic().items():
+                src = (cr.get("source") or "").lower()
+                if src.startswith("auto") or src == "combined":
+                    continue
+
+                mid = np.asarray(cr.get("midline", []), float)
+                if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 2:
+                    continue
+
+                manual_ids.append(cid)
+
+            print(f"[quick] manual cracks to edge-track: {manual_ids}")
+
+            if manual_ids:
+                try:
+                    _ = self.run_edge_tracking_parallel(
+                        crack_ids=manual_ids,
+                        cpu_max_workers=cpu_max_workers,
+                        edge_params_fixed=best_edge,  # <-- normalized plain params dict
+                    )
+                except Exception as e:
+                    print(f"[quick] ⚠ manual edge tracking failed: {e}")
+
+                # reload snapshot to ensure new edges are visible
+                self.metric_annotations = load_snapshot_from_files(self.save_folder, base_name)
+
+            t_manual_edges = time.perf_counter() - t_manual_edges_start
+            print(f"[quick] manual-edge generation time = {t_manual_edges:.2f}s")
+
         return
-
-        # ------------------------------------------------------------
-        # PHASE 1: EDGE TRACKING FOR MANUAL CRACKS (edge_param_worker)
-        # ------------------------------------------------------------
-        print("[quick] running edge tracking for MANUAL cracks (debug plots)...")
-        t_manual_edges_start = time.perf_counter()
-
-        manual_ids = []
-        for cid, cr in self._metric_atomic().items():
-            src = (cr.get("source") or "").lower()
-            if src.startswith("auto") or src == "combined":
-                continue
-
-            mid = np.asarray(cr.get("midline", []), float)
-            if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 2:
-                continue
-
-            manual_ids.append(cid)
-
-        print(f"[quick] manual cracks to edge-track: {manual_ids}")
-
-        if manual_ids:
-            try:
-                _ = self.run_edge_tracking_parallel(
-                    crack_ids=manual_ids,
-                    cpu_max_workers=cpu_max_workers,
-                    edge_params_fixed=best_edge,
-                )
-            except Exception as e:
-                print(f"[quick] ⚠ manual edge tracking failed: {e}")
-
-            # reload snapshot to ensure new edges are visible
-            self.metric_annotations = load_snapshot_from_files(self.save_folder, base_name)
-
-        t_manual_edges = time.perf_counter() - t_manual_edges_start
-        print(f"[quick] manual-edge generation time = {t_manual_edges:.2f}s")
-
+        
         # ------------------------------------------------------------
         # PHASE 1.5: RS3 AUTO VARIANTS (this image only)
         # ------------------------------------------------------------
