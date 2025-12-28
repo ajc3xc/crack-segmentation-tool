@@ -78,7 +78,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 edge_grid=None,
                 g_variants=None,
                 cpu_max_workers=8,
-                do_edge_calibrate=False
+                do_edge_calibrate=True
             )
         )
 
@@ -900,59 +900,176 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         return df
    
+    def run_edge_plot_only_parallel(
+        self,
+        crack_ids,
+        *,
+        per_crack_geom,
+        edge_params_fixed,
+        cpu_max_workers=8,
+    ):
+        """
+        Plot-only pass: for each manual crack_id, load the selected family's geom_cache.npz
+        and call edge_param_worker(plot_only=True, geom_cache_path=...).
+
+        This generates:
+        metrics/{base}/cid{cid}/manual/best_{param_tag}/...
+        without recomputing edge_masks / edges_tracking.
+
+        Returns: list of worker results (dicts).
+        """
+        import os
+        import numpy as np
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        base_name = self._image_base()
+        save_root = self.save_folder
+
+        # you likely already have these available in your class
+        image_shape = getattr(self, "image_shape", None)
+        gt_full = getattr(self, "gt_full_mask", None) if hasattr(self, "gt_full_mask") else None
+        original_image = getattr(self, "original_image", None)
+
+        payloads = []
+        for cid in crack_ids:
+            cid_int = int(cid)
+            info = (per_crack_geom or {}).get(cid_int, {})
+            geom_path = info.get("geom_cache_path", None)
+            if not geom_path or not os.path.isfile(geom_path):
+                continue
+
+            cr = self._metric_atomic().get(cid_int, None)
+            if cr is None:
+                continue
+
+            mid = np.asarray(cr.get("midline", []), float)
+            if mid.ndim != 2 or len(mid) < 2:
+                continue
+
+            bbox = cr.get("bbox") or cr.get("mask_bbox") or cr.get("bbox_full") or None
+            if bbox is None:
+                # if you always store bbox, you can remove this
+                continue
+
+            payloads.append({
+                "save_folder": save_root,
+                "image_base": base_name,
+                "crack_id": str(cid_int),
+
+                # For plot-only, we do NOT need these heavy inputs if edge_param_worker supports cache mode.
+                # But keep bbox + params so it builds dirs consistently.
+                "bbox": bbox,
+                "params": dict(edge_params_fixed),
+
+                # tags
+                "midline_type": "manual",
+
+                # Plot-only controls
+                "plot_only": True,
+                "geom_cache_path": geom_path,
+
+                # Optional: allow global overlay plots
+                "image_shape": image_shape,
+                "gt_full": gt_full,
+                "original_image": original_image,
+
+                # Optional per-crack GT crop if you have it stored
+                "gt_crop": cr.get("gt_crop", None),
+            })
+
+        if not payloads:
+            print("[plot-only] no payloads to render")
+            return []
+
+        results = []
+        with ProcessPoolExecutor(max_workers=int(cpu_max_workers)) as ex:
+            futs = [ex.submit(edge_param_worker, p) for p in payloads]
+            for f in as_completed(futs):
+                try:
+                    results.append(f.result())
+                except Exception as e:
+                    results.append({"status": "fail_exception", "error": str(e)})
+
+        return results
+    
     def select_best_edge_family_across_subcracks(self, edge_sweep_packs):
         """
         edge_sweep_packs:
             dict[cid] -> DataFrame from sweep_edges_with_executor
 
-        Selects best EDGE FAMILY using the SAME weighted aggregation you already use,
-        and also emits image-level artifacts that are thesis-auditable:
+        Selects best EDGE FAMILY using weighted aggregation (length * sqrt(area)),
+        and emits image-level artifacts:
 
-        metrics/{image_base}/edge_sweep_all.csv
-        metrics/{image_base}/edge_sweep_family_agg.csv
-        metrics/{image_base}/edge_sweep_summary.png
+            metrics/{image_base}/edge_sweep_all.csv
+            metrics/{image_base}/edge_sweep_family_agg.csv
+            metrics/{image_base}/edge_sweep_summary.png
+
+        Additionally:
+        - resolves per-crack geom_cache.npz paths for the SELECTED family so the
+        caller can re-run edge_param_worker in "plot-only" mode to generate
+        manual-best plots WITHOUT recomputing edges.
+
+        Returns:
+            {
+                "params": {window_half_size, mu, l, p, seg_mode},
+                "per_crack_geom": {
+                    cid: {"geom_cache_path": ".../geom_cache.npz"}
+                }
+            }
         """
         import os
         import numpy as np
         import pandas as pd
 
+        # ------------------------------------------------------------
+        # Collect raw sweep rows
+        # ------------------------------------------------------------
         frames = []
         for cid, df in (edge_sweep_packs or {}).items():
             if df is None or getattr(df, "empty", True):
                 continue
 
             d = df.copy()
-            d["crack_id"] = cid
+            d["crack_id"] = int(cid)
 
             # ---- weights (same philosophy as RS3) ----
-            # prefer sweep-provided columns if they exist; otherwise fall back to 1.0
             d["length_px"] = d.get("midline_length_px", np.nan)
             d["bbox_area"] = d.get("bbox_area_px", np.nan)
 
-            d["length_px"] = pd.to_numeric(d["length_px"], errors="coerce").fillna(1.0)
-            d["bbox_area"] = pd.to_numeric(d["bbox_area"], errors="coerce").fillna(1.0)
+            d["length_px"] = pd.to_numeric(d["length_px"], errors="coerce")
+            d["bbox_area"] = pd.to_numeric(d["bbox_area"], errors="coerce")
 
-            d["global_weight"] = np.maximum(d["length_px"] * np.sqrt(d["bbox_area"]), 1e-3)
+            d["global_weight"] = np.maximum(
+                d["length_px"] * np.sqrt(d["bbox_area"]),
+                1e-3
+            )
 
             frames.append(d)
 
         if not frames:
-            print("[EDGE global] no sweep data")
+            print("[EDGE global] ❌ no sweep data")
             return None
 
         df_all = pd.concat(frames, ignore_index=True)
 
         # ------------------------------------------------------------
-        # HARD DEBUG: verify we are using RAW SWEEP (not post-selection)
+        # HARD DEBUG: verify RAW sweep integrity
         # ------------------------------------------------------------
         print("\n[EDGE global] DEBUG (raw sweep concat)")
         print("  n_rows:", len(df_all))
-        print("  n_cracks:", df_all["crack_id"].nunique() if "crack_id" in df_all.columns else "NA")
-        for col in ["param_window_half_size", "param_mu", "param_l", "param_p", "param_seg_mode"]:
-            if col not in df_all.columns:
-                print(f"  ❌ missing column: {col}")
-        # show family counts if possible
-        fam_cols = ["param_window_half_size", "param_mu", "param_l", "param_p", "param_seg_mode"]
+        print("  n_cracks:", df_all["crack_id"].nunique())
+
+        fam_cols = [
+            "param_window_half_size",
+            "param_mu",
+            "param_l",
+            "param_p",
+            "param_seg_mode",
+        ]
+        for c in fam_cols:
+            if c not in df_all.columns:
+                print(f"  ❌ missing column: {c}")
+
         if set(fam_cols).issubset(df_all.columns):
             fam_counts = (
                 df_all.groupby(fam_cols)
@@ -964,7 +1081,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print(fam_counts.head(12).to_string(index=False))
 
         # ------------------------------------------------------------
-        # Define EDGE FAMILY and compute weighted family score
+        # Family scoring (weighted mean edge_score)
         # ------------------------------------------------------------
         if "edge_score" not in df_all.columns:
             print("[EDGE global] ❌ df_all missing edge_score — cannot select best family")
@@ -975,25 +1092,26 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         grouped = []
         for key, g in df_all.groupby(fam_cols):
             s = g["edge_score"].values.astype(float)
-            w = pd.to_numeric(g.get("global_weight", 1.0), errors="coerce").fillna(1.0).values.astype(float)
+            w = pd.to_numeric(
+                g["global_weight"],
+                errors="coerce"
+            ).fillna(1.0).values.astype(float)
 
             ok = np.isfinite(s) & np.isfinite(w) & (w > 0)
             if not np.any(ok):
                 continue
 
-            score_wmean = float(np.average(s[ok], weights=w[ok]))
-
             grouped.append({
                 **dict(zip(fam_cols, key)),
-                "edge_score_wmean": score_wmean,
+                "edge_score_wmean": float(np.average(s[ok], weights=w[ok])),
                 "n_rows": int(len(g)),
-                "n_cracks": int(g["crack_id"].nunique()) if "crack_id" in g.columns else int(len(g)),
+                "n_cracks": int(g["crack_id"].nunique()),
                 "weight_sum": float(np.sum(w[ok])),
             })
 
         fam_df = pd.DataFrame(grouped)
         if fam_df.empty:
-            print("[EDGE global] ❌ no valid families after grouping (non-finite scores?)")
+            print("[EDGE global] ❌ no valid families after grouping")
             return None
 
         fam_df = fam_df.sort_values("edge_score_wmean", ascending=True).reset_index(drop=True)
@@ -1006,7 +1124,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             f"l={best['param_l']} "
             f"p={best['param_p']} "
             f"mode={best['param_seg_mode']} "
-            f"(score={best['edge_score_wmean']:.4f}, rows={best['n_rows']}, cracks={best['n_cracks']})"
+            f"(score={best['edge_score_wmean']:.4f}, "
+            f"rows={best['n_rows']}, cracks={best['n_cracks']})"
         )
 
         # ------------------------------------------------------------
@@ -1015,9 +1134,17 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         per_crack_geom = {}
 
         try:
-            save_root = getattr(self, "save_folder", None) or getattr(self, "output_folder", None) or ""
-            base_name = str(getattr(self, "image_base", None) or getattr(self, "name", "unknown"))
-            base_name = os.path.splitext(os.path.basename(base_name))[0]
+            save_root = (
+                getattr(self, "save_folder", None)
+                or getattr(self, "output_folder", None)
+                or ""
+            )
+
+            base_name = (
+                getattr(self, "image_base", None)
+                or getattr(self, "name", "unknown")
+            )
+            base_name = os.path.splitext(os.path.basename(str(base_name)))[0]
 
             param_tag = (
                 f"_wsize{best['param_window_half_size']}"
@@ -1032,16 +1159,15 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     save_root,
                     "metrics",
                     base_name,
-                    f"cid{cid}",
+                    f"cid{int(cid)}",
                     "manual",
                     "debug",
                     param_tag,
                     "geom_cache.npz",
                 )
-
                 if os.path.isfile(geom_path):
                     per_crack_geom[int(cid)] = {
-                        "geom_cache_path": geom_path,
+                        "geom_cache_path": geom_path
                     }
 
             if not per_crack_geom:
@@ -1052,40 +1178,66 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             per_crack_geom = {}
 
         # ------------------------------------------------------------
-        # Image-level exports (CSV + plot) — IMPORTANT: use RAW df_all
+        # Image-level exports (CSV + plot)
         # ------------------------------------------------------------
         try:
             metrics_dir = os.path.join(save_root, "metrics", base_name)
             os.makedirs(metrics_dir, exist_ok=True)
 
-            # full raw sweep
-            df_all.to_csv(os.path.join(metrics_dir, "edge_sweep_all.csv"), index=False)
+            df_all.to_csv(
+                os.path.join(metrics_dir, "edge_sweep_all.csv"),
+                index=False
+            )
+            fam_df.to_csv(
+                os.path.join(metrics_dir, "edge_sweep_family_agg.csv"),
+                index=False
+            )
 
-            # family aggregation table used for selection
-            fam_df.to_csv(os.path.join(metrics_dir, "edge_sweep_family_agg.csv"), index=False)
-
-            # thesis plot from RAW data (shows ALL families) + highlight selected
             from helpers.present_plots import plot_edge_sweep_summary
-            out_png = os.path.join(metrics_dir, "edge_sweep_summary.png")
-
-            selected = {
-                "param_window_half_size": best["param_window_half_size"],
-                "param_mu": best["param_mu"],
-                "param_l": best["param_l"],
-                "param_p": best["param_p"],
-                "param_seg_mode": best["param_seg_mode"],
-            }
 
             plot_edge_sweep_summary(
                 df_all,
-                out_png,
+                os.path.join(metrics_dir, "edge_sweep_summary.png"),
                 weight_col="global_weight",
-                selected_family=selected,
+                selected_family={
+                    "param_window_half_size": best["param_window_half_size"],
+                    "param_mu": best["param_mu"],
+                    "param_l": best["param_l"],
+                    "param_p": best["param_p"],
+                    "param_seg_mode": best["param_seg_mode"],
+                },
                 hd95_guardrail=None,
             )
 
         except Exception as e:
             print(f"[EDGE global] ⚠ image-level exports failed: {e}")
+
+        # ------------------------------------------------------------
+        # ✅ NEW: trigger manual-best plot generation (plot-only)
+        # ------------------------------------------------------------
+        try:
+            if per_crack_geom:
+                print("[EDGE global] plot-only rendering manual-best from caches...")
+
+                self.run_edge_tracking_parallel(
+                    crack_ids=list(per_crack_geom.keys()),
+                    edge_params_fixed={
+                        "window_half_size": int(best["param_window_half_size"]),
+                        "mu": float(best["param_mu"]),
+                        "l": int(best["param_l"]),
+                        "p": int(best["param_p"]),
+                        "seg_mode": str(best["param_seg_mode"]),
+                    },
+                    plot_only=True,
+                    per_crack_geom=per_crack_geom,
+                    cpu_max_workers=8,
+                )
+
+            else:
+                print("[EDGE global] plot-only skipped (no caches found)")
+
+        except Exception as e:
+            print(f"[EDGE global] ⚠ plot-only rendering failed: {e}")
 
         # ------------------------------------------------------------
         # FINAL RETURN (authoritative bundle)
@@ -1098,9 +1250,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 "p": int(best["param_p"]),
                 "seg_mode": str(best["param_seg_mode"]),
             },
-            "per_crack_geom": per_crack_geom,   # <-- THIS FIXES YOUR KEYERROR
+            "per_crack_geom": per_crack_geom,
         }
-          
+        
     def _debug_combine_probe(self):
         """
         Runs auto-combine and combined-mask build with loud logs,
@@ -4269,6 +4421,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         edge_params_fixed=None,
         color_channel=None,
         prefer_auto_best=False,
+        plot_only=False,
+        per_crack_geom=None,
     ):
         """
         Parallelize edge-mask + edge-tracking and save results into per-crack files.
@@ -4331,8 +4485,24 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 color_channel=color_channel,
                 prefer_auto_best=prefer_auto_best,
             )
+
             if payload is None:
                 continue
+
+            # -------------------------------------------------
+            # Plot-only override: inject geom cache
+            # -------------------------------------------------
+            if plot_only:
+                info = (per_crack_geom or {}).get(int(cid), {})
+                geom_path = info.get("geom_cache_path", None)
+
+                if not geom_path or not os.path.isfile(geom_path):
+                    print(f"[edge-parallel] cid{cid} ❌ no geom cache for plot-only")
+                    continue
+
+                payload = dict(payload)   # do not mutate original
+                payload["plot_only"] = True
+                payload["geom_cache_path"] = geom_path
 
             # DEBUG: log what midline type we're using
             midline_type = payload.get("midline_type", "manual")
@@ -5453,6 +5623,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             t_manual_edges = time.perf_counter() - t_manual_edges_start
             print(f"[quick] manual-edge generation time = {t_manual_edges:.2f}s")
         
+        return
+        
         # ------------------------------------------------------------
         # PHASE 1.5: RS3 AUTO VARIANTS (this image only)
         # ------------------------------------------------------------
@@ -5493,8 +5665,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 print(f"[quick] ⚠ RS3 family selection failed: {e}")
         else:
             print("[quick] ⚠ no auto_packs; skipping RS3 family selection.")
-            
-        return
 
         # ------------------------------------------------------------
         # PHASE 2: GEODESIC EDGES FOR AUTO BEST MIDLINES

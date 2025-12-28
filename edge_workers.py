@@ -428,11 +428,23 @@ def save_cropped_overlay(img_full_bgr, bbox, mask_or_rgb, out_png, margin=0):
 # ---------------------------------------------------------------------
 # Worker: edge mask → edge tracking → mask creation → midline metrics
 # ---------------------------------------------------------------------     
-from typing import Any, Dict
+from typing import Dict, Any
 
 def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Core edge worker for atomic cracks.
+
+    Supports two modes:
+
+    1) Normal compute mode (default):
+        - runs edge_masks + edges_tracking + mask generation
+        - writes plots (if not calibration_only)
+        - (optionally) writes geom_cache.npz (if calibration_only)
+
+    2) Plot-only mode (AUTO):
+        - if payload["geom_cache_path"] is provided and exists
+        - loads geometry from geom_cache.npz and SKIPS ALL heavy compute
+        - runs plotting + metrics using cached mask/edges/normals
 
     Expects payload to contain (at minimum):
       - image_crop_gray      : (Hc, Wc) float32 or uint8
@@ -447,6 +459,11 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
       - gt_crop              : optional (Hc, Wc) uint8 binary GT mask (0/1 or 0/255)
       - source               : optional "manual" / "auto..." for directory tagging
 
+    Optional:
+      - geom_cache_path      : if provided and file exists -> plot-only mode
+      - calibration_only     : if True -> writes geom_cache.npz under debug/param_tag
+      - image_shape, gt_full, original_image : for global overlay plot
+
     Returns:
       result dict with:
         - status
@@ -457,7 +474,10 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         - timing
         - and any region/boundary/surface metrics if GT provided
     """
-    import numpy as np, cv2, os, time
+    import numpy as np
+    import cv2
+    import os
+    import time
 
     from helpers.metrics import (
         compute_mask_metrics,
@@ -468,7 +488,9 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     from helpers.plot_metrics import (
         plot_gt_normals_on_gtbw,
     )
-    # edge_masks / edges_tracking are assumed imported at module level
+    # edge_masks / edges_tracking assumed imported at module level
+    # plot_normals_pretty, plot_widths_colormap_on_crop, save_gt_vs_manual_overlay assumed available
+    # extract_normals_from_res assumed available
 
     img        = payload["image_crop_gray"]
     pts_crop   = payload["pts_crop"]
@@ -484,18 +506,21 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     image_shape    = payload.get("image_shape", None)
     gt_full        = payload.get("gt_full", None)
     original_image = payload.get("original_image", None)
-    
-    calib_only = payload.get("calibration_only", False)
+
+    calib_only = bool(payload.get("calibration_only", False))
 
     seg_mode = str(P.get("seg_mode", "new")).lower()
     if seg_mode not in ("old", "new"):
         seg_mode = "new"
-        
-    print(f'[SUPER DEBUG] Payload type {str(payload.get("midline_type", "")).lower()}')
+
+    geom_cache_path = payload.get("geom_cache_path", None)
+    plot_only = bool(geom_cache_path) and os.path.isfile(str(geom_cache_path))
+
+    print(f"[SUPER DEBUG] Payload type {str(payload.get('midline_type', '')).lower()} | plot_only={plot_only}")
 
     try:
         # -------------------------------------------------------
-        # Normalize crop to 8-bit
+        # Normalize crop to 8-bit (still needed for plotting)
         # -------------------------------------------------------
         img_norm = cv2.normalize(
             img.astype(np.float32),
@@ -503,19 +528,8 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             cv2.NORM_MINMAX
         ).astype(np.uint8)
 
-        # -------------------------------------------------------
-        # edge_masks timing
-        # -------------------------------------------------------
-        t0 = time.perf_counter()
-        em1, em2 = edge_masks(
-            img_norm,
-            track_yx,
-            window_half_size=int(P["window_half_size"]),
-        )
-        t_edge_masks = float(time.perf_counter() - t0)
-
         midline_xy_crop = np.column_stack([track_yx[1], track_yx[0]])
-        
+
         # -------------------------------------------------------
         # manual vs auto tag
         # -------------------------------------------------------
@@ -532,70 +546,125 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         cid       = crack_id
         save_root = payload["save_folder"]
+
         # ---- root per crack
         cid_root = os.path.join(save_root, "metrics", base_name, f"cid{cid}")
-
-        # ---- manual/auto split
-        cid_root = os.path.join(cid_root, midline_tag)   # .../cidX/manual or .../cidX/auto
+        cid_root = os.path.join(cid_root, midline_tag)  # .../cidX/manual or .../cidX/auto
 
         # ---- calibration artifacts go under debug/
         if calib_only:
             dbg_dir = os.path.join(cid_root, "debug", param_tag)
         else:
-            # for normal (non-calib) runs, keep results under best/ (or params/)
-            dbg_dir = os.path.join(cid_root, "best"+param_tag)
+            dbg_dir = os.path.join(cid_root, "best" + param_tag)
 
         os.makedirs(dbg_dir, exist_ok=True)
 
-        os.makedirs(dbg_dir, exist_ok=True)
+        # =======================================================
+        # PLOT-ONLY MODE: load geometry from geom_cache.npz
+        # =======================================================
+        if plot_only:
+            t_load0 = time.perf_counter()
+            data = np.load(str(geom_cache_path), allow_pickle=True)
 
-        # -------------------------------------------------------
-        # edges_tracking timing (geodesics + normals)
-        # -------------------------------------------------------
-        t1 = time.perf_counter()
-        res = edges_tracking(
-            image_crop=img_norm,
-            pts_cropp=pts_crop,
-            edge_mask1_cropp=em1, edge_mask2_cropp=em2,
-            midline=midline_xy_crop,
-            mu=int(P["mu"]), l=int(P["l"]), p=int(P["p"]),
-            return_normal_edges=True,
-            prefer_gpu=True,
-            mode=seg_mode,
-            debug_dir=dbg_dir
-        )
-        t_edges_tracking = float(time.perf_counter() - t1)
+            # Required keys
+            for k in ["mask_crop", "track_e1", "track_e2", "normals_e1", "normals_e2", "midline_xy_crop", "bbox"]:
+                if k not in data:
+                    return {
+                        "status": "fail_bad_geom_cache",
+                        "error": f"geom_cache missing key: {k}",
+                        "geom_cache_path": str(geom_cache_path),
+                        **P,
+                    }
 
-        if not isinstance(res, dict):
-            print(f"[edge_worker] ⚠ edges_tracking returned {type(res)} — expected dict")
-            return {"status": "fail_invalid_return", **P}
+            mask_crop       = np.asarray(data["mask_crop"])
+            track_e1        = np.asarray(data["track_e1"], float)
+            track_e2        = np.asarray(data["track_e2"], float)
+            normals_e1      = np.asarray(data["normals_e1"], float)
+            normals_e2      = np.asarray(data["normals_e2"], float)
+            midline_xy_crop = np.asarray(data["midline_xy_crop"], float)
 
-        track_e1, track_e2 = res.get("geodesic_edges", (None, None))
-        if track_e1 is None or track_e2 is None:
-            print(f"[edge_worker] ❌ no geodesic edges returned for params={P}")
-            return {"status": "fail_no_edges", **P}
+            bbox_arr = np.asarray(data["bbox"]).astype(int).ravel()
+            if bbox_arr.size != 4:
+                return {
+                    "status": "fail_bad_geom_cache",
+                    "error": f"geom_cache bbox invalid shape: {bbox_arr.shape}",
+                    "geom_cache_path": str(geom_cache_path),
+                    **P,
+                }
 
-        track_e1 = np.asarray(track_e1, float)
-        track_e2 = np.asarray(track_e2, float)
+            x, y, w, h = map(int, bbox_arr.tolist())
 
-        hc, wc = img_norm.shape[:2]
-        
-        normals_e1, normals_e2 = extract_normals_from_res(res)
-        subtiming = res.get("subtiming", {})
+            # Global coords
+            track_e1_global = np.column_stack([track_e1[:, 0] + x, track_e1[:, 1] + y])
+            track_e2_global = np.column_stack([track_e2[:, 0] + x, track_e2[:, 1] + y])
 
-        # global coords
-        track_e1_global = np.column_stack([track_e1[:, 0] + x, track_e1[:, 1] + y])
-        track_e2_global = np.column_stack([track_e2[:, 0] + x, track_e2[:, 1] + y])
-        
-        from cracktools.segmentation import generate_mask_from_edges  # adjust import path
-        mask_crop = generate_mask_from_edges(
-            img_gray=img_norm,
-            edge1_xy=track_e1,
-            edge2_xy=track_e2,
-            out_dir=dbg_dir,
-            tag=f"cid{cid}",
-            do_morph=True,
-        )
+            t_edge_masks = 0.0
+            t_edges_tracking = 0.0
+            subtiming = {}
+            t_load = float(time.perf_counter() - t_load0)
+
+        # =======================================================
+        # NORMAL MODE: compute geometry (edge_masks + edges_tracking + mask)
+        # =======================================================
+        else:
+            # -------------------------------------------------------
+            # edge_masks timing
+            # -------------------------------------------------------
+            t0 = time.perf_counter()
+            em1, em2 = edge_masks(
+                img_norm,
+                track_yx,
+                window_half_size=int(P["window_half_size"]),
+            )
+            t_edge_masks = float(time.perf_counter() - t0)
+
+            # -------------------------------------------------------
+            # edges_tracking timing (geodesics + normals)
+            # -------------------------------------------------------
+            t1 = time.perf_counter()
+            res = edges_tracking(
+                image_crop=img_norm,
+                pts_cropp=pts_crop,
+                edge_mask1_cropp=em1, edge_mask2_cropp=em2,
+                midline=midline_xy_crop,
+                mu=int(P["mu"]), l=int(P["l"]), p=int(P["p"]),
+                return_normal_edges=True,
+                prefer_gpu=True,
+                mode=seg_mode,
+                debug_dir=dbg_dir
+            )
+            t_edges_tracking = float(time.perf_counter() - t1)
+
+            if not isinstance(res, dict):
+                print(f"[edge_worker] ⚠ edges_tracking returned {type(res)} — expected dict")
+                return {"status": "fail_invalid_return", **P}
+
+            track_e1, track_e2 = res.get("geodesic_edges", (None, None))
+            if track_e1 is None or track_e2 is None:
+                print(f"[edge_worker] ❌ no geodesic edges returned for params={P}")
+                return {"status": "fail_no_edges", **P}
+
+            track_e1 = np.asarray(track_e1, float)
+            track_e2 = np.asarray(track_e2, float)
+
+            normals_e1, normals_e2 = extract_normals_from_res(res)
+            subtiming = res.get("subtiming", {}) or {}
+
+            # global coords
+            track_e1_global = np.column_stack([track_e1[:, 0] + x, track_e1[:, 1] + y])
+            track_e2_global = np.column_stack([track_e2[:, 0] + x, track_e2[:, 1] + y])
+
+            from cracktools.segmentation import generate_mask_from_edges  # adjust import path
+            mask_crop = generate_mask_from_edges(
+                img_gray=img_norm,
+                edge1_xy=track_e1,
+                edge2_xy=track_e2,
+                out_dir=dbg_dir,
+                tag=f"cid{cid}",
+                do_morph=True,
+            )
+
+            t_load = 0.0
 
         # =======================================================
         # 1) Pretty edges + normals (crop-level)
@@ -623,14 +692,14 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         if gt_crop is not None:
             gt_bin   = (np.asarray(gt_crop) > 0).astype(np.uint8)
-            pred_bin = (mask_crop > 0).astype(np.uint8)
+            pred_bin = (np.asarray(mask_crop) > 0).astype(np.uint8)
 
             base = compute_mask_metrics(gt_bin, pred_bin)
             bnd  = boundary_fscore(gt_bin, pred_bin, tau=2.0)
             surf = assd_hd95(gt_bin, pred_bin)
             metrics_all = {**base, **bnd, **surf}
 
-            # IoU-style overlay (crop-level, 3x upscaled) – still useful
+            # IoU-style overlay (crop-level, 3x upscaled)
             if not calib_only:
                 try:
                     vis_gray = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR).astype(np.float32) / 255.0
@@ -695,7 +764,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             # =======================================================
             try:
                 if gt_crop is not None:
-                    gt_mask_u8 = (gt_crop > 0).astype(np.uint8) * 255
+                    gt_mask_u8 = (np.asarray(gt_crop) > 0).astype(np.uint8) * 255
                     (e1x, e1y, e2x, e2y, _), _ = normals_from_mask_for_midline(
                         midline_xy_crop,
                         gt_mask_u8 > 0,
@@ -726,7 +795,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 ):
                     H, W = image_shape
                     pred_full = np.zeros((H, W), np.uint8)
-                    pred_full[y:y + h, x:x + w] = (mask_crop > 0).astype(np.uint8)
+                    pred_full[y:y + h, x:x + w] = (np.asarray(mask_crop) > 0).astype(np.uint8)
 
                     ys, xs = np.where(pred_full > 0)
                     if xs.size > 0:
@@ -748,28 +817,31 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                         bbox=bbox,
                         original_image=original_image,
                     )
-
                     print(f"[edge_worker] wrote global mask overlay → {global_overlay_path}")
                 else:
-                    print(f"image shape {image_shape is None}, gt_full {gt_full is None}, original_image {original_image is None}")
+                    print(
+                        f"[edge_worker] global overlay skipped: "
+                        f"image_shape_missing={image_shape is None}, "
+                        f"gt_full_missing={gt_full is None}, "
+                        f"original_image_missing={original_image is None}"
+                    )
             except Exception as e:
                 print(f"[edge_worker] ⚠ save_gt_vs_manual_overlay failed cid{cid}: {e}")
 
         # -------------------------------------------------------
         # Cache geometry for later plotting (calibration runs)
         # -------------------------------------------------------
-        if calib_only:
+        if calib_only and (not plot_only):
             try:
                 geom_cache = {
-                    "mask_crop": mask_crop.astype(np.uint8),
-                    "track_e1": track_e1.astype(np.float32),
-                    "track_e2": track_e2.astype(np.float32),
-                    "normals_e1": normals_e1.astype(np.float32),
-                    "normals_e2": normals_e2.astype(np.float32),
-                    "midline_xy_crop": midline_xy_crop.astype(np.float32),
+                    "mask_crop": np.asarray(mask_crop).astype(np.uint8),
+                    "track_e1": np.asarray(track_e1).astype(np.float32),
+                    "track_e2": np.asarray(track_e2).astype(np.float32),
+                    "normals_e1": np.asarray(normals_e1).astype(np.float32),
+                    "normals_e2": np.asarray(normals_e2).astype(np.float32),
+                    "midline_xy_crop": np.asarray(midline_xy_crop).astype(np.float32),
                     "bbox": np.asarray([x, y, w, h], np.int32),
                 }
-
                 np.savez_compressed(
                     os.path.join(dbg_dir, "geom_cache.npz"),
                     **geom_cache
@@ -784,20 +856,25 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             "edge_masks_sec":     float(t_edge_masks),
             "edges_tracking_sec": float(t_edges_tracking),
         }
-        timing_dict.update(subtiming)
+        if plot_only:
+            timing_dict["geom_cache_load_sec"] = float(t_load)
+
+        # include subtiming if present
+        if isinstance(subtiming, dict):
+            timing_dict.update(subtiming)
 
         result: Dict[str, Any] = {
             "status": "ok",
             "bbox": [x, y, w, h],
             "mask_bbox": [x, y, w, h],
-            "mask_crop": mask_crop.tolist(),
+            "mask_crop": np.asarray(mask_crop).tolist(),
             "geodesic_edges": {
                 "edge1": track_e1_global.tolist(),
                 "edge2": track_e2_global.tolist(),
             },
             "normal_edge_points_full": {
-                "edge1": normals_e1.tolist(),
-                "edge2": normals_e2.tolist(),
+                "edge1": np.asarray(normals_e1).tolist(),
+                "edge2": np.asarray(normals_e2).tolist(),
             },
             "timing": timing_dict,
         }
@@ -808,7 +885,6 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     except Exception as e:
         import traceback
-
         tb = traceback.format_exc()
         print(f"[edge_worker] ❌ unexpected failure for params={P}")
         print(tb)
@@ -816,7 +892,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         out: Dict[str, Any] = {
             "status": "fail_exception",
             "error": str(e),
-            "traceback": tb,   # <-- retained for caller / CSV / debug
+            "traceback": tb,
         }
         out.update(P)
         return out
