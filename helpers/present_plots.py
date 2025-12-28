@@ -1033,27 +1033,37 @@ def plot_width_error_hexbin(
 # Edge parameter sweep
 #########################################################
 
-def plot_edge_sweep_summary(df, out_png, *, weight_col="global_weight", selected_family=None, hd95_guardrail=None):
+def plot_edge_sweep_summary(
+    df,
+    out_png,
+    *,
+    weight_col="global_weight",
+    selected_family=None,
+    hd95_guardrail=None,
+):
     """
-    Thesis-grade edge calibration diagnostic WITH HARD instrumentation.
+    Thesis-grade edge calibration diagnostic (FULLY EXPLAINABLE).
 
-    Panel A: Pareto space (crack-level)
-      - x = Boundary F1 ↑
-      - y = ASSD ↓
-      - labels = crack id
-      - shows the selected FAMILY center (weighted mean) as a black 'X' (optional)
+    Panel A: Pareto space (RAW sweep points)
+      - each dot = one (crack, parameter family) evaluation
+      - color = parameter family (explicitly labeled by parameters)
+      - small text = crack id
+      - black X = weighted mean of each parameter family
 
-    Panel B: Edge score decomposition (ALL parameter families)
-      - x = parameter family (w, μ, l, p, mode)
-      - stacked bars = WEIGHTED mean penalty terms across cracks/rows
-      - x tick labels are multiline and rotated
+    Panel B: Edge score decomposition (parameter families)
+      - stacked bars = WEIGHTED mean penalty terms
+      - x labels explicitly show (w, μ, l, p, mode)
 
-    This plot is only valid if df is RAW sweep output (pre-selection).
+    This plot is ONLY valid when df is RAW sweep output (pre-selection).
     """
     import numpy as np
     import pandas as pd
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
+    # ------------------------------------------------------------
+    # Required columns
+    # ------------------------------------------------------------
     required = {
         "crack_id",
         "boundary_f1",
@@ -1069,13 +1079,12 @@ def plot_edge_sweep_summary(df, out_png, *, weight_col="global_weight", selected
     if not required.issubset(df.columns):
         print("[plot_edge_sweep_summary] ❌ missing required columns")
         print("Have:", sorted(df.columns))
-        print("Need:", sorted(required))
         return
 
     D = df.copy()
 
     # ------------------------------------------------------------
-    # Coerce numerics
+    # Numeric coercion
     # ------------------------------------------------------------
     for c in ["boundary_f1", "ASSD", "HD95", "edge_score"]:
         D[c] = pd.to_numeric(D[c], errors="coerce")
@@ -1086,41 +1095,24 @@ def plot_edge_sweep_summary(df, out_png, *, weight_col="global_weight", selected
     else:
         D[weight_col] = 1.0
 
-    # optional guardrail
     if hd95_guardrail is not None:
-        D = D[D["HD95"] <= float(hd95_guardrail)].copy()
+        D = D[D["HD95"] <= float(hd95_guardrail)]
 
     D = D.dropna(subset=["boundary_f1", "ASSD", "HD95", "edge_score"])
     if D.empty:
-        print("[plot_edge_sweep_summary] ❌ empty after coercion/guardrail")
+        print("[plot_edge_sweep_summary] ❌ empty dataframe after filtering")
         return
 
-    fam_cols = ["param_window_half_size", "param_mu", "param_l", "param_p", "param_seg_mode"]
+    fam_cols = [
+        "param_window_half_size",
+        "param_mu",
+        "param_l",
+        "param_p",
+        "param_seg_mode",
+    ]
 
     # ------------------------------------------------------------
-    # HARD DEBUG
-    # ------------------------------------------------------------
-    print("\n[edge_sweep_summary] DEBUG")
-    print("  rows:", len(D))
-    print("  cracks:", int(D["crack_id"].nunique()))
-    fam_counts = (
-        D.groupby(fam_cols)
-         .size()
-         .reset_index(name="n_rows")
-         .sort_values("n_rows", ascending=False)
-    )
-    print("  parameter families:", len(fam_counts))
-    print(fam_counts.head(12).to_string(index=False))
-    if len(fam_counts) == 1:
-        print(
-            "  ⚠ Only ONE parameter family present.\n"
-            "  This usually means you are plotting AFTER image-level\n"
-            "  family selection, not the raw sweep."
-        )
-
-    # ------------------------------------------------------------
-    # Penalties (EXACTLY matching your score definition)
-    # IMPORTANT: medians computed over RAW rows (same as your current practice)
+    # Penalties (MATCH edge_score exactly)
     # ------------------------------------------------------------
     assd_med = float(D["ASSD"].median()) + 1e-9
     hd95_med = float(D["HD95"].median()) + 1e-9
@@ -1130,7 +1122,7 @@ def plot_edge_sweep_summary(df, out_png, *, weight_col="global_weight", selected
     D["penalty_hd95"] = 0.25 * (D["HD95"] / hd95_med)
 
     # ------------------------------------------------------------
-    # Weighted aggregation helper
+    # Weighted mean helper
     # ------------------------------------------------------------
     def _wmean(x, w):
         x = np.asarray(x, float)
@@ -1141,144 +1133,142 @@ def plot_edge_sweep_summary(df, out_png, *, weight_col="global_weight", selected
         return float(np.average(x[ok], weights=w[ok]))
 
     # ------------------------------------------------------------
-    # Aggregate PER FAMILY (weighted)
+    # Aggregate per parameter family (WEIGHTED)
     # ------------------------------------------------------------
     rows = []
     for key, g in D.groupby(fam_cols):
-        w = g[weight_col].values.astype(float)
-
+        w = g[weight_col].values
         rows.append({
             **dict(zip(fam_cols, key)),
-            "penalty_bf1":  _wmean(g["penalty_bf1"].values,  w),
-            "penalty_assd": _wmean(g["penalty_assd"].values, w),
-            "penalty_hd95": _wmean(g["penalty_hd95"].values, w),
-            "edge_score_wmean": _wmean(g["edge_score"].values, w),
-            "n_rows": int(len(g)),
-            "n_cracks": int(g["crack_id"].nunique()),
-            "weight_sum": float(np.sum(w[np.isfinite(w) & (w > 0)])),
+            "bf1_wmean":  _wmean(g["boundary_f1"], w),
+            "ASSD_wmean": _wmean(g["ASSD"], w),
+            "penalty_bf1":  _wmean(g["penalty_bf1"], w),
+            "penalty_assd": _wmean(g["penalty_assd"], w),
+            "penalty_hd95": _wmean(g["penalty_hd95"], w),
+            "edge_score_wmean": _wmean(g["edge_score"], w),
+            "n_rows": len(g),
+            "n_cracks": g["crack_id"].nunique(),
         })
 
-    P = pd.DataFrame(rows)
-    if P.empty:
-        print("[plot_edge_sweep_summary] ❌ no aggregated families")
-        return
-
-    P = P.sort_values("edge_score_wmean", ascending=True).reset_index(drop=True)
-
-    print("\n[edge_sweep_summary] Aggregated families (top 12):")
-    print(P.head(12).to_string(index=False))
+    P = pd.DataFrame(rows).sort_values("edge_score_wmean").reset_index(drop=True)
 
     # ------------------------------------------------------------
     # Figure layout
     # ------------------------------------------------------------
     fig, (ax1, ax2) = plt.subplots(
         1, 2,
-        figsize=(13.0, 4.8),
+        figsize=(14.0, 5.2),
         dpi=160,
-        gridspec_kw=dict(width_ratios=[1.1, 1.3]),
+        gridspec_kw=dict(width_ratios=[1.15, 1.45]),
     )
 
     # ============================================================
-    # PANEL A — Pareto space (crack-level, honest)
-    # NOTE: This is per-row scatter (so multiple points per crack if multiple families)
-    # If you want ONLY one point per crack, you must filter to a chosen family first.
+    # PANEL A — RAW Pareto space (NO aggregation hiding)
     # ============================================================
-    ax1.scatter(
-        D["boundary_f1"].values,
-        D["ASSD"].values,
-        s=55,
-        alpha=0.35,
-        edgecolor="none",
-    )
+    fam_keys = list(P[fam_cols].itertuples(index=False, name=None))
+    colors = plt.cm.tab10(np.linspace(0, 1, len(fam_keys)))
+    fam_to_color = dict(zip(fam_keys, colors))
 
-    # overlay crack labels using each crack's best row (min edge_score) for legibility
-    for cid, g in D.groupby("crack_id"):
-        gi = g.loc[g["edge_score"].idxmin()]
-        ax1.scatter([gi["boundary_f1"]], [gi["ASSD"]], s=85, alpha=0.9, edgecolor="black", linewidth=0.4)
-        ax1.annotate(
-            f"{int(cid)}",
-            (gi["boundary_f1"], gi["ASSD"]),
-            xytext=(4, 3),
-            textcoords="offset points",
-            fontsize=8,
-            alpha=0.85,
+    legend_items = []
+
+    for key in fam_keys:
+        g = D.loc[(D[fam_cols] == pd.Series(key, index=fam_cols)).all(axis=1)]
+        c = fam_to_color[key]
+
+        ax1.scatter(
+            g["boundary_f1"],
+            g["ASSD"],
+            s=55,
+            alpha=0.6,
+            color=c,
+            edgecolor="none",
         )
 
-    # Optional: show selected family center as 'X' (weighted mean in Pareto axes)
-    if selected_family is not None:
-        try:
-            mask = np.ones(len(D), dtype=bool)
-            for k in fam_cols:
-                if k in selected_family:
-                    mask &= (D[k].astype(str) == str(selected_family[k]))
-            G = D[mask]
-            if len(G) > 0:
-                w = G[weight_col].values.astype(float)
-                bx = _wmean(G["boundary_f1"].values, w)
-                ay = _wmean(G["ASSD"].values, w)
-                ax1.scatter([bx], [ay], marker="x", s=140, linewidths=2.2, color="black", zorder=6)
-        except Exception as e:
-            print(f"[plot_edge_sweep_summary] ⚠ selected-family marker failed: {e}")
+        # crack id annotations
+        for _, r in g.iterrows():
+            ax1.annotate(
+                str(int(r["crack_id"])),
+                (r["boundary_f1"], r["ASSD"]),
+                xytext=(3, 2),
+                textcoords="offset points",
+                fontsize=7,
+                alpha=0.6,
+            )
+
+        # weighted family mean (THIS IS WHAT IS SELECTED)
+        w = g[weight_col].values
+        bx = _wmean(g["boundary_f1"], w)
+        ay = _wmean(g["ASSD"], w)
+        ax1.scatter(bx, ay, marker="x", s=150, linewidths=2.6, color="black")
+
+        label = (
+            f"w={key[0]}, μ={key[1]}, l={key[2]}, "
+            f"p={key[3]}, mode={key[4]}"
+        )
+        legend_items.append(
+            Line2D([0], [0], marker="o", color="w",
+                   markerfacecolor=c, markersize=8,
+                   label=label)
+        )
+
+    legend_items.append(
+        Line2D([0], [0], marker="x", color="black",
+               markersize=9, linewidth=0,
+               label="Weighted family mean")
+    )
+
+    ax1.legend(handles=legend_items, fontsize=8, loc="best", frameon=True)
 
     ax1.set_xlabel("Boundary F1 ↑")
     ax1.set_ylabel("ASSD (px) ↓")
-    ax1.set_title("Pareto space (labels = crack id)")
+    ax1.set_title("Pareto space (raw sweep points)")
     ax1.grid(True, alpha=0.25)
 
     # ============================================================
-    # PANEL B — Score decomposition (ALL families, weighted)
+    # PANEL B — Edge score decomposition (parameter families)
     # ============================================================
     x = np.arange(len(P))
 
-    ax2.bar(x, P["penalty_bf1"].values, label="Boundary error", color="#d62728")
-    ax2.bar(x, P["penalty_assd"].values, bottom=P["penalty_bf1"].values, label="ASSD penalty", color="#ff7f0e")
+    ax2.bar(x, P["penalty_bf1"], label="Boundary error", color="#d62728")
     ax2.bar(
         x,
-        P["penalty_hd95"].values,
-        bottom=(P["penalty_bf1"].values + P["penalty_assd"].values),
+        P["penalty_assd"],
+        bottom=P["penalty_bf1"],
+        label="ASSD penalty",
+        color="#ff7f0e",
+    )
+    ax2.bar(
+        x,
+        P["penalty_hd95"],
+        bottom=P["penalty_bf1"] + P["penalty_assd"],
         label="HD95 penalty",
         color="#9467bd",
     )
 
-    labels = []
-    for _, r in P.iterrows():
-        labels.append(
-            f"w={int(r['param_window_half_size'])}\n"
-            f"μ={r['param_mu']}\n"
-            f"l={int(r['param_l'])}, p={int(r['param_p'])}\n"
-            f"mode={r['param_seg_mode']}\n"
-            f"(cracks={int(r['n_cracks'])}, rows={int(r['n_rows'])})"
-        )
+    labels = [
+        f"w={int(r.param_window_half_size)}\n"
+        f"μ={r.param_mu}\n"
+        f"l={int(r.param_l)}, p={int(r.param_p)}\n"
+        f"mode={r.param_seg_mode}\n"
+        f"(cracks={r.n_cracks})"
+        for r in P.itertuples()
+    ]
 
     ax2.set_xticks(x)
     ax2.set_xticklabels(labels, rotation=90, fontsize=8)
     ax2.set_ylabel("Weighted mean normalized penalty")
-    ax2.set_title("Edge score decomposition (ALL parameter families)")
+    ax2.set_title("Edge score decomposition (parameter families)")
     ax2.legend(fontsize=8)
     ax2.grid(True, axis="y", alpha=0.25)
 
-    # Optional: highlight selected family bar with a black rectangle
-    if selected_family is not None:
-        try:
-            sel_mask = np.ones(len(P), dtype=bool)
-            for k in fam_cols:
-                if k in selected_family:
-                    sel_mask &= (P[k].astype(str) == str(selected_family[k]))
-            sel_idx = np.where(sel_mask)[0]
-            if sel_idx.size > 0:
-                i = int(sel_idx[0])
-                total = float(P.loc[i, "penalty_bf1"] + P.loc[i, "penalty_assd"] + P.loc[i, "penalty_hd95"])
-                ax2.add_patch(
-                    plt.Rectangle((i - 0.5, 0.0), 1.0, total, fill=False, edgecolor="black", linewidth=2.0)
-                )
-        except Exception as e:
-            print(f"[plot_edge_sweep_summary] ⚠ selected-family highlight failed: {e}")
-
-    fig.suptitle("Edge calibration: multi-objective tradeoff and score justification", fontsize=13)
+    fig.suptitle(
+        "Edge calibration: multi-objective tradeoff and score justification",
+        fontsize=13,
+    )
     fig.tight_layout(rect=[0, 0.02, 1, 0.95])
     fig.savefig(out_png)
     plt.close(fig)
-    
+   
 def plot_from_cached_geometry(
     geom_npz,
     img_crop_gray,
