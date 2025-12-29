@@ -4917,7 +4917,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     print(f"[AUTO {crack_id}] v{vid} ❌ RS3 failed: {r.get('error')}")
                     continue
 
+                # --------------------------------------------------
                 # RS3 track (global XY → (N,2))
+                # --------------------------------------------------
                 track_xy = np.asarray(r["track_full_xy"], float).T
 
                 # ensure start alignment
@@ -4928,29 +4930,35 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 track_xy = track_xy + (p0 - track_xy[0])
 
                 # local crop coords
-                track_crop_xy = np.column_stack([track_xy[:, 0] - x, track_xy[:, 1] - y])
+                track_crop_xy = np.column_stack([
+                    track_xy[:, 0] - x,
+                    track_xy[:, 1] - y,
+                ])
                 var_local_xy_by_id[vid] = track_crop_xy
 
-                # ---- midline metrics ----
+                # --------------------------------------------------
+                # MIDLINE METRICS (FULL DIAGNOSTIC SET)
+                # --------------------------------------------------
                 m = compute_midline_metrics(track_crop_xy, man_xy_crop)
 
+                # --- selection metrics (AUTHORITATIVE) ---
                 ch  = float(m.get("chamfer_mean", np.inf))
                 hd  = float(m.get("hausdorff", np.inf))
                 cov = float(m.get("coverage", 0.0))
 
                 score_mid = (
-                    math.log1p(max(ch, 0)) +
-                    0.5 * math.log1p(max(hd, 0)) +
-                    (1.0 - float(np.clip(cov, 0, 1)))
+                    math.log1p(max(ch, 0.0)) +
+                    0.5 * math.log1p(max(hd, 0.0)) +
+                    (1.0 - float(np.clip(cov, 0.0, 1.0)))
                 )
 
-                # IMPORTANT: use ACTUAL g-params used for this OS mode
+                # IMPORTANT: actual g-params used
                 g_used = g_variants_run[local_vid]
 
-                # -------------------------
-                # GEOMETRY METRICS ROW
-                # -------------------------
-                metrics_rows[vid] = {
+                # --------------------------------------------------
+                # GEOMETRY METRICS ROW (EXTENDED, CLEAN)
+                # --------------------------------------------------
+                row = {
                     "image": base_name,
                     "crack_id": crack_id,
                     "variant_global_id": vid,
@@ -4958,17 +4966,32 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     "g11": float(g_used["g11"]),
                     "g22": float(g_used["g22"]),
                     "g33": float(g_used["g33"]),
+                    "length_px": man_len_px,
+                    "bbox_area": bbox_area,
+
+                    # --- selection metrics ---
                     "chamfer_mean": ch,
                     "hausdorff": hd,
                     "coverage": cov,
                     "score_mid": score_mid,
-                    "length_px": man_len_px,
-                    "bbox_area": bbox_area,
+
+                    # --- diagnostics (NOT used for selection) ---
+                    "frechet_discrete": m.get("frechet_discrete"),
+                    "angle_err_deg": m.get("angle_err_deg"),
+                    "length_ratio": m.get("length_ratio"),
+                    "orth_mean": m.get("orth_mean"),
+                    "orth_std": m.get("orth_std"),
+                    "directional_bias": m.get("directional_bias"),
+                    "curvature_rms_auto": m.get("curvature_rms_auto"),
+                    "curvature_rms_manual": m.get("curvature_rms_manual"),
+                    "curvature_rms_ratio": m.get("curvature_rms_ratio"),
                 }
 
-                # -------------------------
-                # TIMING ROW (SEPARATE)
-                # -------------------------
+                metrics_rows[vid] = row
+
+                # --------------------------------------------------
+                # TIMING ROW (UNCHANGED)
+                # --------------------------------------------------
                 timing_row = {
                     "image": base_name,
                     "crack_id": crack_id,
@@ -4982,7 +5005,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 timing_row.update(r.get("timing", {}))
                 timing_rows[vid] = timing_row
 
-                # ---- variant registration ----
+                # --------------------------------------------------
+                # VARIANT REGISTRATION
+                # --------------------------------------------------
                 desc = _variant_desc(vid, g_used, edge_params_fixed or {})
                 desc["os_mode"] = os_mode_name
 
@@ -4999,7 +5024,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     variants_out[f"v{vid}"],
                     params=desc,
                     is_best=False,
-                    scores=m,
+                    scores=m,   # full diagnostics preserved
                 )
 
                 variant_labels_by_id[vid] = (
@@ -5082,9 +5107,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         """
         Image-level RS3 family selection across ALL manual subcracks.
 
-        Uses geometry-only metrics (metrics_df) for scoring.
-        Timing data (timing_df) is aggregated separately for analysis/plots,
-        but NEVER influences selection.
+        Uses geometry-only metrics (score_mid) for selection.
+        All other midline diagnostics are preserved for analysis / appendix,
+        but NEVER influence selection.
 
         Input:
             auto_packs_for_image:
@@ -5106,9 +5131,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             return
 
         # ------------------------------------------------------------
-        # 1) Collect geometry metrics (AUTHORITATIVE)
+        # 1) Collect geometry + timing metrics
         # ------------------------------------------------------------
-        geom_frames = []
+        geom_frames   = []
         timing_frames = []
 
         for cid, pack in auto_packs_for_image.items():
@@ -5119,7 +5144,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 geom_frames.append(d)
 
             dft = pack.get("timing_df")
-            #print(dft)
             if dft is not None and not dft.empty:
                 t = dft.copy()
                 t["crack_id"] = cid
@@ -5132,18 +5156,19 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         df_all = pd.concat(geom_frames, ignore_index=True)
 
         # ------------------------------------------------------------
-        # 2) Weights (length × sqrt(area)) — SAME philosophy as EDGE
+        # 2) Global weights (length × sqrt(area))
         # ------------------------------------------------------------
         df_all["length_px"]  = df_all["length_px"].fillna(0.01)
-        df_all["bbox_area"] = df_all["bbox_area"].fillna(0.01)
+        df_all["bbox_area"]  = df_all["bbox_area"].fillna(0.01)
 
         w_len  = df_all["length_px"].values
         w_area = np.sqrt(df_all["bbox_area"].values)
         w      = np.maximum(w_len * w_area, 1e-3)
+
         df_all["global_weight"] = w
 
         # ------------------------------------------------------------
-        # 3) Aggregate by RS3 family (SCORE ONLY)
+        # 3) Aggregate by RS3 family (SELECTION ONLY)
         # ------------------------------------------------------------
         fam_rows = []
         fam_cols = ["os_mode", "g11", "g22", "g33"]
@@ -5171,7 +5196,10 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             print("[AUTO global] family table empty")
             return
 
-        fam_df = fam_df.sort_values("score_mid_wmean", ascending=True).reset_index(drop=True)
+        fam_df = fam_df.sort_values(
+            "score_mid_wmean",
+            ascending=True
+        ).reset_index(drop=True)
 
         best = fam_df.iloc[0]
         best_key = (
@@ -5182,19 +5210,23 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         )
 
         # ------------------------------------------------------------
-        # 4) Output dirs
+        # 4) Output directories
         # ------------------------------------------------------------
-        base_name = self._image_base()
+        base_name   = self._image_base()
         metrics_dir = os.path.join(self._metrics_dir(), "auto")
         os.makedirs(metrics_dir, exist_ok=True)
 
+        plots_dir = os.path.join(metrics_dir, "rs3_plots")
+        os.makedirs(plots_dir, exist_ok=True)
+
         # ------------------------------------------------------------
-        # 5) Save CSVs (thesis-grade, auditable)
+        # 5) Save CSVs (FULL DIAGNOSTICS PRESERVED)
         # ------------------------------------------------------------
         df_all.to_csv(
             os.path.join(metrics_dir, "rs3_sweep_all_metrics.csv"),
             index=False,
         )
+
         fam_df.to_csv(
             os.path.join(metrics_dir, "rs3_family_agg.csv"),
             index=False,
@@ -5208,32 +5240,39 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             )
         else:
             timing_all = None
-
+        
         # ------------------------------------------------------------
-        # 6) Visualization (score + timing if present)
+        # 6) Visualization (EXISTING PLOTS ONLY)
         # ------------------------------------------------------------
         try:
             from helpers.present_plots import plot_rs3_sweep_summary
 
             plot_rs3_sweep_summary(
                 df_all,
-                os.path.join(metrics_dir, "rs3_plots"),
+                plots_dir,
                 weight_col="global_weight",
                 selected_family=best_key,
             )
 
-            # ------------------------------------------------------------
-            # Timing-only visualization (NEW, CLEAN, SEPARATE)
-            # ------------------------------------------------------------
-            #print(timing_frames, timing_all)
             if timing_all is not None and not timing_all.empty:
                 from helpers.present_plots import plot_rs3_timing_summary
 
                 plot_rs3_timing_summary(
                     timing_all,
-                    os.path.join(metrics_dir, "rs3_plots"),
+                    plots_dir,
                     selected_family=best_key,
                 )
+
+            # Diagnostic-only midline plots (NO SELECTION EFFECT)
+            try:
+                from helpers.present_plots import plot_rs3_midline_diagnostics
+                plot_rs3_midline_diagnostics(
+                    df_all=df_all,
+                    out_dir=plots_dir,
+                    selected_family=best_key,
+                )
+            except Exception as e:
+                print(f"[AUTO global] diagnostic plots skipped: {e}")
 
         except Exception as e:
             print(f"[AUTO global] ⚠ rs3 summary plot failed: {e}")
@@ -5383,6 +5422,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         Uses the same snapshot structure as batch_run, but without global calibration.
         """
+        
+        #stopgap measure
+        do_edge_calibrate=False
 
         import os, time, numpy as np, pandas as pd
         from helpers import metrics
@@ -5623,8 +5665,6 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             t_manual_edges = time.perf_counter() - t_manual_edges_start
             print(f"[quick] manual-edge generation time = {t_manual_edges:.2f}s")
         
-        return
-        
         # ------------------------------------------------------------
         # PHASE 1.5: RS3 AUTO VARIANTS (this image only)
         # ------------------------------------------------------------
@@ -5665,6 +5705,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 print(f"[quick] ⚠ RS3 family selection failed: {e}")
         else:
             print("[quick] ⚠ no auto_packs; skipping RS3 family selection.")
+
+        return
 
         # ------------------------------------------------------------
         # PHASE 2: GEODESIC EDGES FOR AUTO BEST MIDLINES

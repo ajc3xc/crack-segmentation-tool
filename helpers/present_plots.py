@@ -1373,7 +1373,6 @@ def plot_from_cached_geometry(
 ##################################################################
 # Auto variants plots
 ##################################################################
-
 def plot_rs3_sweep_summary(
     df_all,
     out_dir,
@@ -1384,13 +1383,12 @@ def plot_rs3_sweep_summary(
     """
     Thesis-grade RS3 auto-variant calibration summary.
 
-    Produces FOUR plots into out_dir:
-      1) rs3_pareto.png        — raw variant scatter (ALL points)
-      2) rs3_decomposition.png — weighted score breakdown by family
-      3) rs3_heatmap.png       — per-crack vs family performance
-      4) rs3_os_compare.png    — OS-mode ablation comparison
-
-    df_all MUST be RAW concatenated metrics_df across cracks.
+    Produces:
+      1) rs3_pareto.png
+      2) rs3_decomposition.png
+      3) rs3_family_crack_<id>.png
+      4) rs3_family_win_count.png
+      5) rs3_os_compare.png
     """
 
     import os
@@ -1398,12 +1396,13 @@ def plot_rs3_sweep_summary(
     import pandas as pd
     import matplotlib.pyplot as plt
     import seaborn as sns
+    from matplotlib.patches import Patch
 
     os.makedirs(out_dir, exist_ok=True)
 
-    # -----------------------------
+    # --------------------------------------------------
     # Required columns
-    # -----------------------------
+    # --------------------------------------------------
     req = {
         "crack_id",
         "os_mode",
@@ -1420,9 +1419,9 @@ def plot_rs3_sweep_summary(
 
     D = df_all.copy()
 
-    # -----------------------------
+    # --------------------------------------------------
     # Numeric coercion
-    # -----------------------------
+    # --------------------------------------------------
     for c in ["score_mid", "chamfer_mean", "hausdorff", "coverage", weight_col]:
         D[c] = pd.to_numeric(D[c], errors="coerce")
 
@@ -1431,32 +1430,52 @@ def plot_rs3_sweep_summary(
         print("[plot_rs3] ❌ empty after coercion")
         return
 
-    # -----------------------------
-    # Family key
-    # -----------------------------
-    fam_cols = ["os_mode", "g11", "g22", "g33"]
-    D["family"] = D[fam_cols].astype(str).agg("|".join, axis=1)
+    # --------------------------------------------------
+    # Human-readable family label
+    # --------------------------------------------------
+    def format_family(row):
+        return (
+            f"{row['os_mode']}, "
+            f"g11={int(row['g11'])}, "
+            f"g22={int(row['g22'])}, "
+            f"g33={int(row['g33'])}"
+        )
 
-    fam_keys = D["family"].unique().tolist()
-    fam_to_idx = {k: i for i, k in enumerate(fam_keys)}
+    D["family"] = D.apply(format_family, axis=1)
 
-    # ============================================================
-    # 1) RAW PARETO SCATTER (ALL POINTS)
-    # ============================================================
+    # --------------------------------------------------
+    # Stable family IDs + infinite color palette
+    # --------------------------------------------------
+    families = sorted(D["family"].unique())
+    family_id = {fam: f"F{i+1}" for i, fam in enumerate(families)}
+
+    cmap = plt.cm.get_cmap("turbo", len(families))
+    fam_color = {fam: cmap(i) for i, fam in enumerate(families)}
+
+    D["family_id"] = D["family"].map(family_id)
+
+    # --------------------------------------------------
+    # Proper legend handles (CRITICAL FIX)
+    # --------------------------------------------------
+    legend_handles = [
+        Patch(color=fam_color[f], label=f"{family_id[f]}: {f}")
+        for f in families
+    ]
+
+    # ==================================================
+    # 1) RAW PARETO SCATTER
+    # ==================================================
     plt.figure(figsize=(7.0, 5.5), dpi=160)
 
-    colors = plt.cm.tab10(np.linspace(0, 1, len(fam_keys)))
-
     for fam, g in D.groupby("family"):
-        i = fam_to_idx[fam]
         plt.scatter(
             g["chamfer_mean"],
             g["hausdorff"],
             s=55,
-            alpha=0.55,
-            color=colors[i],
-            label=fam,
+            alpha=0.6,
+            color=fam_color[fam],
         )
+
         for _, r in g.iterrows():
             plt.annotate(
                 str(int(r["crack_id"])),
@@ -1467,9 +1486,8 @@ def plot_rs3_sweep_summary(
                 alpha=0.6,
             )
 
-        # weighted mean marker
         w = g[weight_col].values
-        ok = np.isfinite(w)
+        ok = np.isfinite(w) & (w > 0)
         if ok.any():
             bx = np.average(g["chamfer_mean"].values[ok], weights=w[ok])
             by = np.average(g["hausdorff"].values[ok], weights=w[ok])
@@ -1479,14 +1497,14 @@ def plot_rs3_sweep_summary(
     plt.ylabel("Hausdorff ↓")
     plt.title("RS3 Pareto space (raw variants)")
     plt.grid(True, alpha=0.25)
-    plt.legend(fontsize=7, loc="best")
+    plt.legend(handles=legend_handles, fontsize=7, frameon=True)
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "rs3_pareto.png"))
+    plt.savefig(os.path.join(out_dir, "rs3_pareto.png"), bbox_inches="tight")
     plt.close()
 
-    # ============================================================
-    # 2) SCORE DECOMPOSITION (WEIGHTED)
-    # ============================================================
+    # ==================================================
+    # 2) SCORE DECOMPOSITION
+    # ==================================================
     rows = []
     for fam, g in D.groupby("family"):
         w = g[weight_col].values
@@ -1496,73 +1514,103 @@ def plot_rs3_sweep_summary(
 
         rows.append({
             "family": fam,
-            "chamfer": np.average(np.log1p(g["chamfer_mean"].values[ok]), weights=w[ok]),
-            "hausdorff": 0.5 * np.average(np.log1p(g["hausdorff"].values[ok]), weights=w[ok]),
-            "coverage": np.average((1.0 - g["coverage"].values[ok]), weights=w[ok]),
+            "log_chamfer": np.average(np.log1p(g["chamfer_mean"].values[ok]), weights=w[ok]),
+            "log_hausdorff": 0.5 * np.average(np.log1p(g["hausdorff"].values[ok]), weights=w[ok]),
+            "one_minus_coverage": np.average((1.0 - g["coverage"].values[ok]), weights=w[ok]),
             "score": np.average(g["score_mid"].values[ok], weights=w[ok]),
         })
 
-    P = pd.DataFrame(rows).sort_values("score")
-
+    P = pd.DataFrame(rows).sort_values("score").reset_index(drop=True)
     x = np.arange(len(P))
 
     plt.figure(figsize=(7.5, 4.5), dpi=160)
-    plt.bar(x, P["chamfer"], label="log(Chamfer)")
-    plt.bar(x, P["hausdorff"], bottom=P["chamfer"], label="0.5·log(Hausdorff)")
+    plt.bar(x, P["log_chamfer"], label="log(Chamfer)")
+    plt.bar(x, P["log_hausdorff"], bottom=P["log_chamfer"], label="0.5·log(Hausdorff)")
     plt.bar(
         x,
-        P["coverage"],
-        bottom=P["chamfer"] + P["hausdorff"],
+        P["one_minus_coverage"],
+        bottom=P["log_chamfer"] + P["log_hausdorff"],
         label="1 − Coverage",
     )
 
-    plt.xticks(x, P["family"], rotation=90, fontsize=7)
+    plt.xticks(x, [family_id[f] for f in P["family"]], fontsize=8)
     plt.ylabel("Weighted mean score components")
     plt.title("RS3 score decomposition by family")
     plt.legend(fontsize=8)
     plt.grid(True, axis="y", alpha=0.25)
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "rs3_decomposition.png"))
+    plt.savefig(os.path.join(out_dir, "rs3_decomposition.png"), bbox_inches="tight")
     plt.close()
 
-    # ============================================================
-    # 3) PER-CRACK vs FAMILY HEATMAP
-    # ============================================================
-    pivot = (
-        D.pivot_table(
-            index="crack_id",
-            columns="family",
-            values="score_mid",
-            aggfunc="mean",
+    # ==================================================
+    # 3) PER-CRACK FAMILY COMPARISON
+    # ==================================================
+    best_per_crack = (
+        D.groupby(["crack_id", "family"])["score_mid"]
+        .min()
+        .reset_index()
+    )
+    best_per_crack["family_id"] = best_per_crack["family"].map(family_id)
+
+    for cid, g in best_per_crack.groupby("crack_id"):
+        g = g.sort_values("score_mid")
+
+        plt.figure(figsize=(3.8, 2.8), dpi=160)
+        plt.bar(
+            g["family_id"],
+            g["score_mid"],
+            color=[fam_color[f] for f in g["family"]],
         )
-        .sort_index()
+
+        plt.ylabel("score_mid (lower is better)")
+        plt.xlabel("RS3 family")
+        plt.title(f"RS3 family comparison — crack {cid}")
+        plt.grid(axis="y", alpha=0.25)
+        plt.legend(handles=legend_handles, fontsize=7, frameon=True)
+
+        plt.tight_layout()
+        plt.savefig(
+            os.path.join(out_dir, f"rs3_family_crack_{cid}.png"),
+            bbox_inches="tight",
+        )
+        plt.close()
+
+    # ==================================================
+    # 4) FAMILY SELECTION FREQUENCY
+    # ==================================================
+    wins = (
+        best_per_crack
+        .loc[best_per_crack.groupby("crack_id")["score_mid"].idxmin()]
+        .groupby("family")
+        .size()
+        .sort_values(ascending=False)
     )
 
-    plt.figure(figsize=(1.0 + 0.6 * len(pivot.columns), 0.6 + 0.5 * len(pivot)), dpi=160)
-    sns.heatmap(
-        pivot,
-        cmap="viridis_r",
-        annot=True,
-        fmt=".3f",
-        cbar_kws=dict(label="score_mid"),
+    plt.figure(figsize=(3.8, 2.8), dpi=160)
+    plt.bar(
+        [family_id[f] for f in wins.index],
+        wins.values,
+        color=[fam_color[f] for f in wins.index],
     )
-    plt.title("RS3 per-crack vs family performance")
-    plt.ylabel("Crack ID")
+
+    plt.ylabel("number of cracks won")
     plt.xlabel("RS3 family")
+    plt.title("RS3 family selection frequency")
+    plt.grid(axis="y", alpha=0.25)
+    plt.legend(handles=legend_handles, fontsize=7, frameon=True)
+
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "rs3_heatmap.png"))
+    plt.savefig(
+        os.path.join(out_dir, "rs3_family_win_count.png"),
+        bbox_inches="tight",
+    )
     plt.close()
 
-    # ============================================================
-    # 4) OS-MODE ABLATION
-    # ============================================================
+    # ==================================================
+    # 5) OS-MODE ABLATION
+    # ==================================================
     plt.figure(figsize=(5.0, 4.5), dpi=160)
-    sns.boxplot(
-        data=D,
-        x="os_mode",
-        y="score_mid",
-        showfliers=False,
-    )
+    sns.boxplot(data=D, x="os_mode", y="score_mid", showfliers=False)
     sns.stripplot(
         data=D,
         x="os_mode",
@@ -1572,15 +1620,16 @@ def plot_rs3_sweep_summary(
         size=4,
         jitter=True,
     )
+
     plt.ylabel("score_mid ↓")
     plt.title("RS3 OS-mode comparison")
     plt.grid(True, axis="y", alpha=0.25)
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "rs3_os_compare.png"))
+    plt.savefig(os.path.join(out_dir, "rs3_os_compare.png"), bbox_inches="tight")
     plt.close()
 
     print(f"[plot_rs3] ✓ wrote RS3 summary plots to {out_dir}")
-    
+
 def plot_rs3_timing_summary(
     df_timing,
     out_dir,
@@ -1815,3 +1864,107 @@ def plot_rs3_timing_summary(
         )
 
     print(f"[plot_rs3_timing_summary] ✓ clean timing plots written to {out_dir}")
+
+
+def plot_rs3_midline_diagnostics(df_all, out_dir, selected_family):
+    """
+    Thesis-grade diagnostic plots for midline behavior.
+    NO selection influence.
+    """
+    import os
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    fam_mask = (
+        (df_all["os_mode"] == selected_family[0]) &
+        (df_all["g11"] == selected_family[1]) &
+        (df_all["g22"] == selected_family[2]) &
+        (df_all["g33"] == selected_family[3])
+    )
+
+    df = df_all[fam_mask].copy()
+    if df.empty:
+        return
+
+    # ------------------------------------------------------------
+    # 1) PRIMARY METRICS (thesis-facing)
+    # ------------------------------------------------------------
+    primary_metrics = [
+        "chamfer_mean",
+        "hausdorff",
+        "coverage",
+        "score_mid",
+    ]
+
+    primary_metrics = [m for m in primary_metrics if m in df.columns]
+
+    if primary_metrics:
+        data = []
+        labels = []
+
+        for m in primary_metrics:
+            vals = pd.to_numeric(df[m], errors="coerce").dropna().values
+            if len(vals):
+                data.append(vals)
+                labels.append(m)
+
+        if data:
+            plt.figure(figsize=(1.6 * len(data), 4))
+            plt.boxplot(data, labels=labels, showfliers=False)
+            plt.ylabel("value")
+            plt.title("RS3 Primary Midline Metrics (Selected Family)")
+            plt.tight_layout()
+            plt.savefig(
+                os.path.join(out_dir, "primary_midline_metrics.png"),
+                dpi=200,
+            )
+            plt.close()
+
+    # ------------------------------------------------------------
+    # 2) DIAGNOSTIC METRICS (summary bars)
+    # ------------------------------------------------------------
+    diagnostic_metrics = [
+        "length_ratio",
+        "orth_mean",
+        "orth_std",
+        "curvature_rms_ratio",
+        "angle_err_deg",
+    ]
+
+    rows = []
+    for m in diagnostic_metrics:
+        if m not in df.columns:
+            continue
+
+        vals = pd.to_numeric(df[m], errors="coerce").dropna().values
+        if not len(vals):
+            continue
+
+        rows.append({
+            "metric": m,
+            "mean": np.mean(vals),
+            "std":  np.std(vals),
+        })
+
+    if rows:
+        dfd = pd.DataFrame(rows)
+
+        plt.figure(figsize=(1.6 * len(dfd), 4))
+        plt.bar(
+            dfd["metric"],
+            dfd["mean"],
+            yerr=dfd["std"],
+            capsize=5,
+        )
+        plt.ylabel("value")
+        plt.title("RS3 Midline Diagnostic Metrics (mean ± std)")
+        plt.xticks(rotation=30, ha="right")
+        plt.tight_layout()
+        plt.savefig(
+            os.path.join(out_dir, "diagnostic_bars.png"),
+            dpi=200,
+        )
+        plt.close()
