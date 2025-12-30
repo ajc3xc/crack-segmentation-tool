@@ -626,16 +626,23 @@ def compare_widths_for_cracks(
           { "atomic_cracks": {...} }  OR
           { "combined_cracks": {...} }
 
-    Guarantees:
+    Guarantees (retained):
       - Segment-safe (no flattening)
-      - Combined supervision unpacked by segment length
       - Geodesic fallback if normals missing
       - Zoom uses ONLY union of provided mask_bbox values
       - Solid blue bbox overlay
       - TwoSlopeNorm always monotonic (0 included)
+
+    NEW (combined opsec):
+      - Stage 0: match combined crack to GT supervision by member overlap (fallback to best-overlap)
+      - Stage 1: prune segments to shared atomic IDs (when segment meta exists)
+      - Stage 2: optional branch matching using branch membership (when both sides provide metadata)
+      - Stage 3: symmetric bite-union clipping (when bite masks exist)
+      - GT widths for combined are computed along the FINAL clipped polyline (mask-based),
+        so segment ordering differences cannot corrupt alignment.
     """
 
-    import os, json
+    import os, json, base64
     import numpy as np
     import matplotlib.pyplot as plt
     from matplotlib.colors import TwoSlopeNorm
@@ -664,6 +671,8 @@ def compare_widths_for_cracks(
     # ---------------- helpers ----------------
     def _split_on_nans(arr):
         arr = np.asarray(arr, float)
+        if arr.ndim != 2 or arr.shape[1] != 2:
+            return []
         good = np.isfinite(arr[:, 0]) & np.isfinite(arr[:, 1])
         segs, s = [], None
         for i, g in enumerate(good):
@@ -683,35 +692,200 @@ def compare_widths_for_cracks(
         e2 = np.asarray(geo.get("edge2", []), float)
         return e1, e2
 
-    def _unpack_packed(packed, seg_lens):
-        out, i, n = [], 0, len(packed)
-        def skip(j):
-            while j < n and packed[j] is None:
-                j += 1
-            return j
-        i = skip(i)
-        for L in seg_lens:
-            cur = []
-            while len(cur) < L and i < n:
-                v = packed[i]; i += 1
-                cur.append(np.nan if v is None else float(v))
-            i = skip(i)
-            out.append(np.asarray(cur, float))
-        return out
-
     def _union_bboxes(bboxes):
         xs0, ys0, xs1, ys1 = [], [], [], []
         for b in bboxes:
             if not b or len(b) != 4:
                 continue
-            x,y,w,h = b
+            x, y, w, h = b
             if w <= 0 or h <= 0:
                 continue
             xs0.append(x); ys0.append(y)
-            xs1.append(x+w); ys1.append(y+h)
+            xs1.append(x + w); ys1.append(y + h)
         if not xs0:
             return None
-        return [min(xs0), min(ys0), max(xs1)-min(xs0), max(ys1)-min(ys0)]
+        return [min(xs0), min(ys0), max(xs1) - min(xs0), max(ys1) - min(ys0)]
+
+    def _decode_packbits_mask(blob):
+        """
+        blob = {"shape":[h,w], "packbits_b64": "..."}
+        returns uint8 mask (h,w)
+        """
+        if not blob:
+            return None
+        shape = blob.get("shape") or [0, 0]
+        h, w = int(shape[0]), int(shape[1])
+        s = blob.get("packbits_b64") or ""
+        if h <= 0 or w <= 0 or not s:
+            return np.zeros((h, w), np.uint8)
+        raw = base64.b64decode(s.encode("ascii"))
+        packed = np.frombuffer(raw, dtype=np.uint8)
+        # packed is (h * ceil(w/8),) flatten
+        row_bytes = int((w + 7) // 8)
+        if packed.size < h * row_bytes:
+            # corrupted / mismatch: fail closed to empty
+            return np.zeros((h, w), np.uint8)
+        packed = packed[: h * row_bytes].reshape((h, row_bytes))
+        unpacked = np.unpackbits(packed, axis=1)[:, :w]
+        return unpacked.astype(np.uint8)
+
+    def _points_hit_bite(points_xy, bite_obj):
+        """
+        bite_obj:
+          {"bbox":[x0,y0,w,h], "shape":[h,w], "packbits_b64":"..."}
+        returns boolean mask len(points)
+        """
+        if bite_obj is None:
+            return np.zeros((len(points_xy),), bool)
+
+        bb = bite_obj.get("bbox")
+        if not bb or len(bb) != 4:
+            return np.zeros((len(points_xy),), bool)
+
+        x0, y0, bw, bh = map(int, bb)
+        if bw <= 0 or bh <= 0:
+            return np.zeros((len(points_xy),), bool)
+
+        m = _decode_packbits_mask({
+            "shape": bite_obj.get("shape"),
+            "packbits_b64": bite_obj.get("packbits_b64"),
+        })
+        if m is None or m.size == 0:
+            return np.zeros((len(points_xy),), bool)
+
+        pts = np.asarray(points_xy, float)
+        xs = np.round(pts[:, 0]).astype(int) - x0
+        ys = np.round(pts[:, 1]).astype(int) - y0
+        ok = (xs >= 0) & (xs < bw) & (ys >= 0) & (ys < bh)
+        hit = np.zeros((len(pts),), bool)
+        if np.any(ok):
+            hit[ok] = (m[ys[ok], xs[ok]] > 0)
+        return hit
+
+    def _split_by_keep_mask(points, keep_mask):
+        """
+        points: (N,2)
+        keep_mask: (N,) bool
+        returns list of (run_points, run_indices_in_original)
+        """
+        pts = np.asarray(points, float)
+        keep = np.asarray(keep_mask, bool)
+        out = []
+        s = None
+        for i, k in enumerate(keep):
+            if k and s is None:
+                s = i
+            elif (not k) and (s is not None):
+                if i - s >= 2:
+                    idx = np.arange(s, i, dtype=int)
+                    out.append((pts[s:i], idx))
+                s = None
+        if s is not None and len(pts) - s >= 2:
+            idx = np.arange(s, len(pts), dtype=int)
+            out.append((pts[s:], idx))
+        return out
+
+    def _linestring_length(S):
+        S = np.asarray(S, float)
+        if S.ndim != 2 or len(S) < 2:
+            return 0.0
+        d = np.linalg.norm(S[1:] - S[:-1], axis=1)
+        d = d[np.isfinite(d)]
+        return float(d.sum()) if len(d) else 0.0
+
+    def _extract_segments_and_meta(crack):
+        """
+        Returns:
+          segs: list[np.ndarray (Ni,2)]
+          seg_meta: list[dict] same length as segs (best effort)
+          bite_obj: dict or None
+          members_set: set(str)
+        """
+        if mode == "atomic":
+            segs = _split_on_nans(crack.get("midline", []))
+            seg_meta = [{"branch_id": 0, "atomic_id": str(crack.get("id", ""))} for _ in segs]
+            return segs, seg_meta, None, {str(crack.get("id", ""))}
+        else:
+            segs = [np.asarray(s, float) for s in (crack.get("midline_segments", []) or [])]
+            seg_meta = crack.get("midline_segments_meta") or crack.get("segments_meta") or []
+            if not isinstance(seg_meta, list):
+                seg_meta = []
+            if len(seg_meta) != len(segs):
+                # best effort padding
+                tmp = []
+                for i in range(len(segs)):
+                    d = seg_meta[i] if i < len(seg_meta) and isinstance(seg_meta[i], dict) else {}
+                    tmp.append(d)
+                seg_meta = tmp
+                for i in range(len(seg_meta)):
+                    if "branch_id" not in seg_meta[i]:
+                        seg_meta[i]["branch_id"] = int(seg_meta[i].get("branch_id", i))
+            bite_obj = None
+            dom = crack.get("dominance_meta") or crack.get("dominance") or crack.get("dominance_info") or {}
+            if isinstance(dom, dict) and "bite" in dom and isinstance(dom["bite"], dict):
+                bite_obj = dom["bite"]
+            else:
+                # some pipelines store bite directly
+                b = crack.get("bite")
+                if isinstance(b, dict) and "bbox" in b:
+                    bite_obj = b
+            members = crack.get("members") or []
+            members_set = set(map(str, members))
+            return segs, seg_meta, bite_obj, members_set
+
+    def _build_branch_table(segs, seg_meta, shared_members=None):
+        """
+        Builds branch dict:
+          branch_id -> {"members":set(str), "seg_idxs":[int], "length":float}
+        If seg_meta has atomic_id, that's used for branch membership.
+        """
+        if shared_members is None:
+            shared_members = None
+        branches = {}
+        for i, (S, m) in enumerate(zip(segs, seg_meta)):
+            if S is None or len(S) < 2:
+                continue
+            bid = int(m.get("branch_id", i))
+            aid = m.get("atomic_id")
+            if bid not in branches:
+                branches[bid] = {"members": set(), "seg_idxs": [], "length": 0.0}
+            branches[bid]["seg_idxs"].append(i)
+            branches[bid]["length"] += _linestring_length(S)
+            if aid is not None:
+                aid = str(aid)
+                if shared_members is None or aid in shared_members:
+                    branches[bid]["members"].add(aid)
+        return branches
+
+    def _greedy_match_branches(gt_br, pr_br):
+        """
+        gt_br, pr_br: dict branch_id -> {"members", "length", ...}
+        Returns:
+          list of (gt_bid, pr_bid, shared_count, shared_len)
+        """
+        pairs = []
+        for g_id, g in gt_br.items():
+            for p_id, p in pr_br.items():
+                inter = g["members"] & p["members"]
+                sc = len(inter)
+                if sc <= 0:
+                    continue
+                # tie-break with min length (stable, doesn't depend on float dominance noise)
+                sl = float(min(g.get("length", 0.0), p.get("length", 0.0)))
+                pairs.append((g_id, p_id, sc, sl))
+        # sort by (shared_count, shared_len) desc
+        pairs.sort(key=lambda t: (t[2], t[3]), reverse=True)
+
+        gt_used = set()
+        pr_used = set()
+        out = []
+        for g_id, p_id, sc, sl in pairs:
+            if g_id in gt_used or p_id in pr_used:
+                continue
+            gt_used.add(g_id)
+            pr_used.add(p_id)
+            out.append((g_id, p_id, sc, sl))
+        return out
 
     # ---------------- load GT supervision ----------------
     gt_sup = {}
@@ -722,90 +896,280 @@ def compare_widths_for_cracks(
                 data = json.load(f)
             for e in data.get("cracks", []):
                 if e.get("kind") == mode:
-                    key = str(e["id"]) if mode == "atomic" else frozenset(map(str, e["members"]))
+                    key = str(e["id"]) if mode == "atomic" else frozenset(map(str, e.get("members", [])))
                     gt_sup[key] = e
 
     # ---------------- accumulators ----------------
     coords, diffs, bboxes = [], [], []
     rows = []
 
+    # debug dir for opsec artifacts
+    opsec_dir = os.path.join(metrics_dir, midline_type or "unknown", "opsec_debug")
+    os.makedirs(opsec_dir, exist_ok=True)
+
     # ---------------- iterate cracks ----------------
     for cid, crack in cracks.items():
-
         print(f"\n[WIDTH DEBUG] {mode.upper()} cid={cid}")
 
-        if mode == "atomic":
-            mid_segs = _split_on_nans(crack.get("midline", []))
-        else:
-            mid_segs = [np.asarray(s, float) for s in crack.get("midline_segments", [])]
-
-        if not mid_segs:
+        segs, seg_meta, bite_pred, pred_members = _extract_segments_and_meta(crack)
+        if not segs:
             continue
 
         e1, e2 = _get_edges(crack)
         if len(e1) < 2 or len(e2) < 2:
             continue
-
         m_edge = min(len(e1), len(e2))
         widths_geo = np.linalg.norm(e1[:m_edge] - e2[:m_edge], axis=1)
 
-        # ---- GT widths ----
-        gt_widths = []
+        # --------------------------------------------
+        # ATOMIC MODE (keep prior logic, minimal)
+        # --------------------------------------------
+        if mode == "atomic":
+            gt_widths = []
+            if gt_sup_root and str(cid) in gt_sup:
+                try:
+                    gt_widths = [np.asarray(gt_sup[str(cid)]["gt_normals"]["width_px"], float)]
+                except Exception:
+                    gt_widths = []
 
-        if mode == "atomic" and cid in gt_sup:
-            gt_widths = [np.asarray(gt_sup[cid]["gt_normals"]["width_px"], float)]
+            if not gt_widths:
+                for s in segs:
+                    (_, _, _, _, w), _ = normals_from_mask_for_midline(s, mask_bin, max_radius)
+                    gt_widths.append(np.asarray(w, float))
 
-        elif mode == "combined":
-            key = frozenset(map(str, crack.get("members", [])))
-            if key in gt_sup:
-                packed = gt_sup[key]["gt_normals"]["width_px"]
-                seg_lens = [len(s) for s in mid_segs]
-                gt_widths = _unpack_packed(packed, seg_lens)
+            off = 0
+            for s, gtw in zip(segs, gt_widths):
+                m = min(len(s), len(gtw), len(widths_geo) - off)
+                if m < 2:
+                    off += max(m, 0)
+                    continue
+                d = widths_geo[off:off + m] - gtw[:m]
+                pts = s[:m]
+                diffs.append(d)
+                coords.append(pts)
+                bboxes.append(crack.get("mask_bbox"))
 
-        if not gt_widths:
-            for s in mid_segs:
-                (_,_,_,_,w),_ = normals_from_mask_for_midline(s, mask_bin, max_radius)
-                gt_widths.append(np.asarray(w, float))
+                for (x, y), dw, gw, pw in zip(pts, d, gtw[:m], widths_geo[off:off + m]):
+                    if not np.isfinite(dw):
+                        continue
+                    rows.append({
+                        "x": float(x), "y": float(y),
+                        "gt_width_px": float(gw),
+                        "pred_width_px": float(pw),
+                        "width_diff_px": float(dw),
+                        "cid": str(cid),
+                        "crack_type": mode,
+                        "midline_type": midline_type,
+                    })
+                off += m
+            continue
 
-        # ---- compare ----
-        off = 0
-        for s, gtw in zip(mid_segs, gt_widths):
-            m = min(len(s), len(gtw), len(widths_geo)-off)
-            if m < 2:
-                off += max(m,0)
+        # --------------------------------------------
+        # COMBINED MODE OPSEC (HEAVY DEBUG)
+        # --------------------------------------------
+
+        # Stage 0: find best GT entry by overlap
+        pred_key = frozenset(map(str, crack.get("members", []) or []))
+        gt_entry = gt_sup.get(pred_key)
+
+        if gt_entry is None and gt_sup:
+            pm = set(map(str, crack.get("members", []) or []))
+            best = None
+            for k, e in gt_sup.items():
+                gm = set(map(str, e.get("members", []) or []))
+                inter = len(pm & gm)
+                denom = max(1, max(len(pm), len(gm)))
+                u = inter / denom
+                if best is None or u > best[0]:
+                    best = (u, e)
+            if best is not None and best[0] >= 0.60:
+                gt_entry = best[1]
+
+        if gt_entry is None:
+            gt_members = set(map(str, crack.get("members", []) or []))
+            bite_gt = None
+        else:
+            gt_members = set(map(str, gt_entry.get("members", []) or []))
+            bite_gt = None
+            dom_gt = gt_entry.get("dominance_meta") or gt_entry.get("dominance") or {}
+            if isinstance(dom_gt, dict) and "bite" in dom_gt:
+                bite_gt = dom_gt["bite"]
+
+        shared = pred_members & gt_members
+        overlap = len(shared) / max(1, max(len(pred_members), len(gt_members)))
+        if overlap < 0.60:
+            print(f"[WIDTH DEBUG] combined cid={cid} overlap={overlap:.3f} -> SKIP")
+            continue
+
+        print(f"[WIDTH DEBUG] cid={cid} shared_members={sorted(shared)}")
+
+        # --------------------------------------------
+        # Stage 1: prune segments by shared atomic IDs
+        # --------------------------------------------
+        pruned_segs = []
+        pruned_meta = []
+
+        for i, (S, m) in enumerate(zip(segs, seg_meta)):
+            if S is None or len(S) < 2:
                 continue
-            '''diffs.append(widths_geo[off:off+m] - gtw[:m])
-            coords.append(s[:m])
-            bboxes.append(crack.get("mask_bbox"))
-            off += m'''
-            d = widths_geo[off:off+m] - gtw[:m]
-            pts = s[:m]
+            aid = m.get("atomic_id")
+            if aid is not None and str(aid) not in shared:
+                print(f"[WIDTH DEBUG] DROP seg#{i} atomic={aid} (not shared)")
+                continue
+            pruned_segs.append(np.asarray(S, float))
+            pruned_meta.append(dict(m))
+
+        if not pruned_segs:
+            print(f"[WIDTH DEBUG] cid={cid} -> NO SEGMENTS AFTER PRUNE")
+            continue
+
+        print(f"[WIDTH DEBUG] cid={cid} kept {len(pruned_segs)} segments after atomic prune")
+
+        # --------------------------------------------
+        # Stage 2: optional branch matching
+        # --------------------------------------------
+        matched_pred_branch_ids = None
+        if gt_entry is not None:
+            gt_mid_segs = gt_entry.get("midline_segments") or []
+            gt_meta = gt_entry.get("midline_segments_meta") or []
+            if len(gt_mid_segs) == len(gt_meta) and gt_mid_segs:
+                gt_segs = [np.asarray(s, float) for s in gt_mid_segs]
+                gt_br = _build_branch_table(gt_segs, gt_meta, shared_members=shared)
+                pr_br = _build_branch_table(pruned_segs, pruned_meta, shared_members=shared)
+                if gt_br and pr_br:
+                    matches = _greedy_match_branches(gt_br, pr_br)
+                    if matches:
+                        matched_pred_branch_ids = {p for (_, p, _, _) in matches}
+
+        if matched_pred_branch_ids is not None:
+            keep_s, keep_m = [], []
+            for S, m in zip(pruned_segs, pruned_meta):
+                bid = int(m.get("branch_id", -1))
+                if bid in matched_pred_branch_ids:
+                    keep_s.append(S)
+                    keep_m.append(m)
+                else:
+                    print(f"[WIDTH DEBUG] DROP branch={bid} (unmatched)")
+            pruned_segs, pruned_meta = keep_s, keep_m
+
+        if not pruned_segs:
+            print(f"[WIDTH DEBUG] cid={cid} -> NO SEGMENTS AFTER BRANCH MATCH")
+            continue
+
+        # --------------------------------------------
+        # Stage 3: build ORIGINAL segment offsets
+        # --------------------------------------------
+        orig_segs = [np.asarray(s, float) for s in crack.get("midline_segments", [])]
+        seg_start = {}
+        off = 0
+        for i, S in enumerate(orig_segs):
+            seg_start[i] = off
+            off += len(S)
+
+        print(f"[WIDTH DEBUG] cid={cid} widths_geo={len(widths_geo)}")
+
+        have_valid_seg_idx = any(
+            isinstance(m.get("seg_idx"), int) and m["seg_idx"] in seg_start
+            for m in pruned_meta
+        )
+
+        off_fallback = 0
+
+        # --------------------------------------------
+        # Stage 4: width slicing + SANITY PLOTS
+        # --------------------------------------------
+        for si, (S, m) in enumerate(zip(pruned_segs, pruned_meta)):
+            if len(S) < 2:
+                continue
+
+            if have_valid_seg_idx and isinstance(m.get("seg_idx"), int) and m["seg_idx"] in seg_start:
+                s0 = seg_start[m["seg_idx"]]
+                src = "seg_idx"
+            else:
+                s0 = off_fallback
+                src = "fallback"
+
+            L = len(S)
+            s1 = min(s0 + L, len(widths_geo))
+
+            pw_full = widths_geo[s0:s1]
+            pts_full = S[:len(pw_full)]
+
+            print(
+                f"[WIDTH DEBUG] cid={cid} seg#{si} "
+                f"branch={m.get('branch_id')} src={src} "
+                f"geom_pts={len(S)} pw_pts={len(pw_full)} "
+                f"s0={s0} s1={s1}"
+            )
+
+            off_fallback += L
+
+            if len(pts_full) < 2:
+                continue
+
+            # ---------------- SANITY PLOT (PER SEGMENT)
+            dbg_seg = os.path.join(opsec_dir, f"combined_opsec_{cid}_seg{si}.png")
+            if not os.path.exists(dbg_seg):
+                bb = crack.get("mask_bbox")
+                if bb:
+                    x, y, w, h = map(int, bb)
+                    x0 = max(0, x - 20); y0 = max(0, y - 20)
+                    x1 = min(W, x + w + 20); y1 = min(H, y + h + 20)
+                else:
+                    x0, y0, x1, y1 = 0, 0, W, H
+
+                fig, ax = plt.subplots(figsize=(6,6), dpi=200)
+                ax.imshow(mask_bin[y0:y1, x0:x1], cmap="gray")
+
+                pr = pts_full - np.array([x0, y0])
+                ax.plot(pr[:,0], pr[:,1], color="cyan", lw=1.5, label="width coverage")
+
+                ax.set_title(
+                    f"cid={cid} seg#{si}\n"
+                    f"geom_len={_linestring_length(S):.1f}px  "
+                    f"pw_pts={len(pw_full)}"
+                )
+                ax.legend()
+                ax.axis("off")
+                fig.savefig(dbg_seg, bbox_inches="tight", dpi=200)
+                plt.close(fig)
+
+            # ---------------- GT WIDTHS
+            (_, _, _, _, gw), _ = normals_from_mask_for_midline(pts_full, mask_bin, max_radius)
+            gw = np.asarray(gw, float)
+
+            mlen = min(len(pts_full), len(pw_full), len(gw))
+            if mlen < 2:
+                continue
+
+            pts_ok = pts_full[:mlen]
+            pw_ok = pw_full[:mlen]
+            gw_ok = gw[:mlen]
+            d = pw_ok - gw_ok
+
+            # ---- bbox bookkeeping (FIX) ----
+            bbox0 = crack.get("mask_bbox")
+            if bbox0 is not None:
+                bboxes.append(bbox0)
 
             diffs.append(d)
-            coords.append(pts)
-            bboxes.append(crack.get("mask_bbox"))
+            coords.append(pts_ok)
 
-            for (x, y), dw, gw, pw in zip(
-                    pts,
-                    d,
-                    gtw[:m],
-                    widths_geo[off:off+m],
-                ):
+            for (x, y), dw, gwi, pwi in zip(pts_ok, d, gw_ok, pw_ok):
                 if not np.isfinite(dw):
                     continue
-
                 rows.append({
                     "x": float(x),
                     "y": float(y),
-                    "gt_width_px": float(gw),
-                    "pred_width_px": float(pw),
+                    "gt_width_px": float(gwi),
+                    "pred_width_px": float(pwi),
                     "width_diff_px": float(dw),
                     "cid": str(cid),
-                    "crack_type": mode,
+                    "crack_type": "combined",
                     "midline_type": midline_type,
                 })
 
-            off += m
+
 
     # ---------------- plotting ----------------
     if not coords:
@@ -814,15 +1178,19 @@ def compare_widths_for_cracks(
 
     bbox = _union_bboxes(bboxes)
 
-    fig, ax = plt.subplots(figsize=(6,6), dpi=200)
+    fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
     bg = np.stack([(crack_mask > 0) * 255] * 3, axis=-1)
     ax.imshow(bg)
 
-    all_d = np.concatenate(diffs)
+    all_d = np.concatenate([d for d in diffs if d is not None and len(d) > 0])
     all_d = all_d[np.isfinite(all_d)]
+    if all_d.size == 0:
+        print("[WIDTH DEBUG] no finite diffs")
+        return rows, None
+
     vmin, vmax = np.percentile(all_d, [5, 95])
-    vmin = min(vmin, 0.0)
-    vmax = max(vmax, 0.0)
+    vmin = min(float(vmin), 0.0)
+    vmax = max(float(vmax), 0.0)
     if vmax <= vmin:
         vmax = vmin + 1e-6
 
@@ -831,10 +1199,11 @@ def compare_widths_for_cracks(
 
     # ---- plot colored width-diff segments ----
     for s, d in zip(coords, diffs):
+        s = np.asarray(s, float)
+        d = np.asarray(d, float)
         n = min(len(s), len(d))
         if n < 2:
             continue
-
         for i in range(n - 1):
             if not np.isfinite(d[i]):
                 continue
@@ -874,15 +1243,10 @@ def compare_widths_for_cracks(
     cb.set_label("Estimated width − GT width (px)", fontsize=10, fontweight="bold")
 
     ticks = list(cb.get_ticks())
-
     if len(ticks) >= 2:
         tol = 0.3
-
-        # Replace endpoints
-        ticks[0]  = vmin
+        ticks[0] = vmin
         ticks[-1] = vmax
-
-        # Remove ticks too close to endpoints (except endpoints themselves)
         cleaned = []
         for i, t in enumerate(ticks):
             if i == 0 or i == len(ticks) - 1:
@@ -890,11 +1254,10 @@ def compare_widths_for_cracks(
             else:
                 if abs(t - vmin) > tol and abs(t - vmax) > tol:
                     cleaned.append(t)
-
         cb.set_ticks(cleaned)
         cb.set_ticklabels([f"{t:.1f}" for t in cleaned])
 
-    out_dir = os.path.join(metrics_dir, midline_type)
+    out_dir = os.path.join(metrics_dir, midline_type or "unknown")
     os.makedirs(out_dir, exist_ok=True)
     out = os.path.join(out_dir, f"{midline_type}_{crack_type}_width_diffs.png")
     fig.savefig(out, dpi=200, bbox_inches="tight", pad_inches=0)

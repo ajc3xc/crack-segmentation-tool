@@ -371,16 +371,29 @@ def dominant_segments_from_group(
     debug_tag="group",
 ):
     """
-    FINAL dominance logic (portable version).
+    FINAL dominance logic (portable version) + OPSEC metadata.
 
     - Branches defined by shared USER endpoints (atomic space)
     - Branch ordering by total USER length (never clipped)
     - Territory built from CLIPPED geometry only
     - Dominance between branches only
     - Output segments are USER-space polylines (primary: unmodified; subordinate: clipped to remaining)
+
+    NEW:
+      Returns: (kept_segments, meta)
+        meta includes:
+          - branches: per-branch atomic membership + lengths
+          - segments_meta: per kept segment: branch_id + atomic_id + primary flag
+          - bite mask (compressed packbits+b64) in bbox crop coordinates
+            (pixels where a subordinate branch territory was "bitten" by already-claimed dominant territory)
+
+    NOTE:
+      - "bite" here is ONLY dominance overlap (branch_terr & claimed) for subordinate branches.
+      - No re-running dominance downstream; you use bite-union to symmetrically clip later.
     """
 
     import os
+    import base64
     import numpy as np
     import cv2
 
@@ -400,11 +413,37 @@ def dominant_segments_from_group(
                     out.add(tuple(map(float, ups[idx])))
         return out
 
+    def _union_member_bbox_xyxy(member_ids):
+        boxes = []
+        for m in member_ids:
+            bb = (atomic.get(str(m), {}) or {}).get("mask_bbox")
+            if bb and len(bb) == 4:
+                x, y, w, h = map(int, bb)
+                if w > 0 and h > 0:
+                    boxes.append((x, y, x + w, y + h))
+        if not boxes:
+            return None
+        bx0 = max(0, min(b[0] for b in boxes))
+        by0 = max(0, min(b[1] for b in boxes))
+        bx1 = min(W, max(b[2] for b in boxes))
+        by1 = min(H, max(b[3] for b in boxes))
+        if bx1 <= bx0 or by1 <= by0:
+            return None
+        return (bx0, by0, bx1, by1)
+
+    def _pack_mask_b64(mask_u8):
+        mask_u8 = (mask_u8 > 0).astype(np.uint8)
+        if mask_u8.size == 0:
+            return {"shape": [0, 0], "packbits_b64": ""}
+        packed = np.packbits(mask_u8, axis=1)  # (H, ceil(W/8))
+        b64 = base64.b64encode(packed.tobytes()).decode("ascii")
+        return {"shape": [int(mask_u8.shape[0]), int(mask_u8.shape[1])], "packbits_b64": b64}
+
     # -----------------------------
     # 1) collect atomics + endpoints
     # -----------------------------
-    atomics = []    # [(cid_str, S_user)]
-    endpoints = []  # [set((x,y), ...)]
+    atomics = []     # [(cid_str, S_user)]
+    endpoints = []   # [set((x,y), ...)]
 
     for m in members:
         cr = atomic.get(str(m), {}) or {}
@@ -414,7 +453,14 @@ def dominant_segments_from_group(
             endpoints.append(get_user_endpoints(cr))
 
     if not atomics:
-        return [], []
+        return [], {"branches": [], "segments_meta": [], "bite": None}
+
+    # bbox for cropped bite storage
+    bbox_xyxy = _union_member_bbox_xyxy(members)
+    if bbox_xyxy is None:
+        bx0, by0, bx1, by1 = 0, 0, W, H
+    else:
+        bx0, by0, bx1, by1 = bbox_xyxy
 
     # -----------------------------
     # 2) build branches in atomic space
@@ -447,8 +493,8 @@ def dominant_segments_from_group(
     # 3) per-branch user length + user segs + clipped segs (territory only)
     # -----------------------------
     branch_user_len = []
-    branch_user_segs = []
-    branch_clipped_segs = []
+    branch_user_segs = []       # list[list[(atomic_id, polyline)]]
+    branch_clipped_segs = []    # list[list[polyline_piece]]
 
     for atom_ids in branches:
         total_len = 0.0
@@ -456,20 +502,16 @@ def dominant_segments_from_group(
         clipped_segs = []
 
         for ai in atom_ids:
-            _, S_user = atomics[ai]
+            atomic_id, S_user = atomics[ai]
             total_len += _linestring_length(S_user)
-            user_segs.append(S_user)
+            user_segs.append((atomic_id, S_user))
 
             pieces = _clip_polyline_to_mask(S_user, crack_mask)
-            
-            if not pieces:
-                # Basic diagnostics
-                pts = np.asarray(S_user, float)
-                H, W = crack_mask.shape[:2]
 
+            if not pieces:
+                pts = np.asarray(S_user, float)
                 ys = np.clip(np.round(pts[:, 1]).astype(int), 0, H - 1)
                 xs = np.clip(np.round(pts[:, 0]).astype(int), 0, W - 1)
-
                 inside = crack_mask[ys, xs] > 0
                 frac_inside = float(inside.sum()) / max(1, len(inside))
 
@@ -483,10 +525,10 @@ def dominant_segments_from_group(
                     f"[{pts[:,0].max():.1f}, {pts[:,1].max():.1f}]\n"
                     f"  mask_nonzero   = {int(crack_mask.sum())}"
                 )
-            
-            clipped_segs.extend([p for p in pieces if len(p) >= 2])
 
-        branch_user_len.append(total_len)
+            clipped_segs.extend([p for p in pieces if p is not None and len(p) >= 2])
+
+        branch_user_len.append(float(total_len))
         branch_user_segs.append(user_segs)
         branch_clipped_segs.append(clipped_segs)
 
@@ -511,9 +553,14 @@ def dominant_segments_from_group(
     )
 
     claimed = np.zeros((H, W), np.uint8)
+    bite_total = np.zeros((H, W), np.uint8)
 
-    # keep truth: list[(branch_id, seg_array)]
+    # kept_meta: list[(branch_id, atomic_id, polyline, is_primary)]
     kept_meta = []
+
+    # branch stats
+    branch_stats = []
+    primary_branch = order[0] if order else None
 
     for rank, bi in enumerate(order):
         # Build territory from clipped geometry only
@@ -528,36 +575,106 @@ def dominant_segments_from_group(
 
         unique = branch_terr & (~claimed)
 
-        # Suppress small-unique subordinate branches
-        if rank > 0 and unique.sum() < max(10, 0.5 * window_half_size):
+        suppressed = False
+
+        # Suppress only if the KEPT LENGTH is truly negligible
+        min_len_px = 0.10 * branch_user_len[bi]  # 10% of branch length
+
+        if rank > 0 and _linestring_length(
+                np.vstack(branch_clipped_segs[bi]) if branch_clipped_segs[bi] else np.zeros((0,2))
+            ) < min_len_px:
+
+            branch_stats.append({
+                "branch_id": int(bi),
+                "rank": int(rank),
+                "atomic_ids": [aid for (aid, _) in branch_user_segs[bi]],
+                "user_len": float(branch_user_len[bi]),
+                "kept_len": 0.0,
+                "suppressed": True,
+            })
             continue
 
         if rank == 0:
-            # PRIMARY: keep full USER geometry
-            for S_user in branch_user_segs[bi]:
+            # PRIMARY: keep full USER geometry (unmodified)
+            kept_len = 0.0
+            for atomic_id, S_user in branch_user_segs[bi]:
                 if S_user is not None and len(S_user) >= 2:
-                    kept_meta.append((bi, S_user))
+                    kept_meta.append((bi, atomic_id, S_user, True))
+                    kept_len += _linestring_length(S_user)
             claimed |= branch_terr
+
+            branch_stats.append({
+                "branch_id": int(bi),
+                "rank": int(rank),
+                "atomic_ids": [aid for (aid, _) in branch_user_segs[bi]],
+                "user_len": float(branch_user_len[bi]),
+                "kept_len": float(kept_len),
+                "suppressed": False,
+            })
             continue
 
         # SUBORDINATE: clip USER midlines against remaining territory
+        # "bite" = overlap with already-claimed territory (dominant claim)
+        bite = branch_terr & claimed
+        if np.any(bite):
+            bite_total |= bite
+
         remaining = branch_terr & (~claimed)
         kept_any = False
+        kept_len = 0.0
 
-        for S_user in branch_user_segs[bi]:
+        for atomic_id, S_user in branch_user_segs[bi]:
             pieces = _clip_polyline_to_mask(S_user, remaining)
             for p in pieces:
                 if p is not None and len(p) >= 2:
-                    kept_meta.append((bi, p))
+                    kept_meta.append((bi, atomic_id, p, False))
                     kept_any = True
+                    kept_len += _linestring_length(p)
 
         if kept_any:
             claimed |= remaining
 
-    kept = [S for _, S in kept_meta]
+        branch_stats.append({
+            "branch_id": int(bi),
+            "rank": int(rank),
+            "atomic_ids": [aid for (aid, _) in branch_user_segs[bi]],
+            "user_len": float(branch_user_len[bi]),
+            "kept_len": float(kept_len),
+            "suppressed": False if kept_any else True,
+        })
+
+    kept = [S for (_, _, S, _) in kept_meta]
+
+    # per kept segment meta (parallel to `kept`)
+    segments_meta = []
+    for (bi, atomic_id, S, is_primary) in kept_meta:
+        segments_meta.append({
+            "branch_id": int(bi),
+            "atomic_id": str(atomic_id),
+            "is_primary": bool(is_primary),
+            "branch_rank": int(order.index(bi)) if bi in order else -1,
+            "length": float(_linestring_length(S)),
+        })
+
+    # crop bite mask to bbox and pack
+    bite_crop = bite_total[by0:by1, bx0:bx1].astype(np.uint8)
+    bite_blob = _pack_mask_b64(bite_crop)
+
+    meta = {
+        "members": [str(m) for m in members],
+        "primary_branch_id": int(primary_branch) if primary_branch is not None else None,
+        "order": [int(b) for b in order],
+        "branches": branch_stats,
+        "segments_meta": segments_meta,
+        "bite": {
+            "bbox": [int(bx0), int(by0), int(bx1 - bx0), int(by1 - by0)],
+            "shape": bite_blob["shape"],
+            "packbits_b64": bite_blob["packbits_b64"],
+        },
+    }
 
     # -----------------------------
-    # 5) debug (bbox = union of user bboxes)
+    # 5) debug (final visualization)
     # -----------------------------
     if debug_dir and kept:
         import matplotlib.pyplot as plt
@@ -566,56 +683,35 @@ def dominant_segments_from_group(
 
         os.makedirs(debug_dir, exist_ok=True)
 
-        # ----------------------------------
-        # Union of USER-authored bboxes (xywh)
-        # ----------------------------------
-        boxes = []
-        for m in members:
-            bb = atomic.get(str(m), {}).get("mask_bbox")
-            if bb and len(bb) == 4:
-                x, y, w, h = map(int, bb)
-                if w > 0 and h > 0:
-                    boxes.append((x, y, x + w, y + h))
+        # union bbox xyxy already computed
+        bx0d, by0d, bx1d, by1d = bx0, by0, bx1, by1
 
-        if not boxes:
-            return kept, kept
-
-        # TRUE combined bbox (NO padding)
-        bx0 = min(b[0] for b in boxes)
-        by0 = min(b[1] for b in boxes)
-        bx1 = max(b[2] for b in boxes)
-        by1 = max(b[3] for b in boxes)
-
-        # ----------------------------------
-        # Padded VIEW window (context only)
-        # ----------------------------------
         pad = 20
-        x0 = max(0, bx0 - pad)
-        y0 = max(0, by0 - pad)
-        x1 = min(W, bx1 + pad)
-        y1 = min(H, by1 + pad)
+        x0 = max(0, bx0d - pad)
+        y0 = max(0, by0d - pad)
+        x1 = min(W, bx1d + pad)
+        y1 = min(H, by1d + pad)
 
         fig, ax = plt.subplots(figsize=(5, 5), dpi=200)
         ax.imshow(crack_mask[y0:y1, x0:x1], cmap="gray")
 
-        # ----------------------------------
-        # Draw TRUE combined user bbox
-        # (no padding, thin line)
-        # ----------------------------------
+        # ----------------------------
+        # Draw combined bounding box
+        # ----------------------------
         ax.add_patch(
             Rectangle(
-                (bx0 - x0, by0 - y0),
-                bx1 - bx0,
-                by1 - by0,
+                (bx0d - x0, by0d - y0),
+                bx1d - bx0d,
+                by1d - by0d,
                 fill=False,
                 linewidth=1.0,
                 edgecolor="#1f77b4",
             )
         )
 
-        # ----------------------------------
-        # Draw kept midlines by branch
-        # ----------------------------------
+        # ----------------------------
+        # Plot kept midlines
+        # ----------------------------
         branch_colors = [
             "#2ecc71",
             "#e67e22",
@@ -626,29 +722,44 @@ def dominant_segments_from_group(
         ]
 
         used_branches = set()
-        for (bi, S) in kept_meta:
+        for (bi, _, S, _) in kept_meta:
             used_branches.add(bi)
             color = branch_colors[bi % len(branch_colors)]
-            lw = 3.0 if bi == order[0] else 2.0
+            lw = 3.0 if (primary_branch is not None and bi == primary_branch) else 2.0
             S2 = S - np.array([x0, y0])
             ax.plot(S2[:, 0], S2[:, 1], color=color, lw=lw)
 
-        # ----------------------------------
-        # Legend (RESTORED)
-        # ----------------------------------
+        # ----------------------------
+        # Legend with compact lengths
+        # ----------------------------
         legend_items = []
 
+        branch_stat_map = {b["branch_id"]: b for b in branch_stats}
+
         for bi in sorted(used_branches):
+            st = branch_stat_map.get(bi, {})
+            user_len = float(st.get("user_len", 0.0))
+            kept_len = float(st.get("kept_len", 0.0))
+
+            # compact formatting
+            if abs(user_len - kept_len) < 1e-3:
+                len_txt = f"{user_len:.1f}px"
+            else:
+                len_txt = f"{user_len:.1f}/{kept_len:.1f}px"
+
+            label = (
+                f"Branch {bi} (primary) — {len_txt}"
+                if (primary_branch is not None and bi == primary_branch)
+                else
+                f"Branch {bi} — {len_txt}"
+            )
+
             legend_items.append(
                 Line2D(
                     [0], [0],
                     color=branch_colors[bi % len(branch_colors)],
-                    lw=3.0 if bi == order[0] else 2.0,
-                    label=(
-                        f"Branch {bi} (primary)"
-                        if bi == order[0]
-                        else f"Branch {bi}"
-                    ),
+                    lw=3.0 if (primary_branch is not None and bi == primary_branch) else 2.0,
+                    label=label,
                 )
             )
 
@@ -679,7 +790,7 @@ def dominant_segments_from_group(
         )
         plt.close(fig)
 
-    return kept, kept
+    return kept, meta
 
 
 
@@ -900,13 +1011,17 @@ def build_combined_crack_stateless(
 
     crack_mask_full = (crack_mask_full > 0).astype(np.uint8)
 
-    segs, _ = dominant_segments_from_group(
+    segs, dom_meta = dominant_segments_from_group(
         members=member_ids,
         atomic=authoring_atomic,
         crack_mask_u8=crack_mask_full,
         window_half_size=window_half_size,
         debug_dir=debug_dir,
     )
+
+    # attach metadata so width eval can do opsec
+    midline_segments_meta = dom_meta.get("segments_meta", [])
+    dominance_meta = {"bite": dom_meta.get("bite")}
 
     t_stitch1 = time.perf_counter()
     stitching_sec = float(t_stitch1 - t_stitch0)
@@ -1126,4 +1241,6 @@ def build_combined_crack_stateless(
             "combine_postprocess_sec": t_post_total,
             "combine_loop_total_sec": t_loop_total,
         },
+        "midline_segments_meta": midline_segments_meta,
+        "dominance_meta": dominance_meta,
     }

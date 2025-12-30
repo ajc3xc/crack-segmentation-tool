@@ -2778,7 +2778,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
     def compute_mask_and_width_metrics_for_image(
         self,
         display=False,
-        export_supervision=False,
+        export_supervision=True,
         *,
         cache_key=None,
         include_auto=False,   # enable auto-variant scoring
@@ -2940,10 +2940,10 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     gt_mask=gt_full,
                 )
 
-                print(f"[DEBUG METRICS] GT supervision export completed for {base_name}")
+                print(f"\n[DEBUG METRICS] GT supervision export completed for {base_name}\n")
 
             except Exception as e:
-                print(f"[DEBUG METRICS] GT supervision export failed: {e}")
+                print(f"\n[DEBUG METRICS] GT supervision export failed: {e}\n")
                 traceback.print_exc()
 
         # ------------------------------------------------------------------
@@ -3531,6 +3531,8 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     "mask_bbox": bbox,              # ✅ REQUIRED
                     "timing": cmb.get("timing", {}),
                 }
+                out[str(ccid)]["midline_segments_meta"] = cmb.get("midline_segments_meta")
+                out[str(ccid)]["dominance_meta"] = cmb.get("dominance_meta")
             return out
 
         # ------------------------------------------------------------------
@@ -4053,7 +4055,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         # --- 3) use existing metric pipeline ---
         try:
             print("[SMOKE] running mask/width metrics ...")
-            self.compute_mask_and_width_metrics_for_image(display=display, export_supervision=False)
+            self.compute_mask_and_width_metrics_for_image(display=display, export_supervision=True)
         except Exception as e:
             traceback.print_exc()
             print(f"[SMOKE] mask/width stage failed: {e}")
