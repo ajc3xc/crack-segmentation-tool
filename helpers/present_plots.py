@@ -1866,10 +1866,21 @@ def plot_rs3_timing_summary(
     print(f"[plot_rs3_timing_summary] ✓ clean timing plots written to {out_dir}")
 
 
-def plot_rs3_midline_diagnostics(df_all, out_dir, selected_family):
+def plot_rs3_midline_diagnostics(
+    df_all,
+    out_dir,
+    selected_family=None,
+    title_suffix=None,
+):
     """
     Thesis-grade diagnostic plots for midline behavior.
     NO selection influence.
+
+    If selected_family is None:
+        → plots diagnostics across ALL rows (generic mode)
+
+    If selected_family is provided:
+        → filters to that RS3 family (legacy behavior)
     """
     import os
     import numpy as np
@@ -1878,14 +1889,20 @@ def plot_rs3_midline_diagnostics(df_all, out_dir, selected_family):
 
     os.makedirs(out_dir, exist_ok=True)
 
-    fam_mask = (
-        (df_all["os_mode"] == selected_family[0]) &
-        (df_all["g11"] == selected_family[1]) &
-        (df_all["g22"] == selected_family[2]) &
-        (df_all["g33"] == selected_family[3])
-    )
+    df = df_all.copy()
 
-    df = df_all[fam_mask].copy()
+    # ------------------------------------------------------------
+    # Optional RS3 family filtering
+    # ------------------------------------------------------------
+    if selected_family is not None:
+        fam_mask = (
+            (df["os_mode"] == selected_family[0]) &
+            (df["g11"] == selected_family[1]) &
+            (df["g22"] == selected_family[2]) &
+            (df["g33"] == selected_family[3])
+        )
+        df = df[fam_mask].copy()
+
     if df.empty:
         return
 
@@ -1898,13 +1915,10 @@ def plot_rs3_midline_diagnostics(df_all, out_dir, selected_family):
         "coverage",
         "score_mid",
     ]
-
     primary_metrics = [m for m in primary_metrics if m in df.columns]
 
     if primary_metrics:
-        data = []
-        labels = []
-
+        data, labels = [], []
         for m in primary_metrics:
             vals = pd.to_numeric(df[m], errors="coerce").dropna().values
             if len(vals):
@@ -1915,7 +1929,14 @@ def plot_rs3_midline_diagnostics(df_all, out_dir, selected_family):
             plt.figure(figsize=(1.6 * len(data), 4))
             plt.boxplot(data, labels=labels, showfliers=False)
             plt.ylabel("value")
-            plt.title("RS3 Primary Midline Metrics (Selected Family)")
+
+            title = "Midline Primary Metrics"
+            if selected_family is not None:
+                title = "RS3 Primary Midline Metrics (Selected Family)"
+            if title_suffix:
+                title += f" — {title_suffix}"
+
+            plt.title(title)
             plt.tight_layout()
             plt.savefig(
                 os.path.join(out_dir, "primary_midline_metrics.png"),
@@ -1945,8 +1966,8 @@ def plot_rs3_midline_diagnostics(df_all, out_dir, selected_family):
 
         rows.append({
             "metric": m,
-            "mean": np.mean(vals),
-            "std":  np.std(vals),
+            "mean": float(np.mean(vals)),
+            "std":  float(np.std(vals)),
         })
 
     if rows:
@@ -1960,7 +1981,14 @@ def plot_rs3_midline_diagnostics(df_all, out_dir, selected_family):
             capsize=5,
         )
         plt.ylabel("value")
-        plt.title("RS3 Midline Diagnostic Metrics (mean ± std)")
+
+        title = "Midline Diagnostic Metrics (mean ± std)"
+        if selected_family is not None:
+            title = "RS3 Midline Diagnostic Metrics (mean ± std)"
+        if title_suffix:
+            title += f" — {title_suffix}"
+
+        plt.title(title)
         plt.xticks(rotation=30, ha="right")
         plt.tight_layout()
         plt.savefig(

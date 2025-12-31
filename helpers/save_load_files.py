@@ -214,8 +214,18 @@ def safe_write_json(path, data):
 def snapshot_pick_crack_fields(cr):
     """Keep only fields metrics care about (read-only in snapshot)."""
     keep = {}
-    for k in ("source","midline","mask_bbox","geodesic_edges",
-              "normal_edge_points_full","normal_edge_points","mask_crop"):
+    for k in (
+        "source",
+        "midline",
+        "mask_bbox",
+        "geodesic_edges",
+        "normal_edge_points_full",
+        "normal_edge_points",
+        "mask_crop",
+        "user_points",
+        "user_connections",
+    ):
+
         if k in cr: keep[k] = cr[k]
     # do NOT keep bulky 'variants' tree in authoring snapshot; we will store per-crack auto artifacts separately
     return keep
@@ -471,6 +481,14 @@ def _flatten_variant_record(vid: int, vrec: dict, params: dict, scores: dict = N
         "params": params or {},
         "scores": scores or {},
     }
+    
+    # --------------------------------------------------
+    # ✅ TOPOLOGY (CRITICAL)
+    # --------------------------------------------------
+    if "user_points" in vrec:
+        out["user_points"] = vrec.get("user_points", [])
+    if "user_connections" in vrec:
+        out["user_connections"] = vrec.get("user_connections", [])
 
     # Optional normals
     for k in ("normal_edge_points_full", "normal_edge_points"):

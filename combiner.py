@@ -451,6 +451,15 @@ def dominant_segments_from_group(
         if ml.ndim == 2 and len(ml) >= 2:
             atomics.append((str(m), _finite_xy(ml)))
             endpoints.append(get_user_endpoints(cr))
+            
+    '''if debug_dir:
+        print("\n[DOMINANCE DBG] === ATOMIC TOPOLOGY CHECK ===")
+        for i, ((cid, _), eps) in enumerate(zip(atomics, endpoints)):
+            print(
+                f"  atomic[{i}] cid={cid} | "
+                f"user_endpoints={len(eps)} | "
+                f"points={sorted(list(eps)) if eps else '∅'}"
+            )'''
 
     if not atomics:
         return [], {"branches": [], "segments_meta": [], "bite": None}
@@ -492,7 +501,7 @@ def dominant_segments_from_group(
     # -----------------------------
     # 3) per-branch user length + user segs + clipped segs (territory only)
     # -----------------------------
-    branch_user_len = []
+    '''branch_user_len = []
     branch_user_segs = []       # list[list[(atomic_id, polyline)]]
     branch_clipped_segs = []    # list[list[polyline_piece]]
 
@@ -530,7 +539,47 @@ def dominant_segments_from_group(
 
         branch_user_len.append(float(total_len))
         branch_user_segs.append(user_segs)
-        branch_clipped_segs.append(clipped_segs)
+        branch_clipped_segs.append(clipped_segs)'''
+
+    branch_user_len = []
+    branch_user_segs = []        # list[list[(atomic_id, USER_polyline)]]
+    branch_terr_segs = []        # list[list[polyline_piece]]  (MASK-CLIPPED, TERRITORY ONLY)
+
+    for atom_ids in branches:
+        total_len = 0.0
+        user_segs = []
+        terr_segs = []
+
+        for ai in atom_ids:
+            atomic_id, S_user = atomics[ai]
+
+            if S_user is None or len(S_user) < 2:
+                continue
+
+            # ---- USER geometry (NEVER clipped to crack_mask) ----
+            total_len += _linestring_length(S_user)
+            user_segs.append((atomic_id, S_user))
+
+            # ---- TERRITORY geometry (mask-clipped, mask logic ONLY) ----
+            pieces = _clip_polyline_to_mask(S_user, crack_mask)
+            for p in pieces:
+                if p is not None and len(p) >= 2:
+                    terr_segs.append(p)
+
+        branch_user_len.append(float(total_len))
+        branch_user_segs.append(user_segs)
+        branch_terr_segs.append(terr_segs)
+        
+    # -----------------------------
+    # Sanity: drop branches with no TERRITORY support
+    # -----------------------------
+    for i, terr in enumerate(branch_terr_segs):
+        if not terr and branch_user_len[i] > 0:
+            print(
+                f"[DOMINANCE AUDIT] ⚠ branch {i} has USER length "
+                f"{branch_user_len[i]:.2f}px but ZERO territory segments"
+            )
+            
 
     # -----------------------------
     # 4) dominance between branches (ordered by USER length)
@@ -555,35 +604,41 @@ def dominant_segments_from_group(
     claimed = np.zeros((H, W), np.uint8)
     bite_total = np.zeros((H, W), np.uint8)
 
-    # kept_meta: list[(branch_id, atomic_id, polyline, is_primary)]
     kept_meta = []
-
-    # branch stats
     branch_stats = []
     primary_branch = order[0] if order else None
 
+    # store territory masks FOR DEBUG ONLY
+    branch_terr_masks = {}
+
     for rank, bi in enumerate(order):
-        # Build territory from clipped geometry only
         branch_terr = np.zeros((H, W), np.uint8)
-        for S_clip in branch_clipped_segs[bi]:
+
+        for S_clip in branch_terr_segs[bi]:
+            if S_clip is None or len(S_clip) < 2:
+                continue
+
             r = seg_radius(S_clip)
             rad = int(max(3, 0.8 * r))
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1))
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1)
+            )
+
             line = _polyline_mask(S_clip, H, W)
             terr = cv2.dilate(line, kernel, iterations=1) & crack_mask
             branch_terr |= terr
 
-        unique = branch_terr & (~claimed)
+        branch_terr_masks[bi] = branch_terr.copy()
 
-        suppressed = False
+        # ---- suppression gate ----
+        terr_len = (
+            _linestring_length(np.vstack(branch_terr_segs[bi]))
+            if branch_terr_segs[bi]
+            else 0.0
+        )
+        min_len_px = 0.10 * branch_user_len[bi]
 
-        # Suppress only if the KEPT LENGTH is truly negligible
-        min_len_px = 0.10 * branch_user_len[bi]  # 10% of branch length
-
-        if rank > 0 and _linestring_length(
-                np.vstack(branch_clipped_segs[bi]) if branch_clipped_segs[bi] else np.zeros((0,2))
-            ) < min_len_px:
-
+        if rank > 0 and terr_len < min_len_px:
             branch_stats.append({
                 "branch_id": int(bi),
                 "rank": int(rank),
@@ -594,13 +649,14 @@ def dominant_segments_from_group(
             })
             continue
 
+        # ---- primary branch ----
         if rank == 0:
-            # PRIMARY: keep full USER geometry (unmodified)
             kept_len = 0.0
             for atomic_id, S_user in branch_user_segs[bi]:
                 if S_user is not None and len(S_user) >= 2:
                     kept_meta.append((bi, atomic_id, S_user, True))
                     kept_len += _linestring_length(S_user)
+
             claimed |= branch_terr
 
             branch_stats.append({
@@ -613,25 +669,28 @@ def dominant_segments_from_group(
             })
             continue
 
-        # SUBORDINATE: clip USER midlines against remaining territory
-        # "bite" = overlap with already-claimed territory (dominant claim)
+        # ---- subordinate branches ----
         bite = branch_terr & claimed
         if np.any(bite):
             bite_total |= bite
 
         remaining = branch_terr & (~claimed)
+
+        # dominance decision is MASK-based,
+        # geometry survival is USER-based
         kept_any = False
         kept_len = 0.0
 
-        for atomic_id, S_user in branch_user_segs[bi]:
-            pieces = _clip_polyline_to_mask(S_user, remaining)
-            for p in pieces:
-                if p is not None and len(p) >= 2:
-                    kept_meta.append((bi, atomic_id, p, False))
-                    kept_any = True
-                    kept_len += _linestring_length(p)
+        if np.any(remaining):
+            for atomic_id, S_user in branch_user_segs[bi]:
+                if S_user is None or len(S_user) < 2:
+                    continue
 
-        if kept_any:
+                kept_meta.append((bi, atomic_id, S_user, False))
+                kept_any = True
+                kept_len += _linestring_length(S_user)
+
+            # only after survival is confirmed do we claim territory
             claimed |= remaining
 
         branch_stats.append({
@@ -640,8 +699,105 @@ def dominant_segments_from_group(
             "atomic_ids": [aid for (aid, _) in branch_user_segs[bi]],
             "user_len": float(branch_user_len[bi]),
             "kept_len": float(kept_len),
-            "suppressed": False if kept_any else True,
+            "suppressed": not kept_any,
         })
+       
+    # -----------------------------
+    # DEBUG: global territory + bite (mask-based)
+    # -----------------------------
+    if debug_dir:
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle
+        os.makedirs(debug_dir, exist_ok=True)
+
+        pad = 30
+        x0 = max(0, bx0 - pad)
+        y0 = max(0, by0 - pad)
+        x1 = min(W, bx1 + pad)
+        y1 = min(H, by1 + pad)
+
+        Hc, Wc = y1 - y0, x1 - x0
+
+        fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
+        ax.imshow(crack_mask[y0:y1, x0:x1], cmap="gray")
+
+        colors = [
+            np.array([0.2, 0.8, 0.2]),
+            np.array([0.9, 0.6, 0.1]),
+            np.array([0.2, 0.4, 0.9]),
+            np.array([0.6, 0.3, 0.7]),
+        ]
+
+        for bi, terr in branch_terr_masks.items():
+            bm = terr[y0:y1, x0:x1]
+            if not np.any(bm):
+                continue
+
+            rgba = np.zeros((Hc, Wc, 4), float)
+            rgba[..., :3] = colors[bi % len(colors)]
+            rgba[..., 3] = 0.25 * (bm > 0)
+            ax.imshow(rgba)
+            
+        # -------------------------------------------------
+        # BRANCH USER GEOMETRY (pre-bite, reference)
+        # -------------------------------------------------
+        for bi, user_segs in enumerate(branch_user_segs):
+            color = colors[bi % len(colors)]
+
+            # darker, opaque line color
+            line_color = color * 0.85
+
+            for atomic_id, S_user in user_segs:
+                if S_user is None or len(S_user) < 2:
+                    continue
+
+                # crop check (fast reject)
+                if (
+                    S_user[:, 0].max() < x0 or S_user[:, 0].min() > x1 or
+                    S_user[:, 1].max() < y0 or S_user[:, 1].min() > y1
+                ):
+                    continue
+
+                S2 = S_user - np.array([x0, y0])
+
+                ax.plot(
+                    S2[:, 0],
+                    S2[:, 1],
+                    color=line_color,
+                    lw=2.5,
+                    alpha=0.9,
+                    solid_capstyle="round",
+                )
+
+        # bite overlay
+        bite_crop = bite_total[y0:y1, x0:x1]
+        if np.any(bite_crop):
+            bite_rgba = np.zeros((Hc, Wc, 4), float)
+            bite_rgba[..., 0] = 1.0
+            bite_rgba[..., 3] = 0.45 * (bite_crop > 0)
+            ax.imshow(bite_rgba)
+
+        ax.add_patch(
+            Rectangle(
+                (bx0 - x0, by0 - y0),
+                bx1 - bx0,
+                by1 - by0,
+                fill=False,
+                edgecolor="cyan",
+                linewidth=1.2,
+            )
+        )
+
+        ax.set_title(f"{debug_tag} — Territory + Bite")
+        ax.axis("off")
+
+        out = os.path.join(debug_dir, f"{debug_tag}_territory_global.png")
+        fig.savefig(out, bbox_inches="tight", dpi=200)
+        plt.close(fig)
+
+        print(f"[DOMINANCE DEBUG] wrote {out}")
+
+
 
     kept = [S for (_, _, S, _) in kept_meta]
 
@@ -674,16 +830,15 @@ def dominant_segments_from_group(
     }
 
     # -----------------------------
-    # 5) debug (final visualization)
+    # 5) debug (visual dominance audit)
     # -----------------------------
-    if debug_dir and kept:
+    if debug_dir:
         import matplotlib.pyplot as plt
         from matplotlib.lines import Line2D
         from matplotlib.patches import Rectangle
 
         os.makedirs(debug_dir, exist_ok=True)
 
-        # union bbox xyxy already computed
         bx0d, by0d, bx1d, by1d = bx0, by0, bx1, by1
 
         pad = 20
@@ -692,26 +847,28 @@ def dominant_segments_from_group(
         x1 = min(W, bx1d + pad)
         y1 = min(H, by1d + pad)
 
-        fig, ax = plt.subplots(figsize=(5, 5), dpi=200)
+        fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
         ax.imshow(crack_mask[y0:y1, x0:x1], cmap="gray")
 
-        # ----------------------------
-        # Draw combined bounding box
-        # ----------------------------
-        ax.add_patch(
-            Rectangle(
-                (bx0d - x0, by0d - y0),
-                bx1d - bx0d,
-                by1d - by0d,
-                fill=False,
-                linewidth=1.0,
-                edgecolor="#1f77b4",
-            )
-        )
+        # -------------------------------------------------
+        # TERRITORY (what dominance actually reasoned on)
+        # -------------------------------------------------
+        for bi, terr_segs in enumerate(branch_terr_segs):
+            for S in terr_segs:
+                if S is None or len(S) < 2:
+                    continue
+                S2 = S - np.array([x0, y0])
+                ax.plot(
+                    S2[:, 0], S2[:, 1],
+                    color="lime",
+                    lw=3.0,
+                    linestyle="--",
+                    alpha=0.9
+                )
 
-        # ----------------------------
-        # Plot kept midlines
-        # ----------------------------
+        # -------------------------------------------------
+        # KEPT segments (final output)
+        # -------------------------------------------------
         branch_colors = [
             "#2ecc71",
             "#e67e22",
@@ -721,56 +878,70 @@ def dominant_segments_from_group(
             "#1abc9c",
         ]
 
-        used_branches = set()
-        for (bi, _, S, _) in kept_meta:
-            used_branches.add(bi)
-            color = branch_colors[bi % len(branch_colors)]
-            lw = 3.0 if (primary_branch is not None and bi == primary_branch) else 2.0
+        for (bi, _, S, is_primary) in kept_meta:
+            if S is None or len(S) < 2:
+                continue
             S2 = S - np.array([x0, y0])
-            ax.plot(S2[:, 0], S2[:, 1], color=color, lw=lw)
-
-        # ----------------------------
-        # Legend with compact lengths
-        # ----------------------------
-        legend_items = []
-
-        branch_stat_map = {b["branch_id"]: b for b in branch_stats}
-
-        for bi in sorted(used_branches):
-            st = branch_stat_map.get(bi, {})
-            user_len = float(st.get("user_len", 0.0))
-            kept_len = float(st.get("kept_len", 0.0))
-
-            # compact formatting
-            if abs(user_len - kept_len) < 1e-3:
-                len_txt = f"{user_len:.1f}px"
-            else:
-                len_txt = f"{user_len:.1f}/{kept_len:.1f}px"
-
-            label = (
-                f"Branch {bi} (primary) — {len_txt}"
-                if (primary_branch is not None and bi == primary_branch)
-                else
-                f"Branch {bi} — {len_txt}"
+            ax.plot(
+                S2[:, 0], S2[:, 1],
+                color=branch_colors[bi % len(branch_colors)],
+                lw=3.5 if is_primary else 2.5
             )
 
-            legend_items.append(
-                Line2D(
-                    [0], [0],
-                    color=branch_colors[bi % len(branch_colors)],
-                    lw=3.0 if (primary_branch is not None and bi == primary_branch) else 2.0,
-                    label=label,
-                )
+        # -------------------------------------------------
+        # REJECTED USER geometry (what got nuked)
+        # -------------------------------------------------
+        for bi, atomic_id, S in [
+            (m.get("branch_id"), m.get("atomic_id"), s)
+            for m, s in zip(segments_meta, kept)
+            if m.get("length", 0) < 2.0
+        ]:
+            if S is None or len(S) < 2:
+                continue
+            S2 = S - np.array([x0, y0])
+            ax.plot(
+                S2[:, 0], S2[:, 1],
+                color="gray",
+                lw=2.0,
+                linestyle=":"
             )
 
-        legend_items.append(
-            Line2D(
-                [0], [0],
-                color="#1f77b4",
-                lw=1.0,
-                label="Bounding Box",
+        # -------------------------------------------------
+        # BITE AREA (actual dominance overlap)
+        # -------------------------------------------------
+        if bite_total is not None and np.any(bite_total):
+            bite_crop_dbg = bite_total[y0:y1, x0:x1]
+            ax.imshow(
+                np.ma.masked_where(bite_crop_dbg == 0, bite_crop_dbg),
+                cmap="Reds",
+                alpha=0.5,
+                interpolation="nearest",
+            )
+
+        # -------------------------------------------------
+        # Bounding box
+        # -------------------------------------------------
+        ax.add_patch(
+            Rectangle(
+                (bx0d - x0, by0d - y0),
+                bx1d - bx0d,
+                by1d - by0d,
+                fill=False,
+                linewidth=1.2,
+                edgecolor="#1f77b4",
             )
         )
+
+        # -------------------------------------------------
+        # Legend (minimal, readable)
+        # -------------------------------------------------
+        legend_items = [
+            Line2D([0], [0], color="lime", lw=3, linestyle="--", label="Territory (mask-clipped)"),
+            Line2D([0], [0], color="red", lw=4, label="Kept (primary / sub)"),
+            Line2D([0], [0], color="gray", lw=2, linestyle=":", label="Rejected"),
+            Line2D([0], [0], color="red", lw=6, alpha=0.5, label="Bite"),
+            Line2D([0], [0], color="#1f77b4", lw=1, label="BBox"),
+        ]
 
         ax.legend(
             handles=legend_items,
@@ -784,12 +955,43 @@ def dominant_segments_from_group(
         ax.axis("off")
 
         fig.savefig(
-            os.path.join(debug_dir, f"{debug_tag}_final.png"),
+            os.path.join(debug_dir, f"{debug_tag}_dominance_debug.png"),
             bbox_inches="tight",
             dpi=200,
         )
         plt.close(fig)
 
+    # -----------------------------
+    # INSTRUMENTATION: segment audit
+    # -----------------------------
+    if debug_dir:
+        bad = []
+        for i, S in enumerate(kept):
+            if S is None:
+                bad.append((i, "None"))
+            elif not isinstance(S, np.ndarray):
+                bad.append((i, f"type={type(S)}"))
+            elif S.ndim != 2:
+                bad.append((i, f"ndim={S.ndim}"))
+            elif S.shape[1] != 2:
+                bad.append((i, f"shape={S.shape}"))
+            elif len(S) < 3:
+                bad.append((i, f"len={len(S)}"))
+
+        if bad:
+            print("\n[DOMINANCE AUDIT] ⚠ problematic kept segments:")
+            for i, reason in bad:
+                m = segments_meta[i] if i < len(segments_meta) else {}
+                print(
+                    f"  seg#{i}: {reason}, "
+                    f"branch={m.get('branch_id')}, "
+                    f"rank={m.get('branch_rank')}, "
+                    f"atomic={m.get('atomic_id')}, "
+                    f"is_primary={m.get('is_primary')}, "
+                    f"len_px={m.get('length'):.2f}"
+                )
+    
+    
     return kept, meta
 
 
@@ -1061,6 +1263,21 @@ def build_combined_crack_stateless(
         # edge_masks timing
         # -------------------------
         t_em0 = time.perf_counter()
+        
+        # -----------------------------
+        # INSTRUMENTATION: pre-edge audit
+        # -----------------------------
+        n_pts = track_local_yx.shape[1]
+        if n_pts < 3:
+            print(
+                f"[COMBINER AUDIT] ⚠ short segment skipped: "
+                f"n_pts={n_pts}, "
+                f"bbox=({x0},{y0})-({x1},{y1}), "
+                f"pad={pad}"
+            )
+            continue
+
+        
         em1, em2 = edge_masks(
             crop.astype(np.uint8),
             track_local_yx,

@@ -2886,6 +2886,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     # fall back to snapshot-level geodesics if auto_best didn't persist them
                     ge_auto = snap.get("geodesic_edges", {}) or {}
 
+                # --------------------------------------------------
+                # AUTO ATOMIC (INHERIT MANUAL TOPOLOGY)
+                # --------------------------------------------------
                 auto_cr = {
                     "midline": mid_auto.tolist(),
                     "geodesic_edges": ge_auto,
@@ -2893,7 +2896,13 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     "mask_crop": snap.get("mask_crop"),
                     "timing": snap.get("timing", {}),
                     "source": "auto_best",
+
+                    # CRITICAL: preserve manual topology for grouping
+                    "user_points": snap.get("user_points", []),
+                    "user_connections": snap.get("user_connections", []),
                 }
+                auto_atomic[scid] = auto_cr
+
                 auto_atomic[scid] = auto_cr
 
             print(f"[DEBUG METRICS] built {len(auto_atomic)} auto_best cracks for mask/width metrics")
@@ -3017,6 +3026,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     color_channel=0, pad=10, prefer_gpu=True,
                     debug_dir=mode_dir,
                     crack_mask_full=self.current_mask,
+                    #crack_mask_full=self.full_prediction_mask,
                     debug_callback=_cb,
                 )
                 rebuilt["members"] = members
@@ -3714,7 +3724,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     # crack id
                     if prefer_semantic_id:
                         crack_id = cr.get("semantic_id") or cr.get("members_str") or str(cid)
-                        print(crack_id, cr.keys())
+                        #print(crack_id, cr.keys())
                     else:
                         crack_id = str(cid)
 
@@ -5013,10 +5023,17 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 desc = _variant_desc(vid, g_used, edge_params_fixed or {})
                 desc["os_mode"] = os_mode_name
 
+                # --------------------------------------------------
+                # TOPOLOGY INHERITANCE (FROM MANUAL CRACK)
+                # --------------------------------------------------
                 variants_out[f"v{vid}"] = {
                     "midline": track_xy.tolist(),
                     "mask_bbox": [x, y, w, h],
                     "params": desc,
+
+                    # inherit manual topology verbatim
+                    "user_points": crack.get("user_points", []),
+                    "user_connections": crack.get("user_connections", []),
                 }
 
                 set_auto_variant_for_crack(
@@ -5501,7 +5518,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 "mu": [0],
                 "l": [5],
                 "p": [14],
-                "seg_mode": ["new", "old"],
+                "seg_mode": ["new"],
             }
 
         # default params (always valid)
@@ -5689,7 +5706,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 edge_params_fixed=best_edge,
                 cpu_max_workers=cpu_max_workers,
                 force_recompute=True,
-                os_ablation=True
+                os_ablation=False
             )
             if pack:
                 auto_packs[cid] = pack
@@ -5707,8 +5724,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 print(f"[quick] ⚠ RS3 family selection failed: {e}")
         else:
             print("[quick] ⚠ no auto_packs; skipping RS3 family selection.")
-
-        return
+        #return
 
         # ------------------------------------------------------------
         # PHASE 2: GEODESIC EDGES FOR AUTO BEST MIDLINES

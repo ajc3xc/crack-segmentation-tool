@@ -902,6 +902,7 @@ def compare_widths_for_cracks(
     # ---------------- accumulators ----------------
     coords, diffs, bboxes = [], [], []
     rows = []
+    midline_metric_rows = []   # NEW: for combined midline diagnostics
 
     # debug dir for opsec artifacts
     opsec_dir = os.path.join(metrics_dir, midline_type or "unknown", "opsec_debug")
@@ -1146,6 +1147,80 @@ def compare_widths_for_cracks(
             pw_ok = pw_full[:mlen]
             gw_ok = gw[:mlen]
             d = pw_ok - gw_ok
+            
+            # ============================================================
+            # MIDLINE METRICS (COMBINED + AUTO ONLY)
+            # ============================================================
+            if mode == "combined" and midline_type == "auto" and gt_entry is not None:
+                try:
+                    from helpers.metrics import compute_midline_metrics
+                    import math
+
+                    # ---- build GT midline (same pruning rules as pred) ----
+                    gt_segs_all = gt_entry.get("midline_segments") or []
+                    gt_meta_all = gt_entry.get("midline_segments_meta") or []
+
+                    gt_keep = []
+                    for Sg, mg in zip(gt_segs_all, gt_meta_all):
+                        if Sg is None or len(Sg) < 2:
+                            continue
+                        aid = mg.get("atomic_id")
+                        if aid is not None and str(aid) not in shared:
+                            continue
+                        bid = int(mg.get("branch_id", -1))
+                        if matched_pred_branch_ids is not None and bid not in matched_pred_branch_ids:
+                            continue
+                        gt_keep.append(np.asarray(Sg, float))
+
+                    if gt_keep:
+                        gt_mid = np.vstack(gt_keep)
+
+                        # ---- compute midline metrics ----
+                        mm = compute_midline_metrics(pts_ok, gt_mid)
+
+                        ch  = float(mm.get("chamfer_mean", np.inf))
+                        hd  = float(mm.get("hausdorff", np.inf))
+                        cov = float(mm.get("coverage", 0.0))
+
+                        score_mid = (
+                            math.log1p(max(ch, 0.0)) +
+                            0.5 * math.log1p(max(hd, 0.0)) +
+                            (1.0 - float(np.clip(cov, 0.0, 1.0)))
+                        )
+
+                        midline_metric_rows.append({
+                            "image": base_name,
+                            "crack_id": str(cid),
+                            "variant_global_id": -1,   # sentinel (not RS3)
+                            "os_mode": "combined",
+                            "g11": np.nan,
+                            "g22": np.nan,
+                            "g33": np.nan,
+
+                            "length_px": _linestring_length(gt_mid),
+                            "bbox_area": float(bbox0[2] * bbox0[3]) if bbox0 else np.nan,
+
+                            # --- selection metrics ---
+                            "chamfer_mean": ch,
+                            "hausdorff": hd,
+                            "coverage": cov,
+                            "score_mid": score_mid,
+
+                            # --- diagnostics ---
+                            "frechet_discrete": mm.get("frechet_discrete"),
+                            "angle_err_deg": mm.get("angle_err_deg"),
+                            "length_ratio": mm.get("length_ratio"),
+                            "orth_mean": mm.get("orth_mean"),
+                            "orth_std": mm.get("orth_std"),
+                            "directional_bias": mm.get("directional_bias"),
+                            "curvature_rms_auto": mm.get("curvature_rms_auto"),
+                            "curvature_rms_manual": mm.get("curvature_rms_manual"),
+                            "curvature_rms_ratio": mm.get("curvature_rms_ratio"),
+                        })
+
+                except Exception as e:
+                    print(f"[MIDLINE METRICS] skipped cid={cid} seg#{si}: {e}")
+
 
             # ---- bbox bookkeeping (FIX) ----
             bbox0 = crack.get("mask_bbox")
@@ -1262,6 +1337,31 @@ def compare_widths_for_cracks(
     out = os.path.join(out_dir, f"{midline_type}_{crack_type}_width_diffs.png")
     fig.savefig(out, dpi=200, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
+    
+    # ============================================================
+    # MIDLINE DIAGNOSTIC PLOTS (COMBINED / AUTO)
+    # ============================================================
+    if midline_metric_rows:
+        try:
+            import pandas as pd
+            from helpers.present_plots import plot_rs3_midline_diagnostics
+
+            df_mid = pd.DataFrame(midline_metric_rows)
+
+            diag_dir = os.path.join(metrics_dir, midline_type or "unknown", "midline_diagnostics")
+            os.makedirs(diag_dir, exist_ok=True)
+
+            plot_rs3_midline_diagnostics(
+                df_all=df_mid,
+                out_dir=diag_dir,
+                selected_family=None,   # GENERALIZED
+            )
+
+            print(f"[MIDLINE METRICS] plotted {len(df_mid)} combined diagnostics")
+
+        except Exception as e:
+            print(f"[MIDLINE METRICS] plotting failed: {e}")
+
 
     return rows, None
 
