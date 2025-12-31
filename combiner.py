@@ -360,6 +360,22 @@ def bbox_xywh_to_xyxy(bbox, H, W, *, pad=0):
         raise ValueError(f"bbox_xywh_to_xyxy: degenerate bbox after clip: {bbox}")
 
     return x0, y0, x1, y1
+
+def _atomic_mask_global(cr, H, W):
+    """
+    Expand per-atomic mask_crop into global image space.
+    """
+    mc = cr.get("mask_crop")
+    bb = cr.get("mask_bbox")
+
+    if mc is None or bb is None:
+        return None
+
+    x, y, w, h = map(int, bb)
+    m = np.zeros((H, W), np.uint8)
+    mc = np.asarray(mc, np.uint8)
+    m[y:y+h, x:x+w] = mc[:h, :w]
+    return m
     
 def dominant_segments_from_group(
     *,
@@ -446,8 +462,10 @@ def dominant_segments_from_group(
     endpoints = []   # [set((x,y), ...)]
 
     for m in members:
+        
         cr = atomic.get(str(m), {}) or {}
         ml = np.asarray(cr.get("midline", []), float)
+        print(cr['source'], cr.keys())
         if ml.ndim == 2 and len(ml) >= 2:
             atomics.append((str(m), _finite_xy(ml)))
             endpoints.append(get_user_endpoints(cr))
@@ -584,16 +602,21 @@ def dominant_segments_from_group(
     # -----------------------------
     # 4) dominance between branches (ordered by USER length)
     # -----------------------------
-    dt = cv2.distanceTransform(crack_mask, cv2.DIST_L2, 5)
 
-    def seg_radius(S):
-        ys = np.clip(np.round(S[:, 1]).astype(int), 0, H - 1)
-        xs = np.clip(np.round(S[:, 0]).astype(int), 0, W - 1)
-        d = dt[ys, xs]
-        d = d[np.isfinite(d)]
-        if len(d) == 0:
-            return 0.3 * window_half_size
-        return max(3.0, min(float(np.median(d)), window_half_size))
+    use_mask_territory = crack_mask is None
+
+    # Distance transform ONLY used in DT fallback mode
+    if not use_mask_territory:
+        dt = cv2.distanceTransform(crack_mask, cv2.DIST_L2, 5)
+
+        def seg_radius(S):
+            ys = np.clip(np.round(S[:, 1]).astype(int), 0, H - 1)
+            xs = np.clip(np.round(S[:, 0]).astype(int), 0, W - 1)
+            d = dt[ys, xs]
+            d = d[np.isfinite(d)]
+            if len(d) == 0:
+                return 0.3 * window_half_size
+            return max(3.0, min(float(np.median(d)), window_half_size))
 
     order = sorted(
         range(len(branches)),
@@ -612,25 +635,40 @@ def dominant_segments_from_group(
     branch_terr_masks = {}
 
     for rank, bi in enumerate(order):
+
+        # -------------------------------------------------
+        # Build territory mask
+        # -------------------------------------------------
         branch_terr = np.zeros((H, W), np.uint8)
 
-        for S_clip in branch_terr_segs[bi]:
-            if S_clip is None or len(S_clip) < 2:
-                continue
+        if use_mask_territory:
+            # === MASK-BASED TERRITORY (atomic mask crops) ===
+            for atomic_id, _ in branch_user_segs[bi]:
+                cr = atomic.get(str(atomic_id), {})
+                am = _atomic_mask_global(cr, H, W)
+                if am is not None:
+                    branch_terr |= am
+        else:
+            # === DT-BASED TERRITORY (legacy fallback) ===
+            for S_clip in branch_terr_segs[bi]:
+                if S_clip is None or len(S_clip) < 2:
+                    continue
 
-            r = seg_radius(S_clip)
-            rad = int(max(3, 0.8 * r))
-            kernel = cv2.getStructuringElement(
-                cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1)
-            )
+                r = seg_radius(S_clip)
+                rad = int(max(3, 0.8 * r))
+                kernel = cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1)
+                )
 
-            line = _polyline_mask(S_clip, H, W)
-            terr = cv2.dilate(line, kernel, iterations=1) & crack_mask
-            branch_terr |= terr
+                line = _polyline_mask(S_clip, H, W)
+                terr = cv2.dilate(line, kernel, iterations=1) & crack_mask
+                branch_terr |= terr
 
         branch_terr_masks[bi] = branch_terr.copy()
 
-        # ---- suppression gate ----
+        # -------------------------------------------------
+        # Suppression gate (territory support vs user length)
+        # -------------------------------------------------
         terr_len = (
             _linestring_length(np.vstack(branch_terr_segs[bi]))
             if branch_terr_segs[bi]
@@ -649,7 +687,9 @@ def dominant_segments_from_group(
             })
             continue
 
-        # ---- primary branch ----
+        # -------------------------------------------------
+        # PRIMARY branch: keep FULL USER geometry
+        # -------------------------------------------------
         if rank == 0:
             kept_len = 0.0
             for atomic_id, S_user in branch_user_segs[bi]:
@@ -674,24 +714,29 @@ def dominant_segments_from_group(
         if np.any(bite):
             bite_total |= bite
 
-        remaining = branch_terr & (~claimed)
-
-        # dominance decision is MASK-based,
-        # geometry survival is USER-based
         kept_any = False
         kept_len = 0.0
 
-        if np.any(remaining):
-            for atomic_id, S_user in branch_user_segs[bi]:
-                if S_user is None or len(S_user) < 2:
-                    continue
+        # IMPORTANT:
+        # We clip ONLY by claimed territory, NOT crack_mask
+        allowed = (claimed == 0)
 
-                kept_meta.append((bi, atomic_id, S_user, False))
-                kept_any = True
-                kept_len += _linestring_length(S_user)
+        for atomic_id, S_user in branch_user_segs[bi]:
+            if S_user is None or len(S_user) < 2:
+                continue
 
-            # only after survival is confirmed do we claim territory
-            claimed |= remaining
+            # Clip OUT the dominant territory
+            pieces = _clip_polyline_to_mask(S_user, allowed)
+
+            for p in pieces:
+                if p is not None and len(p) >= 2:
+                    kept_meta.append((bi, atomic_id, p, False))
+                    kept_any = True
+                    kept_len += _linestring_length(p)
+
+        # Territory ownership remains mask-based
+        if kept_any:
+            claimed |= branch_terr
 
         branch_stats.append({
             "branch_id": int(bi),
@@ -701,7 +746,8 @@ def dominant_segments_from_group(
             "kept_len": float(kept_len),
             "suppressed": not kept_any,
         })
-       
+
+      
     # -----------------------------
     # DEBUG: global territory + bite (mask-based)
     # -----------------------------
