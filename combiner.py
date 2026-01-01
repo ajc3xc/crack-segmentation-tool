@@ -381,7 +381,7 @@ def dominant_segments_from_group(
     *,
     members,
     atomic,
-    crack_mask_u8,
+    crack_mask_u8=None,
     window_half_size,
     debug_dir=None,
     debug_tag="group",
@@ -391,30 +391,21 @@ def dominant_segments_from_group(
 
     - Branches defined by shared USER endpoints (atomic space)
     - Branch ordering by total USER length (never clipped)
-    - Territory built from CLIPPED geometry only
     - Dominance between branches only
-    - Output segments are USER-space polylines (primary: unmodified; subordinate: clipped to remaining)
+    - Output segments are USER-space polylines:
+        * primary: unmodified
+        * subordinate: clipped OUT of claimed territory (and also constrained to crack_mask when provided)
 
-    NEW:
-      Returns: (kept_segments, meta)
-        meta includes:
-          - branches: per-branch atomic membership + lengths
-          - segments_meta: per kept segment: branch_id + atomic_id + primary flag
-          - bite mask (compressed packbits+b64) in bbox crop coordinates
-            (pixels where a subordinate branch territory was "bitten" by already-claimed dominant territory)
+    Territory modes:
+      A) crack_mask_u8 PROVIDED  -> DT-based territory (dilated midline-within-crack_mask)
+      B) crack_mask_u8 is None   -> atomic-mask territory (union of atomic mask crops)
 
-    NOTE:
-      - "bite" here is ONLY dominance overlap (branch_terr & claimed) for subordinate branches.
-      - No re-running dominance downstream; you use bite-union to symmetrically clip later.
+    Returns: (kept_segments, meta)
     """
-
     import os
     import base64
     import numpy as np
     import cv2
-
-    H, W = crack_mask_u8.shape[:2]
-    crack_mask = (crack_mask_u8 > 0).astype(np.uint8)
 
     # -----------------------------
     # local helper: user endpoints
@@ -429,7 +420,7 @@ def dominant_segments_from_group(
                     out.add(tuple(map(float, ups[idx])))
         return out
 
-    def _union_member_bbox_xyxy(member_ids):
+    def _union_member_bbox_xyxy(member_ids, W, H):
         boxes = []
         for m in member_ids:
             bb = (atomic.get(str(m), {}) or {}).get("mask_bbox")
@@ -462,28 +453,46 @@ def dominant_segments_from_group(
     endpoints = []   # [set((x,y), ...)]
 
     for m in members:
-        
         cr = atomic.get(str(m), {}) or {}
         ml = np.asarray(cr.get("midline", []), float)
-        #print(cr['source'], cr.keys())
         if ml.ndim == 2 and len(ml) >= 2:
             atomics.append((str(m), _finite_xy(ml)))
             endpoints.append(get_user_endpoints(cr))
-            
-    '''if debug_dir:
-        print("\n[DOMINANCE DBG] === ATOMIC TOPOLOGY CHECK ===")
-        for i, ((cid, _), eps) in enumerate(zip(atomics, endpoints)):
-            print(
-                f"  atomic[{i}] cid={cid} | "
-                f"user_endpoints={len(eps)} | "
-                f"points={sorted(list(eps)) if eps else '∅'}"
-            )'''
 
     if not atomics:
         return [], {"branches": [], "segments_meta": [], "bite": None}
 
+    # -----------------------------
+    # 1.5) mask / canvas init (NOW atomics exists)
+    # -----------------------------
+    use_dt_territory = (crack_mask_u8 is not None)   # DT territory needs real crack mask
+    use_atomic_mask_territory = (crack_mask_u8 is None)
+
+    if crack_mask_u8 is not None:
+        H, W = crack_mask_u8.shape[:2]
+        crack_mask = (crack_mask_u8 > 0).astype(np.uint8)
+    else:
+        # fallback canvas from USER geometry
+        xs = []
+        ys = []
+        for _, S in atomics:
+            if S is None or len(S) == 0:
+                continue
+            fx = S[:, 0]
+            fy = S[:, 1]
+            fx = fx[np.isfinite(fx)]
+            fy = fy[np.isfinite(fy)]
+            if len(fx):
+                xs.append(float(np.nanmax(fx)))
+            if len(fy):
+                ys.append(float(np.nanmax(fy)))
+
+        W = int(max(xs) + 2) if xs else 2
+        H = int(max(ys) + 2) if ys else 2
+        crack_mask = None
+
     # bbox for cropped bite storage
-    bbox_xyxy = _union_member_bbox_xyxy(members)
+    bbox_xyxy = _union_member_bbox_xyxy(members, W, H)
     if bbox_xyxy is None:
         bx0, by0, bx1, by1 = 0, 0, W, H
     else:
@@ -517,12 +526,11 @@ def dominant_segments_from_group(
         branches.append(comp)
 
     # -----------------------------
-    # 3) per-branch user length + user segs + clipped segs (territory only)
+    # 3) per-branch user length + seg lists
     # -----------------------------
-
     branch_user_len = []
     branch_user_segs = []        # list[list[(atomic_id, USER_polyline)]]
-    branch_terr_segs = []        # list[list[polyline_piece]]  (MASK-CLIPPED, TERRITORY ONLY)
+    branch_terr_segs = []        # list[list[polyline_piece]] (ONLY used for DT territory mode)
 
     for atom_ids in branches:
         total_len = 0.0
@@ -531,43 +539,30 @@ def dominant_segments_from_group(
 
         for ai in atom_ids:
             atomic_id, S_user = atomics[ai]
-
             if S_user is None or len(S_user) < 2:
                 continue
 
-            # ---- USER geometry (NEVER clipped to crack_mask) ----
             total_len += _linestring_length(S_user)
             user_segs.append((atomic_id, S_user))
 
-            # ---- TERRITORY geometry (mask-clipped, mask logic ONLY) ----
-            pieces = _clip_polyline_to_mask(S_user, crack_mask)
-            for p in pieces:
-                if p is not None and len(p) >= 2:
-                    terr_segs.append(p)
+            # Territory polylines only needed when we have a crack_mask to clip to
+            if crack_mask is not None:
+                pieces = _clip_polyline_to_mask(S_user, crack_mask)
+                for p in pieces:
+                    if p is not None and len(p) >= 2:
+                        terr_segs.append(p)
+            else:
+                # no crack_mask: keep something non-empty so terr_len gate doesn't auto-suppress
+                terr_segs.append(S_user)
 
         branch_user_len.append(float(total_len))
         branch_user_segs.append(user_segs)
         branch_terr_segs.append(terr_segs)
-        
-    # -----------------------------
-    # Sanity: drop branches with no TERRITORY support
-    # -----------------------------
-    for i, terr in enumerate(branch_terr_segs):
-        if not terr and branch_user_len[i] > 0:
-            print(
-                f"[DOMINANCE AUDIT] ⚠ branch {i} has USER length "
-                f"{branch_user_len[i]:.2f}px but ZERO territory segments"
-            )
-            
 
-    # -----------------------------
+    ''' # -----------------------------
     # 4) dominance between branches (ordered by USER length)
     # -----------------------------
-
-    use_mask_territory = crack_mask is None
-
-    # Distance transform ONLY used in DT fallback mode
-    if not use_mask_territory:
+    if use_dt_territory:
         dt = cv2.distanceTransform(crack_mask, cv2.DIST_L2, 5)
 
         def seg_radius(S):
@@ -578,6 +573,11 @@ def dominant_segments_from_group(
             if len(d) == 0:
                 return 0.3 * window_half_size
             return max(3.0, min(float(np.median(d)), window_half_size))
+    else:
+        dt = None
+
+        def seg_radius(S):
+            return max(3.0, 0.5 * float(window_half_size))
 
     order = sorted(
         range(len(branches)),
@@ -592,31 +592,30 @@ def dominant_segments_from_group(
     branch_stats = []
     primary_branch = order[0] if order else None
 
-    # store territory masks FOR DEBUG ONLY
-    branch_terr_masks = {}
+    branch_terr_masks = {}  # debug only
 
     for rank, bi in enumerate(order):
 
         # -------------------------------------------------
-        # Build territory mask
+        # Build territory mask for this branch
         # -------------------------------------------------
         branch_terr = np.zeros((H, W), np.uint8)
 
-        if use_mask_territory:
-            # === MASK-BASED TERRITORY (atomic mask crops) ===
+        if use_atomic_mask_territory:
+            # === ATOMIC-MASK TERRITORY (authoritative) ===
             for atomic_id, _ in branch_user_segs[bi]:
-                cr = atomic.get(str(atomic_id), {})
-                am = _atomic_mask_global(cr, H, W)
+                cr = atomic.get(str(atomic_id), {}) or {}
+                am = _atomic_mask_global(cr, H, W)  # expects global H,W
                 if am is not None:
-                    branch_terr |= am
+                    branch_terr |= (am > 0).astype(np.uint8)
+
         else:
-            # === DT-BASED TERRITORY (legacy fallback) ===
+            # === DT TERRITORY (unchanged) ===
             for S_clip in branch_terr_segs[bi]:
                 if S_clip is None or len(S_clip) < 2:
                     continue
 
                 r = seg_radius(S_clip)
-                print(r)
                 rad = int(max(4, 1.3 * r))
                 kernel = cv2.getStructuringElement(
                     cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1)
@@ -629,13 +628,17 @@ def dominant_segments_from_group(
         branch_terr_masks[bi] = branch_terr.copy()
 
         # -------------------------------------------------
-        # Suppression gate (territory support vs user length)
+        # Suppression gate
         # -------------------------------------------------
-        terr_len = (
-            _linestring_length(np.vstack(branch_terr_segs[bi]))
-            if branch_terr_segs[bi]
-            else 0.0
-        )
+        if use_atomic_mask_territory:
+            terr_len = float(branch_user_len[bi])
+        else:
+            terr_len = (
+                _linestring_length(np.vstack(branch_terr_segs[bi]))
+                if branch_terr_segs[bi]
+                else 0.0
+            )
+
         min_len_px = 0.10 * branch_user_len[bi]
 
         if rank > 0 and terr_len < min_len_px:
@@ -647,10 +650,183 @@ def dominant_segments_from_group(
                 "kept_len": 0.0,
                 "suppressed": True,
             })
+
+        else:
+
+            # -------------------------------------------------
+            # PRIMARY branch: keep FULL USER geometry
+            # -------------------------------------------------
+            if rank == 0:
+                kept_len = 0.0
+                for atomic_id, S_user in branch_user_segs[bi]:
+                    if S_user is not None and len(S_user) >= 2:
+                        kept_meta.append((bi, atomic_id, S_user, True))
+                        kept_len += _linestring_length(S_user)
+
+                branch_stats.append({
+                    "branch_id": int(bi),
+                    "rank": int(rank),
+                    "atomic_ids": [aid for (aid, _) in branch_user_segs[bi]],
+                    "user_len": float(branch_user_len[bi]),
+                    "kept_len": float(kept_len),
+                    "suppressed": False,
+                })
+
+            # -------------------------------------------------
+            # SUBORDINATE branches: clip OUT claimed territory
+            # -------------------------------------------------
+            else:
+                bite = branch_terr & claimed
+
+                # --- AUTHORITATIVE bite expansion (atomic-mask mode only) ---
+                if use_atomic_mask_territory and np.any(bite):
+                    bite = cv2.dilate(
+                        bite,
+                        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+                        iterations=1,
+                    )
+
+                if np.any(bite):
+                    bite_total |= bite
+                    claimed |= bite   # <-- makes dilation affect cutting
+
+                kept_any = False
+                kept_len = 0.0
+
+                if crack_mask is not None:
+                    allowed = ((crack_mask > 0) & (claimed == 0)).astype(np.uint8)
+                else:
+                    allowed = (claimed == 0).astype(np.uint8)
+
+                for atomic_id, S_user in branch_user_segs[bi]:
+                    if S_user is None or len(S_user) < 2:
+                        continue
+
+                    pieces = _clip_polyline_to_mask(S_user, allowed)
+                    for p in pieces:
+                        if p is not None and len(p) >= 2:
+                            kept_meta.append((bi, atomic_id, p, False))
+                            kept_any = True
+                            kept_len += _linestring_length(p)
+
+                branch_stats.append({
+                    "branch_id": int(bi),
+                    "rank": int(rank),
+                    "atomic_ids": [aid for (aid, _) in branch_user_segs[bi]],
+                    "user_len": float(branch_user_len[bi]),
+                    "kept_len": float(kept_len),
+                    "suppressed": not kept_any,
+                })
+
+        # -------------------------------------------------
+        # CRITICAL INVARIANT:
+        # Territory is always claimed, even if geometry is fully deleted
+        # -------------------------------------------------
+        claimed |= branch_terr'''
+    # -----------------------------
+    # 4) dominance between branches (ordered by USER length)
+    # -----------------------------
+
+    # -------------------------------------------------
+    # Select DT domain mask
+    # -------------------------------------------------
+    if crack_mask is not None:
+        domain_mask = (crack_mask > 0).astype(np.uint8)
+    else:
+        domain_mask = np.zeros((H, W), np.uint8)
+        for m in members:
+            cr = atomic.get(str(m), {}) or {}
+            am = _atomic_mask_global(cr, H, W)
+            if am is not None:
+                domain_mask |= (am > 0).astype(np.uint8)
+
+    # -------------------------------------------------
+    # Compute DT once over domain
+    # -------------------------------------------------
+    dt = cv2.distanceTransform(domain_mask, cv2.DIST_L2, 5)
+
+    def seg_radius(S):
+        ys = np.clip(np.round(S[:, 1]).astype(int), 0, H - 1)
+        xs = np.clip(np.round(S[:, 0]).astype(int), 0, W - 1)
+        d = dt[ys, xs]
+        d = d[np.isfinite(d)]
+        if len(d) == 0:
+            return 0.3 * window_half_size
+        return max(3.0, min(float(np.median(d)), window_half_size))
+
+    order = sorted(
+        range(len(branches)),
+        key=lambda i: branch_user_len[i],
+        reverse=True,
+    )
+
+    claimed = np.zeros((H, W), np.uint8)
+    bite_total = np.zeros((H, W), np.uint8)
+
+    kept_meta = []
+    branch_stats = []
+    primary_branch = order[0] if order else None
+
+    branch_terr_masks = {}  # debug only
+
+    # -------------------------------------------------
+    # Precompute per-branch atomic masks (hard exclusion)
+    # -------------------------------------------------
+    branch_atomic_masks = {}
+    for bi in range(len(branches)):
+        m = np.zeros((H, W), np.uint8)
+        for atomic_id, _ in branch_user_segs[bi]:
+            cr = atomic.get(str(atomic_id), {}) or {}
+            am = _atomic_mask_global(cr, H, W)
+            if am is not None:
+                m |= (am > 0).astype(np.uint8)
+        branch_atomic_masks[bi] = m
+
+    for rank, bi in enumerate(order):
+
+        # -------------------------------------------------
+        # Build DT-based territory
+        # -------------------------------------------------
+        branch_terr = np.zeros((H, W), np.uint8)
+
+        for atomic_id, S_user in branch_user_segs[bi]:
+            if S_user is None or len(S_user) < 2:
+                continue
+
+            r = seg_radius(S_user)
+            rad = int(max(3, r))
+
+            line = _polyline_mask(S_user, H, W)
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1)
+            )
+
+            terr = cv2.dilate(line, kernel, iterations=1)
+            terr &= domain_mask
+            branch_terr |= terr
+
+        branch_terr_masks[bi] = branch_terr.copy()
+
+        # -------------------------------------------------
+        # Suppression gate
+        # -------------------------------------------------
+        terr_len = float(branch_user_len[bi])
+        min_len_px = 0.10 * branch_user_len[bi]
+
+        if rank > 0 and terr_len < min_len_px:
+            branch_stats.append({
+                "branch_id": int(bi),
+                "rank": int(rank),
+                "atomic_ids": [aid for (aid, _) in branch_user_segs[bi]],
+                "user_len": float(branch_user_len[bi]),
+                "kept_len": 0.0,
+                "suppressed": True,
+            })
+            claimed |= branch_terr
             continue
 
         # -------------------------------------------------
-        # PRIMARY branch: keep FULL USER geometry
+        # PRIMARY branch
         # -------------------------------------------------
         if rank == 0:
             kept_len = 0.0
@@ -658,8 +834,6 @@ def dominant_segments_from_group(
                 if S_user is not None and len(S_user) >= 2:
                     kept_meta.append((bi, atomic_id, S_user, True))
                     kept_len += _linestring_length(S_user)
-
-            claimed |= branch_terr
 
             branch_stats.append({
                 "branch_id": int(bi),
@@ -669,36 +843,37 @@ def dominant_segments_from_group(
                 "kept_len": float(kept_len),
                 "suppressed": False,
             })
+
+            claimed |= branch_terr
             continue
 
-        # ---- subordinate branches ----
-        bite = branch_terr & claimed
+        # -------------------------------------------------
+        # SUBORDINATE branches
+        # -------------------------------------------------
+        # hard exclusion: DT territory + dominant atomic masks
+        forbidden = claimed.copy()
+        for obi in order[:rank]:
+            forbidden |= branch_atomic_masks[obi]
+
+        bite = branch_terr & forbidden
         if np.any(bite):
             bite_total |= bite
 
+        allowed = (forbidden == 0).astype(np.uint8)
+
         kept_any = False
         kept_len = 0.0
-
-        # IMPORTANT:
-        # We clip ONLY by claimed territory, NOT crack_mask
-        allowed = (claimed == 0)
 
         for atomic_id, S_user in branch_user_segs[bi]:
             if S_user is None or len(S_user) < 2:
                 continue
 
-            # Clip OUT the dominant territory
-            pieces = _clip_polyline_to_mask(S_user, allowed)
-
+            pieces = _clip_polyline_to_mask(S_user, allowed.astype(np.uint8))
             for p in pieces:
                 if p is not None and len(p) >= 2:
                     kept_meta.append((bi, atomic_id, p, False))
                     kept_any = True
                     kept_len += _linestring_length(p)
-
-        # Territory ownership remains mask-based
-        if kept_any:
-            claimed |= branch_terr
 
         branch_stats.append({
             "branch_id": int(bi),
@@ -709,17 +884,13 @@ def dominant_segments_from_group(
             "suppressed": not kept_any,
         })
 
-      
-    # -----------------------------
-    # DEBUG: decision logic plots (cropped, mask + geometry)
-    #   - PRE: territories + bite + USER midlines + branch labels
-    #   - STEPS: per-rank claimed/bite evolution (helps with “recursive” dominance intuition)
-    # -----------------------------
+        claimed |= branch_terr
 
-
+    # -----------------------------
+    # Pack outputs + meta
+    # -----------------------------
     kept = [S for (_, _, S, _) in kept_meta]
 
-    # per kept segment meta (parallel to `kept`)
     segments_meta = []
     for (bi, atomic_id, S, is_primary) in kept_meta:
         segments_meta.append({
@@ -730,7 +901,6 @@ def dominant_segments_from_group(
             "length": float(_linestring_length(S)),
         })
 
-    # crop bite mask to bbox and pack
     bite_crop = bite_total[by0:by1, bx0:bx1].astype(np.uint8)
     bite_blob = _pack_mask_b64(bite_crop)
 
@@ -746,14 +916,34 @@ def dominant_segments_from_group(
             "packbits_b64": bite_blob["packbits_b64"],
         },
     }
+    
+    
+    
+    # -------------------------------------------------
+    # 5 PLOT BASE MASK:
+    #   - if crack_mask exists: use it
+    #   - else: union of atomic masks (global) for this group
+    # -------------------------------------------------
+    if crack_mask is not None:
+        plot_mask = crack_mask.astype(np.uint8)
+    else:
+        plot_mask = np.zeros((H, W), np.uint8)
+        for m in members:
+            cr = atomic.get(str(m), {}) or {}
+            am = _atomic_mask_global(cr, H, W)
+            if am is not None:
+                plot_mask |= (am > 0).astype(np.uint8)
 
-    # =============================================================
+
+    # -----------------------------
     # DEBUG: PRE (territory + bite + user)
-    # =============================================================
+    # -----------------------------
     if debug_dir:
         import matplotlib.pyplot as plt
         from matplotlib.patches import Rectangle
         from matplotlib.lines import Line2D
+        import numpy as np
+        import os
 
         os.makedirs(debug_dir, exist_ok=True)
 
@@ -766,54 +956,47 @@ def dominant_segments_from_group(
         Hc, Wc = y1 - y0, x1 - x0
 
         fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
-        ax.imshow(crack_mask[y0:y1, x0:x1], cmap="gray", zorder=0)
+        ax.imshow(plot_mask[y0:y1, x0:x1], cmap="gray", zorder=0)
 
-        # -------------------------------------------------
-        # CANONICAL BRANCH PALETTE (identity only)
-        # -------------------------------------------------
-        BRANCH_COLORS = [
-            np.array([0.18, 0.80, 0.44]),  # green
-            np.array([0.90, 0.55, 0.20]),  # orange
-            np.array([0.20, 0.50, 0.85]),  # blue
-            np.array([0.60, 0.35, 0.70]),  # purple
+        # 5 branch colors (identity only)
+        branch_colors = [
+            np.array([0.18, 0.80, 0.32]),  # green
+            np.array([0.93, 0.54, 0.16]),  # orange
+            np.array([0.20, 0.50, 0.90]),  # blue
+            np.array([0.62, 0.35, 0.75]),  # purple
             np.array([0.10, 0.75, 0.70]),  # teal
         ]
 
         # -------------------------------------------------
-        # TERRITORY (below everything else)
+        # TERRITORY (below user)
         # -------------------------------------------------
         for bi, terr in branch_terr_masks.items():
             bm = terr[y0:y1, x0:x1]
             if not np.any(bm):
                 continue
-
             rgba = np.zeros((Hc, Wc, 4), float)
-            rgba[..., :3] = BRANCH_COLORS[bi % len(BRANCH_COLORS)]
+            rgba[..., :3] = branch_colors[bi % len(branch_colors)]
             rgba[..., 3] = 0.25 * (bm > 0)
             ax.imshow(rgba, zorder=1)
 
         # -------------------------------------------------
-        # USER GEOMETRY — draw SHORT → LONG
+        # USER GEOMETRY — draw short -> long so long is on top
         # -------------------------------------------------
-        order_by_len = sorted(
-            range(len(branch_user_segs)),
-            key=lambda i: branch_user_len[i]
-        )
+        order_by_len = sorted(range(len(branch_user_segs)), key=lambda i: branch_user_len[i])
 
         for rank, bi in enumerate(order_by_len):
-            col = BRANCH_COLORS[bi % len(BRANCH_COLORS)] * 0.9
-            z = 3 + rank  # longer on top
+            col = branch_colors[bi % len(branch_colors)]
+            z = 3 + rank
 
+            # user geometry
             for _, S in branch_user_segs[bi]:
                 if S is None or len(S) < 2:
                     continue
-
                 if (
                     S[:, 0].max() < x0 or S[:, 0].min() > x1 or
                     S[:, 1].max() < y0 or S[:, 1].min() > y1
                 ):
                     continue
-
                 S2 = S - np.array([x0, y0])
                 ax.plot(
                     S2[:, 0], S2[:, 1],
@@ -824,13 +1007,10 @@ def dominant_segments_from_group(
                     zorder=z,
                 )
 
-            # -------------------------------------------------
-            # USER LENGTH LABEL (PRE = user only)
-            # -------------------------------------------------
+            # label at midpoint of longest user segment (white box)
             if branch_user_segs[bi]:
-                _, S0 = branch_user_segs[bi][0]
-                mid = S0[len(S0) // 2]
-
+                longest = max(branch_user_segs[bi], key=lambda t: _linestring_length(t[1]))[1]
+                mid = longest[len(longest) // 2]
                 if x0 <= mid[0] <= x1 and y0 <= mid[1] <= y1:
                     mx, my = mid - np.array([x0, y0])
                     ax.text(
@@ -875,35 +1055,33 @@ def dominant_segments_from_group(
         )
 
         # -------------------------------------------------
-        # LEGEND (roles, not colors)
+        # LEGEND (colors = branch identity)
         # -------------------------------------------------
         legend_items = [
-            Line2D([0], [0], color="white", lw=3, label="User geometry"),
-            Line2D([0], [0], color="white", lw=6, alpha=0.3, label="Territory (branch-owned area)"),
+            Line2D([0], [0], color="white", lw=3, label="User midlines (colored per branch)"),
+            Line2D([0], [0], color="black", lw=0, label="Branch colors = identity only"),
             Line2D([0], [0], color="red", lw=6, alpha=0.5, label="Bite (dominance overlap)"),
             Line2D([0], [0], color="#0033cc", lw=1.5, label="BBox"),
         ]
+        leg = ax.legend(handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9)
+        leg.set_zorder(100)
 
-        ax.legend(handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9)
-        ax.set_title(
-            f"{debug_tag} — PRE (territory + bite + user)\n"
-            "Branch colors indicate identity only",
-            fontsize=10,
-        )
+        ax.set_title(f"{debug_tag} — PRE", fontsize=10)
         ax.axis("off")
 
         out = os.path.join(debug_dir, f"{debug_tag}_pre.png")
         fig.savefig(out, bbox_inches="tight", dpi=200)
         plt.close(fig)
 
-
-    # =============================================================
-    # DEBUG: FINAL (user dashed, kept solid, px labels)
-    # =============================================================
+    # -----------------------------
+    # DEBUG: FINAL (user dashed if clipped, kept solid, labels kept/user)
+    # -----------------------------
     if debug_dir:
         import matplotlib.pyplot as plt
         from matplotlib.patches import Rectangle
         from matplotlib.lines import Line2D
+        import numpy as np
+        import os
 
         pad = 20
         x0 = max(0, bx0 - pad)
@@ -914,21 +1092,26 @@ def dominant_segments_from_group(
         Hc, Wc = y1 - y0, x1 - x0
 
         fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
-        ax.imshow(crack_mask[y0:y1, x0:x1], cmap="gray", zorder=0)
+        ax.imshow(plot_mask[y0:y1, x0:x1], cmap="gray", zorder=0)
 
-        # -------------------------------------------------
-        # faint bite (context)
-        # -------------------------------------------------
+        # same 5 colors as PRE (identity only)
+        branch_colors = [
+            "#2ecc71",  # green
+            "#e67e22",  # orange
+            "#3498db",  # blue
+            "#9b59b6",  # purple
+            "#1abc9c",  # teal
+        ]
+
+        # --- bite (make it visible) ---
         bite_crop = bite_total[y0:y1, x0:x1]
         if np.any(bite_crop):
             bite_rgba = np.zeros((Hc, Wc, 4), float)
             bite_rgba[..., 0] = 1.0
-            bite_rgba[..., 3] = 0.45 * (bite_crop > 0)
+            bite_rgba[..., 3] = 0.55 * (bite_crop > 0)
             ax.imshow(bite_rgba, zorder=2)
 
-        # -------------------------------------------------
-        # dashed USER (only if clipped)
-        # -------------------------------------------------
+        # --- dashed USER (ONLY if clipped happened) ---
         for bi, user_segs in enumerate(branch_user_segs):
             user_len = branch_user_len[bi]
             kept_len = sum(
@@ -936,11 +1119,8 @@ def dominant_segments_from_group(
                 for (bii, _, S, _) in kept_meta
                 if bii == bi
             )
-
             if kept_len >= 0.999 * user_len:
                 continue
-
-            col = BRANCH_COLORS[bi % len(BRANCH_COLORS)]
 
             for _, S in user_segs:
                 if S is None or len(S) < 2:
@@ -948,31 +1128,31 @@ def dominant_segments_from_group(
                 S2 = S - np.array([x0, y0])
                 ax.plot(
                     S2[:, 0], S2[:, 1],
-                    color=col,
-                    lw=1.2,
-                    linestyle=(0, (2, 3)),
-                    alpha=0.8,
-                    zorder=2,
+                    color="white",
+                    lw=1.6,
+                    linestyle=(0, (1, 3)),  # dotty
+                    alpha=0.9,
+                    zorder=3,
                 )
 
-        # -------------------------------------------------
-        # kept geometry (solid)
-        # -------------------------------------------------
-        for bi, _, S, is_primary in kept_meta:
-            if S is None or len(S) < 2:
-                continue
-            S2 = S - np.array([x0, y0])
-            ax.plot(
-                S2[:, 0], S2[:, 1],
-                color=BRANCH_COLORS[bi % len(BRANCH_COLORS)],
-                lw=3.6 if is_primary else 2.6,
-                solid_capstyle="round",
-                zorder=4 if is_primary else 3,
-            )
+        # --- kept geometry (primary on top) ---
+        # draw sub first, then primary last so it overlays
+        for pass_primary in (False, True):
+            for bi, _, S, is_primary in kept_meta:
+                if bool(is_primary) != pass_primary:
+                    continue
+                if S is None or len(S) < 2:
+                    continue
+                S2 = S - np.array([x0, y0])
+                ax.plot(
+                    S2[:, 0], S2[:, 1],
+                    color=branch_colors[bi % len(branch_colors)],
+                    lw=3.8 if is_primary else 2.8,
+                    solid_capstyle="round",
+                    zorder=6 if is_primary else 4,
+                )
 
-        # -------------------------------------------------
-        # per-branch px labels (kept/user)
-        # -------------------------------------------------
+        # --- per-branch labels: "user" OR "kept/user" if clipped ---
         for bi, user_segs in enumerate(branch_user_segs):
             if not user_segs:
                 continue
@@ -984,35 +1164,34 @@ def dominant_segments_from_group(
                 if bii == bi
             )
 
-            label = (
-                f"{int(kept_len)}/{int(user_len)} px"
-                if kept_len < 0.999 * user_len
-                else f"{int(user_len)} px"
-            )
+            if kept_len < 0.999 * user_len:
+                label = f"{int(kept_len)}/{int(user_len)} px"
+            else:
+                label = f"{int(user_len)} px"
 
-            longest = max(user_segs, key=lambda x: _linestring_length(x[1]))[1]
-            mid = longest[len(longest) // 2] - np.array([x0, y0])
+            longest = max(user_segs, key=lambda t: _linestring_length(t[1]))[1]
+            mid = longest[len(longest) // 2]
+            if not (x0 <= mid[0] <= x1 and y0 <= mid[1] <= y1):
+                continue
+            mx, my = mid - np.array([x0, y0])
 
             ax.text(
-                mid[0], mid[1],
+                mx, my,
                 label,
                 fontsize=7,
                 color="black",
                 ha="center",
                 va="center",
-                zorder=6,
+                zorder=20,
                 bbox=dict(
                     boxstyle="round,pad=0.2",
                     facecolor="white",
-                    edgecolor="black",
-                    linewidth=0.6,
+                    edgecolor="none",
                     alpha=0.9,
                 ),
             )
 
-        # -------------------------------------------------
-        # bbox
-        # -------------------------------------------------
+        # --- bbox ---
         ax.add_patch(
             Rectangle(
                 (bx0 - x0, by0 - y0),
@@ -1021,30 +1200,23 @@ def dominant_segments_from_group(
                 fill=False,
                 edgecolor="#0033cc",
                 linewidth=1.5,
-                zorder=10,
+                zorder=30,
             )
         )
 
-        # -------------------------------------------------
-        # legend
-        # -------------------------------------------------
         legend_items = [
-            Line2D([0], [0], color="black", lw=3, label="Kept geometry (branch-colored)"),
-            Line2D([0], [0], color="black", lw=2, linestyle=(0, (2, 3)),
-                label="User geometry (removed)"),
-            Line2D([0], [0], color="red", lw=6, alpha=0.5,
+            Line2D([0], [0], color="white", lw=2, linestyle=(0, (1, 3)),
+                label="User midlines (only if clipped)"),
+            Line2D([0], [0], color="black", lw=3,
+                label="Kept midlines (branch-colored; primary drawn on top)"),
+            Line2D([0], [0], color="red", lw=6, alpha=0.55,
                 label="Bite (dominance overlap)"),
             Line2D([0], [0], color="#0033cc", lw=1.5, label="BBox"),
         ]
+        leg = ax.legend(handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9)
+        leg.set_zorder(100)
 
-        ax.legend(handles=legend_items, loc="lower right",
-                fontsize=8, framealpha=0.9)
-
-        ax.set_title(
-            f"{debug_tag} — FINAL\n"
-            "Branch colors = identity only; labels show px kept/user",
-            fontsize=10,
-        )
+        ax.set_title(f"{debug_tag} — FINAL", fontsize=10)
         ax.axis("off")
 
         out = os.path.join(debug_dir, f"{debug_tag}_final.png")
@@ -1080,7 +1252,6 @@ def dominant_segments_from_group(
                     f"is_primary={m.get('is_primary')}, "
                     f"len_px={m.get('length'):.2f}"
                 )
-    
     
     return kept, meta
 
@@ -1306,7 +1477,7 @@ def build_combined_crack_stateless(
     segs, dom_meta = dominant_segments_from_group(
         members=member_ids,
         atomic=authoring_atomic,
-        crack_mask_u8=crack_mask_full,
+        #crack_mask_u8=crack_mask_full,
         window_half_size=window_half_size,
         debug_dir=debug_dir,
     )
