@@ -1092,12 +1092,27 @@ def compare_widths_for_cracks(
                 1, 2, figsize=(10, 5), dpi=200, sharex=True, sharey=True
             )
 
-            for ax, title in zip(
-                axes,
-                ["GT supervision (final geometry)", "Prediction (Stage 1 pruning)"],
-            ):
-                ax.set_title(title, fontsize=10)
+            # ---- descriptor for titles ----
+            member_list = sorted(shared) if shared else sorted(pred_members)
+            member_str = ", ".join(member_list)
+
+            combo_label = f"Combined crack cid={cid}"
+            members_label = f"Atomic members: [{member_str}]"
+
+            
+            axes[0].set_title(
+                "GT supervision (final geometry)",
+                fontsize=10,
+            )
+
+            axes[1].set_title(
+                "Prediction (atomic pruning)",
+                fontsize=10,
+            )
+
+            for ax in axes:
                 ax.axis("off")
+
 
             # backgrounds
             axes[0].imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
@@ -1146,7 +1161,9 @@ def compare_widths_for_cracks(
             axes[1].legend(handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9)
 
             fig.suptitle(
-                f"Stage 1 Atomic Pruning — cid={cid}",
+                f"Stage 1 Atomic Pruning\n"
+                f"{combo_label}\n"
+                f"{members_label}",
                 fontsize=11,
                 fontweight="bold",
             )
@@ -1257,11 +1274,14 @@ def compare_widths_for_cracks(
                 pr = pts_full - np.array([x0, y0])
                 ax.plot(pr[:,0], pr[:,1], color="cyan", lw=1.5, label="width coverage")
 
-                ax.set_title(
-                    f"cid={cid} seg#{si}\n"
-                    f"geom_len={_linestring_length(S):.1f}px  "
-                    f"pw_pts={len(pw_full)}"
+                fig.suptitle(
+                    f"Stage 1 Atomic Pruning "
+                    f"{combo_label} "
+                    f"{members_label}",
+                    fontsize=11,
+                    fontweight="bold",
                 )
+
                 ax.legend()
                 ax.axis("off")
                 fig.savefig(dbg_seg, bbox_inches="tight", dpi=200)
