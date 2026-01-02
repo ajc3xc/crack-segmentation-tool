@@ -806,6 +806,7 @@ def compare_widths_for_cracks(
             seg_meta = [{"branch_id": 0, "atomic_id": str(crack.get("id", ""))} for _ in segs]
             return segs, seg_meta, None, {str(crack.get("id", ""))}
         else:
+            print(f"\n------------{crack.keys()}-----------\n")
             segs = [np.asarray(s, float) for s in (crack.get("midline_segments", []) or [])]
             seg_meta = crack.get("midline_segments_meta") or crack.get("segments_meta") or []
             if not isinstance(seg_meta, list):
@@ -1025,6 +1026,137 @@ def compare_widths_for_cracks(
             continue
 
         print(f"[WIDTH DEBUG] cid={cid} kept {len(pruned_segs)} segments after atomic prune")
+        
+        # ============================================================
+        # OPSEC PLOT — STAGE 1 ATOMIC PRUNING (GT vs PRED)
+        #   - LEFT : GT mask (gt_full -> mask_bin) + GT final geometry
+        #   - RIGHT: PRED mask (from crack["mask_crop"] + crack["mask_bbox"])
+        #           + kept/pruned pred segments (Stage 1 rule)
+        # ============================================================
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.lines import Line2D
+            import numpy as np
+
+            # ---- reconstruct PRED mask from mask_crop + mask_bbox ----
+            pred_mask_full = np.zeros((H, W), np.uint8)
+            bb = crack.get("mask_bbox")
+            crop_list = crack.get("mask_crop")
+
+            if bb and crop_list is not None:
+                x, y, w, h = map(int, bb)
+                crop_u8 = np.asarray(crop_list, dtype=np.uint8)
+
+                # safety: handle mismatched shapes gracefully
+                hh = min(h, crop_u8.shape[0]) if crop_u8.ndim >= 2 else 0
+                ww = min(w, crop_u8.shape[1]) if crop_u8.ndim >= 2 else 0
+                if hh > 0 and ww > 0:
+                    pred_mask_full[y:y+hh, x:x+ww] = (crop_u8[:hh, :ww] > 0).astype(np.uint8)
+
+            # ---- bbox crop window ----
+            if bb:
+                x, y, w, h = map(int, bb)
+                pad = 25
+                x0 = max(0, x - pad)
+                y0 = max(0, y - pad)
+                x1 = min(W, x + w + pad)
+                y1 = min(H, y + h + pad)
+            else:
+                x, y, w, h = 0, 0, W, H
+                x0, y0, x1, y1 = 0, 0, W, H
+
+            # ---- classify PRED segments (Stage 1 rule) ----
+            pred_kept = []
+            pred_pruned = []
+            for S, m in zip(segs, seg_meta):
+                if S is None or len(S) < 2:
+                    continue
+                aid = m.get("atomic_id", None)
+                if aid is not None and str(aid) not in shared:
+                    pred_pruned.append(np.asarray(S, float))
+                else:
+                    pred_kept.append(np.asarray(S, float))
+
+            # ---- GT segments (final geometry) ----
+            gt_kept = []
+            gt_pruned = []  # will remain empty unless GT provides per-seg atomic IDs
+            if gt_entry is not None:
+                gt_segs_all = gt_entry.get("midline_segments") or []
+                for Sg in gt_segs_all:
+                    if Sg is None or len(Sg) < 2:
+                        continue
+                    gt_kept.append(np.asarray(Sg, float))
+
+            # ---- figure ----
+            fig, axes = plt.subplots(
+                1, 2, figsize=(10, 5), dpi=200, sharex=True, sharey=True
+            )
+
+            for ax, title in zip(
+                axes,
+                ["GT supervision (final geometry)", "Prediction (Stage 1 pruning)"],
+            ):
+                ax.set_title(title, fontsize=10)
+                ax.axis("off")
+
+            # backgrounds
+            axes[0].imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
+            axes[1].imshow(pred_mask_full[y0:y1, x0:x1], cmap="gray", zorder=0)
+
+            # ---- colors ----
+            col_keep = (0.2, 0.4, 0.8)   # muted blue
+            col_drop = (0.5, 0.0, 0.0)   # dark red
+
+            # ---- GT plot ----
+            for S in gt_pruned:
+                S2 = S - np.array([x0, y0])
+                axes[0].plot(S2[:, 0], S2[:, 1], color=col_drop, lw=2.0, alpha=0.8)
+
+            for S in gt_kept:
+                S2 = S - np.array([x0, y0])
+                axes[0].plot(S2[:, 0], S2[:, 1], color=col_keep, lw=2.5)
+
+            # ---- Pred plot ----
+            for S in pred_pruned:
+                S2 = S - np.array([x0, y0])
+                axes[1].plot(S2[:, 0], S2[:, 1], color=col_drop, lw=2.0, alpha=0.8)
+
+            for S in pred_kept:
+                S2 = S - np.array([x0, y0])
+                axes[1].plot(S2[:, 0], S2[:, 1], color=col_keep, lw=2.5)
+
+            # ---- bbox overlay (same bbox coords for both panels) ----
+            for ax in axes:
+                ax.add_patch(
+                    plt.Rectangle(
+                        (x - x0, y - y0),
+                        w, h,
+                        fill=False,
+                        edgecolor="dodgerblue",
+                        lw=1.5,
+                    )
+                )
+
+            # ---- legend ----
+            legend_items = [
+                Line2D([0], [0], color=col_keep, lw=3, label="Kept segments"),
+                Line2D([0], [0], color=col_drop, lw=3, label="Pruned segments"),
+                Line2D([0], [0], color="dodgerblue", lw=1.5, label="BBox"),
+            ]
+            axes[1].legend(handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9)
+
+            fig.suptitle(
+                f"Stage 1 Atomic Pruning — cid={cid}",
+                fontsize=11,
+                fontweight="bold",
+            )
+
+            out = os.path.join(opsec_dir, f"stage1_prune_{cid}.png")
+            fig.savefig(out, bbox_inches="tight", dpi=200)
+            plt.close(fig)
+
+        except Exception as e:
+            print(f"[OPSEC STAGE1 PLOT] skipped cid={cid}: {e}")
 
         # --------------------------------------------
         # Stage 2: optional branch matching

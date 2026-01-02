@@ -3524,9 +3524,12 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             """
             out = {}
             for ccid, cmb in (combined_src or {}).items():
+                #print(f"\n------------{cmb.keys()}-----------\n")
+
                 mid_segs = cmb.get("midline_segments", [])
                 normals  = cmb.get("normal_edge_points", {}) or {}
-                bbox     = cmb.get("mask_bbox")  # ✅ required for zoom
+                bbox     = cmb.get("mask_bbox")      # ✅ required for zoom
+                crop     = cmb.get("mask_crop")      # ✅ REQUIRED for pred mask plotting
 
                 if not mid_segs or not normals:
                     continue
@@ -3538,9 +3541,12 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     "midline_segments": mid_segs,
                     "normal_edge_points": normals,
                     "members": cmb.get("members", []),
-                    "mask_bbox": bbox,              # ✅ REQUIRED
+                    "mask_bbox": bbox,               # ✅ REQUIRED
+                    "mask_crop": crop,               # ✅ ADDED (authoritative pred mask)
                     "timing": cmb.get("timing", {}),
                 }
+
+                # pass through dominance + segment metadata verbatim
                 out[str(ccid)]["midline_segments_meta"] = cmb.get("midline_segments_meta")
                 out[str(ccid)]["dominance_meta"] = cmb.get("dominance_meta")
             return out
