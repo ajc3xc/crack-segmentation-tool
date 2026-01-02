@@ -361,22 +361,145 @@ def bbox_xywh_to_xyxy(bbox, H, W, *, pad=0):
 
     return x0, y0, x1, y1
 
-def _atomic_mask_global(cr, H, W):
+def _opsec_plot_mask_bbox_only(
+    *,
+    mask_crop,
+    mask_bbox,
+    H, W,
+    out_path,
+    title=None,
+):
+    """
+    OPSEC debug plot:
+      - mask_crop pasted into global canvas
+      - bbox drawn with sub-pixel precision
+      - NO geometry, NO edges, NO midlines
+    """
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    mc = np.asarray(mask_crop, np.uint8)
+    x, y, w, h = map(float, mask_bbox)
+
+    canvas = np.zeros((H, W), np.uint8)
+
+    ih, iw = mc.shape
+    x0 = int(np.floor(x))
+    y0 = int(np.floor(y))
+    x1 = min(W, x0 + iw)
+    y1 = min(H, y0 + ih)
+
+    canvas[y0:y1, x0:x1] = mc[: y1 - y0, : x1 - x0]
+
+    fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
+    ax.imshow(canvas, cmap="gray")
+
+    ax.add_patch(
+        plt.Rectangle(
+            (x, y), w, h,
+            fill=False,
+            edgecolor="red",
+            linewidth=1.5,
+        )
+    )
+
+    ax.set_title(title or "MASK / BBOX OPSEC")
+    ax.axis("off")
+
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
+def _atomic_mask_global(cr, H, W, debug_dir=None):
     """
     Expand per-atomic mask_crop into global image space.
+
+    STRICT OPSEC MODE:
+      - mask_bbox is authoritative
+      - mask_crop MUST match bbox size exactly
+      - bbox MUST lie fully inside image bounds
+      - NO auto-clamp, NO silent fixes
+      - any violation -> OPSEC plot + hard failure
     """
+
+    import numpy as np
+    import os
+
     mc = cr.get("mask_crop")
     bb = cr.get("mask_bbox")
+    cid = cr.get("id", "unknown")
 
     if mc is None or bb is None:
         return None
 
-    x, y, w, h = map(int, bb)
-    m = np.zeros((H, W), np.uint8)
     mc = np.asarray(mc, np.uint8)
-    m[y:y+h, x:x+w] = mc[:h, :w]
+    x, y, w, h = map(int, bb)
+    mh, mw = mc.shape
+
+    # --------------------------------------------------
+    # OPSEC 1: mask_crop vs bbox size mismatch
+    # --------------------------------------------------
+    if mh != h or mw != w:
+        if debug_dir is not None:
+            out_path = os.path.join(
+                debug_dir, "opsec",
+                f"atomic_mask_bbox_size_mismatch_cid{cid}.png"
+            )
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+            _opsec_plot_mask_bbox_only(
+                mask_crop=mc,
+                mask_bbox=bb,
+                H=H,
+                W=W,
+                out_path=out_path,
+                title=(
+                    f"CID {cid} — MASK/BBOX SIZE MISMATCH\n"
+                    f"bbox=(w={w}, h={h})  mask_crop=(w={mw}, h={mh})"
+                ),
+            )
+
+        raise ValueError(
+            f"[ATOMIC OPSEC] cid={cid} mask_crop shape={mc.shape} "
+            f"does not match mask_bbox (w={w}, h={h})"
+        )
+
+    # --------------------------------------------------
+    # OPSEC 2: bbox out of image bounds
+    # --------------------------------------------------
+    if x < 0 or y < 0 or x + w > W or y + h > H:
+        if debug_dir is not None:
+            out_path = os.path.join(
+                debug_dir, "opsec",
+                f"atomic_bbox_out_of_bounds_cid{cid}.png"
+            )
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+            _opsec_plot_mask_bbox_only(
+                mask_crop=mc,
+                mask_bbox=bb,
+                H=H,
+                W=W,
+                out_path=out_path,
+                title=(
+                    f"CID {cid} — BBOX OUT OF IMAGE BOUNDS\n"
+                    f"bbox=(x={x}, y={y}, w={w}, h={h})\n"
+                    f"image=(W={W}, H={H})"
+                ),
+            )
+
+        raise ValueError(
+            f"[ATOMIC OPSEC] cid={cid} bbox out of bounds: "
+            f"(x+w={x+w} > W={W} or y+h={y+h} > H={H})"
+        )
+
+    # --------------------------------------------------
+    # Normal path (authoritative placement)
+    # --------------------------------------------------
+    m = np.zeros((H, W), np.uint8)
+    m[y:y+h, x:x+w] = mc
     return m
-    
+   
 def dominant_segments_from_group(
     *,
     members,
@@ -420,24 +543,35 @@ def dominant_segments_from_group(
                     out.add(tuple(map(float, ups[idx])))
         return out
 
-    def _union_member_bbox_xyxy(member_ids, W, H):
+    def _union_member_bbox_xyxy(member_ids):
+        """
+        Compute intrinsic union bbox (x0, y0, x1, y1)
+        from atomic mask_bboxes.
+
+        No clamping. No canvas assumptions.
+        """
         boxes = []
+
         for m in member_ids:
             bb = (atomic.get(str(m), {}) or {}).get("mask_bbox")
             if bb and len(bb) == 4:
                 x, y, w, h = map(int, bb)
                 if w > 0 and h > 0:
                     boxes.append((x, y, x + w, y + h))
+
         if not boxes:
             return None
-        bx0 = max(0, min(b[0] for b in boxes))
-        by0 = max(0, min(b[1] for b in boxes))
-        bx1 = min(W, max(b[2] for b in boxes))
-        by1 = min(H, max(b[3] for b in boxes))
+
+        bx0 = min(b[0] for b in boxes)
+        by0 = min(b[1] for b in boxes)
+        bx1 = max(b[2] for b in boxes)
+        by1 = max(b[3] for b in boxes)
+
         if bx1 <= bx0 or by1 <= by0:
             return None
-        return (bx0, by0, bx1, by1)
 
+        return (bx0, by0, bx1, by1)
+    
     def _pack_mask_b64(mask_u8):
         mask_u8 = (mask_u8 > 0).astype(np.uint8)
         if mask_u8.size == 0:
@@ -468,35 +602,58 @@ def dominant_segments_from_group(
     use_dt_territory = (crack_mask_u8 is not None)   # DT territory needs real crack mask
     use_atomic_mask_territory = (crack_mask_u8 is None)
 
+    # --------------------------------------------------
+    # Determine global canvas (AUTHORITATIVE)
+    # --------------------------------------------------
     if crack_mask_u8 is not None:
+        # ----------------------------------------------
+        # Primary path: canvas comes from real mask
+        # ----------------------------------------------
         H, W = crack_mask_u8.shape[:2]
         crack_mask = (crack_mask_u8 > 0).astype(np.uint8)
-    else:
-        # fallback canvas from USER geometry
-        xs = []
-        ys = []
-        for _, S in atomics:
-            if S is None or len(S) == 0:
-                continue
-            fx = S[:, 0]
-            fy = S[:, 1]
-            fx = fx[np.isfinite(fx)]
-            fy = fy[np.isfinite(fy)]
-            if len(fx):
-                xs.append(float(np.nanmax(fx)))
-            if len(fy):
-                ys.append(float(np.nanmax(fy)))
 
-        W = int(max(xs) + 2) if xs else 2
-        H = int(max(ys) + 2) if ys else 2
-        crack_mask = None
+        # Union bbox (pure geometry, then clamped to canvas)
+        bbox_xyxy = _union_member_bbox_xyxy(members)
+        if bbox_xyxy is None:
+            bx0, by0, bx1, by1 = 0, 0, W, H
+        else:
+            bx0, by0, bx1, by1 = bbox_xyxy
 
-    # bbox for cropped bite storage
-    bbox_xyxy = _union_member_bbox_xyxy(members, W, H)
-    if bbox_xyxy is None:
-        bx0, by0, bx1, by1 = 0, 0, W, H
+            # Clamp ONLY here (mask-backed canvas is authoritative)
+            bx0 = max(0, min(bx0, W))
+            by0 = max(0, min(by0, H))
+            bx1 = max(0, min(bx1, W))
+            by1 = max(0, min(by1, H))
+
+            if bx1 <= bx0 or by1 <= by0:
+                raise ValueError(
+                    f"[OPSEC] Union bbox collapses after clamp: "
+                    f"({bx0},{by0})-({bx1},{by1}) with canvas W={W}, H={H}"
+                )
+
     else:
+        # ----------------------------------------------
+        # STRICT fallback: canvas derived ONLY from union bbox
+        # ----------------------------------------------
+        bbox_xyxy = _union_member_bbox_xyxy(members)
+
+        if bbox_xyxy is None:
+            raise ValueError(
+                "[OPSEC] No crack_mask_u8 and no union bbox available — "
+                "cannot construct fallback canvas"
+            )
+
         bx0, by0, bx1, by1 = bbox_xyxy
+
+        W = int(np.ceil(bx1))
+        H = int(np.ceil(by1))
+
+        if W <= 0 or H <= 0:
+            raise ValueError(
+                f"[OPSEC] Invalid fallback canvas from bbox: W={W}, H={H}"
+            )
+
+        crack_mask = None
 
     # -----------------------------
     # 2) build branches in atomic space
@@ -736,7 +893,7 @@ def dominant_segments_from_group(
         domain_mask = np.zeros((H, W), np.uint8)
         for m in members:
             cr = atomic.get(str(m), {}) or {}
-            am = _atomic_mask_global(cr, H, W)
+            am = _atomic_mask_global(cr, H, W, debug_dir)
             if am is not None:
                 domain_mask |= (am > 0).astype(np.uint8)
 
@@ -761,7 +918,12 @@ def dominant_segments_from_group(
     )
 
     claimed = np.zeros((H, W), np.uint8)
-    bite_total = np.zeros((H, W), np.uint8)
+    bite_total = {
+        "mask": np.zeros((H, W), np.uint8),
+        "terr": np.zeros((H, W), np.uint8),
+        "both": np.zeros((H, W), np.uint8),
+    }
+
 
     kept_meta = []
     branch_stats = []
@@ -794,7 +956,12 @@ def dominant_segments_from_group(
                 continue
 
             r = seg_radius(S_user)
-            rad = int(max(3, r))
+            rad = int(
+                max(
+                    4,                         # hard minimum exclusion
+                    min(1.2 * r, window_half_size)
+                )
+            )
 
             line = _polyline_mask(S_user, H, W)
             kernel = cv2.getStructuringElement(
@@ -802,7 +969,7 @@ def dominant_segments_from_group(
             )
 
             terr = cv2.dilate(line, kernel, iterations=1)
-            terr &= domain_mask
+            #terr &= domain_mask
             branch_terr |= terr
 
         branch_terr_masks[bi] = branch_terr.copy()
@@ -850,14 +1017,32 @@ def dominant_segments_from_group(
         # -------------------------------------------------
         # SUBORDINATE branches
         # -------------------------------------------------
-        # hard exclusion: DT territory + dominant atomic masks
-        forbidden = claimed.copy()
-        for obi in order[:rank]:
-            forbidden |= branch_atomic_masks[obi]
+        
+        # -------------------------------------------------
+        # Hard exclusion: dominant territory + dominant masks
+        # -------------------------------------------------
+        terr_forbidden = claimed.copy()
 
-        bite = branch_terr & forbidden
-        if np.any(bite):
-            bite_total |= bite
+        mask_forbidden = np.zeros((H, W), np.uint8)
+        for obi in order[:rank]:
+            mask_forbidden |= branch_atomic_masks[obi]
+
+        forbidden = terr_forbidden | mask_forbidden
+
+        # -------------------------------------------------
+        # Bite decomposition (DEBUG-ONLY semantics)
+        # -------------------------------------------------
+        bite_mask_only = branch_terr & mask_forbidden
+        bite_terr_only = branch_terr & terr_forbidden & (~mask_forbidden)
+        bite_both = branch_terr & terr_forbidden & mask_forbidden
+
+        # accumulate for debug plots
+        if np.any(bite_mask_only):
+            bite_total["mask"] |= bite_mask_only
+        if np.any(bite_terr_only):
+            bite_total["terr"] |= bite_terr_only
+        if np.any(bite_both):
+            bite_total["both"] |= bite_both
 
         allowed = (forbidden == 0).astype(np.uint8)
 
@@ -901,8 +1086,27 @@ def dominant_segments_from_group(
             "length": float(_linestring_length(S)),
         })
 
-    bite_crop = bite_total[by0:by1, bx0:bx1].astype(np.uint8)
+    # -------------------------------------------------
+    # BITE EXPORT (AUTHORITATIVE)
+    # -------------------------------------------------
+    # Compose overall bite (union of all dominance causes)
+    bite_union = (
+        bite_total["mask"] |
+        bite_total["terr"] |
+        bite_total["both"]
+    ).astype(np.uint8)
+
+    bite_crop = bite_union[by0:by1, bx0:bx1]
     bite_blob = _pack_mask_b64(bite_crop)
+
+    # Optional: also export decomposed bite channels (DEBUG / RESEARCH)
+    bite_mask_crop = bite_total["mask"][by0:by1, bx0:bx1].astype(np.uint8)
+    bite_terr_crop = bite_total["terr"][by0:by1, bx0:bx1].astype(np.uint8)
+    bite_both_crop = bite_total["both"][by0:by1, bx0:bx1].astype(np.uint8)
+
+    bite_mask_blob = _pack_mask_b64(bite_mask_crop)
+    bite_terr_blob = _pack_mask_b64(bite_terr_crop)
+    bite_both_blob = _pack_mask_b64(bite_both_crop)
 
     meta = {
         "members": [str(m) for m in members],
@@ -910,14 +1114,34 @@ def dominant_segments_from_group(
         "order": [int(b) for b in order],
         "branches": branch_stats,
         "segments_meta": segments_meta,
+
+        # -------------------------------------------------
+        # Bite metadata
+        # -------------------------------------------------
         "bite": {
+            # Backward-compatible UNION bite
             "bbox": [int(bx0), int(by0), int(bx1 - bx0), int(by1 - by0)],
             "shape": bite_blob["shape"],
             "packbits_b64": bite_blob["packbits_b64"],
+
+            # Decomposed dominance causes (NEW, OPTIONAL)
+            "by_cause": {
+                "mask": {
+                    "shape": bite_mask_blob["shape"],
+                    "packbits_b64": bite_mask_blob["packbits_b64"],
+                },
+                "territory": {
+                    "shape": bite_terr_blob["shape"],
+                    "packbits_b64": bite_terr_blob["packbits_b64"],
+                },
+                "both": {
+                    "shape": bite_both_blob["shape"],
+                    "packbits_b64": bite_both_blob["packbits_b64"],
+                },
+            },
         },
     }
-    
-    
+
     
     # -------------------------------------------------
     # 5 PLOT BASE MASK:
@@ -1032,11 +1256,26 @@ def dominant_segments_from_group(
         # -------------------------------------------------
         # BITE (between territory and user)
         # -------------------------------------------------
-        bite_crop = bite_total[y0:y1, x0:x1]
-        if np.any(bite_crop):
+        bm = bite_total["mask"][y0:y1, x0:x1]
+        bt = bite_total["terr"][y0:y1, x0:x1]
+        bb = bite_total["both"][y0:y1, x0:x1]
+
+        if np.any(bm) or np.any(bt) or np.any(bb):
             bite_rgba = np.zeros((Hc, Wc, 4), float)
-            bite_rgba[..., 0] = 1.0
-            bite_rgba[..., 3] = 0.45 * (bite_crop > 0)
+
+            # mask-only → red
+            bite_rgba[..., 0] += (bm > 0)
+
+            # territory-only → orange (red + green)
+            bite_rgba[..., 0] += 0.9 * (bt > 0)
+            bite_rgba[..., 1] += 0.5 * (bt > 0)
+
+            # both → purple (red + blue)
+            bite_rgba[..., 0] += (bb > 0)
+            bite_rgba[..., 2] += (bb > 0)
+
+            bite_rgba[..., 3] = 0.45 * ((bm | bt | bb) > 0)
+
             ax.imshow(bite_rgba, zorder=2)
 
         # -------------------------------------------------
@@ -1058,12 +1297,31 @@ def dominant_segments_from_group(
         # LEGEND (colors = branch identity)
         # -------------------------------------------------
         legend_items = [
-            Line2D([0], [0], color="white", lw=3, label="User midlines (colored per branch)"),
-            Line2D([0], [0], color="black", lw=0, label="Branch colors = identity only"),
-            Line2D([0], [0], color="red", lw=6, alpha=0.5, label="Bite (dominance overlap)"),
-            Line2D([0], [0], color="#0033cc", lw=1.5, label="BBox"),
+            Line2D([0], [0], color="white", lw=2, linestyle=(0, (1, 3)),
+                label="User midlines (only if clipped)"),
+
+            Line2D([0], [0], color="black", lw=3,
+                label="Kept midlines (branch-colored)"),
+
+            Line2D([0], [0], color="red", lw=6, alpha=0.55,
+                label="Bite: mask dominance"),
+
+            Line2D([0], [0], color="#e67e22", lw=6, alpha=0.55,
+                label="Bite: territory dominance"),
+
+            Line2D([0], [0], color="#d16ba5", lw=6, alpha=0.55,
+                label="Bite: mask + territory dominance"),
+
+            Line2D([0], [0], color="#0033cc", lw=1.5,
+                label="BBox"),
         ]
-        leg = ax.legend(handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9)
+
+        leg = ax.legend(
+            handles=legend_items,
+            loc="lower right",
+            fontsize=8,
+            framealpha=0.9,
+        )
         leg.set_zorder(100)
 
         ax.set_title(f"{debug_tag} — PRE", fontsize=10)
@@ -1104,11 +1362,26 @@ def dominant_segments_from_group(
         ]
 
         # --- bite (make it visible) ---
-        bite_crop = bite_total[y0:y1, x0:x1]
-        if np.any(bite_crop):
+        bm = bite_total["mask"][y0:y1, x0:x1]
+        bt = bite_total["terr"][y0:y1, x0:x1]
+        bb = bite_total["both"][y0:y1, x0:x1]
+
+        if np.any(bm) or np.any(bt) or np.any(bb):
             bite_rgba = np.zeros((Hc, Wc, 4), float)
-            bite_rgba[..., 0] = 1.0
-            bite_rgba[..., 3] = 0.55 * (bite_crop > 0)
+
+            # mask-only → red
+            bite_rgba[..., 0] += (bm > 0)
+
+            # territory-only → orange (red + green)
+            bite_rgba[..., 0] += 0.9 * (bt > 0)
+            bite_rgba[..., 1] += 0.5 * (bt > 0)
+
+            # both → purple (red + blue)
+            bite_rgba[..., 0] += (bb > 0)
+            bite_rgba[..., 2] += (bb > 0)
+
+            bite_rgba[..., 3] = 0.45 * ((bm | bt | bb) > 0)
+
             ax.imshow(bite_rgba, zorder=2)
 
         # --- dashed USER (ONLY if clipped happened) ---
@@ -1207,13 +1480,29 @@ def dominant_segments_from_group(
         legend_items = [
             Line2D([0], [0], color="white", lw=2, linestyle=(0, (1, 3)),
                 label="User midlines (only if clipped)"),
+
             Line2D([0], [0], color="black", lw=3,
-                label="Kept midlines (branch-colored; primary drawn on top)"),
+                label="Kept midlines (branch-colored)"),
+
             Line2D([0], [0], color="red", lw=6, alpha=0.55,
-                label="Bite (dominance overlap)"),
-            Line2D([0], [0], color="#0033cc", lw=1.5, label="BBox"),
+                label="Bite: mask dominance"),
+
+            Line2D([0], [0], color="#e67e22", lw=6, alpha=0.55,
+                label="Bite: territory dominance"),
+
+            Line2D([0], [0], color="#d16ba5", lw=6, alpha=0.55,
+                label="Bite: mask + territory dominance"),
+
+            Line2D([0], [0], color="#0033cc", lw=1.5,
+                label="BBox"),
         ]
-        leg = ax.legend(handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9)
+        
+        leg = ax.legend(
+            handles=legend_items,
+            loc="lower right",
+            fontsize=8,
+            framealpha=0.9,
+        )
         leg.set_zorder(100)
 
         ax.set_title(f"{debug_tag} — FINAL", fontsize=10)

@@ -806,7 +806,7 @@ def compare_widths_for_cracks(
             seg_meta = [{"branch_id": 0, "atomic_id": str(crack.get("id", ""))} for _ in segs]
             return segs, seg_meta, None, {str(crack.get("id", ""))}
         else:
-            print(f"\n------------{crack.keys()}-----------\n")
+            #print(f"\n------------{crack.keys()}-----------\n")
             segs = [np.asarray(s, float) for s in (crack.get("midline_segments", []) or [])]
             seg_meta = crack.get("midline_segments_meta") or crack.get("segments_meta") or []
             if not isinstance(seg_meta, list):
@@ -1161,8 +1161,8 @@ def compare_widths_for_cracks(
             axes[1].legend(handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9)
 
             fig.suptitle(
-                f"Stage 1 Atomic Pruning\n"
-                f"{combo_label}\n"
+                f"Stage 1 Atomic Pruning - "
+                f"{combo_label}  "
                 f"{members_label}",
                 fontsize=11,
                 fontweight="bold",
@@ -1225,13 +1225,160 @@ def compare_widths_for_cracks(
 
         off_fallback = 0
 
+        '''# ============================================================
+        # OPSEC PLOT — STAGE 4 FINAL GEOMETRY (GT vs PRED)
+        # ============================================================
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.lines import Line2D
+
+            # --------------------------------------------------
+            # bbox (authoritative zoom)
+            # --------------------------------------------------
+            bb = crack.get("mask_bbox")
+            if bb:
+                x, y, w, h = map(int, bb)
+                pad = 25
+                x0 = max(0, x - pad)
+                y0 = max(0, y - pad)
+                x1 = min(W, x + w + pad)
+                y1 = min(H, y + h + pad)
+            else:
+                x0, y0, x1, y1 = 0, 0, W, H
+
+            # --------------------------------------------------
+            # classify PRED segments (after Stage 2)
+            # --------------------------------------------------
+            pred_kept = [np.asarray(S, float) for S in pruned_segs]
+            pred_pruned = []
+
+            for S in segs:
+                if S is None or len(S) < 2:
+                    continue
+                if not any(np.array_equal(S, K) for K in pruned_segs):
+                    pred_pruned.append(np.asarray(S, float))
+
+           # --------------------------------------------------
+            # classify GT segments (FINAL, SCHEMA-CORRECT)
+            # --------------------------------------------------
+            gt_kept, gt_pruned = [], []
+
+            if gt_entry is not None:
+                gt_segs_all = gt_entry.get("midline_segments") or []
+
+                # GT supervision has NO per-segment meta.
+                # Therefore:
+                #   - Stage 1 atomic majority already happened at crack-match level
+                #   - Stage 2 / 3 CANNOT be applied to GT
+                #   - All GT segments that belong to this matched GT entry are KEPT
+
+                for Sg in gt_segs_all:
+                    if Sg is None or len(Sg) < 2:
+                        continue
+                    gt_kept.append(np.asarray(Sg, float))
+
+            # --------------------------------------------------
+            # masks
+            # --------------------------------------------------
+            pred_mask_full = np.zeros((H, W), np.uint8)
+            if "mask_crop" in crack and crack["mask_crop"] is not None:
+                mc = np.asarray(crack["mask_crop"], np.uint8)
+                pred_mask_full[y:y+h, x:x+w] = mc
+
+            # --------------------------------------------------
+            # figure
+            # --------------------------------------------------
+            fig, axes = plt.subplots(
+                1, 2, figsize=(10, 5), dpi=200, sharex=True, sharey=True
+            )
+
+            axes[0].set_title("GT supervision (final geometry)", fontsize=10)
+            axes[1].set_title("Prediction (final geometry)", fontsize=10)
+
+            axes[0].imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
+            axes[1].imshow(pred_mask_full[y0:y1, x0:x1], cmap="gray", zorder=0)
+
+            for ax in axes:
+                ax.axis("off")
+
+            # --------------------------------------------------
+            # colors
+            # --------------------------------------------------
+            col_keep = (0.2, 0.4, 0.8)   # muted blue
+            col_drop = (0.5, 0.0, 0.0)   # dark red
+
+            # --------------------------------------------------
+            # GT plot
+            # --------------------------------------------------
+            for S in gt_pruned:
+                S2 = S - np.array([x0, y0])
+                axes[0].plot(S2[:, 0], S2[:, 1], color=col_drop, lw=2.0, alpha=0.8)
+
+            for S in gt_kept:
+                S2 = S - np.array([x0, y0])
+                axes[0].plot(S2[:, 0], S2[:, 1], color=col_keep, lw=2.5)
+
+            # --------------------------------------------------
+            # PRED plot
+            # --------------------------------------------------
+            for S in pred_pruned:
+                S2 = S - np.array([x0, y0])
+                axes[1].plot(S2[:, 0], S2[:, 1], color=col_drop, lw=2.0, alpha=0.8)
+
+            for S in pred_kept:
+                S2 = S - np.array([x0, y0])
+                axes[1].plot(S2[:, 0], S2[:, 1], color=col_keep, lw=2.5)
+
+            # --------------------------------------------------
+            # bbox overlay
+            # --------------------------------------------------
+            for ax in axes:
+                ax.add_patch(
+                    plt.Rectangle(
+                        (x - x0, y - y0),
+                        w, h,
+                        fill=False,
+                        edgecolor="dodgerblue",
+                        lw=1.5,
+                    )
+                )
+
+            # --------------------------------------------------
+            # legend
+            # --------------------------------------------------
+            legend_items = [
+                Line2D([0], [0], color=col_keep, lw=3, label="Kept segments"),
+                Line2D([0], [0], color=col_drop, lw=3, label="Pruned segments"),
+                Line2D([0], [0], color="dodgerblue", lw=1.5, label="BBox"),
+            ]
+            axes[1].legend(
+                handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9
+            )
+
+            fig.suptitle(
+                f"Stage 4 Final Geometry — cid={cid}  members={sorted(shared)}",
+                fontsize=11,
+                fontweight="bold",
+            )
+
+            out = os.path.join(opsec_dir, f"stage4_final_geom_{cid}.png")
+            fig.savefig(out, bbox_inches="tight", dpi=200)
+            plt.close(fig)
+
+        except Exception as e:
+            print(f"[OPSEC STAGE4 PLOT] skipped cid={cid}: {e}")'''
+
+        
         # --------------------------------------------
-        # Stage 4: width slicing + SANITY PLOTS
+        # Stage 4: width slicing (NO PLOTS, NO SANITY)
         # --------------------------------------------
+        final_pred_segs = []   # prediction geometry after width slicing
+        final_gt_segs   = []   # GT geometry aligned to same support
         for si, (S, m) in enumerate(zip(pruned_segs, pruned_meta)):
             if len(S) < 2:
                 continue
 
+            # --- determine width index source ---
             if have_valid_seg_idx and isinstance(m.get("seg_idx"), int) and m["seg_idx"] in seg_start:
                 s0 = seg_start[m["seg_idx"]]
                 src = "seg_idx"
@@ -1257,38 +1404,10 @@ def compare_widths_for_cracks(
             if len(pts_full) < 2:
                 continue
 
-            # ---------------- SANITY PLOT (PER SEGMENT)
-            dbg_seg = os.path.join(opsec_dir, f"combined_opsec_{cid}_seg{si}.png")
-            if not os.path.exists(dbg_seg):
-                bb = crack.get("mask_bbox")
-                if bb:
-                    x, y, w, h = map(int, bb)
-                    x0 = max(0, x - 20); y0 = max(0, y - 20)
-                    x1 = min(W, x + w + 20); y1 = min(H, y + h + 20)
-                else:
-                    x0, y0, x1, y1 = 0, 0, W, H
-
-                fig, ax = plt.subplots(figsize=(6,6), dpi=200)
-                ax.imshow(mask_bin[y0:y1, x0:x1], cmap="gray")
-
-                pr = pts_full - np.array([x0, y0])
-                ax.plot(pr[:,0], pr[:,1], color="cyan", lw=1.5, label="width coverage")
-
-                fig.suptitle(
-                    f"Stage 1 Atomic Pruning "
-                    f"{combo_label} "
-                    f"{members_label}",
-                    fontsize=11,
-                    fontweight="bold",
-                )
-
-                ax.legend()
-                ax.axis("off")
-                fig.savefig(dbg_seg, bbox_inches="tight", dpi=200)
-                plt.close(fig)
-
-            # ---------------- GT WIDTHS
-            (_, _, _, _, gw), _ = normals_from_mask_for_midline(pts_full, mask_bin, max_radius)
+            # ---- GT widths (mask-based, authoritative) ----
+            (_, _, _, _, gw), _ = normals_from_mask_for_midline(
+                pts_full, mask_bin, max_radius
+            )
             gw = np.asarray(gw, float)
 
             mlen = min(len(pts_full), len(pw_full), len(gw))
@@ -1296,10 +1415,195 @@ def compare_widths_for_cracks(
                 continue
 
             pts_ok = pts_full[:mlen]
-            pw_ok = pw_full[:mlen]
-            gw_ok = gw[:mlen]
+            pw_ok  = pw_full[:mlen]
+            gw_ok  = gw[:mlen]
             d = pw_ok - gw_ok
-            
+
+            # --------------------------------------------
+            # COLLECT FINAL STAGE-4 GEOMETRY (AUTHORITATIVE)
+            # --------------------------------------------
+            # Geometry support is identical for GT & pred at this stage
+            final_pred_segs.append(pts_ok)
+            final_gt_segs.append(pts_ok)
+
+            # ---- bookkeeping (unchanged contract) ----
+            diffs.append(d)
+            coords.append(pts_ok)
+
+            bbox0 = crack.get("mask_bbox")
+            if bbox0 is not None:
+                bboxes.append(bbox0)
+
+            for (x, y), dw, gwi, pwi in zip(pts_ok, d, gw_ok, pw_ok):
+                if not np.isfinite(dw):
+                    continue
+                rows.append({
+                    "x": float(x),
+                    "y": float(y),
+                    "gt_width_px": float(gwi),
+                    "pred_width_px": float(pwi),
+                    "width_diff_px": float(dw),
+                    "cid": str(cid),
+                    "crack_type": "combined",
+                    "midline_type": midline_type,
+                })
+
+        # ============================================================
+        # OPSEC PLOT — STAGE 4 FINAL GEOMETRY (WITH PRUNED OVERLAY)
+        # ============================================================
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.lines import Line2D
+
+            # --------------------------------------------------
+            # bbox (authoritative zoom)
+            # --------------------------------------------------
+            bb = crack.get("mask_bbox")
+            if bb:
+                x, y, w, h = map(int, bb)
+                pad = 25
+                x0 = max(0, x - pad)
+                y0 = max(0, y - pad)
+                x1 = min(W, x + w + pad)
+                y1 = min(H, y + h + pad)
+            else:
+                x0, y0, x1, y1 = 0, 0, W, H
+
+            # --------------------------------------------------
+            # reconstruct PRUNED geometry (Stage-4 subtraction)
+            # --------------------------------------------------
+            def _subtract_segments(orig, kept):
+                """
+                orig : list[np.ndarray]
+                kept : list[np.ndarray]
+                returns list[np.ndarray] of removed sub-segments
+                """
+                removed = []
+
+                kept_pts = set()
+                for S in kept:
+                    for p in S:
+                        kept_pts.add((float(p[0]), float(p[1])))
+
+                for S in orig:
+                    buf = []
+                    for p in S:
+                        key = (float(p[0]), float(p[1]))
+                        if key in kept_pts:
+                            if len(buf) >= 2:
+                                removed.append(np.asarray(buf, float))
+                            buf = []
+                        else:
+                            buf.append(p)
+                    if len(buf) >= 2:
+                        removed.append(np.asarray(buf, float))
+
+                return removed
+
+            final_pred_segs = [np.asarray(S, float) for S in final_pred_segs]
+            pruned_pred_segs = _subtract_segments(pruned_segs, final_pred_segs)
+
+            # --------------------------------------------------
+            # GT geometry (same support, same slicing)
+            # --------------------------------------------------
+            final_gt_segs = final_pred_segs
+            pruned_gt_segs = pruned_pred_segs
+
+            # --------------------------------------------------
+            # prediction mask
+            # --------------------------------------------------
+            pred_mask_full = np.zeros((H, W), np.uint8)
+            if "mask_crop" in crack and crack["mask_crop"] is not None and bb:
+                mc = np.asarray(crack["mask_crop"], np.uint8)
+                pred_mask_full[y:y+h, x:x+w] = mc
+
+            # --------------------------------------------------
+            # figure
+            # --------------------------------------------------
+            fig, axes = plt.subplots(
+                1, 2, figsize=(10, 5), dpi=200, sharex=True, sharey=True
+            )
+
+            axes[0].set_title("GT supervision (post Stage-4)", fontsize=10)
+            axes[1].set_title("Prediction (post Stage-4)", fontsize=10)
+
+            axes[0].imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
+            axes[1].imshow(pred_mask_full[y0:y1, x0:x1], cmap="gray", zorder=0)
+
+            for ax in axes:
+                ax.axis("off")
+
+            # --------------------------------------------------
+            # colors / styles
+            # --------------------------------------------------
+            col_keep = (0.2, 0.4, 0.8)   # blue
+            col_drop = (0.7, 0.1, 0.1)   # red
+
+            # --------------------------------------------------
+            # GT plot
+            # --------------------------------------------------
+            for S in pruned_gt_segs:
+                S2 = S - np.array([x0, y0])
+                axes[0].plot(S2[:, 0], S2[:, 1],
+                            color=col_drop, lw=1.0, alpha=0.9, zorder=3)
+
+            for S in final_gt_segs:
+                S2 = S - np.array([x0, y0])
+                axes[0].plot(S2[:, 0], S2[:, 1],
+                            color=col_keep, lw=2.2, zorder=4)
+
+            # --------------------------------------------------
+            # PRED plot
+            # --------------------------------------------------
+            for S in pruned_pred_segs:
+                S2 = S - np.array([x0, y0])
+                axes[1].plot(S2[:, 0], S2[:, 1],
+                            color=col_drop, lw=1.0, alpha=0.9, zorder=3)
+
+            for S in final_pred_segs:
+                S2 = S - np.array([x0, y0])
+                axes[1].plot(S2[:, 0], S2[:, 1],
+                            color=col_keep, lw=2.2, zorder=4)
+
+            # --------------------------------------------------
+            # bbox overlay
+            # --------------------------------------------------
+            for ax in axes:
+                ax.add_patch(
+                    plt.Rectangle(
+                        (x - x0, y - y0),
+                        w, h,
+                        fill=False,
+                        edgecolor="dodgerblue",
+                        lw=1.5,
+                    )
+                )
+
+            # --------------------------------------------------
+            # legend
+            # --------------------------------------------------
+            legend_items = [
+                Line2D([0], [0], color=col_keep, lw=2.5, label="Kept (Stage-4)"),
+                Line2D([0], [0], color=col_drop, lw=1.2, label="Pruned (Stage-4)"),
+                Line2D([0], [0], color="dodgerblue", lw=1.5, label="BBox"),
+            ]
+            axes[1].legend(
+                handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9
+            )
+
+            fig.suptitle(
+                f"Stage-4 Width-Aligned Geometry — cid={cid}  members={sorted(shared)}",
+                fontsize=11,
+                fontweight="bold",
+            )
+
+            out = os.path.join(opsec_dir, f"stage4_final_geom_{cid}.png")
+            fig.savefig(out, bbox_inches="tight", dpi=200)
+            plt.close(fig)
+
+        except Exception as e:
+            print(f"[OPSEC STAGE4 PLOT] skipped cid={cid}: {e}")
+                    
             # ============================================================
             # MIDLINE METRICS (COMBINED + AUTO ONLY)
             # ============================================================
