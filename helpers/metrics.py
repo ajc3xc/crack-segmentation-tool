@@ -1224,162 +1224,35 @@ def compare_widths_for_cracks(
         )
 
         off_fallback = 0
-
-        '''# ============================================================
-        # OPSEC PLOT — STAGE 4 FINAL GEOMETRY (GT vs PRED)
-        # ============================================================
-        try:
-            import matplotlib.pyplot as plt
-            from matplotlib.lines import Line2D
-
-            # --------------------------------------------------
-            # bbox (authoritative zoom)
-            # --------------------------------------------------
-            bb = crack.get("mask_bbox")
-            if bb:
-                x, y, w, h = map(int, bb)
-                pad = 25
-                x0 = max(0, x - pad)
-                y0 = max(0, y - pad)
-                x1 = min(W, x + w + pad)
-                y1 = min(H, y + h + pad)
-            else:
-                x0, y0, x1, y1 = 0, 0, W, H
-
-            # --------------------------------------------------
-            # classify PRED segments (after Stage 2)
-            # --------------------------------------------------
-            pred_kept = [np.asarray(S, float) for S in pruned_segs]
-            pred_pruned = []
-
-            for S in segs:
-                if S is None or len(S) < 2:
-                    continue
-                if not any(np.array_equal(S, K) for K in pruned_segs):
-                    pred_pruned.append(np.asarray(S, float))
-
-           # --------------------------------------------------
-            # classify GT segments (FINAL, SCHEMA-CORRECT)
-            # --------------------------------------------------
-            gt_kept, gt_pruned = [], []
-
-            if gt_entry is not None:
-                gt_segs_all = gt_entry.get("midline_segments") or []
-
-                # GT supervision has NO per-segment meta.
-                # Therefore:
-                #   - Stage 1 atomic majority already happened at crack-match level
-                #   - Stage 2 / 3 CANNOT be applied to GT
-                #   - All GT segments that belong to this matched GT entry are KEPT
-
-                for Sg in gt_segs_all:
-                    if Sg is None or len(Sg) < 2:
-                        continue
-                    gt_kept.append(np.asarray(Sg, float))
-
-            # --------------------------------------------------
-            # masks
-            # --------------------------------------------------
-            pred_mask_full = np.zeros((H, W), np.uint8)
-            if "mask_crop" in crack and crack["mask_crop"] is not None:
-                mc = np.asarray(crack["mask_crop"], np.uint8)
-                pred_mask_full[y:y+h, x:x+w] = mc
-
-            # --------------------------------------------------
-            # figure
-            # --------------------------------------------------
-            fig, axes = plt.subplots(
-                1, 2, figsize=(10, 5), dpi=200, sharex=True, sharey=True
-            )
-
-            axes[0].set_title("GT supervision (final geometry)", fontsize=10)
-            axes[1].set_title("Prediction (final geometry)", fontsize=10)
-
-            axes[0].imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
-            axes[1].imshow(pred_mask_full[y0:y1, x0:x1], cmap="gray", zorder=0)
-
-            for ax in axes:
-                ax.axis("off")
-
-            # --------------------------------------------------
-            # colors
-            # --------------------------------------------------
-            col_keep = (0.2, 0.4, 0.8)   # muted blue
-            col_drop = (0.5, 0.0, 0.0)   # dark red
-
-            # --------------------------------------------------
-            # GT plot
-            # --------------------------------------------------
-            for S in gt_pruned:
-                S2 = S - np.array([x0, y0])
-                axes[0].plot(S2[:, 0], S2[:, 1], color=col_drop, lw=2.0, alpha=0.8)
-
-            for S in gt_kept:
-                S2 = S - np.array([x0, y0])
-                axes[0].plot(S2[:, 0], S2[:, 1], color=col_keep, lw=2.5)
-
-            # --------------------------------------------------
-            # PRED plot
-            # --------------------------------------------------
-            for S in pred_pruned:
-                S2 = S - np.array([x0, y0])
-                axes[1].plot(S2[:, 0], S2[:, 1], color=col_drop, lw=2.0, alpha=0.8)
-
-            for S in pred_kept:
-                S2 = S - np.array([x0, y0])
-                axes[1].plot(S2[:, 0], S2[:, 1], color=col_keep, lw=2.5)
-
-            # --------------------------------------------------
-            # bbox overlay
-            # --------------------------------------------------
-            for ax in axes:
-                ax.add_patch(
-                    plt.Rectangle(
-                        (x - x0, y - y0),
-                        w, h,
-                        fill=False,
-                        edgecolor="dodgerblue",
-                        lw=1.5,
-                    )
-                )
-
-            # --------------------------------------------------
-            # legend
-            # --------------------------------------------------
-            legend_items = [
-                Line2D([0], [0], color=col_keep, lw=3, label="Kept segments"),
-                Line2D([0], [0], color=col_drop, lw=3, label="Pruned segments"),
-                Line2D([0], [0], color="dodgerblue", lw=1.5, label="BBox"),
-            ]
-            axes[1].legend(
-                handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9
-            )
-
-            fig.suptitle(
-                f"Stage 4 Final Geometry — cid={cid}  members={sorted(shared)}",
-                fontsize=11,
-                fontweight="bold",
-            )
-
-            out = os.path.join(opsec_dir, f"stage4_final_geom_{cid}.png")
-            fig.savefig(out, bbox_inches="tight", dpi=200)
-            plt.close(fig)
-
-        except Exception as e:
-            print(f"[OPSEC STAGE4 PLOT] skipped cid={cid}: {e}")'''
-
-        
+      
         # --------------------------------------------
         # Stage 4: width slicing (NO PLOTS, NO SANITY)
         # --------------------------------------------
-        final_pred_segs = []   # prediction geometry after width slicing
-        final_gt_segs   = []   # GT geometry aligned to same support
+
+        # ---- prediction geometry after width slicing (raw support) ----
+        final_pred_segs = []
+
+        # ---- track per-seg diffs so OPSEC plot can mirror width-diff plot behavior ----
+        stage4_pairs = []   # list of (pts_ok, d_ok) aligned
+
+        # ---- preserve TRUE GT geometry for plotting (never sliced) ----
+        gt_plot_segs = []
+        if gt_entry is not None:
+            for Sg in gt_entry.get("midline_segments", []):
+                if Sg is None or len(Sg) < 2:
+                    continue
+                gt_plot_segs.append(np.asarray(Sg, float))
+
         for si, (S, m) in enumerate(zip(pruned_segs, pruned_meta)):
-            if len(S) < 2:
+            if S is None or len(S) < 2:
                 continue
 
             # --- determine width index source ---
-            if have_valid_seg_idx and isinstance(m.get("seg_idx"), int) and m["seg_idx"] in seg_start:
+            if (
+                have_valid_seg_idx
+                and isinstance(m.get("seg_idx"), int)
+                and m["seg_idx"] in seg_start
+            ):
                 s0 = seg_start[m["seg_idx"]]
                 src = "seg_idx"
             else:
@@ -1415,26 +1288,25 @@ def compare_widths_for_cracks(
                 continue
 
             pts_ok = pts_full[:mlen]
-            pw_ok  = pw_full[:mlen]
+            pw_ok  = np.asarray(pw_full[:mlen], float)
             gw_ok  = gw[:mlen]
-            d = pw_ok - gw_ok
+            d_ok   = pw_ok - gw_ok   # NOTE: will be NaN where gw_ok is NaN/outside GT support
 
             # --------------------------------------------
-            # COLLECT FINAL STAGE-4 GEOMETRY (AUTHORITATIVE)
+            # COLLECT STAGE-4 GEOMETRY (PRED ONLY)
             # --------------------------------------------
-            # Geometry support is identical for GT & pred at this stage
-            final_pred_segs.append(pts_ok)
-            final_gt_segs.append(pts_ok)
+            final_pred_segs.append(np.asarray(pts_ok, float))
+            stage4_pairs.append((np.asarray(pts_ok, float), np.asarray(d_ok, float)))
 
             # ---- bookkeeping (unchanged contract) ----
-            diffs.append(d)
+            diffs.append(d_ok)
             coords.append(pts_ok)
 
             bbox0 = crack.get("mask_bbox")
             if bbox0 is not None:
                 bboxes.append(bbox0)
 
-            for (x, y), dw, gwi, pwi in zip(pts_ok, d, gw_ok, pw_ok):
+            for (x, y), dw, gwi, pwi in zip(pts_ok, d_ok, gw_ok, pw_ok):
                 if not np.isfinite(dw):
                     continue
                 rows.append({
@@ -1450,10 +1322,14 @@ def compare_widths_for_cracks(
 
         # ============================================================
         # OPSEC PLOT — STAGE 4 FINAL GEOMETRY (WITH PRUNED OVERLAY)
+        #   IMPORTANT: "Kept" mirrors width-diff plotting:
+        #   only contiguous runs where d[i] is finite are drawn.
         # ============================================================
         try:
             import matplotlib.pyplot as plt
             from matplotlib.lines import Line2D
+            import numpy as np
+            import os
 
             # --------------------------------------------------
             # bbox (authoritative zoom)
@@ -1467,25 +1343,60 @@ def compare_widths_for_cracks(
                 x1 = min(W, x + w + pad)
                 y1 = min(H, y + h + pad)
             else:
+                x, y, w, h = 0, 0, W, H
                 x0, y0, x1, y1 = 0, 0, W, H
 
             # --------------------------------------------------
-            # reconstruct PRUNED geometry (Stage-4 subtraction)
+            # helper: split into contiguous runs where d is finite
+            # (matches width-diff plot behavior: uses d[i] for edge i->i+1)
+            # --------------------------------------------------
+            def _split_by_finite_d(pts, d, min_pts=2):
+                pts = np.asarray(pts, float)
+                d = np.asarray(d, float)
+                n = min(len(pts), len(d))
+                if n < 2:
+                    return []
+
+                good = np.isfinite(d[:n])
+                out = []
+                buf = [pts[0]]
+
+                for i in range(n - 1):
+                    if good[i]:
+                        buf.append(pts[i + 1])
+                    else:
+                        if len(buf) >= min_pts:
+                            out.append(np.asarray(buf, float))
+                        buf = [pts[i + 1]]
+
+                if len(buf) >= min_pts:
+                    out.append(np.asarray(buf, float))
+
+                return out
+
+            # --------------------------------------------------
+            # Build kept prediction segments exactly as width-diff plot would render them
+            # --------------------------------------------------
+            final_pred_plot_segs = []
+            for pts_ok, d_ok in stage4_pairs:
+                final_pred_plot_segs.extend(_split_by_finite_d(pts_ok, d_ok, min_pts=2))
+
+            # --------------------------------------------------
+            # reconstruct PRUNED prediction geometry relative to kept runs
             # --------------------------------------------------
             def _subtract_segments(orig, kept):
-                """
-                orig : list[np.ndarray]
-                kept : list[np.ndarray]
-                returns list[np.ndarray] of removed sub-segments
-                """
                 removed = []
 
                 kept_pts = set()
                 for S in kept:
+                    S = np.asarray(S, float)
                     for p in S:
                         kept_pts.add((float(p[0]), float(p[1])))
 
                 for S in orig:
+                    S = np.asarray(S, float)
+                    if len(S) < 2:
+                        continue
                     buf = []
                     for p in S:
                         key = (float(p[0]), float(p[1]))
@@ -1500,14 +1411,13 @@ def compare_widths_for_cracks(
 
                 return removed
 
-            final_pred_segs = [np.asarray(S, float) for S in final_pred_segs]
-            pruned_pred_segs = _subtract_segments(pruned_segs, final_pred_segs)
+            pruned_pred_segs = _subtract_segments(pruned_segs, final_pred_plot_segs)
 
             # --------------------------------------------------
-            # GT geometry (same support, same slicing)
+            # GT geometry — TRUE GT (NO Stage-4 pruning)
             # --------------------------------------------------
-            final_gt_segs = final_pred_segs
-            pruned_gt_segs = pruned_pred_segs
+            final_gt_segs = gt_plot_segs
+            pruned_gt_segs = []  # GT not pruned in Stage-4
 
             # --------------------------------------------------
             # prediction mask
@@ -1520,9 +1430,7 @@ def compare_widths_for_cracks(
             # --------------------------------------------------
             # figure
             # --------------------------------------------------
-            fig, axes = plt.subplots(
-                1, 2, figsize=(10, 5), dpi=200, sharex=True, sharey=True
-            )
+            fig, axes = plt.subplots(1, 2, figsize=(10, 5), dpi=200, sharex=True, sharey=True)
 
             axes[0].set_title("GT supervision (post Stage-4)", fontsize=10)
             axes[1].set_title("Prediction (post Stage-4)", fontsize=10)
@@ -1533,9 +1441,7 @@ def compare_widths_for_cracks(
             for ax in axes:
                 ax.axis("off")
 
-            # --------------------------------------------------
             # colors / styles
-            # --------------------------------------------------
             col_keep = (0.2, 0.4, 0.8)   # blue
             col_drop = (0.7, 0.1, 0.1)   # red
 
@@ -1544,26 +1450,22 @@ def compare_widths_for_cracks(
             # --------------------------------------------------
             for S in pruned_gt_segs:
                 S2 = S - np.array([x0, y0])
-                axes[0].plot(S2[:, 0], S2[:, 1],
-                            color=col_drop, lw=1.0, alpha=0.9, zorder=3)
+                axes[0].plot(S2[:, 0], S2[:, 1], color=col_drop, lw=1.0, alpha=0.9, zorder=3)
 
             for S in final_gt_segs:
                 S2 = S - np.array([x0, y0])
-                axes[0].plot(S2[:, 0], S2[:, 1],
-                            color=col_keep, lw=2.2, zorder=4)
+                axes[0].plot(S2[:, 0], S2[:, 1], color=col_keep, lw=2.2, zorder=4)
 
             # --------------------------------------------------
             # PRED plot
             # --------------------------------------------------
             for S in pruned_pred_segs:
                 S2 = S - np.array([x0, y0])
-                axes[1].plot(S2[:, 0], S2[:, 1],
-                            color=col_drop, lw=1.0, alpha=0.9, zorder=3)
+                axes[1].plot(S2[:, 0], S2[:, 1], color=col_drop, lw=1.0, alpha=0.9, zorder=3)
 
-            for S in final_pred_segs:
+            for S in final_pred_plot_segs:   # <-- IMPORTANT
                 S2 = S - np.array([x0, y0])
-                axes[1].plot(S2[:, 0], S2[:, 1],
-                            color=col_keep, lw=2.2, zorder=4)
+                axes[1].plot(S2[:, 0], S2[:, 1], color=col_keep, lw=2.2, zorder=4)
 
             # --------------------------------------------------
             # bbox overlay
@@ -1583,13 +1485,11 @@ def compare_widths_for_cracks(
             # legend
             # --------------------------------------------------
             legend_items = [
-                Line2D([0], [0], color=col_keep, lw=2.5, label="Kept (Stage-4)"),
+                Line2D([0], [0], color=col_keep, lw=2.5, label="Kept (Stage-4, finite-d only)"),
                 Line2D([0], [0], color=col_drop, lw=1.2, label="Pruned (Stage-4)"),
                 Line2D([0], [0], color="dodgerblue", lw=1.5, label="BBox"),
             ]
-            axes[1].legend(
-                handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9
-            )
+            axes[1].legend(handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9)
 
             fig.suptitle(
                 f"Stage-4 Width-Aligned Geometry — cid={cid}  members={sorted(shared)}",
@@ -1597,85 +1497,88 @@ def compare_widths_for_cracks(
                 fontweight="bold",
             )
 
+            os.makedirs(opsec_dir, exist_ok=True)
             out = os.path.join(opsec_dir, f"stage4_final_geom_{cid}.png")
             fig.savefig(out, bbox_inches="tight", dpi=200)
             plt.close(fig)
 
+            print(f"[OPSEC STAGE4 PLOT] wrote: {out}")
+
         except Exception as e:
             print(f"[OPSEC STAGE4 PLOT] skipped cid={cid}: {e}")
-                    
-            # ============================================================
-            # MIDLINE METRICS (COMBINED + AUTO ONLY)
-            # ============================================================
-            if mode == "combined" and midline_type == "auto" and gt_entry is not None:
-                try:
-                    from helpers.metrics import compute_midline_metrics
-                    import math
+                        
+        # ============================================================
+        # MIDLINE METRICS (COMBINED + AUTO ONLY)
+        # ============================================================
+        if mode == "combined" and midline_type == "auto" and gt_entry is not None:
+            try:
+                from helpers.metrics import compute_midline_metrics
+                import math
 
-                    # ---- build GT midline (same pruning rules as pred) ----
-                    gt_segs_all = gt_entry.get("midline_segments") or []
-                    gt_meta_all = gt_entry.get("midline_segments_meta") or []
+                # ---- build GT midline (same pruning rules as pred) ----
+                gt_segs_all = gt_entry.get("midline_segments") or []
+                gt_meta_all = gt_entry.get("midline_segments_meta") or []
 
-                    gt_keep = []
-                    for Sg, mg in zip(gt_segs_all, gt_meta_all):
-                        if Sg is None or len(Sg) < 2:
-                            continue
-                        aid = mg.get("atomic_id")
-                        if aid is not None and str(aid) not in shared:
-                            continue
-                        bid = int(mg.get("branch_id", -1))
-                        if matched_pred_branch_ids is not None and bid not in matched_pred_branch_ids:
-                            continue
-                        gt_keep.append(np.asarray(Sg, float))
+                gt_keep = []
+                for Sg, mg in zip(gt_segs_all, gt_meta_all):
+                    if Sg is None or len(Sg) < 2:
+                        continue
+                    aid = mg.get("atomic_id")
+                    if aid is not None and str(aid) not in shared:
+                        continue
+                    bid = int(mg.get("branch_id", -1))
+                    if matched_pred_branch_ids is not None and bid not in matched_pred_branch_ids:
+                        continue
+                    gt_keep.append(np.asarray(Sg, float))
 
-                    if gt_keep:
-                        gt_mid = np.vstack(gt_keep)
+                if gt_keep:
+                    gt_mid = np.vstack(gt_keep)
 
-                        # ---- compute midline metrics ----
-                        mm = compute_midline_metrics(pts_ok, gt_mid)
+                    # ---- compute midline metrics ----
+                    mm = compute_midline_metrics(pts_ok, gt_mid)
 
-                        ch  = float(mm.get("chamfer_mean", np.inf))
-                        hd  = float(mm.get("hausdorff", np.inf))
-                        cov = float(mm.get("coverage", 0.0))
+                    ch  = float(mm.get("chamfer_mean", np.inf))
+                    hd  = float(mm.get("hausdorff", np.inf))
+                    cov = float(mm.get("coverage", 0.0))
 
-                        score_mid = (
-                            math.log1p(max(ch, 0.0)) +
-                            0.5 * math.log1p(max(hd, 0.0)) +
-                            (1.0 - float(np.clip(cov, 0.0, 1.0)))
-                        )
+                    score_mid = (
+                        math.log1p(max(ch, 0.0)) +
+                        0.5 * math.log1p(max(hd, 0.0)) +
+                        (1.0 - float(np.clip(cov, 0.0, 1.0)))
+                    )
 
-                        midline_metric_rows.append({
-                            "image": base_name,
-                            "crack_id": str(cid),
-                            "variant_global_id": -1,   # sentinel (not RS3)
-                            "os_mode": "combined",
-                            "g11": np.nan,
-                            "g22": np.nan,
-                            "g33": np.nan,
+                    midline_metric_rows.append({
+                        "image": base_name,
+                        "crack_id": str(cid),
+                        "variant_global_id": -1,   # sentinel (not RS3)
+                        "os_mode": "combined",
+                        "g11": np.nan,
+                        "g22": np.nan,
+                        "g33": np.nan,
 
-                            "length_px": _linestring_length(gt_mid),
-                            "bbox_area": float(bbox0[2] * bbox0[3]) if bbox0 else np.nan,
+                        "length_px": _linestring_length(gt_mid),
+                        "bbox_area": float(bbox0[2] * bbox0[3]) if bbox0 else np.nan,
 
-                            # --- selection metrics ---
-                            "chamfer_mean": ch,
-                            "hausdorff": hd,
-                            "coverage": cov,
-                            "score_mid": score_mid,
+                        # --- selection metrics ---
+                        "chamfer_mean": ch,
+                        "hausdorff": hd,
+                        "coverage": cov,
+                        "score_mid": score_mid,
 
-                            # --- diagnostics ---
-                            "frechet_discrete": mm.get("frechet_discrete"),
-                            "angle_err_deg": mm.get("angle_err_deg"),
-                            "length_ratio": mm.get("length_ratio"),
-                            "orth_mean": mm.get("orth_mean"),
-                            "orth_std": mm.get("orth_std"),
-                            "directional_bias": mm.get("directional_bias"),
-                            "curvature_rms_auto": mm.get("curvature_rms_auto"),
-                            "curvature_rms_manual": mm.get("curvature_rms_manual"),
-                            "curvature_rms_ratio": mm.get("curvature_rms_ratio"),
-                        })
+                        # --- diagnostics ---
+                        "frechet_discrete": mm.get("frechet_discrete"),
+                        "angle_err_deg": mm.get("angle_err_deg"),
+                        "length_ratio": mm.get("length_ratio"),
+                        "orth_mean": mm.get("orth_mean"),
+                        "orth_std": mm.get("orth_std"),
+                        "directional_bias": mm.get("directional_bias"),
+                        "curvature_rms_auto": mm.get("curvature_rms_auto"),
+                        "curvature_rms_manual": mm.get("curvature_rms_manual"),
+                        "curvature_rms_ratio": mm.get("curvature_rms_ratio"),
+                    })
 
-                except Exception as e:
-                    print(f"[MIDLINE METRICS] skipped cid={cid} seg#{si}: {e}")
+            except Exception as e:
+                print(f"[MIDLINE METRICS] skipped cid={cid} seg#{si}: {e}")
 
 
             # ---- bbox bookkeeping (FIX) ----
