@@ -1412,6 +1412,8 @@ def compare_widths_for_cracks(
                 return removed
 
             pruned_pred_segs = _subtract_segments(pruned_segs, final_pred_plot_segs)
+            
+            undefined_pred_segs = _subtract_segments(pruned_segs, final_pred_plot_segs)
 
             # --------------------------------------------------
             # GT geometry — TRUE GT (NO Stage-4 pruning)
@@ -1462,6 +1464,33 @@ def compare_widths_for_cracks(
             for S in pruned_pred_segs:
                 S2 = S - np.array([x0, y0])
                 axes[1].plot(S2[:, 0], S2[:, 1], color=col_drop, lw=1.0, alpha=0.9, zorder=3)
+                
+            for S in undefined_pred_segs:
+                S2 = S - np.array([x0, y0])
+
+                if len(S2) < 2:
+                    continue
+
+                axes[1].plot(
+                    S2[:, 0], S2[:, 1],
+                    color=(0.55, 0.55, 0.55),   # visible neutral gray
+                    lw=2.2,                    # IMPORTANT: thicker than kept
+                    solid_capstyle="round",
+                    alpha=0.9,
+                    zorder=2,
+                )
+                
+            for S in pruned_pred_segs:
+                if len(S) == 1:
+                    p = S[0] - np.array([x0, y0])
+                    axes[1].plot(
+                        p[0], p[1],
+                        marker="o",
+                        color="red",
+                        markersize=3,
+                        zorder=3,
+                    )
+
 
             for S in final_pred_plot_segs:   # <-- IMPORTANT
                 S2 = S - np.array([x0, y0])
@@ -1485,10 +1514,35 @@ def compare_widths_for_cracks(
             # legend
             # --------------------------------------------------
             legend_items = [
-                Line2D([0], [0], color=col_keep, lw=2.5, label="Kept (Stage-4, finite-d only)"),
-                Line2D([0], [0], color=col_drop, lw=1.2, label="Pruned (Stage-4)"),
-                Line2D([0], [0], color="dodgerblue", lw=1.5, label="BBox"),
+                Line2D(
+                    [0], [0],
+                    color=col_keep,
+                    lw=2.5,
+                    solid_capstyle="round",
+                    label="Kept (finite width-d)"
+                ),
+                Line2D(
+                    [0], [0],
+                    color=col_drop,
+                    lw=1.4,
+                    solid_capstyle="round",
+                    label="Pruned (Stage-4)"
+                ),
+                Line2D(
+                    [0], [0],
+                    color=(0.6, 0.6, 0.6),
+                    lw=2.2,                      # IMPORTANT: same as plot
+                    solid_capstyle="round",
+                    label="Undefined (no width)"
+                ),
+                Line2D(
+                    [0], [0],
+                    color="dodgerblue",
+                    lw=1.5,
+                    label="BBox"
+                ),
             ]
+
             axes[1].legend(handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9)
 
             fig.suptitle(
