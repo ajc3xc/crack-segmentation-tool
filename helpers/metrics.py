@@ -1556,6 +1556,11 @@ def compare_widths_for_cracks(
 
             return out
 
+        # ============================================================
+        # Stage 4: DOMINANCE-AWARE BITE — LOGIC ONLY
+        #   (no plotting, no matplotlib)
+        # ============================================================
+
         # ----------------------------
         # decode dominance
         # ----------------------------
@@ -1568,7 +1573,7 @@ def compare_widths_for_cracks(
 
         loss_pred = _decode_by_losing_branch(dom_pred, H, W)
         loss_gt   = _decode_by_losing_branch(dom_gt,   H, W)
-        
+
         # ------------------------------------------------------------
         # AUTHORITATIVE dominance masks for pruning & width eval
         #   - ONLY prediction-side dominance may invalidate prediction
@@ -1586,16 +1591,17 @@ def compare_widths_for_cracks(
                 f"no prediction-side dominance loss (no pruning will occur)"
             )
 
-
         # ----------------------------
-        # build per-branch overlays
+        # union of branch IDs involved
         # ----------------------------
         all_bids = sorted(set(loss_pred.keys()) | set(loss_gt.keys()))
 
         if not all_bids:
             print(f"[STAGE4] cid={cid} no losing branches in GT or PRED")
 
-        # crop window
+        # ----------------------------
+        # crop window (shared by plots)
+        # ----------------------------
         bb = crack.get("mask_bbox")
         if bb:
             x, y, w, h = map(int, bb)
@@ -1608,21 +1614,12 @@ def compare_widths_for_cracks(
             x0, y0, x1, y1 = 0, 0, W, H
 
         # ----------------------------
-        # plot
-        # ----------------------------
-        fig, ax = plt.subplots(1, 1, figsize=(6.5, 6.5), dpi=240)
-        ax.set_title("Stage 4 Dominance Bite (GT vs Prediction)", fontsize=11)
-
-        # background
-        ax.imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
-
-        # --------------------------------------------------
-        # Build categorical dominance map
+        # categorical dominance map
         #   0 = background
         #   1 = GT-only
         #   2 = PRED-only
         #   3 = BOTH (GT ∩ PRED)
-        # --------------------------------------------------
+        # ----------------------------
         dom_label = np.zeros((H, W), dtype=np.uint8)
 
         for bid in all_bids:
@@ -1638,24 +1635,37 @@ def compare_widths_for_cracks(
             if m_pred is not None:
                 dom_label[m_pred.astype(bool)] |= 2
 
-        # crop
-        dom_crop = dom_label[y0:y1, x0:x1]
+        # cropped + masked version (used only for plotting)
+        dom_crop   = dom_label[y0:y1, x0:x1]
         dom_masked = np.ma.array(dom_crop, mask=(dom_crop == 0))
+        
+        # ============================================================
+        # Stage 4: DOMINANCE-AWARE BITE — PLOTTING ONLY
+        # ============================================================
 
-        # --------------------------------------------------
-        # Discrete colormap (opaque, categorical)
-        # --------------------------------------------------
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
         from matplotlib.colors import ListedColormap
 
+        fig, ax = plt.subplots(1, 1, figsize=(6.5, 6.5), dpi=240)
+        ax.set_title("Stage 4 Dominance Bite (GT vs Prediction)", fontsize=11)
+
+        # ----------------------------
+        # background (unchanged behavior)
+        # ----------------------------
+        ax.imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
+
+        # ----------------------------
+        # dominance overlay
+        # ----------------------------
         DOM_CMAP = ListedColormap([
             "#000000",  # 0 (unused)
-            "#e41a1c",  # 1 = GT-only (red)
-            "#377eb8",  # 2 = PRED-only (blue)
-            "#984ea3",  # 3 = BOTH (purple)
+            "#e41a1c",  # 1 = GT-only
+            "#377eb8",  # 2 = PRED-only
+            "#984ea3",  # 3 = BOTH
         ])
 
         ax.imshow(dom_masked, cmap=DOM_CMAP, interpolation="nearest", zorder=1)
-
 
         # ----------------------------
         # overlay segments
@@ -1681,16 +1691,18 @@ def compare_widths_for_cracks(
             ax.plot(S2[:, 0], S2[:, 1], color=col, lw=2.3, zorder=5)
 
             if bid not in seen:
-                legend_handles.append(Line2D([0], [0], color=col, lw=3, label=f"branch {bid}"))
+                legend_handles.append(
+                    Line2D([0], [0], color=col, lw=3, label=f"branch {bid}")
+                )
                 seen.add(bid)
 
         # ----------------------------
-        # legend & annotation
+        # legend
         # ----------------------------
         legend_handles += [
-            Line2D([0], [0], color="red",   lw=6, label="GT-only loss"),
-            Line2D([0], [0], color="blue",  lw=6, label="Pred-only loss"),
-            Line2D([0], [0], color="purple",lw=6, label="GT ∩ Pred"),
+            Line2D([0], [0], color="red",    lw=6, label="GT-only loss"),
+            Line2D([0], [0], color="blue",   lw=6, label="Pred-only loss"),
+            Line2D([0], [0], color="purple", lw=6, label="GT ∩ Pred"),
         ]
 
         ax.legend(handles=legend_handles, loc="lower right", fontsize=8, framealpha=0.9)
@@ -1701,6 +1713,8 @@ def compare_widths_for_cracks(
         plt.close(fig)
 
         print(f"[OPSEC] Stage-4 dominance plot written: {out}")
+
+
         
         # ============================================================
         # Stage 5: width slicing + DOMINANCE-AWARE BITE PRUNE
