@@ -687,7 +687,7 @@ def export_gt_supervision_for_image(
         tag = f"ccid{ccid}_" + "_".join(members)
 
         from combiner import dominant_segments_from_group
-        segs, _cands = dominant_segments_from_group(
+        segs, dom_meta = dominant_segments_from_group(
             members=members,
             atomic=atomic,
             crack_mask_u8=crack_mask,
@@ -741,6 +741,7 @@ def export_gt_supervision_for_image(
                 ),
             },
             "midline_segments": [np.asarray(S, float).tolist() for S in segs],
+            "dominance_meta": dom_meta,
         }
 
         final_entries.append(combined_entry)

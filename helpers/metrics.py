@@ -160,13 +160,13 @@ def _nn_dists(A, B):
         return np.min(dists, axis=1)
 
 
-def chamfer_symmetric(A, B):
+def nn_mean_bidirectional(A, B):
     """Mean NN distance both directions."""
     A = _finite_xy(A); B = _finite_xy(B)
     return float(np.mean(_nn_dists(A,B))) + float(np.mean(_nn_dists(B,A)))
 
 
-def hausdorff_symmetric(A, B):
+def hausdorff_max(A, B):
     """Max directed NN both ways."""
     A = _finite_xy(A); B = _finite_xy(B)
     da = _nn_dists(A, B); db = _nn_dists(B, A)
@@ -174,10 +174,49 @@ def hausdorff_symmetric(A, B):
         return float('inf')
     return float(max(da.max(), db.max()))
 
+def hausdorff_p95(A, B, q=95):
+    """
+    Robust symmetric Hausdorff distance (q-th percentile of NN distances).
+
+    Parameters
+    ----------
+    A, B : (N,2) and (M,2) arrays
+        Polylines / point sets.
+    q : float, optional
+        Percentile to use (default: 95).
+
+    Returns
+    -------
+    float
+        max( percentile_q(A→B), percentile_q(B→A) )
+    """
+    import numpy as np
+
+    A = _finite_xy(A)
+    B = _finite_xy(B)
+
+    if len(A) == 0 or len(B) == 0:
+        return float("inf")
+
+    dAB = _nn_dists(A, B)
+    dBA = _nn_dists(B, A)
+
+    # filter non-finite just in case
+    dAB = dAB[np.isfinite(dAB)]
+    dBA = dBA[np.isfinite(dBA)]
+
+    if dAB.size == 0 or dBA.size == 0:
+        return float("inf")
+
+    return float(max(
+        np.percentile(dAB, q),
+        np.percentile(dBA, q)
+    ))
+
 # --- DROP-IN REPLACEMENT in py ---
 
 
-def frechet_discrete(A, B, max_points=800):
+def frechet_discrete_ds(A, B, max_points=800):
     """
     Iterative Eiter–Mannila discrete Fréchet distance.
     - No recursion (avoids RecursionError)
@@ -230,7 +269,7 @@ def tangent_angles(xy):
     return ang
 
 
-def angle_error_degrees(A, B):
+def mean_tangent_angle_error_degs(A, B):
     # resample to same count for angle comparison
     Ar = _resample_by_arclen(A, N=400)
     Br = _resample_by_arclen(B, N=len(Ar))
@@ -279,7 +318,7 @@ def coverage_at_tau(A, B, tau_px=3.0):
     )
 
 
-def length_ratio(A, B):
+def relative_length_error(A, B):
     La = _len_seg(_finite_xy(A)); Lb = _len_seg(_finite_xy(B))
     if La < 1e-9: return np.nan
     return float(abs(Lb - La) / La)
@@ -603,6 +642,182 @@ def _plot_gt_normals(mask_bin, mid_xy, e1_xy, e2_xy, out_png, title):
     plt.tight_layout()
     plt.savefig(out_png, dpi=200)
     plt.close()
+
+import base64
+import numpy as np
+
+def _decode_packbits_b64_to_mask(packbits_b64, shape):
+    raw = base64.b64decode(packbits_b64.encode("utf-8"))
+    bits = np.frombuffer(raw, dtype=np.uint8)
+    arr = np.unpackbits(bits)
+
+    H, W = int(shape[0]), int(shape[1])
+    n = H * W
+    if arr.size < n:
+        arr = np.pad(arr, (0, n - arr.size), constant_values=0)
+
+    return arr[:n].reshape((H, W)).astype(np.uint8)
+
+
+def bite_blob_to_fullmask(bite_blob, H, W):
+    full = np.zeros((H, W), np.uint8)
+    if not bite_blob:
+        return full
+
+    bb = bite_blob.get("bbox")
+    shape = bite_blob.get("shape")
+    b64 = bite_blob.get("packbits_b64")
+
+    if not (bb and shape and b64):
+        return full
+
+    x0, y0, w, h = map(int, bb)
+    mask = _decode_packbits_b64_to_mask(b64, shape)
+
+    hh = min(h, mask.shape[0], H - y0)
+    ww = min(w, mask.shape[1], W - x0)
+    if hh > 0 and ww > 0:
+        full[y0:y0+hh, x0:x0+ww] = mask[:hh, :ww]
+
+    return full
+
+def split_polyline_by_mask(xy, invalid_mask, min_pts=2):
+    """
+    xy: (N,2)
+    invalid_mask: (N,) bool — True = REMOVE
+    returns: list of (M,2) arrays
+    """
+    out = []
+    buf = []
+
+    for p, bad in zip(xy, invalid_mask):
+        if bad:
+            if len(buf) >= min_pts:
+                out.append(np.asarray(buf, float))
+            buf = []
+        else:
+            buf.append(p)
+
+    if len(buf) >= min_pts:
+        out.append(np.asarray(buf, float))
+
+    return out
+
+def _polyline_points_keyset(segs, ndigits=3):
+    """
+    Build a set of rounded (x,y) keys from a list of polylines.
+
+    Parameters
+    ----------
+    segs : list of (N,2) arrays
+    ndigits : int
+        Rounding precision for float stability
+
+    Returns
+    -------
+    set of (float, float)
+    """
+    pts = set()
+    if not segs:
+        return pts
+
+    for S in segs:
+        if S is None:
+            continue
+        S = np.asarray(S, float)
+        if S.ndim != 2 or S.shape[1] != 2:
+            continue
+        for x, y in S:
+            if np.isfinite(x) and np.isfinite(y):
+                pts.add((
+                    round(float(x), ndigits),
+                    round(float(y), ndigits),
+                ))
+    return pts
+
+def subtract_segments_by_pointset(
+    orig_segs,
+    keep_point_set,
+    min_pts=2,
+    ndigits=3,
+):
+    """
+    Subtract kept geometry from original segments using a point keyset.
+
+    Parameters
+    ----------
+    orig_segs : list of (N,2) arrays
+        Original (topology-pruned) geometry
+    keep_point_set : set of (x,y)
+        Points that survived later stages (post-bite, post-width)
+    min_pts : int
+        Minimum points per returned segment
+    ndigits : int
+        Rounding precision (must match keyset)
+
+    Returns
+    -------
+    list of (M,2) arrays
+        Geometry removed BEFORE bite (pure topology prune)
+    """
+    removed = []
+
+    for S in orig_segs:
+        if S is None:
+            continue
+        S = np.asarray(S, float)
+        if S.ndim != 2 or len(S) < 2:
+            continue
+
+        buf = []
+        for x, y in S:
+            key = (
+                round(float(x), ndigits),
+                round(float(y), ndigits),
+            )
+            if key in keep_point_set:
+                if len(buf) >= min_pts:
+                    removed.append(np.asarray(buf, float))
+                buf = []
+            else:
+                buf.append([x, y])
+
+        if len(buf) >= min_pts:
+            removed.append(np.asarray(buf, float))
+
+    return removed
+
+def build_branch_bite_masks(dominance_meta, H, W):
+    """
+    Returns:
+        dict: branch_id -> full_mask (uint8 HxW)
+    """
+    out = {}
+
+    if not dominance_meta:
+        return out
+
+    branches = dominance_meta.get("branches", {})
+    bite = dominance_meta.get("bite", {})
+
+    by_cause = bite.get("by_cause", {})
+
+    for bid, bmeta in branches.items():
+        bid = int(bid)
+        lost = bmeta.get("lost_to", [])  # ← THIS is critical
+
+        masks = []
+        for cause in lost:
+            blob = by_cause.get(cause)
+            if blob:
+                masks.append(bite_blob_to_fullmask(blob, H, W))
+
+        if masks:
+            out[bid] = np.logical_or.reduce(masks)
+        else:
+            out[bid] = np.zeros((H, W), bool)
+
+    return out
 
 def compare_widths_for_cracks(
     ann,
@@ -1077,15 +1292,30 @@ def compare_widths_for_cracks(
                 else:
                     pred_kept.append(np.asarray(S, float))
 
-            # ---- GT segments (final geometry) ----
+            # ---- GT segments (Stage-1 pruning — symmetric when possible) ----
             gt_kept = []
-            gt_pruned = []  # will remain empty unless GT provides per-seg atomic IDs
+            gt_pruned = []
+
             if gt_entry is not None:
-                gt_segs_all = gt_entry.get("midline_segments") or []
-                for Sg in gt_segs_all:
-                    if Sg is None or len(Sg) < 2:
-                        continue
-                    gt_kept.append(np.asarray(Sg, float))
+                gt_segs_all  = gt_entry.get("midline_segments") or []
+                gt_meta_all  = gt_entry.get("midline_segments_meta") or []
+
+                if len(gt_segs_all) != len(gt_meta_all):
+                    # No reliable atomic metadata → do NOT prune GT
+                    for Sg in gt_segs_all:
+                        if Sg is None or len(Sg) < 2:
+                            continue
+                        gt_kept.append(np.asarray(Sg, float))
+                else:
+                    for Sg, mg in zip(gt_segs_all, gt_meta_all):
+                        if Sg is None or len(Sg) < 2:
+                            continue
+
+                        aid = mg.get("atomic_id", None)
+                        if aid is not None and str(aid) not in shared:
+                            gt_pruned.append(np.asarray(Sg, float))
+                        else:
+                            gt_kept.append(np.asarray(Sg, float))
 
             # ---- figure ----
             fig, axes = plt.subplots(
@@ -1176,21 +1406,47 @@ def compare_widths_for_cracks(
             print(f"[OPSEC STAGE1 PLOT] skipped cid={cid}: {e}")
 
         # --------------------------------------------
-        # Stage 2: optional branch matching
+        # Stage 2: optional branch matching (SYMMETRIC)
         # --------------------------------------------
         matched_pred_branch_ids = None
+
         if gt_entry is not None:
+            # ---- GT segments AFTER Stage-1 atomic pruning (symmetric with pred) ----
             gt_mid_segs = gt_entry.get("midline_segments") or []
-            gt_meta = gt_entry.get("midline_segments_meta") or []
-            if len(gt_mid_segs) == len(gt_meta) and gt_mid_segs:
-                gt_segs = [np.asarray(s, float) for s in gt_mid_segs]
-                gt_br = _build_branch_table(gt_segs, gt_meta, shared_members=shared)
-                pr_br = _build_branch_table(pruned_segs, pruned_meta, shared_members=shared)
+            gt_meta_all = gt_entry.get("midline_segments_meta") or []
+
+            gt_segs_pruned = []
+            gt_meta_pruned = []
+
+            if len(gt_mid_segs) == len(gt_meta_all):
+                for Sg, mg in zip(gt_mid_segs, gt_meta_all):
+                    if Sg is None or len(Sg) < 2:
+                        continue
+                    aid = mg.get("atomic_id", None)
+                    if aid is not None and str(aid) not in shared:
+                        continue
+                    gt_segs_pruned.append(np.asarray(Sg, float))
+                    gt_meta_pruned.append(dict(mg))
+
+            # ---- build branch tables on symmetric supports ----
+            if gt_segs_pruned and pruned_segs:
+                gt_br = _build_branch_table(
+                    gt_segs_pruned,
+                    gt_meta_pruned,
+                    shared_members=shared
+                )
+                pr_br = _build_branch_table(
+                    pruned_segs,
+                    pruned_meta,
+                    shared_members=shared
+                )
+
                 if gt_br and pr_br:
                     matches = _greedy_match_branches(gt_br, pr_br)
                     if matches:
                         matched_pred_branch_ids = {p for (_, p, _, _) in matches}
 
+        # ---- prune prediction segments by matched branches ----
         if matched_pred_branch_ids is not None:
             keep_s, keep_m = [], []
             for S, m in zip(pruned_segs, pruned_meta):
@@ -1224,18 +1480,236 @@ def compare_widths_for_cracks(
         )
 
         off_fallback = 0
-      
-        # --------------------------------------------
-        # Stage 4: width slicing (NO PLOTS, NO SANITY)
-        # --------------------------------------------
+        
+        # ============================================================
+        # Stage 4: DOMINANCE-AWARE BITE (AUTHORITATIVE, EXPLANATORY)
+        #
+        # Purpose (READ-ONLY):
+        #   - Visualize WHERE each branch loses dominance
+        #   - Separate GT vs PRED vs OR(expanded) loss regions
+        #   - Overlay segments to show what geometry is at risk
+        #
+        # Semantics:
+        #   - RED    : GT-only loss
+        #   - BLUE   : PRED-only loss (OR expansion)
+        #   - PURPLE : GT ∩ PRED (agreement)
+        #
+        # NO GEOMETRY IS REMOVED HERE
+        # ============================================================
 
-        # ---- prediction geometry after width slicing (raw support) ----
+        import numpy as np
+        import os
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+
+        # ----------------------------
+        # helpers
+        # ----------------------------
+        def _safe_int(x, default=None):
+            try:
+                return int(x)
+            except Exception:
+                return default
+
+        def _dump_json(path, obj):
+            try:
+                import json
+                with open(path, "w") as f:
+                    json.dump(obj, f, indent=2)
+            except Exception:
+                pass
+
+        def _decode_by_losing_branch(dom_meta, H, W):
+            """
+            Returns: dict[int bid] -> bool fullmask
+            AUTHORITATIVE decoder.
+            """
+            out = {}
+            if not isinstance(dom_meta, dict):
+                return out
+
+            bite = dom_meta.get("bite")
+            if not isinstance(bite, dict):
+                return out
+
+            by_branch = bite.get("by_losing_branch")
+            if not isinstance(by_branch, dict):
+                return out
+
+            fallback_bbox = bite.get("bbox")
+
+            for bid_str, blob in by_branch.items():
+                bid = _safe_int(bid_str)
+                if bid is None:
+                    continue
+
+                if "bbox" not in blob and fallback_bbox is not None:
+                    blob = dict(blob)
+                    blob["bbox"] = fallback_bbox
+
+                try:
+                    m = bite_blob_to_fullmask(blob, H, W)
+                    if m is not None and np.any(m):
+                        out[bid] = (m > 0)
+                except Exception:
+                    continue
+
+            return out
+
+        # ----------------------------
+        # decode dominance
+        # ----------------------------
+        dom_pred = crack.get("dominance_meta")
+        dom_gt   = gt_entry.get("dominance_meta") if gt_entry else None
+
+        os.makedirs(opsec_dir, exist_ok=True)
+        _dump_json(os.path.join(opsec_dir, f"dom_pred_{cid}.json"), dom_pred)
+        _dump_json(os.path.join(opsec_dir, f"dom_gt_{cid}.json"), dom_gt)
+
+        loss_pred = _decode_by_losing_branch(dom_pred, H, W)
+        loss_gt   = _decode_by_losing_branch(dom_gt,   H, W)
+        
+        # ------------------------------------------------------------
+        # AUTHORITATIVE dominance masks for pruning & width eval
+        #   - ONLY prediction-side dominance may invalidate prediction
+        # ------------------------------------------------------------
+        loss_masks_by_branch = loss_pred if isinstance(loss_pred, dict) else {}
+
+        if loss_masks_by_branch:
+            print(
+                f"[BITE DOM] cid={cid} "
+                f"loss_masks_by_branch (PRED) = {sorted(loss_masks_by_branch.keys())}"
+            )
+        else:
+            print(
+                f"[BITE DOM] cid={cid} "
+                f"no prediction-side dominance loss (no pruning will occur)"
+            )
+
+
+        # ----------------------------
+        # build per-branch overlays
+        # ----------------------------
+        all_bids = sorted(set(loss_pred.keys()) | set(loss_gt.keys()))
+
+        if not all_bids:
+            print(f"[STAGE4] cid={cid} no losing branches in GT or PRED")
+
+        # crop window
+        bb = crack.get("mask_bbox")
+        if bb:
+            x, y, w, h = map(int, bb)
+            pad = 25
+            x0 = max(0, x - pad)
+            y0 = max(0, y - pad)
+            x1 = min(W, x + w + pad)
+            y1 = min(H, y + h + pad)
+        else:
+            x0, y0, x1, y1 = 0, 0, W, H
+
+        # ----------------------------
+        # plot
+        # ----------------------------
+        fig, ax = plt.subplots(1, 1, figsize=(6.5, 6.5), dpi=240)
+        ax.set_title("Stage 4 Dominance Bite (GT vs Prediction)", fontsize=11)
+
+        # background
+        ax.imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
+
+        # --------------------------------------------------
+        # Build categorical dominance map
+        #   0 = background
+        #   1 = GT-only
+        #   2 = PRED-only
+        #   3 = BOTH (GT ∩ PRED)
+        # --------------------------------------------------
+        dom_label = np.zeros((H, W), dtype=np.uint8)
+
+        for bid in all_bids:
+            m_gt   = loss_gt.get(bid)
+            m_pred = loss_pred.get(bid)
+
+            if m_gt is None and m_pred is None:
+                continue
+
+            if m_gt is not None:
+                dom_label[m_gt.astype(bool)] |= 1
+
+            if m_pred is not None:
+                dom_label[m_pred.astype(bool)] |= 2
+
+        # crop
+        dom_crop = dom_label[y0:y1, x0:x1]
+        dom_masked = np.ma.array(dom_crop, mask=(dom_crop == 0))
+
+        # --------------------------------------------------
+        # Discrete colormap (opaque, categorical)
+        # --------------------------------------------------
+        from matplotlib.colors import ListedColormap
+
+        DOM_CMAP = ListedColormap([
+            "#000000",  # 0 (unused)
+            "#e41a1c",  # 1 = GT-only (red)
+            "#377eb8",  # 2 = PRED-only (blue)
+            "#984ea3",  # 3 = BOTH (purple)
+        ])
+
+        ax.imshow(dom_masked, cmap=DOM_CMAP, interpolation="nearest", zorder=1)
+
+
+        # ----------------------------
+        # overlay segments
+        # ----------------------------
+        color_cycle = [
+            (0.95, 0.90, 0.25),
+            (0.25, 0.85, 0.35),
+            (0.25, 0.55, 0.95),
+            (0.95, 0.35, 0.35),
+        ]
+
+        legend_handles = []
+        seen = set()
+
+        for S, m in zip(pruned_segs, pruned_meta):
+            if S is None or len(S) < 2:
+                continue
+
+            bid = _safe_int(m.get("branch_id"), 0)
+            col = color_cycle[bid % len(color_cycle)]
+            S2 = np.asarray(S) - np.array([x0, y0])
+
+            ax.plot(S2[:, 0], S2[:, 1], color=col, lw=2.3, zorder=5)
+
+            if bid not in seen:
+                legend_handles.append(Line2D([0], [0], color=col, lw=3, label=f"branch {bid}"))
+                seen.add(bid)
+
+        # ----------------------------
+        # legend & annotation
+        # ----------------------------
+        legend_handles += [
+            Line2D([0], [0], color="red",   lw=6, label="GT-only loss"),
+            Line2D([0], [0], color="blue",  lw=6, label="Pred-only loss"),
+            Line2D([0], [0], color="purple",lw=6, label="GT ∩ Pred"),
+        ]
+
+        ax.legend(handles=legend_handles, loc="lower right", fontsize=8, framealpha=0.9)
+        ax.axis("off")
+
+        out = os.path.join(opsec_dir, f"stage4_dominance_bite_{cid}.png")
+        fig.savefig(out, bbox_inches="tight")
+        plt.close(fig)
+
+        print(f"[OPSEC] Stage-4 dominance plot written: {out}")
+
+        # ============================================================
+        # Stage 5: width slicing + DOMINANCE-AWARE BITE PRUNE
+        # ============================================================
+
         final_pred_segs = []
+        stage4_pairs = []  # (pts_ok_run, d_ok_run)
+        bite_pruned_pred_segs = []
 
-        # ---- track per-seg diffs so OPSEC plot can mirror width-diff plot behavior ----
-        stage4_pairs = []   # list of (pts_ok, d_ok) aligned
-
-        # ---- preserve TRUE GT geometry for plotting (never sliced) ----
         gt_plot_segs = []
         if gt_entry is not None:
             for Sg in gt_entry.get("midline_segments", []):
@@ -1262,7 +1736,7 @@ def compare_widths_for_cracks(
             L = len(S)
             s1 = min(s0 + L, len(widths_geo))
 
-            pw_full = widths_geo[s0:s1]
+            pw_full  = widths_geo[s0:s1]
             pts_full = S[:len(pw_full)]
 
             print(
@@ -1287,43 +1761,80 @@ def compare_widths_for_cracks(
             if mlen < 2:
                 continue
 
-            pts_ok = pts_full[:mlen]
-            pw_ok  = np.asarray(pw_full[:mlen], float)
-            gw_ok  = gw[:mlen]
-            d_ok   = pw_ok - gw_ok   # NOTE: will be NaN where gw_ok is NaN/outside GT support
+            pts_raw = np.asarray(pts_full[:mlen], float)
+            pw_raw  = np.asarray(pw_full[:mlen], float)
+            gw_raw  = np.asarray(gw[:mlen], float)
 
-            # --------------------------------------------
-            # COLLECT STAGE-4 GEOMETRY (PRED ONLY)
-            # --------------------------------------------
-            final_pred_segs.append(np.asarray(pts_ok, float))
-            stage4_pairs.append((np.asarray(pts_ok, float), np.asarray(d_ok, float)))
+            # ------------------------------------------------------------
+            # DOMINANCE-AWARE bite invalid mask:
+            # invalid[i] True only if THIS segment's branch lost at that point.
+            # ------------------------------------------------------------
+            invalid = np.zeros(len(pts_raw), dtype=bool)
 
-            # ---- bookkeeping (unchanged contract) ----
-            diffs.append(d_ok)
-            coords.append(pts_ok)
+            seg_branch = int(m.get("branch_id", -1))
+            loss_mask = loss_masks_by_branch.get(seg_branch)
 
-            bbox0 = crack.get("mask_bbox")
-            if bbox0 is not None:
-                bboxes.append(bbox0)
+            if loss_mask is not None:
+                for i, (x, y) in enumerate(pts_raw):
+                    xi = int(round(x))
+                    yi = int(round(y))
+                    if 0 <= xi < W and 0 <= yi < H:
+                        invalid[i] = bool(loss_mask[yi, xi])
 
-            for (x, y), dw, gwi, pwi in zip(pts_ok, d_ok, gw_ok, pw_ok):
-                if not np.isfinite(dw):
+            # ---- split pts into kept vs bite-pruned runs ----
+            pred_runs = split_polyline_by_mask(pts_raw, invalid, min_pts=2)
+            bite_runs = split_polyline_by_mask(pts_raw, ~invalid, min_pts=2)
+
+            for br in bite_runs:
+                bite_pruned_pred_segs.append(np.asarray(br, float))
+
+            pw_runs = split_polyline_by_mask(pw_raw[:, None], invalid, min_pts=2)
+            gw_runs = split_polyline_by_mask(gw_raw[:, None], invalid, min_pts=2)
+
+            if not pred_runs:
+                continue
+
+            # ---- consume each bite-clean run as a separate "segment" ----
+            for pts_ok, pw_ok, gw_ok in zip(pred_runs, pw_runs, gw_runs):
+                pw_ok = np.asarray(pw_ok[:, 0], float)
+                gw_ok = np.asarray(gw_ok[:, 0], float)
+
+                m2 = min(len(pts_ok), len(pw_ok), len(gw_ok))
+                if m2 < 2:
                     continue
-                rows.append({
-                    "x": float(x),
-                    "y": float(y),
-                    "gt_width_px": float(gwi),
-                    "pred_width_px": float(pwi),
-                    "width_diff_px": float(dw),
-                    "cid": str(cid),
-                    "crack_type": "combined",
-                    "midline_type": midline_type,
-                })
 
+                pts_ok = np.asarray(pts_ok[:m2], float)
+                pw_ok  = np.asarray(pw_ok[:m2], float)
+                gw_ok  = np.asarray(gw_ok[:m2], float)
+
+                d_ok = pw_ok - gw_ok
+
+                final_pred_segs.append(pts_ok)
+                stage4_pairs.append((pts_ok, d_ok))
+
+                diffs.append(d_ok)
+                coords.append(pts_ok)
+
+                bbox0 = crack.get("mask_bbox")
+                if bbox0 is not None:
+                    bboxes.append(bbox0)
+
+                for (x, y), dw, gwi, pwi in zip(pts_ok, d_ok, gw_ok, pw_ok):
+                    if not np.isfinite(dw):
+                        continue
+                    rows.append({
+                        "x": float(x),
+                        "y": float(y),
+                        "gt_width_px": float(gwi),
+                        "pred_width_px": float(pwi),
+                        "width_diff_px": float(dw),
+                        "cid": str(cid),
+                        "crack_type": "combined",
+                        "midline_type": midline_type,
+                    })
+                
         # ============================================================
-        # OPSEC PLOT — STAGE 4 FINAL GEOMETRY (WITH PRUNED OVERLAY)
-        #   IMPORTANT: "Kept" mirrors width-diff plotting:
-        #   only contiguous runs where d[i] is finite are drawn.
+        # OPSEC PLOT — STAGE 5 FINAL GEOMETRY (DOMINANCE-AWARE)
         # ============================================================
         try:
             import matplotlib.pyplot as plt
@@ -1331,9 +1842,6 @@ def compare_widths_for_cracks(
             import numpy as np
             import os
 
-            # --------------------------------------------------
-            # bbox (authoritative zoom)
-            # --------------------------------------------------
             bb = crack.get("mask_bbox")
             if bb:
                 x, y, w, h = map(int, bb)
@@ -1346,80 +1854,64 @@ def compare_widths_for_cracks(
                 x, y, w, h = 0, 0, W, H
                 x0, y0, x1, y1 = 0, 0, W, H
 
-            # --------------------------------------------------
-            # helper: split into contiguous runs where d is finite
-            # (matches width-diff plot behavior: uses d[i] for edge i->i+1)
-            # --------------------------------------------------
-            def _split_by_finite_d(pts, d, min_pts=2):
+            def _split_finite_undef(pts, d, min_pts=2):
                 pts = np.asarray(pts, float)
                 d = np.asarray(d, float)
                 n = min(len(pts), len(d))
                 if n < 2:
-                    return []
+                    return [], []
 
-                good = np.isfinite(d[:n])
-                out = []
-                buf = [pts[0]]
+                kept, undef = [], []
+                buf_k, buf_u = [], []
 
                 for i in range(n - 1):
-                    if good[i]:
-                        buf.append(pts[i + 1])
+                    p0, p1 = pts[i], pts[i + 1]
+                    if np.isfinite(d[i]):
+                        if not buf_k:
+                            buf_k.append(p0)
+                        buf_k.append(p1)
+                        if len(buf_u) >= min_pts:
+                            undef.append(np.asarray(buf_u, float))
+                        buf_u = []
                     else:
-                        if len(buf) >= min_pts:
-                            out.append(np.asarray(buf, float))
-                        buf = [pts[i + 1]]
+                        if not buf_u:
+                            buf_u.append(p0)
+                        buf_u.append(p1)
+                        if len(buf_k) >= min_pts:
+                            kept.append(np.asarray(buf_k, float))
+                        buf_k = []
 
-                if len(buf) >= min_pts:
-                    out.append(np.asarray(buf, float))
-
-                return out
+                if len(buf_k) >= min_pts:
+                    kept.append(np.asarray(buf_k, float))
+                if len(buf_u) >= min_pts:
+                    undef.append(np.asarray(buf_u, float))
+                return kept, undef
 
             # --------------------------------------------------
-            # Build kept prediction segments exactly as width-diff plot would render them
+            # Build prediction plot segments
             # --------------------------------------------------
-            final_pred_plot_segs = []
+            pred_kept_segs = []
+            pred_undef_segs = []
+            pred_stage5_support = []
+
             for pts_ok, d_ok in stage4_pairs:
-                final_pred_plot_segs.extend(_split_by_finite_d(pts_ok, d_ok, min_pts=2))
+                k, u = _split_finite_undef(pts_ok, d_ok, min_pts=2)
+                pred_kept_segs.extend(k)
+                pred_undef_segs.extend(u)
+                pred_stage5_support.append(pts_ok)
 
             # --------------------------------------------------
-            # reconstruct PRUNED prediction geometry relative to kept runs
+            # TOPOLOGY-PRUNED geometry (unchanged)
             # --------------------------------------------------
-            def _subtract_segments(orig, kept):
-                removed = []
+            keep_set = _polyline_points_keyset(pred_stage5_support)
+            if bite_pruned_pred_segs:
+                keep_set |= _polyline_points_keyset(bite_pruned_pred_segs)
 
-                kept_pts = set()
-                for S in kept:
-                    S = np.asarray(S, float)
-                    for p in S:
-                        kept_pts.add((float(p[0]), float(p[1])))
-
-                for S in orig:
-                    S = np.asarray(S, float)
-                    if len(S) < 2:
-                        continue
-                    buf = []
-                    for p in S:
-                        key = (float(p[0]), float(p[1]))
-                        if key in kept_pts:
-                            if len(buf) >= 2:
-                                removed.append(np.asarray(buf, float))
-                            buf = []
-                        else:
-                            buf.append(p)
-                    if len(buf) >= 2:
-                        removed.append(np.asarray(buf, float))
-
-                return removed
-
-            pruned_pred_segs = _subtract_segments(pruned_segs, final_pred_plot_segs)
-            
-            undefined_pred_segs = _subtract_segments(pruned_segs, final_pred_plot_segs)
-
-            # --------------------------------------------------
-            # GT geometry — TRUE GT (NO Stage-4 pruning)
-            # --------------------------------------------------
-            final_gt_segs = gt_plot_segs
-            pruned_gt_segs = []  # GT not pruned in Stage-4
+            topology_pruned_pred_segs = subtract_segments_by_pointset(
+                pruned_segs,
+                keep_set,
+                min_pts=2,
+            )
 
             # --------------------------------------------------
             # prediction mask
@@ -1427,140 +1919,149 @@ def compare_widths_for_cracks(
             pred_mask_full = np.zeros((H, W), np.uint8)
             if "mask_crop" in crack and crack["mask_crop"] is not None and bb:
                 mc = np.asarray(crack["mask_crop"], np.uint8)
-                pred_mask_full[y:y+h, x:x+w] = mc
+                hh = min(h, mc.shape[0])
+                ww = min(w, mc.shape[1])
+                if hh > 0 and ww > 0:
+                    pred_mask_full[y:y+hh, x:x+ww] = mc[:hh, :ww]
 
             # --------------------------------------------------
             # figure
             # --------------------------------------------------
             fig, axes = plt.subplots(1, 2, figsize=(10, 5), dpi=200, sharex=True, sharey=True)
 
-            axes[0].set_title("GT supervision (post Stage-4)", fontsize=10)
-            axes[1].set_title("Prediction (post Stage-4)", fontsize=10)
+            axes[0].set_title("GT supervision (dominance-aware)", fontsize=10)
+            axes[1].set_title("Prediction (dominance-aware)", fontsize=10)
 
             axes[0].imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
             axes[1].imshow(pred_mask_full[y0:y1, x0:x1], cmap="gray", zorder=0)
+            
+            # --------------------------------------------------
+            # overlay: branch-specific loss regions (AUTHORITATIVE)
+            # --------------------------------------------------
+            if loss_masks_by_branch:
+                # build label image: pixel value = branch_id that lost here
+                loss_label = np.full((H, W), -1, dtype=np.int32)
+
+                for bid, msk in loss_masks_by_branch.items():
+                    if msk is None:
+                        continue
+                    loss_label[msk.astype(bool)] = int(bid)
+
+                # mask out non-loss pixels
+                lab = loss_label[y0:y1, x0:x1]
+                lab_masked = np.ma.array(lab, mask=(lab < 0))
+
+                # show same overlay on GT + pred for visual correspondence
+                axes[0].imshow(lab_masked, alpha=0.35, interpolation="nearest", zorder=1)
+                axes[1].imshow(lab_masked, alpha=0.35, interpolation="nearest", zorder=1)
+
+
 
             for ax in axes:
                 ax.axis("off")
 
-            # colors / styles
-            col_keep = (0.2, 0.4, 0.8)   # blue
-            col_drop = (0.7, 0.1, 0.1)   # red
+            col_keep  = (0.2, 0.4, 0.8)  # blue
+            col_topo  = (0.7, 0.1, 0.1)  # red
+            col_undef = (0.6, 0.6, 0.6)  # gray
+            col_bite  = (0.9, 0.6, 0.0)  # orange
 
             # --------------------------------------------------
-            # GT plot
+            # GT plot (LEFT): dominance-aware bite (ROBUST)
             # --------------------------------------------------
-            for S in pruned_gt_segs:
-                S2 = S - np.array([x0, y0])
-                axes[0].plot(S2[:, 0], S2[:, 1], color=col_drop, lw=1.0, alpha=0.9, zorder=3)
+            gt_meta = gt_entry.get("midline_segments_meta", []) if gt_entry else []
 
-            for S in final_gt_segs:
-                S2 = S - np.array([x0, y0])
-                axes[0].plot(S2[:, 0], S2[:, 1], color=col_keep, lw=2.2, zorder=4)
+            for i, S in enumerate(gt_plot_segs):
+                S = np.asarray(S, float)
 
-            # --------------------------------------------------
-            # PRED plot
-            # --------------------------------------------------
-            for S in pruned_pred_segs:
-                S2 = S - np.array([x0, y0])
-                axes[1].plot(S2[:, 0], S2[:, 1], color=col_drop, lw=1.0, alpha=0.9, zorder=3)
-                
-            for S in undefined_pred_segs:
-                S2 = S - np.array([x0, y0])
+                # --- branch id if available, else None ---
+                bid = None
+                if i < len(gt_meta) and isinstance(gt_meta[i], dict):
+                    bid = gt_meta[i].get("branch_id")
 
-                if len(S2) < 2:
+                loss_mask = loss_masks_by_branch.get(int(bid)) if bid is not None else None
+
+                # ---- NO dominance info → draw full GT segment ----
+                if loss_mask is None:
+                    axes[0].plot(
+                        S[:, 0] - x0,
+                        S[:, 1] - y0,
+                        color=col_keep,
+                        lw=2.2,
+                        zorder=4,
+                    )
                     continue
 
-                axes[1].plot(
-                    S2[:, 0], S2[:, 1],
-                    color=(0.55, 0.55, 0.55),   # visible neutral gray
-                    lw=2.2,                    # IMPORTANT: thicker than kept
-                    solid_capstyle="round",
-                    alpha=0.9,
-                    zorder=2,
-                )
-                
-            for S in pruned_pred_segs:
-                if len(S) == 1:
-                    p = S[0] - np.array([x0, y0])
-                    axes[1].plot(
-                        p[0], p[1],
-                        marker="o",
-                        color="red",
-                        markersize=3,
+                # ---- dominance-aware pruning ----
+                invalid_gt = np.array([
+                    bool(loss_mask[int(round(y)), int(round(x))])
+                    if 0 <= int(round(x)) < W and 0 <= int(round(y)) < H else False
+                    for x, y in S
+                ], bool)
+
+                kept_gt = split_polyline_by_mask(S, invalid_gt, min_pts=2)
+                bite_gt = split_polyline_by_mask(S, ~invalid_gt, min_pts=2)
+
+                for k in kept_gt:
+                    axes[0].plot(
+                        k[:, 0] - x0,
+                        k[:, 1] - y0,
+                        color=col_keep,
+                        lw=2.2,
+                        zorder=4,
+                    )
+                for b in bite_gt:
+                    axes[0].plot(
+                        b[:, 0] - x0,
+                        b[:, 1] - y0,
+                        color=col_bite,
+                        lw=2.2,
                         zorder=3,
                     )
 
-
-            for S in final_pred_plot_segs:   # <-- IMPORTANT
-                S2 = S - np.array([x0, y0])
-                axes[1].plot(S2[:, 0], S2[:, 1], color=col_keep, lw=2.2, zorder=4)
-
             # --------------------------------------------------
-            # bbox overlay
+            # PRED plot (RIGHT)
             # --------------------------------------------------
+            for S in topology_pruned_pred_segs:
+                axes[1].plot(S[:, 0] - x0, S[:, 1] - y0, color=col_topo, lw=1.4)
+
+            for S in bite_pruned_pred_segs:
+                axes[1].plot(S[:, 0] - x0, S[:, 1] - y0, color=col_bite, lw=2.0)
+
+            for S in pred_undef_segs:
+                axes[1].plot(S[:, 0] - x0, S[:, 1] - y0, color=col_undef, lw=2.2)
+
+            for S in pred_kept_segs:
+                axes[1].plot(S[:, 0] - x0, S[:, 1] - y0, color=col_keep, lw=2.5)
+
             for ax in axes:
                 ax.add_patch(
-                    plt.Rectangle(
-                        (x - x0, y - y0),
-                        w, h,
-                        fill=False,
-                        edgecolor="dodgerblue",
-                        lw=1.5,
-                    )
+                    plt.Rectangle((x - x0, y - y0), w, h, fill=False,
+                                edgecolor="dodgerblue", lw=1.5)
                 )
 
-            # --------------------------------------------------
-            # legend
-            # --------------------------------------------------
             legend_items = [
-                Line2D(
-                    [0], [0],
-                    color=col_keep,
-                    lw=2.5,
-                    solid_capstyle="round",
-                    label="Kept (finite width-d)"
-                ),
-                Line2D(
-                    [0], [0],
-                    color=col_drop,
-                    lw=1.4,
-                    solid_capstyle="round",
-                    label="Pruned (Stage-4)"
-                ),
-                Line2D(
-                    [0], [0],
-                    color=(0.6, 0.6, 0.6),
-                    lw=2.2,                      # IMPORTANT: same as plot
-                    solid_capstyle="round",
-                    label="Undefined (no width)"
-                ),
-                Line2D(
-                    [0], [0],
-                    color="dodgerblue",
-                    lw=1.5,
-                    label="BBox"
-                ),
+                Line2D([0],[0], color=col_keep, lw=2.5, label="Finite dist"),
+                Line2D([0],[0], color=col_undef, lw=2.2, label="Infinite/undef"),
+                Line2D([0],[0], color=col_bite, lw=2.0, label="Dominance-bite"),
+                Line2D([0],[0], color=col_topo, lw=1.4, label="Topology-pruned"),
             ]
-
-            axes[1].legend(handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9)
+            axes[1].legend(handles=legend_items, loc="lower right", fontsize=8)
 
             fig.suptitle(
-                f"Stage-4 Width-Aligned Geometry — cid={cid}  members={sorted(shared)}",
-                fontsize=11,
-                fontweight="bold",
+                f"Stage-5 Geometry Provenance (Dominance-aware) — cid={cid}",
+                fontsize=11, fontweight="bold"
             )
 
             os.makedirs(opsec_dir, exist_ok=True)
-            out = os.path.join(opsec_dir, f"stage4_final_geom_{cid}.png")
+            out = os.path.join(opsec_dir, f"stage5_geom_provenance_{cid}.png")
             fig.savefig(out, bbox_inches="tight", dpi=200)
             plt.close(fig)
 
-            print(f"[OPSEC STAGE4 PLOT] wrote: {out}")
+            print(f"[OPSEC STAGE5 PLOT] wrote: {out}")
 
         except Exception as e:
-            print(f"[OPSEC STAGE4 PLOT] skipped cid={cid}: {e}")
-                        
+            print(f"[OPSEC STAGE5 PLOT] skipped cid={cid}: {e}")
+                                        
         # ============================================================
         # MIDLINE METRICS (COMBINED + AUTO ONLY)
         # ============================================================
@@ -1568,6 +2069,7 @@ def compare_widths_for_cracks(
             try:
                 from helpers.metrics import compute_midline_metrics
                 import math
+                import numpy as np
 
                 # ---- build GT midline (same pruning rules as pred) ----
                 gt_segs_all = gt_entry.get("midline_segments") or []
@@ -1585,15 +2087,15 @@ def compare_widths_for_cracks(
                         continue
                     gt_keep.append(np.asarray(Sg, float))
 
-                if gt_keep:
-                    gt_mid = np.vstack(gt_keep)
+                if final_pred_segs and gt_keep:
+                    pred_mid = np.vstack(final_pred_segs)
+                    gt_mid   = np.vstack(gt_keep)
 
-                    # ---- compute midline metrics ----
-                    mm = compute_midline_metrics(pts_ok, gt_mid)
+                    mm = compute_midline_metrics(pred_mid, gt_mid)
 
-                    ch  = float(mm.get("chamfer_mean", np.inf))
-                    hd  = float(mm.get("hausdorff", np.inf))
-                    cov = float(mm.get("coverage", 0.0))
+                    ch  = float(mm.get("nn_mean_bidirectional", np.inf))
+                    hd  = float(mm.get("hausdorff_max", np.inf))
+                    cov = float(mm.get("coverage_min", 0.0))
 
                     score_mid = (
                         math.log1p(max(ch, 0.0)) +
@@ -1601,10 +2103,12 @@ def compare_widths_for_cracks(
                         (1.0 - float(np.clip(cov, 0.0, 1.0)))
                     )
 
+                    bbox0 = crack.get("mask_bbox")
+
                     midline_metric_rows.append({
                         "image": base_name,
                         "crack_id": str(cid),
-                        "variant_global_id": -1,   # sentinel (not RS3)
+                        "variant_global_id": -1,
                         "os_mode": "combined",
                         "g11": np.nan,
                         "g22": np.nan,
@@ -1614,49 +2118,25 @@ def compare_widths_for_cracks(
                         "bbox_area": float(bbox0[2] * bbox0[3]) if bbox0 else np.nan,
 
                         # --- selection metrics ---
-                        "chamfer_mean": ch,
-                        "hausdorff": hd,
-                        "coverage": cov,
+                        "nn_mean_bidirectional": ch,
+                        "hausdorff_max": hd,
+                        "coverage_min": cov,
                         "score_mid": score_mid,
 
                         # --- diagnostics ---
-                        "frechet_discrete": mm.get("frechet_discrete"),
-                        "angle_err_deg": mm.get("angle_err_deg"),
-                        "length_ratio": mm.get("length_ratio"),
+                        "frechet_discrete_ds": mm.get("frechet_discrete_ds"),
+                        "mean_tan_angle_error_deg": mm.get("mean_tan_angle_error_deg"),
+                        "relative_length_error": mm.get("relative_length_error"),
                         "orth_mean": mm.get("orth_mean"),
                         "orth_std": mm.get("orth_std"),
-                        "directional_bias": mm.get("directional_bias"),
+                        "signed_bias_z": mm.get("signed_bias_z"),
                         "curvature_rms_auto": mm.get("curvature_rms_auto"),
                         "curvature_rms_manual": mm.get("curvature_rms_manual"),
                         "curvature_rms_ratio": mm.get("curvature_rms_ratio"),
                     })
 
             except Exception as e:
-                print(f"[MIDLINE METRICS] skipped cid={cid} seg#{si}: {e}")
-
-
-            # ---- bbox bookkeeping (FIX) ----
-            bbox0 = crack.get("mask_bbox")
-            if bbox0 is not None:
-                bboxes.append(bbox0)
-
-            diffs.append(d)
-            coords.append(pts_ok)
-
-            for (x, y), dw, gwi, pwi in zip(pts_ok, d, gw_ok, pw_ok):
-                if not np.isfinite(dw):
-                    continue
-                rows.append({
-                    "x": float(x),
-                    "y": float(y),
-                    "gt_width_px": float(gwi),
-                    "pred_width_px": float(pwi),
-                    "width_diff_px": float(dw),
-                    "cid": str(cid),
-                    "crack_type": "combined",
-                    "midline_type": midline_type,
-                })
-
+                print(f"[MIDLINE METRICS] skipped cid={cid}: {e}")
 
 
     # ---------------- plotting ----------------
@@ -2038,8 +2518,8 @@ def compute_midline_metrics(auto_xy, man_xy, tau=3.0):
     Core and diagnostic midline metrics (robust to dict returns).
 
     Outputs:
-    chamfer_mean, hausdorff, frechet_discrete, angle_err_deg,
-    length_ratio, coverage, orth_mean, orth_std, directional_bias,
+    nn_mean_bidirectional, hausdorff, frechet_discrete_ds, mean_tan_angle_error_deg,
+    relative_length_error, coverage, orth_mean, orth_std, signed_bias_z,
     curvature_rms_[auto|manual|ratio]
     """
     import numpy as np
@@ -2047,7 +2527,7 @@ def compute_midline_metrics(auto_xy, man_xy, tau=3.0):
     def _unwrap(v):
         """extract numeric value if helper returns dict"""
         if isinstance(v, dict):
-            for k in ("value", "mean", "coverage", "score", "dist"):
+            for k in ("value", "mean", "coverage_min", "score", "dist"):
                 if k in v and np.isscalar(v[k]):
                     return float(v[k])
             # try first numeric entry
@@ -2064,9 +2544,9 @@ def compute_midline_metrics(auto_xy, man_xy, tau=3.0):
     B = _finite_xy(auto_xy)
     if len(A) < 2 or len(B) < 2:
         return {k: np.nan for k in
-                ("chamfer_mean","hausdorff","frechet_discrete",
-                "angle_err_deg","length_ratio","coverage",
-                "orth_mean","orth_std","directional_bias",
+                ("nn_mean_bidirectional","hausdorff_max","frechet_discrete_ds",
+                "mean_tan_angle_error_deg","relative_length_error","coverage_min",
+                "orth_mean","orth_std","signed_bias_z",
                 "curvature_rms_auto","curvature_rms_manual","curvature_rms_ratio")}
 
     # --- Light resampling for expensive ops ---
@@ -2074,19 +2554,24 @@ def compute_midline_metrics(auto_xy, man_xy, tau=3.0):
     B_ds = _resample_by_arclen(B, N=min(600, len(B)))
 
     out = {
-        "chamfer_mean": _unwrap(chamfer_symmetric(A, B)),
-        "hausdorff":    _unwrap(hausdorff_symmetric(A, B)),
-        "frechet_discrete": float("nan"),
-        "angle_err_deg": _unwrap(angle_error_degrees(A, B)),
-        "length_ratio":  _unwrap(length_ratio(A, B)),
-        "coverage":      _unwrap(coverage_at_tau(A, B, tau_px=tau)),
+        "nn_mean_bidirectional": _unwrap(nn_mean_bidirectional(A, B)),
+        "hausdorff_max":    _unwrap(hausdorff_max(A, B)),
+        "frechet_discrete_ds": float("nan"),
+        "mean_tan_angle_error_deg": _unwrap(mean_tangent_angle_error_degs(A, B)),
+        "relative_length_error":  _unwrap(relative_length_error(A, B)),
     }
+    
+    cov = coverage_at_tau(A, B, tau_px=tau)
+    out["coverage_A_to_B"] = float(cov["A_to_B"])
+    out["coverage_B_to_A"] = float(cov["B_to_A"])
+    out["coverage_min"]    = float(min(cov["A_to_B"], cov["B_to_A"]))
+    out["hausdorff_p95"] = hausdorff_p95(A, B)
 
     # --- Fréchet (optional but standard) ---
     try:
         if len(A_ds) >= 2 and len(B_ds) >= 2:
-            out["frechet_discrete"] = _unwrap(
-                frechet_discrete(A_ds, B_ds, max_points=800)
+            out["frechet_discrete_ds"] = _unwrap(
+                frechet_discrete_ds(A_ds, B_ds, max_points=800)
             )
     except Exception as e:
         print(f"[metrics][warn] Fréchet failed: {e}")
@@ -2126,9 +2611,9 @@ def compute_midline_metrics(auto_xy, man_xy, tau=3.0):
         sd = float(np.std(a) + 1e-12)
         out["orth_mean"] = mu
         out["orth_std"]  = sd
-        out["directional_bias"] = float(np.sign(mu) * abs(mu) / sd)
+        out["signed_bias_z"] = float(np.sign(mu) * abs(mu) / sd)
     else:
-        out["orth_mean"] = out["orth_std"] = out["directional_bias"] = np.nan
+        out["orth_mean"] = out["orth_std"] = out["signed_bias_z"] = np.nan
 
     # --- Curvature RMS ratio (smoothness diagnostic) ---
     def _rms_curvature(xy):

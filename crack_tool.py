@@ -1597,12 +1597,12 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 df_all.to_csv(os.path.join(summ_dir, "global_edge_sweep_all.csv"), index=False)
 
                 param_cols = ["param_window_half_size", "param_mu", "param_l", "param_p"]
-                keep_cols  = param_cols + ["chamfer_mean", "hausdorff", "coverage"]
+                keep_cols  = param_cols + ["nn_mean_bidirectional", "hausdorff_max", "coverage_min"]
                 sub = df_all[[c for c in keep_cols if c in df_all.columns]].dropna()
 
                 g = (sub.groupby(param_cols, as_index=False)
-                        .agg({"chamfer_mean":"mean","hausdorff":"mean","coverage":"mean"}))
-                g = g.sort_values(["chamfer_mean","hausdorff","coverage"],
+                        .agg({"nn_mean_bidirectional":"mean","hausdorff_max":"mean","coverage_min":"mean"}))
+                g = g.sort_values(["nn_mean_bidirectional","hausdorff_max","coverage_min"],
                                 ascending=[True, True, False])
 
                 best = g.iloc[0].to_dict()
@@ -2644,11 +2644,11 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 "mu": data.get("mu"),
                 "l": data.get("l"),
                 "p": data.get("p"),
-                "chamfer_mean": data.get("chamfer_mean"),
-                "hausdorff": data.get("hausdorff"),
-                "angle_err_deg": data.get("angle_err_deg"),
-                "coverage": data.get("coverage"),
-                "directional_bias": data.get("directional_bias"),
+                "nn_mean_bidirectional": data.get("nn_mean_bidirectional"),
+                "hausdorff_max": data.get("hausdorff_max"),
+                "mean_tan_angle_error_deg": data.get("mean_tan_angle_error_deg"),
+                "coverage_min": data.get("coverage_min"),
+                "signed_bias_z": data.get("signed_bias_z"),
                 "curvature_rms_ratio": data.get("curvature_rms_ratio"),
                 "local_thickness_corr": data.get("local_thickness_corr"),
             }
@@ -2668,7 +2668,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         # tiny bar chart of a few key metrics (mean ± std)
         try:
-            metrics_pick = ["chamfer_mean", "hausdorff", "angle_err_deg", "coverage"]
+            metrics_pick = ["nn_mean_bidirectional", "hausdorff_max", "mean_tan_angle_error_deg", "coverage_min"]
             means = df[metrics_pick].mean()
             stds  = df[metrics_pick].std()
             plt.figure(figsize=(7,4), dpi=200)
@@ -3476,13 +3476,13 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             # atomics that belong to combined groups. Do NOT change order.
             agg_auto |= _compute_and_record_atomic_metrics(
                 atomic_src=auto_atomic,
-                combined_src=auto_combined_map,   # membership info only
+                combined_src=authoring_combined,   # membership info only
                 crack_type="atomic",
                 supervision="auto"
             )
 
             agg_auto |= _compute_and_record_combined_metrics(
-                combined_src=authoring_combined,  # authoritative members list
+                combined_src=auto_combined_map,  # authoritative members list
                 atomic_src_for_auto=auto_atomic,
                 crack_type="combined",
                 supervision="auto"
@@ -4960,9 +4960,9 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                 m = compute_midline_metrics(track_crop_xy, man_xy_crop)
 
                 # --- selection metrics (AUTHORITATIVE) ---
-                ch  = float(m.get("chamfer_mean", np.inf))
-                hd  = float(m.get("hausdorff", np.inf))
-                cov = float(m.get("coverage", 0.0))
+                ch  = float(m.get("nn_mean_bidirectional", np.inf))
+                hd  = float(m.get("hausdorff_max", np.inf))
+                cov = float(m.get("coverage_min", 0.0))
 
                 score_mid = (
                     math.log1p(max(ch, 0.0)) +
@@ -4988,18 +4988,19 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     "bbox_area": bbox_area,
 
                     # --- selection metrics ---
-                    "chamfer_mean": ch,
-                    "hausdorff": hd,
-                    "coverage": cov,
+                    "nn_mean_bidirectional": ch,
+                    "hausdorff_max": hd,
+                    "coverage_min": cov,
                     "score_mid": score_mid,
 
-                    # --- diagnostics (NOT used for selection) ---
-                    "frechet_discrete": m.get("frechet_discrete"),
-                    "angle_err_deg": m.get("angle_err_deg"),
-                    "length_ratio": m.get("length_ratio"),
+                    # Diagnostics below are geometry-only summaries.
+                    # They are NEVER used for RS3 family selection.
+                    "frechet_discrete_ds": m.get("frechet_discrete_ds"),
+                    "mean_tan_angle_error_deg": m.get("mean_tan_angle_error_deg"),
+                    "relative_length_error": m.get("relative_length_error"),
                     "orth_mean": m.get("orth_mean"),
                     "orth_std": m.get("orth_std"),
-                    "directional_bias": m.get("directional_bias"),
+                    "signed_bias_z": m.get("signed_bias_z"),
                     "curvature_rms_auto": m.get("curvature_rms_auto"),
                     "curvature_rms_manual": m.get("curvature_rms_manual"),
                     "curvature_rms_ratio": m.get("curvature_rms_ratio"),

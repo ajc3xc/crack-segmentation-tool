@@ -39,7 +39,7 @@ def _orth_stats(orth_dev_arr):
     """
     Accepts either a NumPy array of orthogonal deviations or a dict
     returned by orthogonal_deviation(). Extracts numeric values
-    robustly and returns summary stats including directional_bias.
+    robustly and returns summary stats including signed_bias_z.
     """
     import numpy as np
 
@@ -62,7 +62,7 @@ def _orth_stats(orth_dev_arr):
             orth_mean=np.nan,
             orth_mean_abs=np.nan,
             orth_std=np.nan,
-            directional_bias=np.nan
+            signed_bias_z=np.nan
         )
 
     mu = float(np.mean(a))
@@ -72,7 +72,7 @@ def _orth_stats(orth_dev_arr):
         "orth_mean_abs": float(np.mean(np.abs(a))),
         "orth_std": sd,
         # signed normalized bias
-        "directional_bias": float(np.sign(mu) * (abs(mu)/sd))
+        "signed_bias_z": float(np.sign(mu) * (abs(mu)/sd))
     }
 
 

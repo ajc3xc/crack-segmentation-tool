@@ -269,7 +269,7 @@ def plot_mask_metrics_triplet(metrics_dir, base_name, supervision, out_png):
 def plot_midline_edge_metrics_bars(midline_csv, out_png):
     if not os.path.exists(midline_csv): return
     df = pd.read_csv(midline_csv)
-    picks = [c for c in ["chamfer_mean","hausdorff","coverage","angle_err_deg"]
+    picks = [c for c in ["nn_mean_bidirectional","hausdorff_max","coverage_min","mean_tan_angle_error_deg"]
              if c in df.columns]
     if not picks: return
     means = df[picks].astype(float).mean()
@@ -546,9 +546,9 @@ def plot_midline_angle_distribution(midline_csv, out_png):
     import numpy as np, pandas as pd, matplotlib.pyplot as plt
     if not os.path.exists(midline_csv): return
     df = pd.read_csv(midline_csv)
-    if "angle_err_deg" not in df: return
+    if "mean_tan_angle_error_deg" not in df: return
 
-    ang = df["angle_err_deg"].astype(float)
+    ang = df["mean_tan_angle_error_deg"].astype(float)
 
     plt.figure(figsize=(6,4), dpi=160)
     plt.hist(ang, bins=40, color="royalblue", alpha=0.8)
@@ -1408,9 +1408,9 @@ def plot_rs3_sweep_summary(
         "os_mode",
         "g11", "g22", "g33",
         "score_mid",
-        "chamfer_mean",
-        "hausdorff",
-        "coverage",
+        "nn_mean_bidirectional",
+        "hausdorff_max",
+        "coverage_min",
         weight_col,
     }
     if not req.issubset(df_all.columns):
@@ -1422,10 +1422,10 @@ def plot_rs3_sweep_summary(
     # --------------------------------------------------
     # Numeric coercion
     # --------------------------------------------------
-    for c in ["score_mid", "chamfer_mean", "hausdorff", "coverage", weight_col]:
+    for c in ["score_mid", "nn_mean_bidirectional", "hausdorff_max", "coverage_min", weight_col]:
         D[c] = pd.to_numeric(D[c], errors="coerce")
 
-    D = D.dropna(subset=["score_mid", "chamfer_mean", "hausdorff"])
+    D = D.dropna(subset=["score_mid", "nn_mean_bidirectional", "hausdorff_max"])
     if D.empty:
         print("[plot_rs3] ❌ empty after coercion")
         return
@@ -1469,8 +1469,8 @@ def plot_rs3_sweep_summary(
 
     for fam, g in D.groupby("family"):
         plt.scatter(
-            g["chamfer_mean"],
-            g["hausdorff"],
+            g["nn_mean_bidirectional"],
+            g["hausdorff_max"],
             s=55,
             alpha=0.6,
             color=fam_color[fam],
@@ -1479,7 +1479,7 @@ def plot_rs3_sweep_summary(
         for _, r in g.iterrows():
             plt.annotate(
                 str(int(r["crack_id"])),
-                (r["chamfer_mean"], r["hausdorff"]),
+                (r["nn_mean_bidirectional"], r["hausdorff_max"]),
                 xytext=(3, 2),
                 textcoords="offset points",
                 fontsize=7,
@@ -1489,11 +1489,11 @@ def plot_rs3_sweep_summary(
         w = g[weight_col].values
         ok = np.isfinite(w) & (w > 0)
         if ok.any():
-            bx = np.average(g["chamfer_mean"].values[ok], weights=w[ok])
-            by = np.average(g["hausdorff"].values[ok], weights=w[ok])
+            bx = np.average(g["nn_mean_bidirectional"].values[ok], weights=w[ok])
+            by = np.average(g["hausdorff_max"].values[ok], weights=w[ok])
             plt.scatter(bx, by, marker="x", s=160, linewidths=2.5, color="black")
 
-    plt.xlabel("Chamfer mean ↓")
+    plt.xlabel("nn_mean_bidirectional mean ↓")
     plt.ylabel("Hausdorff ↓")
     plt.title("RS3 Pareto space (raw variants)")
     plt.grid(True, alpha=0.25)
@@ -1514,9 +1514,9 @@ def plot_rs3_sweep_summary(
 
         rows.append({
             "family": fam,
-            "log_chamfer": np.average(np.log1p(g["chamfer_mean"].values[ok]), weights=w[ok]),
-            "log_hausdorff": 0.5 * np.average(np.log1p(g["hausdorff"].values[ok]), weights=w[ok]),
-            "one_minus_coverage": np.average((1.0 - g["coverage"].values[ok]), weights=w[ok]),
+            "log_nn_mean_bidirectional": np.average(np.log1p(g["nn_mean_bidirectional"].values[ok]), weights=w[ok]),
+            "log_hausdorff_max": 0.5 * np.average(np.log1p(g["hausdorff_max"].values[ok]), weights=w[ok]),
+            "one_minus_coverage_min": np.average((1.0 - g["coverage_min"].values[ok]), weights=w[ok]),
             "score": np.average(g["score_mid"].values[ok], weights=w[ok]),
         })
 
@@ -1524,13 +1524,13 @@ def plot_rs3_sweep_summary(
     x = np.arange(len(P))
 
     plt.figure(figsize=(7.5, 4.5), dpi=160)
-    plt.bar(x, P["log_chamfer"], label="log(Chamfer)")
-    plt.bar(x, P["log_hausdorff"], bottom=P["log_chamfer"], label="0.5·log(Hausdorff)")
+    plt.bar(x, P["log_nn_mean_bidirectional"], label="log(nn_mean_bidirectional)")
+    plt.bar(x, P["log_hausdorff_max"], bottom=P["log_nn_mean_bidirectional"], label="0.5·log(Hausdorff)")
     plt.bar(
         x,
-        P["one_minus_coverage"],
-        bottom=P["log_chamfer"] + P["log_hausdorff"],
-        label="1 − Coverage",
+        P["one_minus_coverage_min"],
+        bottom=P["log_nn_mean_bidirectional"] + P["log_hausdorff_max"],
+        label="1 − coverage_min",
     )
 
     plt.xticks(x, [family_id[f] for f in P["family"]], fontsize=8)
@@ -1910,11 +1910,12 @@ def plot_rs3_midline_diagnostics(
     # 1) PRIMARY METRICS (thesis-facing)
     # ------------------------------------------------------------
     primary_metrics = [
-        "chamfer_mean",
-        "hausdorff",
-        "coverage",
+        "coverage_min",
+        "nn_mean_bidirectional",
+        "hausdorff_max",
         "score_mid",
     ]
+
     primary_metrics = [m for m in primary_metrics if m in df.columns]
 
     if primary_metrics:
@@ -1948,11 +1949,12 @@ def plot_rs3_midline_diagnostics(
     # 2) DIAGNOSTIC METRICS (summary bars)
     # ------------------------------------------------------------
     diagnostic_metrics = [
-        "length_ratio",
+        "relative_length_error",
         "orth_mean",
         "orth_std",
         "curvature_rms_ratio",
-        "angle_err_deg",
+        "mean_tan_angle_error_deg",
+        "frechet_discrete_ds",
     ]
 
     rows = []
@@ -1982,9 +1984,9 @@ def plot_rs3_midline_diagnostics(
         )
         plt.ylabel("value")
 
-        title = "Midline Diagnostic Metrics (mean ± std)"
+        title = "Midline Diagnostic Metrics (distribution summary)"
         if selected_family is not None:
-            title = "RS3 Midline Diagnostic Metrics (mean ± std)"
+            title = "RS3 " + title
         if title_suffix:
             title += f" — {title_suffix}"
 

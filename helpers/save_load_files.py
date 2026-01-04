@@ -462,7 +462,7 @@ def _flatten_variant_record(vid: int, vrec: dict, params: dict, scores: dict = N
     {
       "variant_id": 2, "midline": [[...],[...]],
       "params": {"g11":1,"g22":35,"g33":25,"win":45,"mu":0,"ell":5,"p":14},
-      "scores": {"chamfer_mean":..., "hausdorff":..., "coverage":...},
+      "scores": {"nn_mean_bidirectional":..., "hausdorff_max":..., "coverage_min":...},
       "normal_edge_points": {"edge1":[[x,y],...], "edge2":[[x,y],...]}
     }
     """
@@ -501,11 +501,11 @@ def _flatten_variant_record(vid: int, vrec: dict, params: dict, scores: dict = N
         g11 = out["params"].get("g11", None)
         g22 = out["params"].get("g22", None)
         g33 = out["params"].get("g33", None)
-        ch  = out["scores"].get("chamfer_mean", None)
-        cov = out["scores"].get("coverage", None)
+        ch  = out["scores"].get("nn_mean_bidirectional", None)
+        cov = out["scores"].get("coverage_min", None)
         print(
             f"[_flatten_variant_record] vid={vid} n_mid={n_mid} "
-            f"g=({g11},{g22},{g33}) chamfer={ch} cov={cov}"
+            f"g=({g11},{g22},{g33}) nn_mean_bidirectional={ch} cov={cov}"
         )
     except Exception as e:
         print(f"[_flatten_variant_record] ⚠ debug print failed for vid={vid}: {e}")
