@@ -1701,7 +1701,7 @@ def compare_widths_for_cracks(
         plt.close(fig)
 
         print(f"[OPSEC] Stage-4 dominance plot written: {out}")
-
+        
         # ============================================================
         # Stage 5: width slicing + DOMINANCE-AWARE BITE PRUNE
         # ============================================================
