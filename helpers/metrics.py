@@ -1638,6 +1638,9 @@ def compare_widths_for_cracks(
         # cropped + masked version (used only for plotting)
         dom_crop   = dom_label[y0:y1, x0:x1]
         dom_masked = np.ma.array(dom_crop, mask=(dom_crop == 0))
+        dom_crop = dom_crop.astype(np.uint8)
+        dom_masked = np.ma.array(dom_crop, mask=(dom_crop == 0))
+
         
         # ============================================================
         # Stage 4: DOMINANCE-AWARE BITE — PLOTTING ONLY
@@ -1647,29 +1650,81 @@ def compare_widths_for_cracks(
         from matplotlib.lines import Line2D
         from matplotlib.colors import ListedColormap
 
-        fig, ax = plt.subplots(1, 1, figsize=(6.5, 6.5), dpi=240)
-        ax.set_title("Stage 4 Dominance Bite (GT vs Prediction)", fontsize=11)
+        # ---- helper: rebuild pred mask exactly like Stage 1 ----
+        def _rebuild_pred_mask(crack, H, W):
+            pm = np.zeros((H, W), np.uint8)
+            bb = crack.get("mask_bbox")
+            crop = crack.get("mask_crop")
+            if bb and crop is not None:
+                x, y, w, h = map(int, bb)
+                crop = np.asarray(crop, np.uint8)
+                if crop.ndim >= 2:
+                    hh = min(h, crop.shape[0])
+                    ww = min(w, crop.shape[1])
+                    if hh > 0 and ww > 0:
+                        pm[y:y+hh, x:x+ww] = (crop[:hh, :ww] > 0).astype(np.uint8)
+            return pm
 
-        # ----------------------------
-        # background (unchanged behavior)
-        # ----------------------------
-        ax.imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
+        # ---- figure ----
+        fig, axes = plt.subplots(
+            1, 2, figsize=(12, 6), dpi=240, sharex=True, sharey=True
+        )
 
-        # ----------------------------
-        # dominance overlay
-        # ----------------------------
+        axes[0].set_title("Stage 4 — GT supervision", fontsize=10)
+        axes[1].set_title("Stage 4 — Prediction", fontsize=10)
+
+        for ax in axes:
+            ax.axis("off")
+
+        # ---- backgrounds ----
+        # LEFT: GT mask
+        axes[0].imshow(
+            (mask_bin[y0:y1, x0:x1] > 0).astype(np.uint8),
+            cmap="gray",
+            vmin=0, vmax=1,
+            interpolation="nearest",
+            zorder=0,
+        )
+
+        # RIGHT: pred mask if AUTO, otherwise black (MANUAL)
+        pred_mask_full = _rebuild_pred_mask(crack, H, W)
+        if np.any(pred_mask_full):
+            axes[1].imshow(
+                pred_mask_full[y0:y1, x0:x1],
+                cmap="gray",
+                vmin=0, vmax=1,
+                interpolation="nearest",
+                zorder=0,
+            )
+        else:
+            axes[1].imshow(
+                np.zeros((y1 - y0, x1 - x0), np.uint8),
+                cmap="gray",
+                vmin=0, vmax=1,
+                interpolation="nearest",
+                zorder=0,
+            )
+
+        # ---- dominance overlay (UNCHANGED semantics) ----
         DOM_CMAP = ListedColormap([
-            "#000000",  # 0 (unused)
-            "#e41a1c",  # 1 = GT-only
-            "#377eb8",  # 2 = PRED-only
-            "#984ea3",  # 3 = BOTH
+            "#000000",  # 0 unused (masked)
+            "#e41a1c",  # GT-only
+            "#377eb8",  # Pred-only
+            "#984ea3",  # GT ∩ Pred
         ])
 
-        ax.imshow(dom_masked, cmap=DOM_CMAP, interpolation="nearest", zorder=1)
+        for ax in axes:
+            ax.imshow(
+                dom_masked,
+                cmap=DOM_CMAP,
+                interpolation="nearest",
+                vmin=0,
+                vmax=3,
+                alpha=0.9,
+                zorder=1,
+            )
 
-        # ----------------------------
-        # overlay segments
-        # ----------------------------
+        # ---- overlay segments ----
         color_cycle = [
             (0.95, 0.90, 0.25),
             (0.25, 0.85, 0.35),
@@ -1688,7 +1743,8 @@ def compare_widths_for_cracks(
             col = color_cycle[bid % len(color_cycle)]
             S2 = np.asarray(S) - np.array([x0, y0])
 
-            ax.plot(S2[:, 0], S2[:, 1], color=col, lw=2.3, zorder=5)
+            for ax in axes:
+                ax.plot(S2[:, 0], S2[:, 1], color=col, lw=2.3, zorder=5)
 
             if bid not in seen:
                 legend_handles.append(
@@ -1696,24 +1752,25 @@ def compare_widths_for_cracks(
                 )
                 seen.add(bid)
 
-        # ----------------------------
-        # legend
-        # ----------------------------
+        # ---- legend ----
         legend_handles += [
-            Line2D([0], [0], color="red",    lw=6, label="GT-only loss"),
-            Line2D([0], [0], color="blue",   lw=6, label="Pred-only loss"),
-            Line2D([0], [0], color="purple", lw=6, label="GT ∩ Pred"),
+            Line2D([0], [0], color="#e41a1c", lw=6, label="GT-only loss"),
+            Line2D([0], [0], color="#377eb8", lw=6, label="Pred-only loss"),
+            Line2D([0], [0], color="#984ea3", lw=6, label="GT ∩ Pred"),
         ]
 
-        ax.legend(handles=legend_handles, loc="lower right", fontsize=8, framealpha=0.9)
-        ax.axis("off")
+        axes[1].legend(
+            handles=legend_handles,
+            loc="lower right",
+            fontsize=8,
+            framealpha=0.9,
+        )
 
         out = os.path.join(opsec_dir, f"stage4_dominance_bite_{cid}.png")
         fig.savefig(out, bbox_inches="tight")
         plt.close(fig)
 
         print(f"[OPSEC] Stage-4 dominance plot written: {out}")
-
 
         
         # ============================================================
