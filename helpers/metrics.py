@@ -1102,6 +1102,12 @@ def compare_widths_for_cracks(
             pr_used.add(p_id)
             out.append((g_id, p_id, sc, sl))
         return out
+    
+    def _safe_int(x, default=None):
+            try:
+                return int(x)
+            except Exception:
+                return default
 
     # ---------------- load GT supervision ----------------
     gt_sup = {}
@@ -1412,27 +1418,42 @@ def compare_widths_for_cracks(
 
         if gt_entry is not None:
             # ---- GT segments AFTER Stage-1 atomic pruning (symmetric with pred) ----
-            gt_mid_segs = gt_entry.get("midline_segments") or []
-            gt_meta_all = gt_entry.get("midline_segments_meta") or []
+            gt_segs_all = gt_entry.get("midline_segments") or []
 
-            gt_segs_pruned = []
-            gt_meta_pruned = []
+            # AUTHORITATIVE: GT segment metadata lives ONLY here
+            gt_meta_all = (gt_entry.get("dominance_meta", {}).get("segments_meta") or [])
 
-            if len(gt_mid_segs) == len(gt_meta_all):
-                for Sg, mg in zip(gt_mid_segs, gt_meta_all):
+            gt_pruned_segs = []
+            gt_pruned_meta = []
+
+            # If GT has segments_meta aligned with segs, use it.
+            # Otherwise fall back: use ALL GT segs with a dummy meta (branch_id=None).
+            if len(gt_segs_all) == len(gt_meta_all) and len(gt_segs_all) > 0:
+                for Sg, mg in zip(gt_segs_all, gt_meta_all):
                     if Sg is None or len(Sg) < 2:
                         continue
-                    aid = mg.get("atomic_id", None)
-                    if aid is not None and str(aid) not in shared:
+
+                    bid = _safe_int(mg.get("branch_id"), None)
+                    if bid is None:
                         continue
-                    gt_segs_pruned.append(np.asarray(Sg, float))
-                    gt_meta_pruned.append(dict(mg))
+
+                    # NOTE: DO NOT filter by all_bids here (Stage 4 only)
+                    gt_pruned_segs.append(np.asarray(Sg, float))
+                    gt_pruned_meta.append(mg)
+            else:
+                # fallback: still allow branch matching to run without exploding
+                # (but it may match less reliably)
+                for Sg in gt_segs_all:
+                    if Sg is None or len(Sg) < 2:
+                        continue
+                    gt_pruned_segs.append(np.asarray(Sg, float))
+                    gt_pruned_meta.append({"branch_id": None})
 
             # ---- build branch tables on symmetric supports ----
-            if gt_segs_pruned and pruned_segs:
+            if gt_pruned_segs and pruned_segs:
                 gt_br = _build_branch_table(
-                    gt_segs_pruned,
-                    gt_meta_pruned,
+                    gt_pruned_segs,
+                    gt_pruned_meta,
                     shared_members=shared
                 )
                 pr_br = _build_branch_table(
@@ -1505,11 +1526,11 @@ def compare_widths_for_cracks(
         # ----------------------------
         # helpers
         # ----------------------------
-        def _safe_int(x, default=None):
+        '''def _safe_int(x, default=None):
             try:
                 return int(x)
             except Exception:
-                return default
+                return default'''
 
         def _dump_json(path, obj):
             try:
@@ -1598,6 +1619,90 @@ def compare_widths_for_cracks(
 
         if not all_bids:
             print(f"[STAGE4] cid={cid} no losing branches in GT or PRED")
+            
+        # ----------------------------
+        # build GT segments to plot (robust)
+        #   Priority:
+        #     (A) keep GT segments whose atomic_id is in this combined crack's members
+        #     (B) else fallback to branch_id matching (if present)
+        #     (C) else fallback: plot ALL GT segments (better than blank)
+        # ----------------------------
+        gt_plot_segs = []
+        gt_plot_meta = []
+
+        # members of this combined crack (strings)
+        _members = crack.get("members", []) or []
+        members_set = set(str(m) for m in _members)
+
+        if gt_entry is not None:
+            gt_segs_all = gt_entry.get("midline_segments") or []
+
+            # AUTHORITATIVE: GT segment metadata lives ONLY here
+            gt_meta_all = (
+                gt_entry.get("dominance_meta", {}).get("segments_meta") or []
+            )
+
+
+            print(f"[STAGE4 DBG] cid={cid} GT segs={len(gt_segs_all)} GT meta={len(gt_meta_all)} members={sorted(members_set) if members_set else 'NONE'}")
+
+            # ---- Case 1: metadata aligned ----
+            if len(gt_segs_all) == len(gt_meta_all) and len(gt_segs_all) > 0:
+                kept_by_atomic = 0
+                kept_by_branch = 0
+                kept_all       = 0
+
+                for Sg, mg in zip(gt_segs_all, gt_meta_all):
+                    if Sg is None or len(Sg) < 2:
+                        continue
+                    mg = mg if isinstance(mg, dict) else {}
+
+                    # (A) atomic_id membership filter (preferred)
+                    aid = mg.get("atomic_id", None)
+                    if members_set and aid is not None and str(aid) in members_set:
+                        gt_plot_segs.append(np.asarray(Sg, float))
+                        gt_plot_meta.append(mg)
+                        kept_by_atomic += 1
+                        continue
+
+                    # (B) branch_id fallback (only if it exists)
+                    bid = _safe_int(mg.get("branch_id"), None)
+                    if bid is not None and bid in all_bids:
+                        gt_plot_segs.append(np.asarray(Sg, float))
+                        gt_plot_meta.append(mg)
+                        kept_by_branch += 1
+                        continue
+
+                    # (C) if neither key exists AND we have no members_set, keep-all fallback
+                    if not members_set and bid is None and aid is None:
+                        gt_plot_segs.append(np.asarray(Sg, float))
+                        gt_plot_meta.append(mg)
+                        kept_all += 1
+
+                print(
+                    f"[STAGE4 DBG] cid={cid} GT kept: "
+                    f"by_atomic={kept_by_atomic} by_branch={kept_by_branch} keepall={kept_all} "
+                    f"TOTAL={len(gt_plot_segs)}"
+                )
+
+                # If we filtered everything out (common when keys don't match), do NOT go blank:
+                if len(gt_plot_segs) == 0:
+                    print(f"[STAGE4 DBG] cid={cid} GT kept=0 after filtering → fallback to plotting ALL GT segs")
+                    for Sg, mg in zip(gt_segs_all, gt_meta_all):
+                        if Sg is None or len(Sg) < 2:
+                            continue
+                        gt_plot_segs.append(np.asarray(Sg, float))
+                        gt_plot_meta.append(mg if isinstance(mg, dict) else {})
+
+            # ---- Case 2: metadata not aligned or missing → plot all GT segments ----
+            else:
+                print(f"[STAGE4 DBG] cid={cid} GT meta mismatch/missing → plotting ALL GT segs")
+                for Sg in gt_segs_all:
+                    if Sg is None or len(Sg) < 2:
+                        continue
+                    gt_plot_segs.append(np.asarray(Sg, float))
+                    gt_plot_meta.append({})
+        else:
+            print(f"[STAGE4 DBG] cid={cid} gt_entry is None → no GT midlines available")
 
         # ----------------------------
         # crop window (shared by plots)
@@ -1640,6 +1745,24 @@ def compare_widths_for_cracks(
         dom_masked = np.ma.array(dom_crop, mask=(dom_crop == 0))
         dom_crop = dom_crop.astype(np.uint8)
         dom_masked = np.ma.array(dom_crop, mask=(dom_crop == 0))
+        
+        # --------------------------------------------------
+        # Build atomic_id → branch_id map from prediction
+        # --------------------------------------------------
+        atomic_to_branch = {}
+
+        for m in pruned_meta:
+            if not isinstance(m, dict):
+                continue
+            aid = m.get("atomic_id", None)
+            bid = m.get("branch_id", None)
+            if aid is not None and bid is not None:
+                atomic_to_branch[str(aid)] = int(bid)
+
+        print(
+            f"[STAGE4 DBG] cid={cid} atomic→branch map: {atomic_to_branch}"
+        )
+
 
         
         # ============================================================
@@ -1735,22 +1858,66 @@ def compare_widths_for_cracks(
         legend_handles = []
         seen = set()
 
-        for S, m in zip(pruned_segs, pruned_meta):
-            if S is None or len(S) < 2:
+
+        # ----------------------------
+        # LEFT: GT supervision midlines (PRUNED)
+        # ----------------------------
+        for Sg, mg in zip(gt_plot_segs, gt_plot_meta):
+            if Sg is None or len(Sg) < 2:
                 continue
 
-            bid = _safe_int(m.get("branch_id"), 0)
-            col = color_cycle[bid % len(color_cycle)]
-            S2 = np.asarray(S) - np.array([x0, y0])
+            # Resolve GT segment → branch via atomic_id
+            aid = mg.get("atomic_id", None)
+            bid = None
 
-            for ax in axes:
-                ax.plot(S2[:, 0], S2[:, 1], color=col, lw=2.3, zorder=5)
+            if aid is not None:
+                bid = atomic_to_branch.get(str(aid), None)
+
+            # Fallbacks (never collapse everything silently)
+            if bid is None:
+                bid = _safe_int(mg.get("branch_id"), None)
+
+            if bid is None:
+                bid = 0  # last-resort fallback, explicit
+
+            col = color_cycle[bid % len(color_cycle)]
+
+            S2 = Sg - np.array([x0, y0], float)
+
+            axes[0].plot(
+                S2[:, 0],
+                S2[:, 1],
+                color=col,
+                lw=2.3,
+                zorder=5,
+            )
 
             if bid not in seen:
                 legend_handles.append(
                     Line2D([0], [0], color=col, lw=3, label=f"branch {bid}")
                 )
                 seen.add(bid)
+
+        # ----------------------------
+        # RIGHT: prediction midlines
+        # ----------------------------
+        for S, m in zip(pruned_segs, pruned_meta):
+            if S is None or len(S) < 2:
+                continue
+
+            bid = _safe_int(m.get("branch_id"), 0)
+            col = color_cycle[bid % len(color_cycle)]
+
+            S = np.asarray(S, float)
+            S2 = S - np.array([x0, y0], float)
+
+            axes[1].plot(
+                S2[:, 0],
+                S2[:, 1],
+                color=col,
+                lw=2.3,
+                zorder=5,
+            )
 
         # ---- legend ----
         legend_handles += [
@@ -2144,7 +2311,12 @@ def compare_widths_for_cracks(
 
                 # ---- build GT midline (same pruning rules as pred) ----
                 gt_segs_all = gt_entry.get("midline_segments") or []
-                gt_meta_all = gt_entry.get("midline_segments_meta") or []
+
+                # AUTHORITATIVE: GT segment metadata lives ONLY here
+                gt_meta_all = (
+                    gt_entry.get("dominance_meta", {}).get("segments_meta") or []
+                )
+
 
                 gt_keep = []
                 for Sg, mg in zip(gt_segs_all, gt_meta_all):
