@@ -1931,21 +1931,52 @@ def compare_widths_for_cracks(
 
         # ============================================================
         # Stage 4.5: APPLY DOMINANCE BITE (SYMMETRIC, DISPOSABLE)
-        #   - PRED is clipped by PRED bite masks
-        #   - GT   is clipped by GT bite masks
-        #   - We do NOT mutate GT storage; we only create local clipped lists
+        #
+        # Key rule (per branch):
+        #   - BOTH GT and PRED are clipped by the UNION of:
+        #       (GT loss mask) ∪ (PRED loss mask)
+        #
+        # Dominance defines INVALID TERRITORY, not ownership.
         #
         # OUTPUTS (used by Stage 5 + OPSEC):
-        #   - pruned_segs / pruned_meta            : replaced with PRED-clipped runs
-        #   - bite_pruned_pred_segs               : list of removed PRED runs (viz)
-        #   - gt_stage5_segs / gt_stage5_meta     : GT-clipped runs (for viz / later)
-        #   - bite_pruned_gt_segs                 : list of removed GT runs (viz)
+        #   - pruned_segs / pruned_meta        : PRED geometry after union-bite clipping
+        #   - bite_pruned_pred_segs           : removed PRED runs (viz)
+        #   - gt_stage5_segs / gt_stage5_meta : GT geometry after union-bite clipping
+        #   - bite_pruned_gt_segs             : removed GT runs (viz)
+        #   - pred_pre45_segs                 : snapshot of PRED geometry BEFORE dominance
         # ============================================================
 
+        # ------------------------------------------------------------
+        # Snapshot BEFORE dominance (for provenance / topology plot)
+        # ------------------------------------------------------------
+        pred_pre45_segs = [
+            np.asarray(S, float)
+            for S in pruned_segs
+            if S is not None and len(S) >= 2
+        ]
+
+        # ------------------------------------------------------------
+        # Union-bite helper (GT ∪ PRED)
+        # ------------------------------------------------------------
+        def _union_bite_for_branch(bid):
+            mg = loss_masks_gt_by_branch.get(bid)
+            mp = loss_masks_pred_by_branch.get(bid)
+
+            if mg is None and mp is None:
+                return None
+            if mg is None:
+                return mp
+            if mp is None:
+                return mg
+            return (mg.astype(bool) | mp.astype(bool))
+
+        # ------------------------------------------------------------
+        # Polyline clipping with MIDPOINT sampling (important!)
+        # ------------------------------------------------------------
         def _clip_polyline_into_runs(S, remove_mask, H, W, min_pts=2):
             """
             Split S into (kept_runs, removed_runs) based on remove_mask (True = remove).
-            Nearest-pixel lookup on each vertex; returns lists of np arrays.
+            Uses midpoint sampling per segment to avoid missed bites.
             """
             S = np.asarray(S, float)
             if S is None or len(S) < 2 or remove_mask is None:
@@ -1958,8 +1989,11 @@ def compare_widths_for_cracks(
                 p0 = S[i]
                 p1 = S[i + 1]
 
-                ix = int(round(float(p0[0])))
-                iy = int(round(float(p0[1])))
+                mx = 0.5 * (p0[0] + p1[0])
+                my = 0.5 * (p0[1] + p1[1])
+
+                ix = int(round(mx))
+                iy = int(round(my))
 
                 in_remove = False
                 if 0 <= ix < W and 0 <= iy < H:
@@ -1987,28 +2021,21 @@ def compare_widths_for_cracks(
 
             return kept, removed
 
-
-        # ----------------------------
-        # PRED: clip by PRED bite masks
-        #   - consumes pruned_segs/pruned_meta
-        #   - produces run-level segments but preserves metadata per-run
-        # ----------------------------
+        # ============================================================
+        # PRED: clip by UNION dominance bite
+        # ============================================================
         pred_dom_clipped_segs = []
         pred_dom_clipped_meta = []
-        bite_pruned_pred_segs = []   # viz only (REMOVED runs)
+        bite_pruned_pred_segs = []   # viz only
 
         for S, m in zip(pruned_segs, pruned_meta):
             if S is None or len(S) < 2:
                 continue
 
+            m = m if isinstance(m, dict) else {}
             bid = _safe_int(m.get("branch_id"), None)
-            if bid is None:
-                # no branch id → do not clip
-                pred_dom_clipped_segs.append(np.asarray(S, float))
-                pred_dom_clipped_meta.append(m)
-                continue
+            rm = _union_bite_for_branch(bid)
 
-            rm = loss_masks_pred_by_branch.get(bid)  # PRED-side bite only
             if rm is None:
                 pred_dom_clipped_segs.append(np.asarray(S, float))
                 pred_dom_clipped_meta.append(m)
@@ -2022,35 +2049,34 @@ def compare_widths_for_cracks(
                 pred_dom_clipped_meta.append(m)
 
         print(
-            f"[DOM CLIP PRED] cid={cid} kept {len(pred_dom_clipped_segs)} runs "
+            f"[DOM CLIP UNION | PRED] cid={cid} kept {len(pred_dom_clipped_segs)} runs "
             f"(from {len(pruned_segs)} segs)"
         )
 
-        # overwrite authoritative PRED geometry for downstream stages
+        # overwrite authoritative prediction geometry
         pruned_segs = pred_dom_clipped_segs
         pruned_meta = pred_dom_clipped_meta
 
-
-        # ----------------------------
-        # GT: clip by GT bite masks (symmetric)
-        #   - uses gt_entry dominance_meta.segments_meta for branch_id
-        #   - produces stage-5-local GT runs (does NOT touch gt_entry)
-        # ----------------------------
+        # ============================================================
+        # GT: clip by SAME UNION dominance bite
+        # ============================================================
         gt_stage5_segs = []
         gt_stage5_meta = []
-        bite_pruned_gt_segs = []   # viz only (REMOVED runs)
+        bite_pruned_gt_segs = []   # viz only
 
         gt_segs_all = gt_entry.get("midline_segments", []) if gt_entry else []
-        gt_meta_all = (gt_entry.get("dominance_meta", {}).get("segments_meta") or []) if gt_entry else []
+        gt_meta_all = (
+            gt_entry.get("dominance_meta", {}).get("segments_meta") or []
+        ) if gt_entry else []
 
-        if gt_entry is not None and len(gt_segs_all) == len(gt_meta_all) and len(gt_segs_all) > 0:
+        if gt_entry and len(gt_segs_all) == len(gt_meta_all) and len(gt_segs_all) > 0:
             for Sg, mg in zip(gt_segs_all, gt_meta_all):
                 if Sg is None or len(Sg) < 2:
                     continue
-                mg = mg if isinstance(mg, dict) else {}
 
+                mg = mg if isinstance(mg, dict) else {}
                 bid = _safe_int(mg.get("branch_id"), None)
-                rm = loss_masks_gt_by_branch.get(bid) if bid is not None else None  # GT-side bite only
+                rm = _union_bite_for_branch(bid)
 
                 if rm is None:
                     gt_stage5_segs.append(np.asarray(Sg, float))
@@ -2065,11 +2091,11 @@ def compare_widths_for_cracks(
                     gt_stage5_meta.append(mg)
 
             print(
-                f"[DOM CLIP GT]   cid={cid} kept {len(gt_stage5_segs)} runs "
+                f"[DOM CLIP UNION | GT]   cid={cid} kept {len(gt_stage5_segs)} runs "
                 f"(from {len(gt_segs_all)} segs)"
             )
         else:
-            # fallback: cannot map GT segs to branches reliably → keep GT uncut
+            # fallback: cannot align GT meta → keep GT uncut
             gt_stage5_segs = [
                 np.asarray(Sg, float)
                 for Sg in gt_segs_all
@@ -2078,16 +2104,16 @@ def compare_widths_for_cracks(
             gt_stage5_meta = [{} for _ in gt_stage5_segs]
             bite_pruned_gt_segs = []
             print(
-                f"[DOM CLIP GT]   cid={cid} GT meta missing/misaligned → kept {len(gt_stage5_segs)} uncut segs"
+                f"[DOM CLIP UNION | GT]   cid={cid} GT meta missing/misaligned → "
+                f"kept {len(gt_stage5_segs)} uncut segs"
             )
-                                
+                                        
         # ============================================================
         # Stage 5: width slicing (DOMINANCE-APPLIED GEOMETRY)
         # ============================================================
 
         final_pred_segs = []
         stage4_pairs = []             # (pts_ok, width_diff)
-        bite_pruned_pred_segs = []    # visualization only
 
         # ---- GT plot segments (dominance-clipped, symmetric) ----
         gt_plot_segs = [np.asarray(s, float) for s in (gt_stage5_segs or []) if s is not None and len(s) >= 2]
@@ -2096,8 +2122,7 @@ def compare_widths_for_cracks(
 
         # ============================================================
         # Consume DOMINANCE-CLIPPED prediction geometry
-        # ============================================================
-
+        # ============================================================        
         for si, (S, m) in enumerate(zip(pruned_segs, pruned_meta)):
             if S is None or len(S) < 2:
                 continue
@@ -2172,313 +2197,15 @@ def compare_widths_for_cracks(
                     "crack_type": "combined",
                     "midline_type": midline_type,
                 })
-                        
-        # ============================================================
-        # Stage 4.5: APPLY DOMINANCE BITE (SYMMETRIC, DISPOSABLE)
-        #
-        # Key rule (per-branch):
-        #   - BOTH sides are clipped by the UNION of (GT bite) ∪ (PRED bite)
-        #     so arclength + downstream comparisons are fair.
-        #
-        # OUTPUTS (used by Stage 5 + OPSEC):
-        #   - pruned_segs / pruned_meta        : replaced with PRED-clipped runs (union bite)
-        #   - bite_pruned_pred_segs           : removed PRED runs (viz)
-        #   - gt_stage5_segs / gt_stage5_meta : GT-clipped runs (union bite)
-        #   - bite_pruned_gt_segs             : removed GT runs (viz)
-        #   - pred_pre45_segs                 : snapshot of pred geometry BEFORE dominance (for provenance plot)
-        # ============================================================
-
-        # snapshot BEFORE dominance (for opsec provenance)
-        pred_pre45_segs = [np.asarray(S, float) for S in pruned_segs if S is not None and len(S) >= 2]
-        pred_pre45_meta = list(pruned_meta) if isinstance(pruned_meta, list) else []
-
-        def _union_bite_for_branch(bid):
-            """Return union bite mask for this branch: (pred OR gt)."""
-            mp = loss_masks_pred_by_branch.get(bid)
-            mg = loss_masks_gt_by_branch.get(bid)
-            if mp is None and mg is None:
-                return None
-            if mp is None:
-                return mg
-            if mg is None:
-                return mp
-            # both exist
-            return (mp.astype(bool) | mg.astype(bool))
-
-        def _split_runs_by_point_mask(S, remove_mask, H, W, min_pts=2):
-            """
-            Point-based splitting.
-            - remove_mask True => point is removed
-            - returns:
-                kept_runs:    list[(pts_run, (i0, i1))]
-                removed_runs: list[(pts_run, (i0, i1))]
-                where i0/i1 are inclusive indices into original S.
-            """
-            S = np.asarray(S, float)
-            if S is None or len(S) < 2 or remove_mask is None:
-                return [(S, (0, len(S) - 1))], []
-
-            n = len(S)
-            rm = np.zeros((n,), dtype=bool)
-
-            for i, (x, y) in enumerate(S):
-                ix = int(round(float(x)))
-                iy = int(round(float(y)))
-                if 0 <= ix < W and 0 <= iy < H:
-                    rm[i] = bool(remove_mask[iy, ix])
-                else:
-                    rm[i] = False
-
-            kept_runs, removed_runs = [], []
-
-            def _flush(buf, i0, i1, out_list):
-                if buf is None:
-                    return
-                if len(buf) >= min_pts:
-                    out_list.append((np.asarray(buf, float), (i0, i1)))
-
-            buf = []
-            buf_is_removed = None
-            buf_i0 = 0
-
-            for i in range(n):
-                is_removed = rm[i]
-
-                if buf_is_removed is None:
-                    buf_is_removed = is_removed
-                    buf_i0 = i
-                    buf = [S[i]]
-                    continue
-
-                # continue same run
-                if is_removed == buf_is_removed:
-                    buf.append(S[i])
-                    continue
-
-                # state changed -> flush previous
-                _flush(buf, buf_i0, i - 1, removed_runs if buf_is_removed else kept_runs)
-
-                # start new
-                buf_is_removed = is_removed
-                buf_i0 = i
-                buf = [S[i]]
-
-            # flush final
-            _flush(buf, buf_i0, n - 1, removed_runs if buf_is_removed else kept_runs)
-
-            return kept_runs, removed_runs
-
-
-        # ----------------------------
-        # PRED: clip by UNION bite masks (branch-wise)
-        # ----------------------------
-        pred_dom_clipped_segs = []
-        pred_dom_clipped_meta = []
-        bite_pruned_pred_segs = []   # REMOVED runs (viz)
-
-        for S, m in zip(pruned_segs, pruned_meta):
-            if S is None or len(S) < 2:
-                continue
-
-            m = m if isinstance(m, dict) else {}
-
-            bid = _safe_int(m.get("branch_id"), None)
-            if bid is None:
-                # no branch id -> keep uncut
-                pred_dom_clipped_segs.append(np.asarray(S, float))
-                pred_dom_clipped_meta.append(m)
-                continue
-
-            union_rm = _union_bite_for_branch(bid)
-            if union_rm is None:
-                pred_dom_clipped_segs.append(np.asarray(S, float))
-                pred_dom_clipped_meta.append(m)
-                continue
-
-            kept_runs, removed_runs = _split_runs_by_point_mask(S, union_rm, H, W, min_pts=2)
-
-            for (rr, (i0, i1)) in removed_runs:
-                bite_pruned_pred_segs.append(rr)
-
-            # Each kept run gets its own meta carrying original-relative indices
-            for (kr, (i0, i1)) in kept_runs:
-                mm = dict(m)
-                mm["_clip_rel_i0"] = int(i0)
-                mm["_clip_rel_i1"] = int(i1)
-                pred_dom_clipped_segs.append(np.asarray(kr, float))
-                pred_dom_clipped_meta.append(mm)
-
-        print(
-            f"[DOM CLIP PRED|UNION] cid={cid} kept {len(pred_dom_clipped_segs)} runs "
-            f"(from {len(pruned_segs)} segs); removed_runs={len(bite_pruned_pred_segs)}"
-        )
-
-        # overwrite authoritative PRED geometry for downstream stages
-        pruned_segs = pred_dom_clipped_segs
-        pruned_meta = pred_dom_clipped_meta
-
-
-        # ----------------------------
-        # GT: clip by UNION bite masks (branch-wise, symmetric)
-        # ----------------------------
-        gt_stage5_segs = []
-        gt_stage5_meta = []
-        bite_pruned_gt_segs = []   # REMOVED runs (viz)
-
-        gt_segs_all = gt_entry.get("midline_segments", []) if gt_entry else []
-        gt_meta_all = (gt_entry.get("dominance_meta", {}).get("segments_meta") or []) if gt_entry else []
-
-        if gt_entry is not None and len(gt_segs_all) == len(gt_meta_all) and len(gt_segs_all) > 0:
-            for Sg, mg in zip(gt_segs_all, gt_meta_all):
-                if Sg is None or len(Sg) < 2:
-                    continue
-                mg = mg if isinstance(mg, dict) else {}
-
-                bid = _safe_int(mg.get("branch_id"), None)
-                if bid is None:
-                    gt_stage5_segs.append(np.asarray(Sg, float))
-                    gt_stage5_meta.append(mg)
-                    continue
-
-                union_rm = _union_bite_for_branch(bid)
-                if union_rm is None:
-                    gt_stage5_segs.append(np.asarray(Sg, float))
-                    gt_stage5_meta.append(mg)
-                    continue
-
-                kept_runs, removed_runs = _split_runs_by_point_mask(Sg, union_rm, H, W, min_pts=2)
-
-                for (rr, (i0, i1)) in removed_runs:
-                    bite_pruned_gt_segs.append(rr)
-
-                for (kr, (i0, i1)) in kept_runs:
-                    mm = dict(mg)
-                    mm["_clip_rel_i0"] = int(i0)
-                    mm["_clip_rel_i1"] = int(i1)
-                    gt_stage5_segs.append(np.asarray(kr, float))
-                    gt_stage5_meta.append(mm)
-
-            print(
-                f"[DOM CLIP GT|UNION]   cid={cid} kept {len(gt_stage5_segs)} runs "
-                f"(from {len(gt_segs_all)} segs); removed_runs={len(bite_pruned_gt_segs)}"
-            )
-        else:
-            # fallback: cannot map GT segs to branches reliably -> keep GT uncut
-            gt_stage5_segs = [
-                np.asarray(Sg, float) for Sg in gt_segs_all
-                if Sg is not None and len(Sg) >= 2
-            ]
-            gt_stage5_meta = [{} for _ in gt_stage5_segs]
-            bite_pruned_gt_segs = []
-            print(
-                f"[DOM CLIP GT|UNION]   cid={cid} GT meta missing/misaligned -> kept {len(gt_stage5_segs)} uncut segs"
-            )
-
-
-        # ============================================================
-        # Stage 5: width slicing (DOMINANCE-APPLIED GEOMETRY)
-        #   - NO dominance logic here (Stage 4.5 already did it)
-        # ============================================================
-
-        final_pred_segs = []
-        stage4_pairs = []          # (pts_ok, width_diff)
-        # NOTE: do NOT reinitialize bite_pruned_pred_segs here; it is produced by Stage 4.5
-
-        # GT plot segments (dominance-clipped, symmetric)
-        gt_plot_segs = [np.asarray(s, float) for s in (gt_stage5_segs or []) if s is not None and len(s) >= 2]
-        gt_plot_meta = gt_stage5_meta if isinstance(gt_stage5_meta, list) else []
-
-        for si, (S, m) in enumerate(zip(pruned_segs, pruned_meta)):
-            if S is None or len(S) < 2:
-                continue
-            m = m if isinstance(m, dict) else {}
-
-            # ---- determine width index source ----
-            if (
-                have_valid_seg_idx
-                and isinstance(m.get("seg_idx"), int)
-                and m["seg_idx"] in seg_start
-            ):
-                base0 = seg_start[m["seg_idx"]]
-                src = "seg_idx"
-            else:
-                base0 = off_fallback
-                src = "fallback"
-
-            # If this run came from clipping, use original-relative indices to keep widths aligned
-            rel_i0 = int(m.get("_clip_rel_i0", 0))
-            rel_i1 = int(m.get("_clip_rel_i1", rel_i0 + len(S) - 1))
-
-            s0 = base0 + rel_i0
-            # length of this run
-            L = len(S)
-            s1 = min(s0 + L, len(widths_geo))
-
-            pw_full = widths_geo[s0:s1]
-            pts_full = np.asarray(S, float)[:len(pw_full)]
-
-            print(
-                f"[WIDTH DEBUG] cid={cid} run#{si} "
-                f"branch={m.get('branch_id')} src={src} "
-                f"rel=({rel_i0},{rel_i1}) "
-                f"geom_pts={len(S)} pw_pts={len(pw_full)} "
-                f"s0={s0} s1={s1}"
-            )
-
-            # Fallback offset must advance by ORIGINAL seg length, not clipped run length.
-            # If seg_idx is missing, we cannot know original seg length reliably; keep old behavior.
-            if src == "fallback":
-                off_fallback += L
-
-            if len(pts_full) < 2:
-                continue
-
-            # ---- GT widths (authoritative from GT mask) ----
-            (_, _, _, _, gw), _ = normals_from_mask_for_midline(
-                pts_full, mask_bin, max_radius
-            )
-            gw = np.asarray(gw, float)
-
-            mlen = min(len(pts_full), len(pw_full), len(gw))
-            if mlen < 2:
-                continue
-
-            pts_raw = np.asarray(pts_full[:mlen], float)
-            pw_raw  = np.asarray(pw_full[:mlen], float)
-            gw_raw  = np.asarray(gw[:mlen], float)
-
-            d_ok = pw_raw - gw_raw
-
-            final_pred_segs.append(pts_raw)
-            stage4_pairs.append((pts_raw, d_ok))
-
-            diffs.append(d_ok)
-            coords.append(pts_raw)
-
-            bbox0 = crack.get("mask_bbox")
-            if bbox0 is not None:
-                bboxes.append(bbox0)
-
-            for (x, y), dw, gwi, pwi in zip(pts_raw, d_ok, gw_raw, pw_raw):
-                if not np.isfinite(dw):
-                    continue
-                rows.append({
-                    "x": float(x),
-                    "y": float(y),
-                    "gt_width_px": float(gwi),
-                    "pred_width_px": float(pwi),
-                    "width_diff_px": float(dw),
-                    "cid": str(cid),
-                    "crack_type": "combined",
-                    "midline_type": midline_type,
-                })
-
 
         # ============================================================
         # OPSEC PLOT — STAGE 5 FINAL GEOMETRY (DOMINANCE-RESOLVED)
         #   - NO dominance pruning logic here
         #   - Overlay can be categorical (GT-only / PRED-only / BOTH) like Stage 4
         # ============================================================
+        assert pred_pre45_segs, "pred_pre45_segs empty — snapshot timing broken"
+        assert bite_pruned_pred_segs is not None, "bite_pruned_pred_segs lost"
+        
         try:
             import matplotlib.pyplot as plt
             from matplotlib.lines import Line2D
@@ -2536,7 +2263,7 @@ def compare_widths_for_cracks(
             # --------------------------------------------------
             pred_kept_segs = []
             pred_undef_segs = []
-            pred_stage5_support = []   # <-- keep this; used later
+            pred_stage5_support = []
 
             for pts_ok, d_ok in stage4_pairs:
                 k, u = _split_finite_undef(pts_ok, d_ok, min_pts=2)
@@ -2550,9 +2277,9 @@ def compare_widths_for_cracks(
             keep_set = _polyline_points_keyset(pred_stage5_support)
             if bite_pruned_pred_segs:
                 keep_set |= _polyline_points_keyset(bite_pruned_pred_segs)
-
+            
             topology_pruned_pred_segs = subtract_segments_by_pointset(
-                pred_pre45_segs,     # <-- IMPORTANT: pre-4.5 snapshot
+                pred_pre45_segs,
                 keep_set,
                 min_pts=2,
             )
@@ -2569,11 +2296,11 @@ def compare_widths_for_cracks(
                     pred_mask_full[y:y+hh, x:x+ww] = mc[:hh, :ww]
 
             # --------------------------------------------------
-            # Dominance categorical overlay like Stage 4 (optional but helpful)
-            #   0 = none (masked out)
+            # Dominance categorical overlay like Stage 4
+            #   0 = none
             #   1 = GT-only
             #   2 = PRED-only
-            #   3 = BOTH (GT ∩ PRED)
+            #   3 = BOTH
             # --------------------------------------------------
             dom_label = np.zeros((H, W), dtype=np.uint8)
             all_bids_local = sorted(set(loss_masks_pred_by_branch.keys()) | set(loss_masks_gt_by_branch.keys()))
@@ -2589,7 +2316,7 @@ def compare_widths_for_cracks(
             dom_masked = np.ma.array(dom_crop, mask=(dom_crop == 0))
 
             DOM_CMAP = ListedColormap([
-                "#000000",  # 0 unused (masked)
+                "#000000",  # masked
                 "#e41a1c",  # GT-only
                 "#377eb8",  # Pred-only
                 "#984ea3",  # GT ∩ Pred
@@ -2606,53 +2333,38 @@ def compare_widths_for_cracks(
             axes[0].imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
             axes[1].imshow(pred_mask_full[y0:y1, x0:x1], cmap="gray", zorder=0)
 
-            # categorical overlay on BOTH axes for correspondence
             for ax in axes:
                 ax.imshow(
                     dom_masked,
                     cmap=DOM_CMAP,
                     interpolation="nearest",
-                    vmin=0, vmax=3,
-                    alpha=0.35,
+                    vmin=0,
+                    vmax=3,
+                    alpha=0.5,
                     zorder=1,
                 )
                 ax.axis("off")
 
-            col_keep  = (0.2, 0.4, 0.8)  # blue
-            col_topo  = (0.7, 0.1, 0.1)  # red
-            col_undef = (0.6, 0.6, 0.6)  # gray
-            col_bite  = (0.9, 0.6, 0.0)  # orange
+            col_keep  = (0.2, 0.4, 0.8)
+            col_topo  = (0.7, 0.1, 0.1)
+            col_undef = (0.6, 0.6, 0.6)
+            col_bite  = (0.9, 0.6, 0.0)
 
             # --------------------------------------------------
-            # GT plot (LEFT): already dominance-resolved in Stage 4.5
+            # GT plot (LEFT)
             # --------------------------------------------------
             for S in gt_stage5_segs:
-                S = np.asarray(S, float)
                 if S is None or len(S) < 2:
                     continue
-                axes[0].plot(
-                    S[:, 0] - x0,
-                    S[:, 1] - y0,
-                    color=col_keep,
-                    lw=2.2,
-                    zorder=4,
-                )
+                axes[0].plot(S[:, 0] - x0, S[:, 1] - y0, color=col_keep, lw=2.2, zorder=4)
 
-            # show GT bite-removed runs (viz only attach)
             for S in bite_pruned_gt_segs:
-                S = np.asarray(S, float)
                 if S is None or len(S) < 2:
                     continue
-                axes[0].plot(
-                    S[:, 0] - x0,
-                    S[:, 1] - y0,
-                    color=col_bite,
-                    lw=2.2,
-                    zorder=3,
-                )
+                axes[0].plot(S[:, 0] - x0, S[:, 1] - y0, color=col_bite, lw=2.2, zorder=3)
 
             # --------------------------------------------------
-            # PRED plot (RIGHT): provenance
+            # PRED plot (RIGHT)
             # --------------------------------------------------
             for S in topology_pruned_pred_segs:
                 if S is None or len(S) < 2:
@@ -2674,7 +2386,6 @@ def compare_widths_for_cracks(
                     continue
                 axes[1].plot(S[:, 0] - x0, S[:, 1] - y0, color=col_keep, lw=2.5, zorder=5)
 
-            # crop box
             for ax in axes:
                 ax.add_patch(
                     plt.Rectangle((x - x0, y - y0), w, h, fill=False,
@@ -2686,15 +2397,16 @@ def compare_widths_for_cracks(
                 Line2D([0],[0], color=col_undef, lw=2.2, label="Infinite/undef"),
                 Line2D([0],[0], color=col_bite,  lw=2.0, label="Dominance-bite (union)"),
                 Line2D([0],[0], color=col_topo,  lw=1.4, label="Topology-pruned"),
-                Line2D([0],[0], color="#e41a1c", lw=6,   label="GT-only loss (overlay)"),
-                Line2D([0],[0], color="#377eb8", lw=6,   label="Pred-only loss (overlay)"),
-                Line2D([0],[0], color="#984ea3", lw=6,   label="GT ∩ Pred (overlay)"),
+                Line2D([0],[0], color="#e41a1c", lw=6, label="GT-only loss (overlay)"),
+                Line2D([0],[0], color="#377eb8", lw=6, label="Pred-only loss (overlay)"),
+                Line2D([0],[0], color="#984ea3", lw=6, label="GT ∩ Pred (overlay)"),
             ]
             axes[1].legend(handles=legend_items, loc="lower right", fontsize=7, framealpha=0.9)
 
             fig.suptitle(
                 f"Stage-5 Geometry Provenance (Dominance-resolved @ 4.5) — cid={cid}",
-                fontsize=11, fontweight="bold"
+                fontsize=11,
+                fontweight="bold",
             )
 
             os.makedirs(opsec_dir, exist_ok=True)
