@@ -3154,8 +3154,8 @@ def compare_widths_for_cracks(
                     pass
                 ax.axis("off")
 
-            draw_colored_polyline(axO, pts_all,  ds0, x0, y0, 1.3, cmap, norm, 0.85)
-            draw_colored_polyline(axR, ptsr_all, ds1, x0, y0, 1.5, cmap, norm, 0.90)
+            draw_colored_polyline(axO, pts_all,  ds0, x0, y0, 2, cmap, norm, 0.85)
+            draw_colored_polyline(axR, ptsr_all, ds1, x0, y0, 2, cmap, norm, 0.90)
 
             sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
             sm.set_array([])
