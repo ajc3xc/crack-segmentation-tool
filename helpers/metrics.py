@@ -2723,6 +2723,7 @@ def compare_widths_for_cracks(
     #   - If you also pass per-sample pred/gt widths into width_pairs as "pw" and "gw", Stage 6 will
     #     resample and plot those too (so you can show “effect on GT vs pred” explicitly).
     # ============================================================
+    
     try:
         import os, math
         import numpy as np
@@ -3083,11 +3084,401 @@ def compare_widths_for_cracks(
         #       - show d(s) curves per-run
         #       - if pw/gw available, also show pw(s), gw(s) before/after
         # ------------------------------------------------------------
+
+
+        # ======================================================================
+        # STAGE 6 PLOT HELPERS (MUST BE DEFINED BEFORE USE)
+        # ======================================================================
+        import numpy as np
+        import matplotlib.pyplot as plt
+        from matplotlib.collections import LineCollection
+
+        def draw_colored_polyline(ax, pts, vals, x0, y0, lw, cmap, norm, alpha=1.0):
+            if pts is None or vals is None or len(pts) < 2:
+                return
+            segs = [
+                [(pts[i,0]-x0, pts[i,1]-y0),
+                (pts[i+1,0]-x0, pts[i+1,1]-y0)]
+                for i in range(len(pts)-1)
+            ]
+            lc = LineCollection(
+                segs, array=vals, cmap=cmap, norm=norm,
+                linewidths=lw, alpha=alpha,
+                capstyle="round", joinstyle="round", zorder=3
+            )
+            ax.add_collection(lc)
+
+
+        def plot_sampling_consistency(
+            *,
+            pts_list,
+            ptsr_list,
+            mask_bin,
+            crop,
+            title,
+            out_path,
+        ):
+            x0, y0, x1, y1 = crop
+
+            if not pts_list or not ptsr_list:
+                return
+
+            pts_all  = np.vstack([p for p in pts_list if p is not None and len(p) >= 2])
+            ptsr_all = np.vstack([p for p in ptsr_list if p is not None and len(p) >= 2])
+
+            if len(pts_all) < 2 or len(ptsr_all) < 2:
+                return
+
+            ds0 = np.linalg.norm(np.diff(pts_all, axis=0), axis=1)
+            ds1 = np.linalg.norm(np.diff(ptsr_all, axis=0), axis=1)
+            ds0 = ds0[np.isfinite(ds0)]
+            ds1 = ds1[np.isfinite(ds1)]
+
+            if ds0.size < 1 or ds1.size < 1:
+                return
+
+            vmin = np.percentile(ds0, 10)
+            vmax = np.percentile(ds0, 90)
+            if vmax <= vmin:
+                vmax = vmin + 1e-6
+
+            cmap = plt.get_cmap("viridis")
+            norm = plt.Normalize(vmin, vmax)
+
+            fig, (axO, axR) = plt.subplots(1, 2, figsize=(13.8, 5.2), dpi=200)
+
+            for ax in (axO, axR):
+                try:
+                    ax.imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
+                except Exception:
+                    pass
+                ax.axis("off")
+
+            draw_colored_polyline(axO, pts_all,  ds0, x0, y0, 1.3, cmap, norm, 0.85)
+            draw_colored_polyline(axR, ptsr_all, ds1, x0, y0, 1.5, cmap, norm, 0.90)
+
+            sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+            sm.set_array([])
+            plt.colorbar(sm, ax=[axO, axR], fraction=0.03, pad=0.03)
+
+            fig.text(0.5, 0.985, title, ha="center", va="top", fontsize=11, fontweight="bold")
+            fig.savefig(out_path, bbox_inches="tight", dpi=200)
+            plt.close(fig)
+
+
+        def plot_width_error_distribution(
+            *,
+            runs,
+            title,
+            out_path,
+            bins=25,   # ⬅️ increased
+        ):
+            """
+            Width error distribution comparison:
+            - ORIGINAL vs RESAMPLED
+            - SAME axes
+            - Normalized histogram (honest density)
+            """
+
+            import numpy as np
+            import matplotlib.pyplot as plt
+            import os
+
+            d_orig_all = []
+            d_rs_all   = []
+
+            for r in runs:
+                d0 = np.asarray(r.get("d", []), float)
+                d1 = np.asarray(r.get("d_rs", []), float)
+
+                if len(d0) >= 2:
+                    d_orig_all.append(d0[:-1])
+                if len(d1) >= 2:
+                    d_rs_all.append(d1[:-1])
+
+            if not d_orig_all or not d_rs_all:
+                print(f"[STAGE6 WIDTH DIST] skipped (no valid samples): {out_path}")
+                return
+
+            d_orig_all = np.concatenate(d_orig_all)
+            d_rs_all   = np.concatenate(d_rs_all)
+
+            d_orig_all = d_orig_all[np.isfinite(d_orig_all)]
+            d_rs_all   = d_rs_all[np.isfinite(d_rs_all)]
+
+            if d_orig_all.size < 10 or d_rs_all.size < 10:
+                print(f"[STAGE6 WIDTH DIST] skipped (too few samples): {out_path}")
+                return
+
+            fig, ax = plt.subplots(1, 1, figsize=(8.8, 4.8), dpi=200)
+
+            ax.hist(
+                d_orig_all,
+                bins=bins,
+                density=True,
+                alpha=0.45,
+                label="original",
+            )
+            ax.hist(
+                d_rs_all,
+                bins=bins,
+                density=True,
+                alpha=0.45,
+                label="resampled",
+            )
+
+            ax.axvline(0.0, lw=1.4, color="black", alpha=0.8)
+
+            rmse_orig = float(np.sqrt(np.mean(d_orig_all ** 2)))
+            rmse_rs   = float(np.sqrt(np.mean(d_rs_all ** 2)))
+
+            mean_orig = float(np.mean(d_orig_all))
+            mean_rs   = float(np.mean(d_rs_all))
+
+            ax.axvline(mean_orig, lw=1.2, linestyle="--", alpha=0.8)
+            ax.axvline(mean_rs,   lw=1.2, linestyle="--", alpha=0.8)
+
+            ax.set_xlabel("Width error (pred − gt) [px]", fontsize=9)
+            ax.set_ylabel("Density", fontsize=9)
+            ax.grid(True, alpha=0.25)
+            ax.legend(fontsize=8)
+
+            ax.text(
+                0.02, 0.96,
+                f"RMSE (orig) = {rmse_orig:.3f}px\nRMSE (resampled) = {rmse_rs:.3f}px",
+                transform=ax.transAxes,
+                va="top",
+                fontsize=8,
+                bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
+            )
+
+            fig.suptitle(title, fontsize=11, fontweight="bold")
+            fig.savefig(out_path, bbox_inches="tight", dpi=200)
+            plt.close(fig)
+
+            print(f"[STAGE6 WIDTH DIST] wrote: {out_path}")
+
+        def plot_stage6_width_signals_preservation(
+            *,
+            run,
+            title,
+            out_path,
+        ):
+            """
+            Plot GT width and predicted width vs arclength for a SINGLE run,
+            showing original vs resampled on the same axes (shape preservation).
+
+            Expects run dict keys from your Stage-6 cache:
+            - s, gw, pw
+            - s_rs, gw_rs, pw_rs
+            """
+            import numpy as np
+            import matplotlib.pyplot as plt
+            import os
+
+            # ------------------------------------------------------------
+            # Pull signals
+            # ------------------------------------------------------------
+            s0  = np.asarray(run.get("s", []), float)    if run.get("s")    is not None else None
+            s1  = np.asarray(run.get("s_rs", []), float) if run.get("s_rs") is not None else None
+            gw0 = np.asarray(run.get("gw", []), float)   if run.get("gw")   is not None else None
+            gw1 = np.asarray(run.get("gw_rs", []), float)if run.get("gw_rs")is not None else None
+            pw0 = np.asarray(run.get("pw", []), float)   if run.get("pw")   is not None else None
+            pw1 = np.asarray(run.get("pw_rs", []), float)if run.get("pw_rs")is not None else None
+
+            missing = []
+            if s0  is None or len(s0)  < 2: missing.append("s")
+            if s1  is None or len(s1)  < 2: missing.append("s_rs")
+            if gw0 is None or len(gw0) < 2: missing.append("gw")
+            if gw1 is None or len(gw1) < 2: missing.append("gw_rs")
+            if pw0 is None or len(pw0) < 2: missing.append("pw")
+            if pw1 is None or len(pw1) < 2: missing.append("pw_rs")
+
+            if missing:
+                print(f"[STAGE6 SIGNAL] skipped (missing/short: {', '.join(missing)})")
+                return
+
+            # ------------------------------------------------------------
+            # Align lengths safely
+            # ------------------------------------------------------------
+            n_g0 = min(len(s0), len(gw0))
+            n_g1 = min(len(s1), len(gw1))
+            n_p0 = min(len(s0), len(pw0))
+            n_p1 = min(len(s1), len(pw1))
+
+            s0g, gw0 = s0[:n_g0], gw0[:n_g0]
+            s1g, gw1 = s1[:n_g1], gw1[:n_g1]
+            s0p, pw0 = s0[:n_p0], pw0[:n_p0]
+            s1p, pw1 = s1[:n_p1], pw1[:n_p1]
+
+            g0_ok = np.isfinite(s0g) & np.isfinite(gw0)
+            g1_ok = np.isfinite(s1g) & np.isfinite(gw1)
+            p0_ok = np.isfinite(s0p) & np.isfinite(pw0)
+            p1_ok = np.isfinite(s1p) & np.isfinite(pw1)
+
+            if not (np.any(g0_ok) and np.any(g1_ok) and np.any(p0_ok) and np.any(p1_ok)):
+                print("[STAGE6 SIGNAL] skipped (no finite width samples)")
+                return
+
+            # ------------------------------------------------------------
+            # Means
+            # ------------------------------------------------------------
+            gw0_mean = float(np.mean(gw0[g0_ok]))
+            gw1_mean = float(np.mean(gw1[g1_ok]))
+            pw0_mean = float(np.mean(pw0[p0_ok]))
+            pw1_mean = float(np.mean(pw1[p1_ok]))
+
+            # ------------------------------------------------------------
+            # Shared axis limits (start at 0)
+            # ------------------------------------------------------------
+            s_max = max(
+                np.max(s0g[g0_ok]),
+                np.max(s1g[g1_ok]),
+                np.max(s0p[p0_ok]),
+                np.max(s1p[p1_ok]),
+            )
+
+            w_max = max(
+                np.max(gw0[g0_ok]),
+                np.max(gw1[g1_ok]),
+                np.max(pw0[p0_ok]),
+                np.max(pw1[p1_ok]),
+            )
+
+            xlim = (0.0, float(s_max) * 1.02)
+            ylim = (0.0, float(w_max) * 1.05)
+
+            # ------------------------------------------------------------
+            # Plot
+            # ------------------------------------------------------------
+            fig, (axG, axP) = plt.subplots(
+                1, 2, figsize=(13.8, 5.2), dpi=200, sharex=True, sharey=True
+            )
+
+            fig.suptitle(title, fontsize=14, fontweight="bold")
+
+            # --- GT panel ---
+            axG.plot(s0g[g0_ok], gw0[g0_ok], lw=2.2, color="tab:blue", label="gt (orig)")
+            axG.plot(s1g[g1_ok], gw1[g1_ok], lw=2.6, ls="--", color="tab:orange", label="gt (resampled)")
+            axG.axhline(gw0_mean, lw=1.6, alpha=0.35, color="tab:blue")
+            axG.axhline(gw1_mean, lw=1.6, alpha=0.35, ls="--", color="tab:orange")
+            axG.set_title("GT width vs arclength", fontsize=12)
+            axG.set_xlabel("arclength s (px)", fontsize=11)
+            axG.set_ylabel("width (px)", fontsize=11)
+            axG.set_xlim(*xlim)
+            axG.set_ylim(*ylim)
+            axG.grid(True, alpha=0.25)
+            axG.legend(loc="upper right", fontsize=10)
+            axG.text(0.02, 0.02, "Horizontal lines = mean width",
+                    transform=axG.transAxes, fontsize=10)
+
+            # --- Pred panel ---
+            axP.plot(s0p[p0_ok], pw0[p0_ok], lw=2.2, color="darkgreen", label="pred (orig)")
+            axP.plot(s1p[p1_ok], pw1[p1_ok], lw=2.6, ls="--", color="red", label="pred (resampled)")
+            axP.axhline(pw0_mean, lw=1.6, alpha=0.35, color="darkgreen")
+            axP.axhline(pw1_mean, lw=1.6, alpha=0.35, ls="--", color="red")
+            axP.set_title("Predicted width vs arclength", fontsize=12)
+            axP.set_xlabel("arclength s (px)", fontsize=11)
+            axP.set_ylabel("width (px)", fontsize=11)
+            axP.grid(True, alpha=0.25)
+            axP.legend(loc="upper right", fontsize=10)
+            axP.text(0.02, 0.02, "Horizontal lines = mean width",
+                    transform=axP.transAxes, fontsize=10)
+
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            fig.savefig(out_path, bbox_inches="tight", dpi=200)
+            plt.close(fig)
+
+            print(f"[STAGE6 SIGNAL] wrote: {out_path}")
+        
+        def stage6_plot_worst_and_all(
+                *,
+                worst_cid_runs,
+                all_runs_global,
+                mask_bin,
+                crop_worst,
+                crop_all,
+                stage6_resample_dir,
+                worst_cid,
+            ):
+            import os
+            import numpy as np
+
+            # ------------------------------------------------------------
+            # WORST CID — ALL segments
+            # ------------------------------------------------------------
+            plot_sampling_consistency(
+                pts_list=[r["pts"] for r in worst_cid_runs if r.get("pts") is not None],
+                ptsr_list=[r["pts_rs"] for r in worst_cid_runs if r.get("pts_rs") is not None],
+                mask_bin=mask_bin,
+                crop=crop_worst,
+                title=f"Stage 6 sampling consistency — WORST CID={worst_cid}",
+                out_path=os.path.join(stage6_resample_dir, f"stage6_sampling_WORST_cid{worst_cid}.png"),
+            )
+
+            plot_width_error_distribution(
+                runs=worst_cid_runs,
+                title=f"Stage 6 width error distribution — WORST CID={worst_cid}",
+                out_path=os.path.join(stage6_resample_dir, f"stage6_width_dist_WORST_cid{worst_cid}.png"),
+            )
+
+            # Worst representative run (longest finite length)
+            worst_run = None
+            bestL = -1.0
+            for r in worst_cid_runs:
+                L = float(r.get("run_len_px", 0.0))
+                if np.isfinite(L) and L > bestL:
+                    bestL = L
+                    worst_run = r
+
+            if worst_run is not None:
+                plot_stage6_width_signals_preservation(
+                    run=worst_run,
+                    title=f"Stage 6 worst-run width signals — cid={worst_cid}",
+                    out_path=os.path.join(stage6_resample_dir, f"stage6_width_signals_WORST_cid{worst_cid}.png"),
+                )
+
+            # ------------------------------------------------------------
+            # GLOBAL — ALL CIDs
+            # ------------------------------------------------------------
+            plot_sampling_consistency(
+                pts_list=[r["pts"] for r in all_runs_global if r.get("pts") is not None],
+                ptsr_list=[r["pts_rs"] for r in all_runs_global if r.get("pts_rs") is not None],
+                mask_bin=mask_bin,
+                crop=crop_all,
+                title="Stage 6 sampling consistency — ALL CIDs",
+                out_path=os.path.join(stage6_resample_dir, "stage6_sampling_ALL_CIDS.png"),
+            )
+
+            plot_width_error_distribution(
+                runs=all_runs_global,
+                title="Stage 6 width error distribution — ALL CIDs",
+                out_path=os.path.join(stage6_resample_dir, "stage6_width_dist_ALL_CIDS.png"),
+            )
+
+            # Representative GLOBAL signal (longest run across all CIDs)
+            global_run = None
+            bestL = -1.0
+            for r in all_runs_global:
+                L = float(r.get("run_len_px", 0.0))
+                if np.isfinite(L) and L > bestL:
+                    bestL = L
+                    global_run = r
+
+            if global_run is not None:
+                plot_stage6_width_signals_preservation(
+                    run=global_run,
+                    title="Stage 6 width signals — ALL CIDs (representative)",
+                    out_path=os.path.join(stage6_resample_dir, "stage6_width_signals_ALL_CIDS.png"),
+                )
+                                        
         try:
             import matplotlib.pyplot as plt
             from matplotlib.colors import TwoSlopeNorm
 
-            # select rows for current scope
+            # ------------------------------------------------------------
+            # Select rows for current scope
+            # ------------------------------------------------------------
             rows_here = [
                 r for r in width_metric_rows
                 if str(r.get("crack_type", "")) == str(mode)
@@ -3118,7 +3509,11 @@ def compare_widths_for_cracks(
                 global_bias = float(np.sum(bias * Ls) / Lsum)
 
                 # TopK by RMSE
-                rows_here_sorted = sorted(rows_here, key=lambda r: float(r.get("width_rmse_L", -1e9)), reverse=True)
+                rows_here_sorted = sorted(
+                    rows_here,
+                    key=lambda r: float(r.get("width_rmse_L", -1e9)),
+                    reverse=True
+                )
                 topK = rows_here_sorted[:15]
 
                 labels, rmse_v, mae_v, bias_v, len_v = [], [], [], [], []
@@ -3178,12 +3573,7 @@ def compare_widths_for_cracks(
                 print(f"[STAGE6] wrote: {out}")
 
                 # ------------------------------------------------------------
-                # (B) Resampling explainers
-                #   - COMBINED:
-                #       (B1) Aggregated diagnostic (distribution-based, NOT curves)
-                #       (B2) Worst-run explainer (geometry + widths + d(s))
-                #   - ATOMIC:
-                #       (B2) Worst-run explainer only
+                # (B) Resampling explainers — corrected semantics
                 # ------------------------------------------------------------
 
                 rows_here_sorted = sorted(
@@ -3191,6 +3581,16 @@ def compare_widths_for_cracks(
                     key=lambda r: float(r.get("width_rmse_L", 0.0)),
                     reverse=True
                 )
+                if not rows_here_sorted:
+                    raise RuntimeError("[STAGE6] no rows for resampling explainers")
+
+                # ------------------------------------------------------------
+                # Identify WORST CID (by RMSE)
+                # ------------------------------------------------------------
+                worst_row = rows_here_sorted[0]
+                worst_cid = str(worst_row["crack_id"])
+                worst_ct  = str(worst_row["crack_type"])
+                worst_mt  = str(worst_row["midline_type"])
 
                 def _cache_for_cid(cid0, ctype0, mtype0):
                     return [
@@ -3201,490 +3601,134 @@ def compare_widths_for_cracks(
                         and it.get("runs")
                     ]
 
-                # choose demo rows
-                demo_rows = []
-                if rows_here_sorted:
-                    demo_rows.append(rows_here_sorted[0])  # worst
-                    if mode == "combined" and len(rows_here_sorted) > 2:
-                        demo_rows.append(rows_here_sorted[-1])  # best (contrast only)
+                # ------------------------------------------------------------
+                # Collect runs for WORST CID
+                # ------------------------------------------------------------
+                items = _cache_for_cid(worst_cid, worst_ct, worst_mt)
+                if not items:
+                    raise RuntimeError(f"[STAGE6] no cache items for worst cid={worst_cid}")
 
-                # de-dup by cid
-                seen = set()
-                demo_rows_u = []
-                for r in demo_rows:
-                    cid0 = str(r.get("crack_id",""))
-                    if cid0 and cid0 not in seen:
-                        seen.add(cid0)
-                        demo_rows_u.append(r)
+                worst_cid_runs = []
+                bbox0 = None
+                for it in items:
+                    bbox0 = bbox0 or it.get("bbox", None)
+                    worst_cid_runs.extend(it["runs"])
 
-                for dr in demo_rows_u:
-                    demo_cid = str(dr["crack_id"])
-                    demo_ct  = str(dr["crack_type"])
-                    demo_mt  = str(dr["midline_type"])
+                if not worst_cid_runs:
+                    raise RuntimeError(f"[STAGE6] no runs for worst cid={worst_cid}")
 
-                    items = _cache_for_cid(demo_cid, demo_ct, demo_mt)
-                    if not items:
-                        continue
-
-                    # merge all runs
-                    runs = []
-                    bbox0 = None
-                    for it in items:
-                        bbox0 = bbox0 or it.get("bbox", None)
-                        runs.extend(it["runs"])
-
-                    if not runs:
-                        continue
-
-                    # choose representative worst run (longest finite run)
-                    worst_run = max(
-                        runs,
-                        key=lambda rr: float(np.sum(np.diff(rr["s_rs"])) if "s_rs" in rr else 0.0),
-                        default=None
+                # ------------------------------------------------------------
+                # Crop for WORST CID
+                # ------------------------------------------------------------
+                if bbox0 and len(bbox0) >= 4:
+                    x, y, w, h = map(int, bbox0[:4])
+                    pad = 25
+                    crop_worst = (
+                        max(0, x - pad),
+                        max(0, y - pad),
+                        min(W, x + w + pad),
+                        min(H, y + h + pad),
                     )
+                else:
+                    crop_worst = (0, 0, W, H)
 
-                    # crop window
-                    if bbox0 and len(bbox0) >= 4:
-                        x,y,w,h = map(int, bbox0[:4])
-                        pad = 25
-                        x0 = max(0, x-pad); y0 = max(0, y-pad)
-                        x1 = min(W, x+w+pad); y1 = min(H, y+h+pad)
-                    else:
-                        x0,y0,x1,y1 = 0,0,W,H
+                # ------------------------------------------------------------
+                # Crop for ALL CIDs (GLOBAL)
+                # ------------------------------------------------------------
+                xs, ys, xe, ye = [], [], [], []
+                for it in stage6_cache:
+                    bb = it.get("bbox", None)
+                    if bb and len(bb) >= 4:
+                        x, y, w, h = map(int, bb[:4])
+                        xs.append(x)
+                        ys.append(y)
+                        xe.append(x + w)
+                        ye.append(y + h)
 
-                    # ============================================================
-                    # (B1) COMBINED — AGGREGATED DIAGNOSTIC (DISTRIBUTIONS ONLY)
-                    # ============================================================
-                    if mode == "combined":
-                        # pool resampled errors, length-weighted
-                        d_all = []
-                        run_rmse = []
-
-                        for rr in runs:
-                            d_rs = np.asarray(rr.get("d_rs", []), float)
-                            s_rs = np.asarray(rr.get("s_rs", []), float)
-                            if len(d_rs) >= 2 and len(s_rs) >= 2:
-                                ds = np.diff(s_rs)
-                                d_all.append(d_rs[:-1])
-                                st = _length_weighted_err_stats(d_rs[:-1], ds)
-                                if np.isfinite(st.get("rmse", np.nan)):
-                                    run_rmse.append(st["rmse"])
-
-                        if d_all:
-                            d_all = np.concatenate(d_all)
-
-                            fig, (axH, axB) = plt.subplots(1, 2, figsize=(13.5, 4.8), dpi=200)
-
-                            # ---- histogram of d(s) ----
-                            axH.hist(d_all, bins=60, density=True, alpha=0.85)
-                            axH.axvline(0.0, lw=1.4)
-                            axH.set_title("Width error distribution after resampling", fontsize=10, fontweight="bold")
-                            axH.set_xlabel("d = pred − gt (px)")
-                            axH.set_ylabel("density")
-                            axH.grid(True, alpha=0.25)
-
-                            axH.text(
-                                0.02, 0.98,
-                                "All finite runs pooled\nLength-weighted samples\n(after arc-length resampling)",
-                                transform=axH.transAxes,
-                                va="top", ha="left", fontsize=8,
-                                bbox=dict(facecolor="white", alpha=0.75, edgecolor="none")
-                            )
-
-                            # ---- per-run RMSE boxplot ----
-                            axB.boxplot(run_rmse, vert=True)
-                            axB.set_title("Per-run width RMSE\n(resampled)", fontsize=10, fontweight="bold")
-                            axB.set_ylabel("RMSE (px)")
-                            axB.grid(True, alpha=0.25)
-
-                            fig.suptitle(
-                                f"Stage 6 aggregated diagnostic — cid={demo_cid} — combined/{demo_mt}\n"
-                                f"Metrics aggregate; visuals summarize distribution (no curve overplotting).",
-                                fontsize=11, fontweight="bold"
-                            )
-
-                            out = os.path.join(
-                                stage6_resample_dir,
-                                f"stage6_resample_aggregated_cid{demo_cid}_{demo_ct}_{demo_mt}.png"
-                            )
-                            fig.savefig(out, bbox_inches="tight", dpi=200)
-                            plt.close(fig)
-                            print(f"[STAGE6] wrote: {out}")
-
-                    # ============================================================
-                    # (B2) WORST-RUN EXPLAINER (ATOMIC + COMBINED) — SPLIT OUTPUT
-                    # ============================================================
-                    if worst_run is None:
-                        continue
-
-                    pts  = np.asarray(worst_run["pts"], float)
-                    ptsr = np.asarray(worst_run["pts_rs"], float)
-
-                    pw0 = np.asarray(worst_run["pw"], float)
-                    gw0 = np.asarray(worst_run["gw"], float)
-                    pw1 = np.asarray(worst_run["pw_rs"], float)
-                    gw1 = np.asarray(worst_run["gw_rs"], float)
-
-                    d1 = np.asarray(worst_run["d_rs"], float)
-
-                    s0 = np.asarray(worst_run["s"], float)
-                    s1 = np.asarray(worst_run["s_rs"], float)
-
-                    # ============================================================
-                    # FILE 1: Sampling consistency explainer — ALL segments
-                    #   NOTE:
-                    #   This plot is a DIAGNOSTIC of sampling irregularity.
-                    #   Δs is shown RAW (unsmoothed) by design — smoothing would
-                    #   hide oversampling/undersampling artifacts and is forbidden.
-                    # ============================================================
-
-                    from matplotlib.collections import LineCollection
-
-                    def _draw_colored_polyline(ax, pts, vals, x0, y0, lw, cmap, norm, alpha=1.0):
-                        if pts is None or vals is None or len(pts) < 2:
-                            return
-                        segs = [
-                            [(pts[i, 0] - x0, pts[i, 1] - y0),
-                            (pts[i + 1, 0] - x0, pts[i + 1, 1] - y0)]
-                            for i in range(len(pts) - 1)
-                        ]
-                        lc = LineCollection(
-                            segs,
-                            array=vals,
-                            cmap=cmap,
-                            norm=norm,
-                            linewidths=lw,
-                            alpha=alpha,
-                            capstyle="round",
-                            joinstyle="round",
-                            zorder=3,
-                        )
-                        ax.add_collection(lc)
-
-                    fig, axes = plt.subplots(
-                        1, 2, figsize=(13.8, 5.2), dpi=200,
-                        gridspec_kw=dict(wspace=0.18)
+                if xs:
+                    pad = 25
+                    crop_all = (
+                        max(0, min(xs) - pad),
+                        max(0, min(ys) - pad),
+                        min(W, max(xe) + pad),
+                        min(H, max(ye) + pad),
                     )
-                    axO, axR = axes
+                else:
+                    crop_all = (0, 0, W, H)
 
-                    # ------------------------------------------------------------
-                    # Background
-                    # ------------------------------------------------------------
-                    for ax in axes:
-                        try:
-                            ax.imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
-                        except Exception:
-                            pass
 
-                    # ------------------------------------------------------------
-                    # COLLECT ALL RUNS (entire crack)
-                    # ------------------------------------------------------------
-                    pts_all = []
-                    ptsr_all = []
+                # ------------------------------------------------------------
+                # (B1) COMBINED — AGGREGATED DIAGNOSTIC (UNCHANGED)
+                # ------------------------------------------------------------
+                if mode == "combined":
+                    d_all = []
+                    run_rmse = []
 
-                    for r in runs:
-                        if "pts" in r and "pts_rs" in r:
-                            pts_all.append(np.asarray(r["pts"], float))
-                            ptsr_all.append(np.asarray(r["pts_rs"], float))
+                    for rr in worst_cid_runs:
+                        d_rs = np.asarray(rr.get("d_rs", []), float)
+                        s_rs = np.asarray(rr.get("s_rs", []), float)
+                        if len(d_rs) >= 2 and len(s_rs) >= 2:
+                            ds = np.diff(s_rs)
+                            d_all.append(d_rs[:-1])
+                            st = _length_weighted_err_stats(d_rs[:-1], ds)
+                            if np.isfinite(st.get("rmse", np.nan)):
+                                run_rmse.append(st["rmse"])
 
-                    if not pts_all or not ptsr_all:
-                        plt.close(fig)
-                    else:
-                        pts_all = np.vstack(pts_all)
-                        ptsr_all = np.vstack(ptsr_all)
+                    if d_all:
+                        d_all = np.concatenate(d_all)
 
-                        # --------------------------------------------------------
-                        # ORIGINAL sampling: RAW Δs
-                        # --------------------------------------------------------
-                        ds_orig = np.linalg.norm(np.diff(pts_all, axis=0), axis=1)
-                        ds_orig = ds_orig[np.isfinite(ds_orig)]
+                        fig, (axH, axB) = plt.subplots(1, 2, figsize=(13.5, 4.8), dpi=200)
 
-                        vmin = np.percentile(ds_orig, 10) if ds_orig.size else 0.0
-                        vmax = np.percentile(ds_orig, 90) if ds_orig.size else 1.0
-                        if vmax <= vmin:
-                            vmax = vmin + 1e-6
+                        axH.hist(d_all, bins=25, density=True, alpha=0.85)
+                        axH.axvline(0.0, lw=1.4)
+                        axH.set_title("Width error distribution after resampling", fontsize=10, fontweight="bold")
+                        axH.set_xlabel("d = pred − gt (px)")
+                        axH.set_ylabel("density")
+                        axH.grid(True, alpha=0.25)
 
-                        norm = plt.Normalize(vmin, vmax)
-                        cmap = plt.get_cmap("viridis")
+                        axB.boxplot(run_rmse, vert=True)
+                        axB.set_title("Per-run width RMSE (resampled)", fontsize=10, fontweight="bold")
+                        axB.set_ylabel("RMSE (px)")
+                        axB.grid(True, alpha=0.25)
 
-                        _draw_colored_polyline(
-                            axO,
-                            pts_all,
-                            ds_orig,
-                            x0, y0,
-                            lw=1.3,
-                            cmap=cmap,
-                            norm=norm,
-                            alpha=0.85,
-                        )
-
-                        axO.set_title(
-                            "Original sampling density (ALL segments)\n(color = local step size Δs)",
-                            fontsize=10
-                        )
-                        axO.axis("off")
-
-                        axO.text(
-                            0.02, 0.96,
-                            f"Δs mean = {np.mean(ds_orig):.2f}px\nΔs std = {np.std(ds_orig):.2f}px",
-                            transform=axO.transAxes,
-                            fontsize=8,
-                            va="top",
-                            bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"),
-                        )
-
-                        # --------------------------------------------------------
-                        # RESAMPLED sampling: RAW Δs
-                        # --------------------------------------------------------
-                        ds_rs = np.linalg.norm(np.diff(ptsr_all, axis=0), axis=1)
-                        ds_rs = ds_rs[np.isfinite(ds_rs)]
-
-                        vmin_r = np.percentile(ds_rs, 10) if ds_rs.size else 0.0
-                        vmax_r = np.percentile(ds_rs, 90) if ds_rs.size else 1.0
-                        if vmax_r <= vmin_r:
-                            vmax_r = vmin_r + 1e-6
-
-                        norm_r = plt.Normalize(vmin_r, vmax_r)
-
-                        _draw_colored_polyline(
-                            axR,
-                            ptsr_all,
-                            ds_rs,
-                            x0, y0,
-                            lw=1.5,
-                            cmap=cmap,
-                            norm=norm_r,
-                            alpha=0.9,
-                        )
-
-                        axR.set_title(
-                            "After arc-length resampling (ALL segments)\n(nearly uniform Δs)",
-                            fontsize=10
-                        )
-                        axR.axis("off")
-
-                        axR.text(
-                            0.02, 0.96,
-                            f"Δs mean = {np.mean(ds_rs):.2f}px\nΔs std = {np.std(ds_rs):.2f}px",
-                            transform=axR.transAxes,
-                            fontsize=8,
-                            va="top",
-                            bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"),
-                        )
-
-                        # --------------------------------------------------------
-                        # Shared colorbar (Δs)
-                        # --------------------------------------------------------
-                        sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
-                        sm.set_array([])
-                        cb = plt.colorbar(sm, ax=axes, fraction=0.03, pad=0.03)
-                        cb.set_label("Local sampling step Δs (px)", fontsize=9)
-
-                        # --------------------------------------------------------
-                        # Annotation
-                        # --------------------------------------------------------
-                        axO.text(
-                            0.02, 0.02,
-                            "Clusters = oversampling\nGaps = undersampling",
-                            transform=axO.transAxes,
-                            fontsize=8,
-                            bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
-                        )
-
-                        axR.text(
-                            0.02, 0.02,
-                            "Uniform arc-length spacing enforced",
-                            transform=axR.transAxes,
-                            fontsize=8,
-                            bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
-                        )
-
-                        # --------------------------------------------------------
-                        # Figure title
-                        # --------------------------------------------------------
-                        fig.text(
-                            0.5, 0.985,
-                            f"Stage 6 sampling consistency (ALL segments) — cid={demo_cid} — {demo_ct}/{demo_mt}",
-                            ha="center", va="top",
-                            fontsize=11, fontweight="bold",
+                        fig.suptitle(
+                            f"Stage 6 aggregated diagnostic — WORST CID={worst_cid} — combined/{worst_mt}",
+                            fontsize=11,
+                            fontweight="bold"
                         )
 
                         out = os.path.join(
                             stage6_resample_dir,
-                            f"stage6_sampling_consistency_ALL_cid{demo_cid}_{demo_ct}_{demo_mt}.png",
+                            f"stage6_resample_aggregated_WORST_cid{worst_cid}_{worst_ct}_{worst_mt}.png"
                         )
                         fig.savefig(out, bbox_inches="tight", dpi=200)
                         plt.close(fig)
                         print(f"[STAGE6] wrote: {out}")
-                        
-                    # ============================================================
-                    # (B3) SAMPLING CONSISTENCY — ALL SEGMENTS
-                    #   - Atomic: all atomic segments in this image
-                    #   - Combined: all member atomics of this combined crack
-                    #   - RAW Δs only (no smoothing) — diagnostic honesty
-                    # ============================================================
 
-                    try:
-                        from matplotlib.collections import LineCollection
+                # ------------------------------------------------------------
+                # Collect GLOBAL ALL runs (ALL CIDs)
+                # ------------------------------------------------------------
+                all_runs_global = []
+                for it in stage6_cache:
+                    if it.get("runs"):
+                        all_runs_global.extend(it["runs"])
 
-                        # --------------------------------------------------------
-                        # Collect ALL runs for this cid
-                        # --------------------------------------------------------
-                        pts_all = []
-                        ptsr_all = []
+                if not all_runs_global:
+                    raise RuntimeError("[STAGE6] no global runs found")
 
-                        for rr in runs:
-                            if "pts" in rr and "pts_rs" in rr:
-                                pts_all.append(np.asarray(rr["pts"], float))
-                                ptsr_all.append(np.asarray(rr["pts_rs"], float))
+                # ------------------------------------------------------------
+                # (B2/B3) FINAL PLOTS
+                # ------------------------------------------------------------
+                stage6_plot_worst_and_all(
+                    worst_cid_runs=worst_cid_runs,
+                    all_runs_global=all_runs_global,
+                    mask_bin=mask_bin,
+                    crop_worst=crop_worst,
+                    crop_all=crop_all,
+                    stage6_resample_dir=stage6_resample_dir,
+                    worst_cid=worst_cid,
+                )
 
-                        if not pts_all or not ptsr_all:
-                            print(f"[STAGE6 B3] skipped ALL plot (no valid runs): cid={demo_cid}")
-                        else:
-                            pts_all  = np.vstack(pts_all)
-                            ptsr_all = np.vstack(ptsr_all)
-
-                            fig, axes = plt.subplots(
-                                1, 2, figsize=(13.8, 5.2), dpi=200,
-                                gridspec_kw=dict(wspace=0.18)
-                            )
-                            axO, axR = axes
-
-                            # ----------------------------------------------------
-                            # Background
-                            # ----------------------------------------------------
-                            for ax in axes:
-                                try:
-                                    ax.imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
-                                except Exception:
-                                    pass
-
-                            # ----------------------------------------------------
-                            # ORIGINAL sampling — RAW Δs
-                            # ----------------------------------------------------
-                            ds_orig = np.linalg.norm(np.diff(pts_all, axis=0), axis=1)
-                            ds_orig = ds_orig[np.isfinite(ds_orig)]
-
-                            vmin = np.percentile(ds_orig, 10) if ds_orig.size else 0.0
-                            vmax = np.percentile(ds_orig, 90) if ds_orig.size else 1.0
-                            if vmax <= vmin:
-                                vmax = vmin + 1e-6
-
-                            norm = plt.Normalize(vmin, vmax)
-                            cmap = plt.get_cmap("viridis")
-
-                            _draw_colored_polyline(
-                                axO,
-                                pts_all,
-                                ds_orig,
-                                x0, y0,
-                                lw=1.3,
-                                cmap=cmap,
-                                norm=norm,
-                                alpha=0.85,
-                            )
-
-                            axO.set_title(
-                                "Original sampling density (ALL segments)\n(color = local step size Δs)",
-                                fontsize=10
-                            )
-                            axO.axis("off")
-
-                            axO.text(
-                                0.02, 0.96,
-                                f"Δs mean = {np.mean(ds_orig):.2f}px\nΔs std = {np.std(ds_orig):.2f}px",
-                                transform=axO.transAxes,
-                                fontsize=8,
-                                va="top",
-                                bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'),
-                            )
-
-                            # ----------------------------------------------------
-                            # RESAMPLED sampling — RAW Δs
-                            # ----------------------------------------------------
-                            ds_rs = np.linalg.norm(np.diff(ptsr_all, axis=0), axis=1)
-                            ds_rs = ds_rs[np.isfinite(ds_rs)]
-
-                            vmin_r = np.percentile(ds_rs, 10) if ds_rs.size else 0.0
-                            vmax_r = np.percentile(ds_rs, 90) if ds_rs.size else 1.0
-                            if vmax_r <= vmin_r:
-                                vmax_r = vmin_r + 1e-6
-
-                            norm_r = plt.Normalize(vmin_r, vmax_r)
-
-                            _draw_colored_polyline(
-                                axR,
-                                ptsr_all,
-                                ds_rs,
-                                x0, y0,
-                                lw=1.5,
-                                cmap=cmap,
-                                norm=norm_r,
-                                alpha=0.9,
-                            )
-
-                            axR.set_title(
-                                "After arc-length resampling (ALL segments)\n(nearly uniform Δs)",
-                                fontsize=10
-                            )
-                            axR.axis("off")
-
-                            axR.text(
-                                0.02, 0.96,
-                                f"Δs mean = {np.mean(ds_rs):.2f}px\nΔs std = {np.std(ds_rs):.2f}px",
-                                transform=axR.transAxes,
-                                fontsize=8,
-                                va="top",
-                                bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'),
-                            )
-
-                            # ----------------------------------------------------
-                            # Shared colorbar
-                            # ----------------------------------------------------
-                            sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
-                            sm.set_array([])
-                            cb = plt.colorbar(sm, ax=axes, fraction=0.03, pad=0.03)
-                            cb.set_label("Local sampling step Δs (px)", fontsize=9)
-
-                            # ----------------------------------------------------
-                            # Annotation
-                            # ----------------------------------------------------
-                            axO.text(
-                                0.02, 0.02,
-                                "Clusters = oversampling\nGaps = undersampling",
-                                transform=axO.transAxes,
-                                fontsize=8,
-                                bbox=dict(facecolor='white', alpha=0.75, edgecolor='none'),
-                            )
-
-                            axR.text(
-                                0.02, 0.02,
-                                "Uniform arc-length spacing enforced",
-                                transform=axR.transAxes,
-                                fontsize=8,
-                                bbox=dict(facecolor='white', alpha=0.75, edgecolor='none'),
-                            )
-
-                            # ----------------------------------------------------
-                            # Figure title
-                            # ----------------------------------------------------
-                            fig.text(
-                                0.5, 0.985,
-                                f"Stage 6 sampling consistency (ALL segments) — cid={demo_cid} — {demo_ct}/{demo_mt}",
-                                ha="center", va="top",
-                                fontsize=11, fontweight="bold",
-                            )
-
-                            out = os.path.join(
-                                stage6_resample_dir,
-                                f"stage6_sampling_consistency_ALL_cid{demo_cid}_{demo_ct}_{demo_mt}.png",
-                            )
-                            fig.savefig(out, bbox_inches="tight", dpi=200)
-                            plt.close(fig)
-                            print(f"[STAGE6] wrote: {out}")
-
-                    except Exception as e:
-                        print(f"[STAGE6 B3] ALL-segments plot skipped: {e}")
 
         except Exception as e:
             print(f"[STAGE6] plots skipped: {e}")
