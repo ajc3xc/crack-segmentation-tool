@@ -159,6 +159,24 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         
         #self.mask_pipeline_button.setStyleSheet("background-color : red")
         
+    def _purge_metrics_for_current_image(self):
+        """
+        Remove metrics artifacts for the CURRENT image only.
+        Safe: does not touch other images.
+        """
+        import os, shutil
+
+        base = self._image_base()   # canonical image key
+        metrics_root = os.path.join(self.save_folder, "metrics")
+        image_dir = os.path.join(metrics_root, base)
+
+        if os.path.isdir(image_dir):
+            try:
+                shutil.rmtree(image_dir)
+                print(f"[METRICS] 🧹 Purged metrics for image '{base}'")
+            except Exception as e:
+                print(f"[METRICS] ⚠ Failed to purge metrics for '{base}': {e}")
+    
     def run_pipeline(self, multirun=False):
         import gc, json
         import numpy as np
@@ -4013,6 +4031,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
 
         # --- 1) refresh combined snapshot ---
         try:
+            self._purge_metrics_for_current_image()
             self._sync_metrics_snapshot_from_authoring(refresh_combine=True, persist=False)
         except Exception as e:
             traceback.print_exc()
@@ -5501,9 +5520,10 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
         # SNAPSHOT SYNC (CRITICAL for per-cid files + _metric_atomic)
         # ------------------------------------------------------------
         try:
+            self._purge_metrics_for_current_image()
             # Builds metrics/<base>/cid*/cid*.json and sets self.metric_annotations
             self._sync_metrics_snapshot_from_authoring(
-                refresh_combine=False,
+                refresh_combine=True,
                 persist=True
             )
         except Exception as e:
@@ -5691,6 +5711,7 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             t_manual_edges = time.perf_counter() - t_manual_edges_start
             print(f"[quick] manual-edge generation time = {t_manual_edges:.2f}s")
         
+        #return
         # ------------------------------------------------------------
         # PHASE 1.5: RS3 AUTO VARIANTS (this image only)
         # ------------------------------------------------------------

@@ -34,7 +34,7 @@ from helpers.metrics import *
 
 import numpy as np
 
-def poly_median_spacing(poly):
+'''def poly_median_spacing(poly):
     poly = np.asarray(poly, float)
     if len(poly) < 2:
         return None
@@ -42,7 +42,7 @@ def poly_median_spacing(poly):
     return float(np.median(d))
 
 
-def resample_polyline(poly, step=.7):
+def resample_polyline(poly, step=1.0):
     poly = np.asarray(poly, float)
     if len(poly) < 2:
         return poly
@@ -57,7 +57,102 @@ def resample_polyline(poly, step=.7):
     t = np.arange(0, total, step)
     x = np.interp(t, s, poly[:, 0])
     y = np.interp(t, s, poly[:, 1])
-    return np.column_stack([x, y])
+    return np.column_stack([x, y])'''
+
+#somewhat improvised way to demonstrate manual resampling visually    
+DEBUG_MANUAL_RESAMPLING = False
+
+def plot_poly_before_after_to_file(
+    poly_raw,
+    poly_rs,
+    image,
+    out_path,
+    overlay=None,
+    pad=5,
+    title="Manual midline resampling sanity check",
+):
+    """
+    Debug-only visualization of manual midline resampling.
+
+    Saves a TWO-PANEL image to out_path:
+      Left  = raw (before)
+      Right = resampled (after)
+
+    Uses overlay if provided, else original image.
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import os
+
+    if poly_raw is None or poly_rs is None or image is None:
+        return
+
+    poly_raw = np.asarray(poly_raw, float)
+    poly_rs  = np.asarray(poly_rs, float)
+
+    if len(poly_raw) < 2 or len(poly_rs) < 2:
+        return
+
+    bg = overlay if overlay is not None else image
+    H, W = bg.shape[:2]
+
+    # ---- compute shared crop from BOTH polylines ----
+    all_xy = np.vstack([poly_raw, poly_rs])
+    xmin = int(max(0, np.floor(all_xy[:, 0].min() - pad)))
+    xmax = int(min(W, np.ceil (all_xy[:, 0].max() + pad)))
+    ymin = int(max(0, np.floor(all_xy[:, 1].min() - pad)))
+    ymax = int(min(H, np.ceil (all_xy[:, 1].max() + pad)))
+
+    if xmax <= xmin or ymax <= ymin:
+        return
+
+    crop = bg[ymin:ymax, xmin:xmax]
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+    # ---- figure (NO gap between panels) ----
+    fig, (axL, axR) = plt.subplots(
+        1, 2,
+        figsize=(9.2, 4.8),
+        dpi=200,
+        sharex=True,
+        sharey=True,
+        gridspec_kw={"wspace": 0.0},
+    )
+
+    # ======================
+    # LEFT: raw (before)
+    # ======================
+    axL.imshow(crop)
+    axL.plot(
+        poly_raw[:, 0] - xmin,
+        poly_raw[:, 1] - ymin,
+        color="darkred",
+        lw=.8,          # thinner to expose jitter
+        alpha=0.9,
+    )
+    axL.set_title("Raw (before)", fontsize=10, fontweight="bold")
+    axL.axis("off")
+
+    # ======================
+    # RIGHT: resampled (after)
+    # ======================
+    axR.imshow(crop)
+    axR.plot(
+        poly_rs[:, 0] - xmin,
+        poly_rs[:, 1] - ymin,
+        color="dodgerblue",
+        lw=1.5,
+        alpha=0.95,
+    )
+    axR.set_title("Resampled (after)", fontsize=10, fontweight="bold")
+    axR.axis("off")
+
+    # ---- overall title ----
+    fig.suptitle(title, fontsize=11, fontweight="bold", y=0.98)
+
+    fig.savefig(out_path, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
 
 #This class is basically is all of the utility / save and load or unimportant functions that aren't directly accessible via a ui button or aren't important
 #
@@ -2014,7 +2109,7 @@ class CrackUtils:
             if idx1 != idx2:
                 readonly_conn_idx.append((min(idx1, idx2), max(idx1, idx2)))
 
-                # ------------------------------------------------------------------
+        # ------------------------------------------------------------------
         # Helper: build an overlay image (original + mask)
         # ------------------------------------------------------------------
         def make_overlay_image():
@@ -2393,9 +2488,9 @@ class CrackUtils:
             if hasattr(annot, "finalize_drawing_if_needed"):
                 annot.finalize_drawing_if_needed()
             self.manual_midlines_tmp = dict(getattr(annot, "midlines", {}))
-
+            
             # --- Anti-noise pass: sanitize newly drawn manual midlines ---
-            for k, poly in self.manual_midlines_tmp.items():
+            '''for k, poly in self.manual_midlines_tmp.items():
                 poly = np.asarray(poly, float)
                 if len(poly) < 3:
                     continue
@@ -2411,6 +2506,62 @@ class CrackUtils:
 
                     self.manual_midlines_tmp[k] = poly_rs.tolist()
 
+                    print(f"[ANTI-NOISE] midline {k}: median spacing {med:.3f}px → resampled ({len(poly)} → {len(poly_rs)})")'''
+
+
+            import numpy as np
+            from helpers.metrics import local_step_sizes, resample_by_arclength
+
+            def poly_median_spacing(poly):
+                poly = np.asarray(poly, float)
+                if len(poly) < 2:
+                    return None
+                ds = local_step_sizes(poly)
+                return float(np.median(ds)) if ds.size else None
+
+            # --- Anti-noise pass: sanitize newly drawn manual midlines ---
+            for k, poly in self.manual_midlines_tmp.items():
+                poly = np.asarray(poly, float)
+                if len(poly) < 3:
+                    continue
+
+                med = poly_median_spacing(poly)
+
+                # only act when clearly oversampled/noisy
+                if med is not None and med < 0.3:
+                    poly_rs, = resample_by_arclength(
+                        poly,
+                        ds_target=1.0,
+                        preserve_endpoints=True,
+                        fastpath=True,   # safe; if already uniform it will just copy
+                    )
+                    if poly_rs is None or len(poly_rs) < 2:
+                        continue
+                    
+                    if DEBUG_MANUAL_RESAMPLING:
+                        # build debug output path
+                        img_idx = getattr(self, "n", "unknown")
+                        out_dir = os.path.join(
+                            self.save_folder,      # or your outputs root
+                            "resample_debug",
+                            f"img_{img_idx}",
+                        )
+                        out_path = os.path.join(
+                            out_dir,
+                            f"resample_plot_k={k}.png"
+                        )
+
+                        plot_poly_before_after_to_file(
+                            poly_raw=poly,
+                            poly_rs=poly_rs,
+                            image=self.original_image,
+                            overlay=getattr(self, "overlay_image", None),
+                            pad=5,
+                            title=f"Manual midline resampling (key={k})",
+                            out_path=out_path,
+                        )
+
+                    self.manual_midlines_tmp[k] = poly_rs.tolist()
                     print(f"[ANTI-NOISE] midline {k}: median spacing {med:.3f}px → resampled ({len(poly)} → {len(poly_rs)})")
 
 
