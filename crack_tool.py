@@ -3580,18 +3580,27 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
             midline_type,
         ):
             """
-            Runs width evaluation for atomic + combined cracks,
-            merges per-point samples, and exports TOTAL metrics only.
+            Runs width evaluation for atomic + combined cracks.
+            For EACH mode:
+            - runs compare_widths_for_cracks
+            - exports per-mode width metrics (CSV lives at midline root)
+            - generates summary bars + width error plots into
+                midline/{atomic|combined}/
             """
 
-            all_rows = []
+            import os
 
-            # -------------------------
-            # ATOMIC
-            # -------------------------
-            if atomic_src is not None:
-                payload = {"atomic_cracks": atomic_src}
-
+            # ------------------------------------------------------------
+            # Inline helper: run + summarize ONE mode
+            # ------------------------------------------------------------
+            def _run_one_mode(
+                *,
+                crack_type,          # "atomic" | "combined"
+                payload,
+            ):
+                # ------------------------------------------
+                # Run width comparison
+                # ------------------------------------------
                 ret = compare_widths_for_cracks(
                     payload,
                     gt_full,
@@ -3599,94 +3608,111 @@ class CrackToolsApplication(ManualDrawing, TrackSegmentPipeline, CombineClearSeg
                     metrics_dir,
                     display=display,
                     midline_type=midline_type,
-                    crack_type="atomic",
+                    crack_type=crack_type,
                     return_normals=False,
                     normals_plot=False,
                     gt_sup_root=gt_sup_root,
                 )
 
-                if ret and ret[0]:
-                    rows = ret[0]
-                    for r in rows:
-                        r["source"] = "atomic"
-                    all_rows.extend(rows)
+                if not ret or not ret[0]:
+                    print(f"[WIDTH] no rows returned for {crack_type}")
+                    return
 
-            # -------------------------
-            # COMBINED
-            # -------------------------
-            if combined_src is not None:
-                payload = {"combined_cracks": combined_src}
+                rows = ret[0]
+                for r in rows:
+                    r["source"] = crack_type
 
-                ret = compare_widths_for_cracks(
-                    payload,
-                    gt_full,
-                    base_name,
-                    metrics_dir,
-                    display=display,
-                    midline_type=midline_type,
-                    crack_type="combined",
-                    return_normals=False,
-                    normals_plot=False,
-                    gt_sup_root=gt_sup_root,
+                # ------------------------------------------
+                # Canonical CSV location (DO NOT move this)
+                # ------------------------------------------
+                csv_root = os.path.join(metrics_dir, midline_type)
+                diffs_csv = os.path.join(
+                    csv_root,
+                    f"{base_name}_width_diffs_{crack_type}.csv",
                 )
 
-                if ret and ret[0]:
-                    rows = ret[0]
-                    for r in rows:
-                        r["source"] = "combined"
-                    all_rows.extend(rows)
-
-            if not all_rows:
-                print("[WIDTH] no width samples collected")
-                return
-
-            # -------------------------
-            # EXPORT TOTAL WIDTH METRICS
-            # -------------------------
-            export_width_metrics_all(
-                metrics_dir,
-                base_name,
-                all_rows,
-                midline_type,
-                crack_type="total",
-            )
-
-            # -------------------------
-            # SUMMARY BAR CHART (TOTAL)
-            # -------------------------
-            from helpers.present_plots import plot_width_summary_bars
-
-            plot_width_summary_bars(
-                metrics_dir,
-                base_name,
-                os.path.join(
+                # ------------------------------------------
+                # Presentation output directory
+                # ------------------------------------------
+                out_dir = os.path.join(
                     metrics_dir,
                     midline_type,
-                    f"{base_name}_width_summary_bars.png"
-                ),
-            )
-            
-            from helpers.present_plots import (
-                plot_relative_width_error_kde,
-                plot_width_error_hexbin,
-            )
+                    crack_type,
+                )
+                os.makedirs(out_dir, exist_ok=True)
 
-            base = os.path.join(metrics_dir, midline_type)
-            diffs_csv = os.path.join(
-                base,
-                f"{base_name}_width_diffs_total.csv"
-            )
+                # ------------------------------------------
+                # Export metrics (writes CSVs into csv_root)
+                # ------------------------------------------
+                export_width_metrics_all(
+                    metrics_dir,
+                    base_name,
+                    rows,
+                    midline_type,
+                    crack_type=crack_type,
+                )
 
-            plot_relative_width_error_kde(
-                diffs_csv,
-                os.path.join(base, f"{base_name}_relative_width_error_kde.png"),
-            )
+                # ------------------------------------------
+                # Summary bars
+                # ------------------------------------------
+                from helpers.present_plots import plot_width_summary_bars
 
-            plot_width_error_hexbin(
-                diffs_csv,
-                os.path.join(base, f"{base_name}_width_error_hexbin.png"),
-            )
+                plot_width_summary_bars(
+                    metrics_dir,
+                    base_name,
+                    os.path.join(
+                        out_dir,
+                        f"{base_name}_width_summary_bars.png",
+                    ),
+                )
 
+                # ------------------------------------------
+                # Width error plots (guarded)
+                # ------------------------------------------
+                if not os.path.exists(diffs_csv):
+                    print(f"[WIDTH] missing diffs CSV, skipping plots: {diffs_csv}")
+                    return
+
+                from helpers.present_plots import (
+                    plot_relative_width_error_kde,
+                    plot_width_error_hexbin,
+                )
+
+                plot_relative_width_error_kde(
+                    diffs_csv,
+                    os.path.join(
+                        out_dir,
+                        f"{base_name}_relative_width_error_kde.png",
+                    ),
+                )
+
+                plot_width_error_hexbin(
+                    diffs_csv,
+                    os.path.join(
+                        out_dir,
+                        f"{base_name}_width_error_hexbin.png",
+                    ),
+                )
+
+                print(f"[WIDTH] finished summaries for {crack_type}")
+
+            # ------------------------------------------------------------
+            # ATOMIC
+            # ------------------------------------------------------------
+            if atomic_src is not None:
+                _run_one_mode(
+                    crack_type="atomic",
+                    payload={"atomic_cracks": atomic_src},
+                )
+
+            # ------------------------------------------------------------
+            # COMBINED
+            # ------------------------------------------------------------
+            if combined_src is not None:
+                _run_one_mode(
+                    crack_type="combined",
+                    payload={"combined_cracks": combined_src},
+                )
 
         # ------------------------------------------------------------------
         # DRIVER

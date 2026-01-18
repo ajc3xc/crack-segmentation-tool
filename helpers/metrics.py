@@ -3835,7 +3835,7 @@ def compare_widths_for_cracks(
         cb.set_ticks(cleaned)
         cb.set_ticklabels([f"{t:.1f}" for t in cleaned])
 
-    out_dir = os.path.join(metrics_dir, midline_type or "unknown")
+    out_dir = os.path.join(metrics_dir, midline_type or "unknown", crack_type)
     os.makedirs(out_dir, exist_ok=True)
     out = os.path.join(out_dir, f"{midline_type}_{crack_type}_width_diffs.png")
     fig.savefig(out, dpi=200, bbox_inches="tight", pad_inches=0)
@@ -3851,7 +3851,7 @@ def compare_widths_for_cracks(
 
             df_mid = pd.DataFrame(midline_metric_rows)
 
-            diag_dir = os.path.join(metrics_dir, midline_type or "unknown", "midline_diagnostics")
+            diag_dir = os.path.join(metrics_dir, midline_type or "unknown", "midline_diagnostics", crack_type)
             os.makedirs(diag_dir, exist_ok=True)
 
             plot_rs3_midline_diagnostics(
@@ -3976,7 +3976,7 @@ def export_width_metrics_all(
         from helpers.present_plots import plot_width_diff_histogram
 
         hist_png = os.path.join(
-            out_dir,
+            out_dir, crack_type,
             f"{base_name}_width_diff_hist_{crack_type}.png"
         )
 
