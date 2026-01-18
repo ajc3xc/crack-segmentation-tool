@@ -49,86 +49,6 @@ def safe_json_dump(data, path, compact=True):
         except Exception: pass
         raise
 
-
-def _normals_to_json(normals, xmin, ymin, ndigits=ROUNDING_DIGITS):
-    import numpy as np
-
-    def to_xy2(arr):
-        a = np.asarray(arr, float)
-        if a.ndim == 2 and a.shape[1] == 2:       # already Nx2
-            x, y = a[:, 0], a[:, 1]
-        elif a.ndim == 2 and a.shape[0] == 2:     # 2xN ( [xlist, ylist] )
-            x, y = a[0], a[1]
-        elif a.ndim == 1:                         # degenerate 1-D
-            x, y = a, np.full_like(a, np.nan, dtype=float)
-        else:
-            x = y = np.array([], float)
-
-        x = x + float(xmin)
-        y = y + float(ymin)
-
-        out = np.stack([x, y], axis=1)
-        # round
-        if np.isfinite(out).any():
-            out = np.round(out, ndigits=ndigits, where=np.isfinite(out))
-        # JSON-safe NaNs
-        out[~np.isfinite(out)] = None
-        return out.tolist()
-
-    # dict form: {"edge1":[xlist,ylist], "edge2":[xlist,ylist]} or {"edge1":Nx2,...}
-    if isinstance(normals, dict):
-        e1 = normals.get("edge1", [])
-        e2 = normals.get("edge2", [])
-        # accept either [xlist,ylist] or Nx2
-        e1 = e1 if isinstance(e1, (list, tuple)) else []
-        e2 = e2 if isinstance(e2, (list, tuple)) else []
-        e1 = to_xy2(e1)
-        e2 = to_xy2(e2)
-        return {"edge1": e1, "edge2": e2}
-
-    # tuple/list form: ((e1x,e1y), (e2x,e2y))
-    try:
-        (e1x, e1y), (e2x, e2y) = normals
-        return {"edge1": to_xy2([e1x, e1y]), "edge2": to_xy2([e2x, e2y])}
-    except Exception:
-        return {"edge1": [], "edge2": []}
-
-def _json_has_manual_midlines(ann_path: str) -> bool:
-    """Lightweight on-disk check: does JSON have any manual midline with ≥2 points?
-       Also purges stale annotations that contain no valid atomic cracks.
-    """
-    import json, os
-    try:
-        with open(ann_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except UnicodeDecodeError:
-        with open(ann_path, "r", encoding="cp1252", errors="strict") as f:
-            data = json.load(f)
-    except Exception:
-        return False
-
-    ann = (data or {}).get("annotations", {}) or {}
-    atomic = ann.get("atomic_cracks", {}) or {}
-
-    # --- purge safety: no atomic cracks or all midlines empty ---
-    if not atomic or all(len(cr.get("midline", [])) < 2 for cr in atomic.values()):
-        print(f"[global-metrics] 🧹 purging stale JSON with no manual midlines: {ann_path}")
-        try:
-            os.remove(ann_path)
-        except Exception as e:
-            print(f"[global-metrics] ⚠ failed to remove {ann_path}: {e}")
-        return False
-
-    # --- otherwise: check for ≥2-pt manual midlines ---
-    for crack in atomic.values():
-        src = (crack.get("source") or "").lower()
-        if src.startswith("auto") or src == "combined":
-            continue
-        mid = crack.get("midline", [])
-        if isinstance(mid, list) and len(mid) >= 2:
-            return True
-    return False
-
 def safe_json_dump(data, path, compact=True):
     """Atomic JSON writer — supports compact (semi-human) or fully minified mode."""
     import os, tempfile, json
@@ -284,109 +204,7 @@ def split_snapshot_to_files(snapshot, save_folder, image_base, merge_if_exists=T
             cnew[k]["auto"] = v["auto"]
     safe_write_json(cpath, cnew)
     #safe_json_dump(cnew, cpath)
-    
-'''def load_snapshot_from_files(save_folder, base_name):
-    """Load all cid*.json under metrics/<base> into a dict."""
-    root = metric_image_dir(save_folder, base_name)
-    out = {"atomic_cracks": {}, "combined_cracks": {}, "auto_best": {}}
-    if not os.path.isdir(root):
-        return out
-    for fn in os.listdir(root):
-        if not fn.startswith("cid") or not fn.endswith(".json"): 
-            continue
-        p = os.path.join(root, fn)
-        rec = safe_read_json(p, {})
-        if not rec: 
-            continue
-        cid = rec.get("crack_id")
-        if cid is None:
-            # fallback from filename
-            try: cid = int(fn[3:-5])
-            except: continue
-        out["atomic_cracks"][cid] = rec
-        if "auto_best" in rec and rec["auto_best"]:
-            out["auto_best"][cid] = rec["auto_best"]
-    return out'''
-    
-# metrics.py  --- add this inside load_snapshot_from_files(...)
-'''def load_snapshot_from_files(save_folder, base_name):
-    """
-    Load snapshot for an image from disk.
-
-    Supports:
-      - NEW: metrics/<base>/cid{cid}/cid{cid}.json
-      - LEGACY: metrics/<base>/cid{cid}.json
-
-    Also loads combined snapshot from:
-      metrics/<base>/snapshot/combined.json
-    """
-    root = metric_image_dir(save_folder, base_name)
-    out = {
-        "atomic_cracks": {},
-        "combined_cracks": {},
-        "auto_best_atomic_cracks": {},
-    }
-
-    if not os.path.isdir(root):
-        return out
-
-    # --- load combined snapshot if it exists ---
-    try:
-        cpath = metric_combined_path(save_folder, base_name)
-        combined = safe_read_json(cpath, {}) or {}
-        if isinstance(combined, dict):
-            out["combined_cracks"] = combined
-    except Exception as e:
-        print(f"[snapshot] ⚠ failed loading combined snapshot: {e}")
-
-    # --- scan atomic snapshots ---
-    for entry in os.listdir(root):
-        full = os.path.join(root, entry)
-
-        # 1) NEW nested layout: metrics/<base>/cid0/cid0.json
-        if os.path.isdir(full) and entry.startswith("cid"):
-            cid_str = entry[3:]  # e.g. "0" from "cid0"
-            # first try cid0/cid0.json
-            cand1 = os.path.join(full, f"{entry}.json")
-            # fallback: cid0/0.json (in case you ever used that)
-            cand2 = os.path.join(full, f"{cid_str}.json")
-
-            for jp in (cand1, cand2):
-                rec = safe_read_json(jp, None)
-                if not (isinstance(rec, dict) and rec):
-                    continue
-
-                cid = rec.get("crack_id", cid_str)
-                cid_key = str(cid)
-
-                out["atomic_cracks"][cid_key] = rec
-                if "auto_best" in rec and rec["auto_best"]:
-                    out["auto_best_atomic_cracks"][cid_key] = rec["auto_best"]
-                break
-
-            continue  # don’t treat the directory as a flat file
-
-        # 2) LEGACY flat layout: metrics/<base>/cid0.json
-        if os.path.isfile(full) and entry.startswith("cid") and entry.endswith(".json"):
-            rec = safe_read_json(full, None)
-            if not (isinstance(rec, dict) and rec):
-                continue
-
-            cid = rec.get("crack_id")
-            if cid is None:
-                try:
-                    # strip "cid" and ".json"
-                    cid = entry[3:-5]  # keep as string; we'll normalize below
-                except Exception:
-                    continue
-
-            cid_key = str(cid)
-            out["atomic_cracks"][cid_key] = rec
-            if "auto_best" in rec and rec["auto_best"]:
-                out["auto_best_atomic_cracks"][cid_key] = rec["auto_best"]
-
-    return out'''
-    
+ 
 def load_snapshot_from_files(save_folder, base_name):
     """
     Load snapshot for an image from disk.
@@ -451,10 +269,6 @@ def load_snapshot_from_files(save_folder, base_name):
             out["combined_cracks"] = combined
 
     return out
-
-def snapshot_fingerprint(snapshot):
-    j = json.dumps(snapshot or {}, sort_keys=True, separators=(",",":"))
-    return hashlib.sha1(j.encode("utf-8")).hexdigest()
 
 def _flatten_variant_record(vid: int, vrec: dict, params: dict, scores: dict = None):
     """
@@ -635,13 +449,3 @@ def set_tracked_edges_for_crack(save_folder, base, cid, payload, mask_crop=None)
 
     safe_write_json(p, out)
     return p
-
-def set_geodesic_edges_for_crack(save_folder, base_name, crack_id, ge_dict):
-    """Store geodesic edges (edge1/edge2 lists) under atomic crack snapshot."""
-    p = metric_atomic_path_for(save_folder, base_name, crack_id)
-    rec = safe_read_json(p, {})
-    if not rec:
-        rec = {"crack_id": crack_id}
-    rec["geodesic_edges"] = ge_dict or {}
-    safe_write_json(p, rec)
-    return rec

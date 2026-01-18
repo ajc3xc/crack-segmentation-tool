@@ -18,12 +18,6 @@ import seaborn as sns
 # A) DECK-READY SUMMARY FIGURES  #
 # ------------------------------ #
 
-def _safe_cols(df, cols):
-    out = {}
-    for c in cols:
-        out[c] = df[c].astype(float).values if c in df.columns else np.array([])
-    return out
-
 def plot_iou_vs_bf1_scatter(metrics_csv, out_png, *, supervision=None):
     df = pd.read_csv(metrics_csv)
 

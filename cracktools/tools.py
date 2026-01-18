@@ -39,49 +39,6 @@ def scale_image(image):
     return image_out
 ###################################
 
-##### choose points on image ##################
-'''pts = []
-def put_points(img1):
-    # mouse callback function
-    def line_drawing(event,x,y,flags,param):
-        global pts,pt
-        if event==cv2.EVENT_LBUTTONDOWN:
-            pts.append(np.array([x,y]))
-            cv2.line(img,(x-10,y),(x+10,y),color=(0,255,0),thickness=1)
-            cv2.line(img,(x,y-10),(x,y+10),color=(0,255,0),thickness=1)
-
-    img = img1.copy()
-    cv2.namedWindow('test draw')
-    cv2.setMouseCallback('test draw',line_drawing)
-
-    while(1):
-        cv2.imshow('test draw',img)
-        if cv2.waitKey(1) & 0xFF == 27:
-            break
-    cv2.destroyAllWindows()
-    
-    return (np.array(pts))'''
-
-'''def points(img1,scalar):
-    global pts
-    pts = []
-    contur_points = put_points(cv2.resize(img1,\
-                            (int(img1.shape[1]/scalar),int(img1.shape[0]/scalar))))
-    contur_points = scalar*contur_points
-    return contur_points'''
-
-'''def redrow_lines(img,contours_x,contours_y,t,scale):
-    flat_x = [item for sublist in contours_x for item in sublist]
-    flat_y = [item for sublist in contours_y for item in sublist]
-    img2 = img.copy()
-    for i in range(len(flat_x)-1):
-        x1 = int2(flat_x[i]-0.5)
-        x2 = int2(flat_x[i+1]-0.5)
-        y1 = int2(flat_y[i]-0.5)
-        y2 = int2(flat_y[i+1]-0.5)
-        img2 = cv2.line(img2,(x1,y1),(x2,y2),color=(0,255,0),thickness=int2(np.ceil(t*scale)))
-    return (img2)'''
-    
 def redrow_lines(img, contours_x, contours_y, t, scale, color=(0, 255, 0)):
     """
     Redraw contour lines on an image.
