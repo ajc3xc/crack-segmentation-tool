@@ -57,6 +57,6 @@ from combiner import *
 #from crackutils import CrackUtils
 DEBUG_SAVE_LIGHT = True   # True → only high-res compact outputs
 from helpers.endpoint_annotator import CrackAnnotator
-min_crop_size = 16
-class EvaluationCore(ManualDrawing, TrackSegmentPipeline, CombineClearSegments, CrackUtils, Ui_MainWindow):
+min_crop_size = 16   
+class MetricsEngine(TrackSegmentPipeline, CrackUtils):
     
