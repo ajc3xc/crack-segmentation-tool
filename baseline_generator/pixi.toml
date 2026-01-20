@@ -1,0 +1,34 @@
+[workspace]
+authors = ["Adam Camerer <ajc3xc@umsystem.edu>"]
+channels = ["rapidsai", "conda-forge"]
+name = "baseline_generator"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+python = "==3.10"
+cuda-version = "==11.8"
+cudatoolkit = "==11.8"
+
+# GPU
+cupy = "*"
+cucim = "==23.4.0"
+
+# Core
+numpy = "<2"
+pandas = "*"
+scikit-image = "*"
+scipy = "*"
+scikit-learn = "*"
+matplotlib = "*"
+pillow = "*"
+networkx = "*"   # sknw depends on this
+pip = "*"
+pandarallel = ">=1.6.5,<2"
+
+[pypi-dependencies]
+sknw = "*"
+wslpath = ">=0.4.2, <0.5"
+
