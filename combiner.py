@@ -83,9 +83,9 @@ def _stitch_lines_by_user(member_ids, atomic):
         #print()
         #print(atomic.keys(), crack.keys(), crack['source'])
         if not crack: continue
-        ml = crack.get("midline", []) or []
-        if len(ml) < 2: continue
-        arr = np.array([[float(x), float(y)] for (x,y) in ml], dtype=float)
+        midl = crack.get("midline", []) or []
+        if len(midl) < 2: continue
+        arr = np.array([[float(x), float(y)] for (x,y) in midl], dtype=float)
         arr = _finite_xy(arr)
         if len(arr) >= 2:
             mid2arr[mid] = arr
@@ -202,16 +202,16 @@ def _align_edge_to_midline(S_xy, E_xy):
 
     for m in members:
         cr = atomic.get(str(m), {}) or {}
-        ml = np.asarray(cr.get("midline", []), float)
+        midl = np.asarray(cr.get("midline", []), float)
 
-        if ml.ndim != 2 or len(ml) < 2:
+        if midl.ndim != 2 or len(midl) < 2:
             continue
 
-        ml = _finite_xy(ml)
-        if len(ml) < 2:
+        midl = _finite_xy(midl)
+        if len(midl) < 2:
             continue
 
-        atomics.append((str(m), ml))
+        atomics.append((str(m), midl))
         endpoints.append(get_user_endpoints(cr))
 
     if not atomics:
@@ -588,9 +588,9 @@ def dominant_segments_from_group(
 
     for m in members:
         cr = atomic.get(str(m), {}) or {}
-        ml = np.asarray(cr.get("midline", []), float)
-        if ml.ndim == 2 and len(ml) >= 2:
-            atomics.append((str(m), _finite_xy(ml)))
+        midl = np.asarray(cr.get("midline", []), float)
+        if midl.ndim == 2 and len(midl) >= 2:
+            atomics.append((str(m), _finite_xy(midl)))
             endpoints.append(get_user_endpoints(cr))
 
     if not atomics:
