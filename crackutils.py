@@ -244,7 +244,12 @@ class CrackUtils:
             print(f"    ID={cid} src={src} midline_len={midline_len} mask_pixels={mask_nonzero}")
     
     def select_folder(self):
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog, QMessageBox, QCheckBox
+        from PyQt5.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+            QPushButton, QFileDialog, QMessageBox, QCheckBox
+        )
+        from PyQt5 import QtCore
+        import os, json
 
         def load_last_folders():
             config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'folder_config.json')
@@ -252,12 +257,18 @@ class CrackUtils:
                 try:
                     with open(config_path, 'r') as f:
                         d = json.load(f)
-                        return d.get("img_folder", ""), d.get("save_folder", ""), d.get("mask_folder", ""), d.get("use_masks", False)
+                        return (
+                            d.get("img_folder", ""),
+                            d.get("save_folder", ""),
+                            d.get("mask_folder", ""),
+                            d.get("use_masks", False),
+                            d.get("use_baselines", False),
+                        )
                 except Exception:
-                    return "", "", "", False
-            return "", "", "", False
+                    pass
+            return "", "", "", False, False
 
-        def save_last_folders(img_folder, save_folder, mask_folder, use_masks):
+        def save_last_folders(img_folder, save_folder, mask_folder, use_masks, use_baselines):
             config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'folder_config.json')
             try:
                 with open(config_path, 'w') as f:
@@ -265,95 +276,95 @@ class CrackUtils:
                         "img_folder": img_folder,
                         "save_folder": save_folder,
                         "mask_folder": mask_folder,
-                        "use_masks": use_masks
-                    }, f)
+                        "use_masks": use_masks,
+                        "use_baselines": use_baselines,
+                    }, f, indent=2)
             except Exception:
                 pass
 
         # --- Load previous defaults ---
-        default_img_folder, default_save_folder, default_mask_folder, default_use_masks = load_last_folders()
+        (
+            default_img_folder,
+            default_save_folder,
+            default_mask_folder,
+            default_use_masks,
+            default_use_baselines,
+        ) = load_last_folders()
+
         img_folder_init = getattr(self, "current_folder", default_img_folder)
         save_folder_init = getattr(self, "save_folder", default_save_folder)
         mask_folder_init = getattr(self, "mask_folder", default_mask_folder)
         use_masks_init = getattr(self, "use_masks", default_use_masks)
+        use_baselines_init = getattr(self, "use_baselines", default_use_baselines)
 
         dlg = QDialog(self.MainWindow)
         dlg.setWindowTitle("Select Image & Save Folders")
-        
-        dlg.setWindowFlags(
-            dlg.windowFlags()
-            | Qt.WindowContextHelpButtonHint
-        )
+        dlg.setWindowFlags(dlg.windowFlags() | QtCore.Qt.WindowContextHelpButtonHint)
         layout = QVBoxLayout(dlg)
-        
-        def event(self, event):
-            if event.type() == QtCore.QEvent.WhatsThis:
-                QMessageBox.information(
-                    self,
-                    "Folder Selection Help",
-                    (
-                        "Image folder:\n"
-                        "  Directory containing input images.\n\n"
-                        "Save folder:\n"
-                        "  Output location for metrics and results.\n\n"
-                        "Use Masks:\n"
-                        "  Enable if ground-truth segmentation masks exist.\n\n"
-                        "Mask folder:\n"
-                        "  Directory containing masks aligned with images."
-                    )
-                )
-                return True
-            return super().event(event)
 
-
+        # ------------------------------------------------------------
         # Image folder row
+        # ------------------------------------------------------------
         img_row = QHBoxLayout()
         img_label = QLabel("Image folder:")
-        image_folder_edit = QLineEdit()
-        image_folder_edit.setText(img_folder_init)
+        image_folder_edit = QLineEdit(img_folder_init)
         img_browse_btn = QPushButton("Browse...")
         img_row.addWidget(img_label)
         img_row.addWidget(image_folder_edit)
         img_row.addWidget(img_browse_btn)
         layout.addLayout(img_row)
 
+        # ------------------------------------------------------------
         # Save folder row
+        # ------------------------------------------------------------
         save_row = QHBoxLayout()
         save_label = QLabel("Save folder:")
-        save_folder_edit = QLineEdit()
-        save_folder_edit.setText(save_folder_init)
+        save_folder_edit = QLineEdit(save_folder_init)
         save_browse_btn = QPushButton("Browse...")
         save_row.addWidget(save_label)
         save_row.addWidget(save_folder_edit)
         save_row.addWidget(save_browse_btn)
         layout.addLayout(save_row)
 
-        # Use Masks checkbox (controls mask row visibility)
+        # ------------------------------------------------------------
+        # Use Masks checkbox
+        # ------------------------------------------------------------
         use_mask_checkbox = QCheckBox("Use Masks")
         use_mask_checkbox.setChecked(use_masks_init)
         layout.addWidget(use_mask_checkbox)
 
+        # ------------------------------------------------------------
         # Mask folder row
+        # ------------------------------------------------------------
         mask_row = QHBoxLayout()
         mask_label = QLabel("Mask folder:")
-        mask_folder_edit = QLineEdit()
-        mask_folder_edit.setText(mask_folder_init)
+        mask_folder_edit = QLineEdit(mask_folder_init)
         mask_browse_btn = QPushButton("Browse...")
         mask_row.addWidget(mask_label)
         mask_row.addWidget(mask_folder_edit)
         mask_row.addWidget(mask_browse_btn)
         layout.addLayout(mask_row)
 
-        # Show/hide mask folder row based on checkbox
         def update_mask_row():
             visible = use_mask_checkbox.isChecked()
             for i in range(mask_row.count()):
                 w = mask_row.itemAt(i).widget()
-                if w: w.setVisible(visible)
-        use_mask_checkbox.toggled.connect(update_mask_row)
-        update_mask_row()  # set initial state
+                if w:
+                    w.setVisible(visible)
 
-        # Button row
+        use_mask_checkbox.toggled.connect(update_mask_row)
+        update_mask_row()
+
+        # ------------------------------------------------------------
+        # Use Baselines checkbox (NEW)
+        # ------------------------------------------------------------
+        use_baselines_checkbox = QCheckBox("Use Baselines")
+        use_baselines_checkbox.setChecked(use_baselines_init)
+        layout.addWidget(use_baselines_checkbox)
+
+        # ------------------------------------------------------------
+        # Buttons
+        # ------------------------------------------------------------
         btn_row = QHBoxLayout()
         ok_btn = QPushButton("Select")
         cancel_btn = QPushButton("Cancel")
@@ -361,66 +372,77 @@ class CrackUtils:
         btn_row.addWidget(cancel_btn)
         layout.addLayout(btn_row)
 
+        # ------------------------------------------------------------
         # Browse logic
-        def img_browse():
-            folder = QFileDialog.getExistingDirectory(dlg, "Select Image Folder")
-            if folder:
-                image_folder_edit.setText(folder)
-        def save_browse():
-            folder = QFileDialog.getExistingDirectory(dlg, "Select Save Folder")
-            if folder:
-                save_folder_edit.setText(folder)
-        def mask_browse():
-            folder = QFileDialog.getExistingDirectory(dlg, "Select Mask Folder")
-            if folder:
-                mask_folder_edit.setText(folder)
-        img_browse_btn.clicked.connect(img_browse)
-        save_browse_btn.clicked.connect(save_browse)
-        mask_browse_btn.clicked.connect(mask_browse)
+        # ------------------------------------------------------------
+        img_browse_btn.clicked.connect(
+            lambda: image_folder_edit.setText(
+                QFileDialog.getExistingDirectory(dlg, "Select Image Folder") or image_folder_edit.text()
+            )
+        )
+        save_browse_btn.clicked.connect(
+            lambda: save_folder_edit.setText(
+                QFileDialog.getExistingDirectory(dlg, "Select Save Folder") or save_folder_edit.text()
+            )
+        )
+        mask_browse_btn.clicked.connect(
+            lambda: mask_folder_edit.setText(
+                QFileDialog.getExistingDirectory(dlg, "Select Mask Folder") or mask_folder_edit.text()
+            )
+        )
 
         ok_btn.clicked.connect(dlg.accept)
         cancel_btn.clicked.connect(dlg.reject)
 
-        def strip_quotes(path):
-            # Remove ONLY a single " from start/end if present
-            if path.startswith('"') and path.endswith('"'):
-                return path[1:-1]
-            elif path.startswith('"'):
-                return path[1:]
-            elif path.endswith('"'):
-                return path[:-1]
-            else:
-                return path
+        def strip_quotes(p):
+            if p.startswith('"') and p.endswith('"'):
+                return p[1:-1]
+            if p.startswith('"'):
+                return p[1:]
+            if p.endswith('"'):
+                return p[:-1]
+            return p
 
-        # --- Show dialog & check folders ---
+        # ------------------------------------------------------------
+        # Validate dialog
+        # ------------------------------------------------------------
         while True:
             if dlg.exec_() == QDialog.Accepted:
                 img_folder = strip_quotes(image_folder_edit.text().strip())
                 save_folder = strip_quotes(save_folder_edit.text().strip())
                 mask_folder = strip_quotes(mask_folder_edit.text().strip())
                 use_masks = use_mask_checkbox.isChecked()
+                use_baselines = use_baselines_checkbox.isChecked()
+
                 if not os.path.isdir(img_folder):
                     QMessageBox.critical(dlg, "Error", "Please select a valid image folder.")
                     continue
                 if not os.path.isdir(save_folder):
                     QMessageBox.critical(dlg, "Error", "Please select a valid save folder.")
                     continue
-                if use_masks and (not os.path.isdir(mask_folder)):
+                if use_masks and not os.path.isdir(mask_folder):
                     QMessageBox.critical(dlg, "Error", "Please select a valid mask folder or uncheck 'Use Masks'.")
                     continue
                 break
             else:
                 print("Folder selection cancelled.")
-                return  # Don't continue if user cancels
+                return
 
-        # Save for use elsewhere and persist for next run!
+        # ------------------------------------------------------------
+        # Persist + reset state
+        # ------------------------------------------------------------
         self.current_folder = img_folder
         self.save_folder = save_folder
         self.mask_folder = mask_folder if use_masks else ""
         self.use_masks = use_masks
-        save_last_folders(img_folder, save_folder, mask_folder, use_masks)   # Write to config file
+        self.use_baselines = use_baselines
 
-        # ---- Wipe all memory/state/arrays for previous folder ----
+        save_last_folders(
+            img_folder, save_folder, mask_folder,
+            use_masks, use_baselines
+        )
+
+        # ---- wipe state ----
         self.files_list.clear()
         self.image_names = []
         self.n = 0
@@ -435,31 +457,43 @@ class CrackUtils:
             if hasattr(self, attr):
                 try:
                     delattr(self, attr)
-                except Exception as e:
-                    print(f"Error deleting attribute {attr}: {e}")
+                except Exception:
                     pass
 
-        import gc; gc.collect()
+        import gc
+        gc.collect()
 
-        # ---- Now load new image list ----
-        self.image_names = ct.tools.get_files(folder=img_folder, formats=['jpeg','jpg','png'], basename=False)
+        # ---- Load images ----
+        self.image_names = ct.tools.get_files(
+            folder=img_folder,
+            formats=['jpeg', 'jpg', 'png'],
+            basename=False
+        )
+
         if self.use_masks and self.mask_folder:
-            self.mask_names = ct.tools.get_files(folder=self.mask_folder, formats=['png','npy'], basename=False)
-            self.mask_map = {os.path.splitext(os.path.basename(f))[0]: f for f in self.mask_names}
-            print(f"{len(self.mask_names)} gt masks loaded in with image")
+            self.mask_names = ct.tools.get_files(
+                folder=self.mask_folder,
+                formats=['png', 'npy'],
+                basename=False
+            )
+            self.mask_map = {
+                os.path.splitext(os.path.basename(f))[0]: f
+                for f in self.mask_names
+            }
+            print(f"{len(self.mask_names)} gt masks loaded")
         else:
             self.mask_names = []
             self.mask_map = {}
-        #print("....................................................")
+
         for filename in self.image_names:
             self.files_list.addItem(os.path.basename(filename))
+
         if self.image_names:
             self.n = 0
             self.change_image()
         else:
             self.ImageScreen.clear()
             self.filename_label_2.setText("No images found in folder.")
-        #print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
         # ---- Optionally load mask file mapping ----
 
