@@ -251,8 +251,14 @@ class CrackUtils:
         from PyQt5 import QtCore
         import os, json
 
+        # ------------------------------------------------------------
+        # Load / save persistent config
+        # ------------------------------------------------------------
         def load_last_folders():
-            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'folder_config.json')
+            config_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                'folder_config.json'
+            )
             if os.path.isfile(config_path):
                 try:
                     with open(config_path, 'r') as f:
@@ -261,32 +267,43 @@ class CrackUtils:
                             d.get("img_folder", ""),
                             d.get("save_folder", ""),
                             d.get("mask_folder", ""),
+                            d.get("baseline_folder", ""),
                             d.get("use_masks", False),
                             d.get("use_baselines", False),
                         )
                 except Exception:
                     pass
-            return "", "", "", False, False
+            return "", "", "", "", False, False
 
-        def save_last_folders(img_folder, save_folder, mask_folder, use_masks, use_baselines):
-            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'folder_config.json')
+        def save_last_folders(
+            img_folder, save_folder, mask_folder, baseline_folder,
+            use_masks, use_baselines
+        ):
+            config_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                'folder_config.json'
+            )
             try:
                 with open(config_path, 'w') as f:
                     json.dump({
                         "img_folder": img_folder,
                         "save_folder": save_folder,
                         "mask_folder": mask_folder,
+                        "baseline_folder": baseline_folder,
                         "use_masks": use_masks,
                         "use_baselines": use_baselines,
                     }, f, indent=2)
             except Exception:
                 pass
 
-        # --- Load previous defaults ---
+        # ------------------------------------------------------------
+        # Load previous defaults
+        # ------------------------------------------------------------
         (
             default_img_folder,
             default_save_folder,
             default_mask_folder,
+            default_baseline_folder,
             default_use_masks,
             default_use_baselines,
         ) = load_last_folders()
@@ -294,6 +311,8 @@ class CrackUtils:
         img_folder_init = getattr(self, "current_folder", default_img_folder)
         save_folder_init = getattr(self, "save_folder", default_save_folder)
         mask_folder_init = getattr(self, "mask_folder", default_mask_folder)
+        baseline_folder_init = getattr(self, "baseline_folder", default_baseline_folder)
+
         use_masks_init = getattr(self, "use_masks", default_use_masks)
         use_baselines_init = getattr(self, "use_baselines", default_use_baselines)
 
@@ -356,11 +375,33 @@ class CrackUtils:
         update_mask_row()
 
         # ------------------------------------------------------------
-        # Use Baselines checkbox (NEW)
+        # Use Baselines checkbox
         # ------------------------------------------------------------
         use_baselines_checkbox = QCheckBox("Use Baselines")
         use_baselines_checkbox.setChecked(use_baselines_init)
         layout.addWidget(use_baselines_checkbox)
+
+        # ------------------------------------------------------------
+        # Baseline folder row (NEW)
+        # ------------------------------------------------------------
+        baseline_row = QHBoxLayout()
+        baseline_label = QLabel("Baseline folder:")
+        baseline_folder_edit = QLineEdit(baseline_folder_init)
+        baseline_browse_btn = QPushButton("Browse...")
+        baseline_row.addWidget(baseline_label)
+        baseline_row.addWidget(baseline_folder_edit)
+        baseline_row.addWidget(baseline_browse_btn)
+        layout.addLayout(baseline_row)
+
+        def update_baseline_row():
+            visible = use_baselines_checkbox.isChecked()
+            for i in range(baseline_row.count()):
+                w = baseline_row.itemAt(i).widget()
+                if w:
+                    w.setVisible(visible)
+
+        use_baselines_checkbox.toggled.connect(update_baseline_row)
+        update_baseline_row()
 
         # ------------------------------------------------------------
         # Buttons
@@ -377,17 +418,26 @@ class CrackUtils:
         # ------------------------------------------------------------
         img_browse_btn.clicked.connect(
             lambda: image_folder_edit.setText(
-                QFileDialog.getExistingDirectory(dlg, "Select Image Folder") or image_folder_edit.text()
+                QFileDialog.getExistingDirectory(dlg, "Select Image Folder")
+                or image_folder_edit.text()
             )
         )
         save_browse_btn.clicked.connect(
             lambda: save_folder_edit.setText(
-                QFileDialog.getExistingDirectory(dlg, "Select Save Folder") or save_folder_edit.text()
+                QFileDialog.getExistingDirectory(dlg, "Select Save Folder")
+                or save_folder_edit.text()
             )
         )
         mask_browse_btn.clicked.connect(
             lambda: mask_folder_edit.setText(
-                QFileDialog.getExistingDirectory(dlg, "Select Mask Folder") or mask_folder_edit.text()
+                QFileDialog.getExistingDirectory(dlg, "Select Mask Folder")
+                or mask_folder_edit.text()
+            )
+        )
+        baseline_browse_btn.clicked.connect(
+            lambda: baseline_folder_edit.setText(
+                QFileDialog.getExistingDirectory(dlg, "Select Baseline Folder")
+                or baseline_folder_edit.text()
             )
         )
 
@@ -411,6 +461,8 @@ class CrackUtils:
                 img_folder = strip_quotes(image_folder_edit.text().strip())
                 save_folder = strip_quotes(save_folder_edit.text().strip())
                 mask_folder = strip_quotes(mask_folder_edit.text().strip())
+                baseline_folder = strip_quotes(baseline_folder_edit.text().strip())
+
                 use_masks = use_mask_checkbox.isChecked()
                 use_baselines = use_baselines_checkbox.isChecked()
 
@@ -421,7 +473,16 @@ class CrackUtils:
                     QMessageBox.critical(dlg, "Error", "Please select a valid save folder.")
                     continue
                 if use_masks and not os.path.isdir(mask_folder):
-                    QMessageBox.critical(dlg, "Error", "Please select a valid mask folder or uncheck 'Use Masks'.")
+                    QMessageBox.critical(
+                        dlg, "Error",
+                        "Please select a valid mask folder or uncheck 'Use Masks'."
+                    )
+                    continue
+                if use_baselines and not os.path.isdir(baseline_folder):
+                    QMessageBox.critical(
+                        dlg, "Error",
+                        "Please select a valid baseline folder or uncheck 'Use Baselines'."
+                    )
                     continue
                 break
             else:
@@ -434,11 +495,13 @@ class CrackUtils:
         self.current_folder = img_folder
         self.save_folder = save_folder
         self.mask_folder = mask_folder if use_masks else ""
+        self.baseline_folder = baseline_folder if use_baselines else ""
+
         self.use_masks = use_masks
         self.use_baselines = use_baselines
 
         save_last_folders(
-            img_folder, save_folder, mask_folder,
+            img_folder, save_folder, mask_folder, baseline_folder,
             use_masks, use_baselines
         )
 
@@ -494,8 +557,6 @@ class CrackUtils:
         else:
             self.ImageScreen.clear()
             self.filename_label_2.setText("No images found in folder.")
-
-        # ---- Optionally load mask file mapping ----
 
     def name_selected(self):
         self.n = self.files_list.currentRow()
@@ -1210,6 +1271,15 @@ class CrackUtils:
         self.original_image = self.image.copy()
         self.filename_label_2.setText(os.path.basename(self.name))
         base_name = os.path.splitext(os.path.basename(self.name))[0]
+        
+        # ------------------------------------------------------------
+        # Baseline folder (per-image handle)
+        # ------------------------------------------------------------
+        if getattr(self, "use_baselines", False) and getattr(self, "baseline_folder", ""):
+            # Root baseline folder (passed later to width eval)
+            self.baseline_img_folder = os.path.join(self.baseline_folder, base_name) 
+        else:
+            self.baseline_img_folder = None
 
         # ---- MASK LOADING (optional external masks) ----
         self.current_mask = None

@@ -796,7 +796,7 @@ def plot_width_diff_histogram(width_diffs_csv, out_png, title=None, bins=60, vli
     plt.close()
     print("[WIDTH HIST] wrote:", out_png)
 
-def plot_width_summary_bars(metrics_dir, base_name, out_png):
+'''def plot_width_summary_bars(metrics_dir, base_name, out_png):
     """
     Bar chart comparing TOTAL width metrics across methods
     (e.g. manual vs auto).
@@ -857,7 +857,7 @@ def plot_width_summary_bars(metrics_dir, base_name, out_png):
     plt.savefig(out_png, dpi=160, bbox_inches="tight")
     plt.close()
 
-    print("[WIDTH BAR] wrote:", out_png)
+    print("[WIDTH BAR] wrote:", out_png)'''
 
 def plot_gt_width_vs_delta_w_scatter(
     diffs_csv,
@@ -1992,3 +1992,221 @@ def plot_rs3_midline_diagnostics(
             dpi=200,
         )
         plt.close()
+
+
+
+# ======================================================================
+# helpers/present_plots.py
+#   Regime-A aggregation + committee plotting (single entry function)
+#   - Reads width_distribution_summary.csv
+#   - Aggregates across images
+#   - Produces 3 plots (median diff, spread ratio, wasserstein)
+# ======================================================================
+
+def plot_width_distribution_report(
+    *,
+    csv_path,
+    out_dir,
+    group_keys=("variant", "gt_tier", "midline_type", "filtered"),
+    x_key="variant",
+    hue_key="gt_tier",
+    filter_midline_type=None,   # e.g. "manual" or "auto" or None
+    filter_gt_tier=None,        # e.g. "combined_unfiltered" or None
+    title_suffix="",            # optional string appended to figure titles
+):
+    """
+    Committee-friendly Regime-A report.
+
+    Inputs:
+      csv_path: path to width_distribution_summary.csv (appended row-per-call)
+      out_dir: directory to write plots + aggregated table
+      group_keys: how to aggregate
+      x_key, hue_key: plot grouping
+      filter_midline_type: optional filter (baseline/manual/auto)
+      filter_gt_tier: optional filter ("atomic"/"combined_unfiltered"/"combined_filtered")
+      title_suffix: optional string for plot titles
+
+    Outputs (written into out_dir):
+      - width_distribution_agg.csv
+      - width_dist_median_diff.png
+      - width_dist_spread_iqr_ratio.png
+      - width_dist_wasserstein.png
+    """
+
+    import os
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    # Prefer SciPy for stats if available; otherwise degrade gracefully.
+    try:
+        from scipy.stats import wasserstein_distance, ks_2samp  # noqa: F401
+        _has_scipy = True
+    except Exception:
+        _has_scipy = False
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    # ------------------------------------------------------------
+    # (0) Load
+    # ------------------------------------------------------------
+    if not os.path.exists(csv_path):
+        print(f"[DIST-PLOT] missing csv: {csv_path}")
+        return
+
+    df = pd.read_csv(csv_path)
+    if df.empty:
+        print("[DIST-PLOT] empty csv")
+        return
+
+    # ------------------------------------------------------------
+    # (1) Optional filtering
+    # ------------------------------------------------------------
+    if filter_midline_type is not None:
+        df = df[df["midline_type"].astype(str) == str(filter_midline_type)]
+    if filter_gt_tier is not None:
+        df = df[df["gt_tier"].astype(str) == str(filter_gt_tier)]
+
+    if df.empty:
+        print("[DIST-PLOT] nothing left after filters")
+        return
+
+    # ------------------------------------------------------------
+    # (2) Aggregate helper
+    # ------------------------------------------------------------
+    def _iqr(x):
+        x = np.asarray(x, float)
+        x = x[np.isfinite(x)]
+        if x.size == 0:
+            return np.nan
+        return float(np.percentile(x, 75) - np.percentile(x, 25))
+
+    gk = list(group_keys)
+    agg = (
+        df.groupby(gk)
+          .agg(
+              n_images=("image", "nunique"),
+              n_samples=("n_samples", "sum"),
+
+              median_diff_med=("median_diff", "median"),
+              median_diff_iqr=("median_diff", _iqr),
+
+              iqr_ratio_med=("iqr_ratio", "median"),
+              std_ratio_med=("std_ratio", "median"),
+
+              wasserstein_med=("wasserstein_dist", "median"),
+              ks_stat_med=("ks_stat", "median"),
+          )
+          .reset_index()
+    )
+
+    out_agg_csv = os.path.join(out_dir, "width_distribution_agg.csv")
+    agg.to_csv(out_agg_csv, index=False)
+    print(f"[DIST-PLOT] wrote agg table: {out_agg_csv}")
+
+    # ------------------------------------------------------------
+    # (3) Plot helper (simple grouped bars, no seaborn dependency)
+    # ------------------------------------------------------------
+    def _barplot_grouped(df_in, *, y_col, out_path, ylabel, title):
+        """
+        Produces a simple grouped bar plot:
+          x categories = x_key
+          hue categories = hue_key (optional; if absent uses single bars)
+        """
+        # Ensure columns exist
+        if x_key not in df_in.columns:
+            print(f"[DIST-PLOT] missing x_key={x_key} in aggregated df")
+            return
+        if y_col not in df_in.columns:
+            print(f"[DIST-PLOT] missing y_col={y_col} in aggregated df")
+            return
+
+        # Build categories
+        xs = [str(v) for v in sorted(df_in[x_key].dropna().unique().tolist())]
+        hues = None
+        if hue_key is not None and hue_key in df_in.columns:
+            hues = [str(v) for v in sorted(df_in[hue_key].dropna().unique().tolist())]
+        else:
+            hues = []
+
+        # Prepare plot
+        plt.figure(figsize=(8, 4), dpi=200)
+
+        if not hues:
+            y = []
+            for x in xs:
+                sub = df_in[df_in[x_key].astype(str) == x]
+                y.append(float(np.nanmedian(sub[y_col].values)) if len(sub) else np.nan)
+
+            x_pos = np.arange(len(xs))
+            plt.bar(x_pos, y)
+            plt.xticks(x_pos, xs, rotation=20, ha="right")
+
+        else:
+            # grouped bars
+            x_pos = np.arange(len(xs))
+            width = 0.8 / max(len(hues), 1)
+
+            for j, h in enumerate(hues):
+                y = []
+                for x in xs:
+                    sub = df_in[
+                        (df_in[x_key].astype(str) == x) &
+                        (df_in[hue_key].astype(str) == h)
+                    ]
+                    y.append(float(np.nanmedian(sub[y_col].values)) if len(sub) else np.nan)
+
+                plt.bar(x_pos + (j - (len(hues) - 1) / 2) * width, y, width=width, label=h)
+
+            plt.xticks(x_pos, xs, rotation=20, ha="right")
+            plt.legend(loc="best", frameon=False)
+
+        plt.ylabel(ylabel)
+        plt.title(title)
+        plt.tight_layout()
+        plt.savefig(out_path)
+        plt.close()
+        print(f"[DIST-PLOT] wrote: {out_path}")
+
+    # ------------------------------------------------------------
+    # (4) Emit plots
+    # ------------------------------------------------------------
+    t_suf = f" {title_suffix}".rstrip()
+
+    # 4.1 median difference
+    out1 = os.path.join(out_dir, "width_dist_median_diff.png")
+    _barplot_grouped(
+        agg,
+        y_col="median_diff_med",
+        out_path=out1,
+        ylabel="Median width difference (px)",
+        title=f"Median width distribution difference vs GT{t_suf}",
+    )
+
+    # 4.2 spread ratio (IQR)
+    out2 = os.path.join(out_dir, "width_dist_spread_iqr_ratio.png")
+    _barplot_grouped(
+        agg,
+        y_col="iqr_ratio_med",
+        out_path=out2,
+        ylabel="IQR ratio (pred / GT)",
+        title=f"Relative width distribution spread (IQR ratio){t_suf}",
+    )
+
+    # 4.3 wasserstein distance
+    out3 = os.path.join(out_dir, "width_dist_wasserstein.png")
+    _barplot_grouped(
+        agg,
+        y_col="wasserstein_med",
+        out_path=out3,
+        ylabel="Wasserstein distance (px)",
+        title=f"Distributional divergence from GT (Wasserstein){t_suf}",
+    )
+
+    return {
+        "agg_csv": out_agg_csv,
+        "plots": [out1, out2, out3],
+        "n_rows_in": int(len(df)),
+        "n_groups": int(len(agg)),
+        "used_scipy": bool(_has_scipy),
+    }

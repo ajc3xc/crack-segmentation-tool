@@ -324,9 +324,9 @@ def save_gt_vs_manual_overlay(H, W, gt_full, man_full, out_png, bbox=None, origi
 #   - mask_iou(m1, m2)
 #   - normals_from_mask_for_midline(midline_xy, mask, max_radius=50)
 #   - compute_midline_metrics(auto_xy, man_xy, tau)
-#   - compare_widths_for_cracks(ann_like, crack_mask, base_name, metrics_dir, display=False, tag=None)
+#   - compare_widths_for_aligned_cracks(ann_like, crack_mask, base_name, metrics_dir, display=False, tag=None)
 
-# For clarity: ann_like for compare_widths_for_cracks is {"atomic_cracks": {cid: crackdict, ...}}
+# For clarity: ann_like for compare_widths_for_aligned_cracks is {"atomic_cracks": {cid: crackdict, ...}}
 
 # -------------------- PLOTTING (GT QUICK LOOK) --------------------
 def debug_plot_gt_preview(mask_bin, mid_xy, e1_xy=None, e2_xy=None, out_png=None, title="GT preview"):

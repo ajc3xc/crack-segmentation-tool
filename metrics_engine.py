@@ -790,7 +790,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             has_valid_mask,
             safe_write_json,
             metric_atomic_path_for,
-            compare_widths_for_cracks,
+            compare_widths_for_aligned_cracks,
             write_width_diff_overlay,
             safe_read_json,
             merged_metric_atomic,
@@ -1502,7 +1502,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         # ------------------------------------------------------------------
         def _prep_combined_for_width(combined_src):
             """
-            Critical: include mask_bbox so compare_widths_for_cracks can zoom.
+            Critical: include mask_bbox so compare_widths_for_aligned_cracks can zoom.
             """
             out = {}
             for ccid, cmb in (combined_src or {}).items():
@@ -1538,145 +1538,175 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         # ------------------------------------------------------------------
 
         def _run_width_eval_total(
-            *,
-            atomic_src=None,
-            combined_src=None,
-            midline_type,
+                *,
+                atomic_src=None,
+                combined_src=None,
+                midline_type,
+                baseline_root=None,   # <- self.baseline_img_folder for manual
         ):
             """
-            Runs width evaluation for atomic + combined cracks.
-            For EACH mode:
-            - runs compare_widths_for_cracks
-            - exports per-mode width metrics (CSV lives at midline root)
-            - generates summary bars + width error plots into
-                midline/{atomic|combined}/
+            Runs width evaluation for atomic + combined cracks across variants.
+
+            Variants:
+            - "main" (the payloads you pass in)
+            - baseline variants discovered under baseline_root (optional; atomic only, per image)
+
+            For EACH (variant, mode):
+            - runs compare_widths_for_aligned_cracks(..., variant_id=...)
+            - exports per-point diffs CSV via export_width_metrics_all
+            - generates summary plots into:
+                <metrics_dir>/<midline_type>/<atomic|combined>/<variant_id>/
             """
 
             import os
+            import numpy as np
 
             # ------------------------------------------------------------
-            # Inline helper: run + summarize ONE mode
+            # Build variant payloads (main variant)
             # ------------------------------------------------------------
-            def _run_one_mode(
-                *,
-                crack_type,          # "atomic" | "combined"
-                payload,
-            ):
-                # ------------------------------------------
-                # Run width comparison
-                # ------------------------------------------
-                ret = compare_widths_for_cracks(
+            variants = {"main": {"atomic": atomic_src, "combined": combined_src}}
+
+            def _run_one_mode(*, variant_id, crack_type, payload, baseline_maps_local=None):
+                import os
+                import numpy as np
+
+                # ------------------------------------------------------------
+                # BASELINE MODE — STUB ONLY (NO aligned evaluation)
+                # ------------------------------------------------------------
+                if baseline_maps_local:
+                    print(f"[BASELINE DEBUG] methods: {list(baseline_maps_local.keys())}")
+
+                    # ---- placeholder stub (replace later with Regime A evaluator) ----
+                    baseline_stub = lambda *args, **kwargs: print(
+                        "    [BASELINE STUB] distributional evaluator not implemented yet"
+                    )
+
+                    for method, (wmap, supp) in baseline_maps_local.items():
+                        print(f"[BASELINE] evaluating method='{method}'")
+
+                        # ---- per-method isolation ----
+                        metrics_dir_local = os.path.join(metrics_dir, method)
+                        os.makedirs(metrics_dir_local, exist_ok=True)
+
+                        baseline_payload = {"atomic_cracks": {}}
+
+                        for cid, cr in (payload.get("atomic_cracks") or {}).items():
+                            mid_xy = np.asarray(cr.get("midline", []), float)
+                            if mid_xy.ndim != 2 or len(mid_xy) < 2:
+                                continue
+
+                            predw = sample_widths_from_wmap(wmap, supp, mid_xy)
+
+                            baseline_payload["atomic_cracks"][cid] = {
+                                "id": cr.get("id", cid),
+                                "midline": mid_xy.tolist(),
+                                "mask_bbox": cr.get("mask_bbox"),
+                                "gt_normals": cr.get("gt_normals", {}),
+                                "pred_widths": predw.tolist(),  # injected baseline widths
+                            }
+
+                        # ---- CALL STUB (instead of aligned evaluation) ----
+                        baseline_stub(
+                            baseline_payload,
+                            gt_full,
+                            base_name,
+                            metrics_dir_local,
+                            midline_type=midline_type,
+                            crack_type="atomic",
+                            variant_id=method,
+                        )
+
+                    print(f"[WIDTH BASELINE] finished (stubbed) baselines for {base_name}")
+                    return
+
+                # ------------------------------------------------------------
+                # NORMAL MODE (main / auto) — UNCHANGED
+                # ------------------------------------------------------------
+                metrics_dir_local = (
+                    metrics_dir
+                    if variant_id in ("", "main")
+                    else os.path.join(metrics_dir, variant_id)
+                )
+                os.makedirs(metrics_dir_local, exist_ok=True)
+
+                base_tag = base_name if variant_id == "main" else f"{base_name}__{variant_id}"
+
+                ret = compare_widths_for_aligned_cracks(
                     payload,
                     gt_full,
                     base_name,
-                    metrics_dir,
+                    metrics_dir_local,
                     display=display,
                     midline_type=midline_type,
                     crack_type=crack_type,
                     return_normals=False,
                     normals_plot=False,
                     gt_sup_root=gt_sup_root,
+                    variant_id=variant_id,
                 )
 
                 if not ret or not ret[0]:
-                    print(f"[WIDTH] no rows returned for {crack_type}")
+                    print(f"[WIDTH] no rows returned for {crack_type} / {variant_id}")
                     return
 
                 rows = ret[0]
                 for r in rows:
                     r["source"] = crack_type
+                    r["variant"] = variant_id
 
-                # ------------------------------------------
-                # Canonical CSV location (DO NOT move this)
-                # ------------------------------------------
-                csv_root = os.path.join(metrics_dir, midline_type)
-                diffs_csv = os.path.join(
-                    csv_root,
-                    f"{base_name}_width_diffs_{crack_type}.csv",
-                )
-
-                # ------------------------------------------
-                # Presentation output directory
-                # ------------------------------------------
-                out_dir = os.path.join(
-                    metrics_dir,
-                    midline_type,
-                    crack_type,
-                )
+                csv_root = os.path.join(metrics_dir_local, midline_type)
+                out_dir = os.path.join(metrics_dir_local, midline_type, crack_type, variant_id)
                 os.makedirs(out_dir, exist_ok=True)
 
-                # ------------------------------------------
-                # Export metrics (writes CSVs into csv_root)
-                # ------------------------------------------
                 export_width_metrics_all(
-                    metrics_dir,
-                    base_name,
+                    metrics_dir_local,
+                    base_tag,
                     rows,
                     midline_type,
                     crack_type=crack_type,
                 )
 
-                # ------------------------------------------
-                # Summary bars
-                # ------------------------------------------
-                from helpers.present_plots import plot_width_summary_bars
-
+                '''from helpers.present_plots import plot_width_summary_bars
                 plot_width_summary_bars(
-                    metrics_dir,
-                    base_name,
-                    os.path.join(
-                        out_dir,
-                        f"{base_name}_width_summary_bars.png",
-                    ),
-                )
+                    metrics_dir_local,
+                    base_tag,
+                    os.path.join(out_dir, f"{base_tag}_width_summary_bars.png"),
+                )'''
 
-                # ------------------------------------------
-                # Width error plots (guarded)
-                # ------------------------------------------
-                if not os.path.exists(diffs_csv):
-                    print(f"[WIDTH] missing diffs CSV, skipping plots: {diffs_csv}")
-                    return
+                print(f"[WIDTH] finished summaries for {crack_type} / {variant_id}")
 
-                from helpers.present_plots import (
-                    plot_relative_width_error_kde,
-                    plot_width_error_hexbin,
-                )
-
-                plot_relative_width_error_kde(
-                    diffs_csv,
-                    os.path.join(
-                        out_dir,
-                        f"{base_name}_relative_width_error_kde.png",
-                    ),
-                )
-
-                plot_width_error_hexbin(
-                    diffs_csv,
-                    os.path.join(
-                        out_dir,
-                        f"{base_name}_width_error_hexbin.png",
-                    ),
-                )
-
-                print(f"[WIDTH] finished summaries for {crack_type}")
 
             # ------------------------------------------------------------
-            # ATOMIC
+            # Run main variant
             # ------------------------------------------------------------
-            if atomic_src is not None:
-                _run_one_mode(
-                    crack_type="atomic",
-                    payload={"atomic_cracks": atomic_src},
-                )
+            for vid, pack in variants.items():
+                a = pack.get("atomic")
+                c = pack.get("combined")
+
+                if a is not None:
+                    _run_one_mode(variant_id=vid, crack_type="atomic", payload={"atomic_cracks": a})
+
+                if c is not None:
+                    _run_one_mode(variant_id=vid, crack_type="combined", payload={"combined_cracks": c})
 
             # ------------------------------------------------------------
-            # COMBINED
+            # Run baseline variants (atomic only, manual call)
             # ------------------------------------------------------------
-            if combined_src is not None:
-                _run_one_mode(
-                    crack_type="combined",
-                    payload={"combined_cracks": combined_src},
-                )
+            if baseline_root and os.path.isdir(baseline_root) and atomic_src is not None and midline_type == "manual":
+                print("[WIDTH] running baselines")
+                try:
+                    baseline_maps = load_baseline_widthmaps_for_image(baseline_root)
+                    print(baseline_maps.keys())
+                    if baseline_maps:
+                        _run_one_mode(
+                            variant_id="baseline",
+                            crack_type="atomic",
+                            payload={"atomic_cracks": atomic_src},
+                            baseline_maps_local=baseline_maps
+                        )
+                except Exception as e:
+                    print(f"[WIDTH] baseline evaluation failed: {e}")
+
 
         # ------------------------------------------------------------------
         # DRIVER
@@ -1690,6 +1720,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 atomic_src=atomic,
                 combined_src=combined_for_width,
                 midline_type="manual",
+                baseline_root=getattr(self, "baseline_img_folder", None),
             )
 
             # AUTO
@@ -1698,12 +1729,28 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 _run_width_eval_total(
                     atomic_src=auto_atomic,
                     combined_src=combined_auto_for_width,
-                    midline_type="auto",
+                    midline_type="auto"
                 )
 
         except Exception as e:
             print(f"[DEBUG WIDTH] failed: {e}")
             traceback.print_exc()
+            
+        from helpers.present_plots import plot_width_distribution_report
+        import os
+
+        dist_csv = os.path.join(metrics_dir, "width_distribution_summary.csv")
+        dist_out = os.path.join(metrics_dir, "distribution_report")
+
+        plot_width_distribution_report(
+            csv_path=dist_csv,
+            out_dir=dist_out,
+            # optional filters you can toggle:
+            # filter_midline_type="manual",
+            # filter_gt_tier="combined_unfiltered",
+            title_suffix="(All images)",
+        )
+
             
         # ------------------------------------------------------------------
         # 9) CORE RUNTIME SUMMARY (edge_masks, edge_tracking, combine)

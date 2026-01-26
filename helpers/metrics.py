@@ -1077,7 +1077,923 @@ def resample_by_arclength(xy, *signals, ds_target=1.0, min_pts=2,
 
     return (xy_rs, *out_sigs)
 
-def compare_widths_for_cracks(
+
+# ---------------- helpers ----------------
+def _split_on_nans(arr):
+    arr = np.asarray(arr, float)
+    if arr.ndim != 2 or arr.shape[1] != 2:
+        return []
+    good = np.isfinite(arr[:, 0]) & np.isfinite(arr[:, 1])
+    segs, s = [], None
+    for i, g in enumerate(good):
+        if g and s is None:
+            s = i
+        elif not g and s is not None:
+            if i - s >= 2:
+                segs.append(arr[s:i])
+            s = None
+    if s is not None and len(arr) - s >= 2:
+        segs.append(arr[s:])
+    return segs
+
+def _get_edges(crack):
+    geo = crack.get("normal_edge_points") or crack.get("geodesic_edges") or {}
+    e1 = np.asarray(geo.get("edge1", []), float)
+    e2 = np.asarray(geo.get("edge2", []), float)
+    return e1, e2
+
+def _union_bboxes(bboxes):
+    xs0, ys0, xs1, ys1 = [], [], [], []
+    for b in bboxes:
+        if not b or len(b) != 4:
+            continue
+        x, y, w, h = b
+        if w <= 0 or h <= 0:
+            continue
+        xs0.append(x); ys0.append(y)
+        xs1.append(x + w); ys1.append(y + h)
+    if not xs0:
+        return None
+    return [min(xs0), min(ys0), max(xs1) - min(xs0), max(ys1) - min(ys0)]
+
+def _decode_packbits_mask(blob):
+    """
+    blob = {"shape":[h,w], "packbits_b64": "..."}
+    returns uint8 mask (h,w)
+    """
+    if not blob:
+        return None
+    shape = blob.get("shape") or [0, 0]
+    h, w = int(shape[0]), int(shape[1])
+    s = blob.get("packbits_b64") or ""
+    if h <= 0 or w <= 0 or not s:
+        return np.zeros((h, w), np.uint8)
+    raw = base64.b64decode(s.encode("ascii"))
+    packed = np.frombuffer(raw, dtype=np.uint8)
+    # packed is (h * ceil(w/8),) flatten
+    row_bytes = int((w + 7) // 8)
+    if packed.size < h * row_bytes:
+        # corrupted / mismatch: fail closed to empty
+        return np.zeros((h, w), np.uint8)
+    packed = packed[: h * row_bytes].reshape((h, row_bytes))
+    unpacked = np.unpackbits(packed, axis=1)[:, :w]
+    return unpacked.astype(np.uint8)
+
+def _points_hit_bite(points_xy, bite_obj):
+    """
+    bite_obj:
+        {"bbox":[x0,y0,w,h], "shape":[h,w], "packbits_b64":"..."}
+    returns boolean mask len(points)
+    """
+    if bite_obj is None:
+        return np.zeros((len(points_xy),), bool)
+
+    bb = bite_obj.get("bbox")
+    if not bb or len(bb) != 4:
+        return np.zeros((len(points_xy),), bool)
+
+    x0, y0, bw, bh = map(int, bb)
+    if bw <= 0 or bh <= 0:
+        return np.zeros((len(points_xy),), bool)
+
+    m = _decode_packbits_mask({
+        "shape": bite_obj.get("shape"),
+        "packbits_b64": bite_obj.get("packbits_b64"),
+    })
+    if m is None or m.size == 0:
+        return np.zeros((len(points_xy),), bool)
+
+    pts = np.asarray(points_xy, float)
+    xs = np.round(pts[:, 0]).astype(int) - x0
+    ys = np.round(pts[:, 1]).astype(int) - y0
+    ok = (xs >= 0) & (xs < bw) & (ys >= 0) & (ys < bh)
+    hit = np.zeros((len(pts),), bool)
+    if np.any(ok):
+        hit[ok] = (m[ys[ok], xs[ok]] > 0)
+    return hit
+
+def _split_by_keep_mask(points, keep_mask):
+    """
+    points: (N,2)
+    keep_mask: (N,) bool
+    returns list of (run_points, run_indices_in_original)
+    """
+    pts = np.asarray(points, float)
+    keep = np.asarray(keep_mask, bool)
+    out = []
+    s = None
+    for i, k in enumerate(keep):
+        if k and s is None:
+            s = i
+        elif (not k) and (s is not None):
+            if i - s >= 2:
+                idx = np.arange(s, i, dtype=int)
+                out.append((pts[s:i], idx))
+            s = None
+    if s is not None and len(pts) - s >= 2:
+        idx = np.arange(s, len(pts), dtype=int)
+        out.append((pts[s:], idx))
+    return out
+
+def _linestring_length(S):
+    S = np.asarray(S, float)
+    if S.ndim != 2 or len(S) < 2:
+        return 0.0
+    d = np.linalg.norm(S[1:] - S[:-1], axis=1)
+    d = d[np.isfinite(d)]
+    return float(d.sum()) if len(d) else 0.0
+
+def _build_branch_table(segs, seg_meta, shared_members=None):
+    """
+    Builds branch dict:
+        branch_id -> {"members":set(str), "seg_idxs":[int], "length":float}
+    If seg_meta has atomic_id, that's used for branch membership.
+    """
+    if shared_members is None:
+        shared_members = None
+    branches = {}
+    for i, (S, m) in enumerate(zip(segs, seg_meta)):
+        if S is None or len(S) < 2:
+            continue
+        bid = int(m.get("branch_id", i))
+        aid = m.get("atomic_id")
+        if bid not in branches:
+            branches[bid] = {"members": set(), "seg_idxs": [], "length": 0.0}
+        branches[bid]["seg_idxs"].append(i)
+        branches[bid]["length"] += _linestring_length(S)
+        if aid is not None:
+            aid = str(aid)
+            if shared_members is None or aid in shared_members:
+                branches[bid]["members"].add(aid)
+    return branches
+
+def _greedy_match_branches(gt_br, pr_br):
+    """
+    gt_br, pr_br: dict branch_id -> {"members", "length", ...}
+    Returns:
+        list of (gt_bid, pr_bid, shared_count, shared_len)
+    """
+    pairs = []
+    for g_id, g in gt_br.items():
+        for p_id, p in pr_br.items():
+            inter = g["members"] & p["members"]
+            sc = len(inter)
+            if sc <= 0:
+                continue
+            # tie-break with min length (stable, doesn't depend on float dominance noise)
+            sl = float(min(g.get("length", 0.0), p.get("length", 0.0)))
+            pairs.append((g_id, p_id, sc, sl))
+    # sort by (shared_count, shared_len) desc
+    pairs.sort(key=lambda t: (t[2], t[3]), reverse=True)
+
+    gt_used = set()
+    pr_used = set()
+    out = []
+    for g_id, p_id, sc, sl in pairs:
+        if g_id in gt_used or p_id in pr_used:
+            continue
+        gt_used.add(g_id)
+        pr_used.add(p_id)
+        out.append((g_id, p_id, sc, sl))
+    return out
+
+
+# ============================================================
+# WIDTH EVAL HELPERS (drop once, outside any function)
+# ============================================================
+
+import os, json
+import numpy as np
+
+def _safe_json_load(path):
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def _first_existing(paths):
+    for p in paths:
+        if p and os.path.exists(p):
+            return p
+    return None
+
+def _polyline_length_px(pts):
+    pts = np.asarray(pts, float)
+    if pts.ndim != 2 or pts.shape[0] < 2:
+        return 0.0
+    d = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    d = d[np.isfinite(d)]
+    return float(np.sum(d)) if d.size else 0.0
+
+def _sample_width_map_at_pts(width_map_2d, pts_xy, *, bbox=None):
+    """
+    width_map_2d: (h,w) float/uint
+    pts_xy: (N,2) in FULL-IMAGE coords
+    bbox: (x,y,w,h) describing where width_map_2d lives in full image coords.
+          If bbox is None, assume map is full image.
+    """
+    wm = np.asarray(width_map_2d)
+    if wm.ndim != 2 or wm.size == 0:
+        return None
+
+    pts = np.asarray(pts_xy, float)
+    if pts.ndim != 2 or pts.shape[0] < 1:
+        return None
+
+    if bbox is None:
+        x0 = 0
+        y0 = 0
+    else:
+        x0 = int(bbox[0])
+        y0 = int(bbox[1])
+
+    xi = np.rint(pts[:, 0]).astype(int) - x0
+    yi = np.rint(pts[:, 1]).astype(int) - y0
+    xi = np.clip(xi, 0, wm.shape[1] - 1)
+    yi = np.clip(yi, 0, wm.shape[0] - 1)
+    return wm[yi, xi].astype(float, copy=False)
+
+def load_baseline_widthmaps_for_image(baseline_img_dir: str):
+    """
+    Loads baseline width maps from your NPZ files saved with _save_npz.
+
+    Returns:
+        dict[method] = (wmap: np.float32 array, supp: bool array)
+    """
+    import os
+    import numpy as np
+    import json
+
+    if not baseline_img_dir or not os.path.isdir(baseline_img_dir):
+        return {}
+
+    out = {}
+    for method in os.listdir(baseline_img_dir):
+        method_dir = os.path.join(baseline_img_dir, method)
+        if not os.path.isdir(method_dir):
+            continue
+
+        p = os.path.join(method_dir, "width_map.npz")
+        if not os.path.isfile(p):
+            continue
+
+        try:
+            z = np.load(p, allow_pickle=True)
+            #print(f"[BASELINE DEBUG] keys in {p}: {list(z.keys())}")  # for sanity check
+
+            wmap = z["width_map"].astype(np.float32)
+            supp = z["support_mask"].astype(bool)
+
+            # optional: parse meta
+            meta = {}
+            if "meta" in z:
+                try:
+                    meta = json.loads(z["meta"])
+                except Exception:
+                    pass
+
+            out[method] = (wmap, supp)
+
+        except Exception as e:
+            print(f"[BASELINE] failed load {p}: {e}")
+
+    return out
+
+
+def sample_widths_from_wmap(wmap, supp, mid_xy):
+    """
+    mid_xy: Nx2 float array in full-image coords
+    returns pred widths with NaN where unsupported/outside
+    """
+    import numpy as np
+
+    H, W = wmap.shape[:2]
+    xy = np.asarray(mid_xy, float)
+    if xy.ndim != 2 or xy.shape[1] != 2:
+        return np.array([], dtype=np.float32)
+
+    x = np.rint(xy[:, 0]).astype(int)
+    y = np.rint(xy[:, 1]).astype(int)
+
+    inside = (x >= 0) & (x < W) & (y >= 0) & (y < H)
+    out = np.full((len(x),), np.nan, dtype=np.float32)
+
+    if np.any(inside):
+        ok = inside & supp[y.clip(0, H-1), x.clip(0, W-1)]
+        out[ok] = wmap[y[ok], x[ok]].astype(np.float32)
+
+    return out
+
+
+
+# ------------------------------------------------------------
+# Part 2 plots
+#   (A) TopK metrics: RMSE + MAE + Bias + finite_len_px (weight)
+#   (B) Resampling explainers:
+#       - worst / median / best by RMSE
+#       - for each: show ALL finite runs (original + resampled)
+#       - show d(s) curves per-run
+#       - if predw/gtruthw available, also show predw(s), gtruthw(s) before/after
+# ------------------------------------------------------------
+
+
+# ======================================================================
+# Part 2 PLOT HELPERS (MUST BE DEFINED BEFORE USE)
+# ======================================================================
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
+
+def draw_colored_polyline(ax, pts, vals, x0, y0, lw, cmap, norm, alpha=1.0):
+    if pts is None or vals is None or len(pts) < 2:
+        return
+    segs = [
+        [(pts[i,0]-x0, pts[i,1]-y0),
+        (pts[i+1,0]-x0, pts[i+1,1]-y0)]
+        for i in range(len(pts)-1)
+    ]
+    lc = LineCollection(
+        segs, array=vals, cmap=cmap, norm=norm,
+        linewidths=lw, alpha=alpha,
+        capstyle="round", joinstyle="round", zorder=3
+    )
+    ax.add_collection(lc)
+
+def plot_sampling_consistency(
+    *,
+    pts_list,
+    ptsr_list,
+    mask_bin,
+    crop,
+    title,
+    out_path,
+):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import os
+
+    print("[SAMPLE CONSISTENCY] enter")
+
+    # ------------------------------------------------------------
+    # Validate inputs
+    # ------------------------------------------------------------
+    if not pts_list or not ptsr_list:
+        print("[SAMPLE CONSISTENCY] skipped: empty pts_list or ptsr_list")
+        return
+
+    # KEEP POLYLINES SEPARATE (CRITICAL)
+    pts_list  = [np.asarray(p, float) for p in pts_list  if p is not None and len(p) >= 2]
+    ptsr_list = [np.asarray(p, float) for p in ptsr_list if p is not None and len(p) >= 2]
+
+    if not pts_list or not ptsr_list:
+        print("[SAMPLE CONSISTENCY] skipped: no valid polylines after filtering")
+        return
+
+    # ------------------------------------------------------------
+    # Collect segment lengths ONLY for color normalization
+    # ------------------------------------------------------------
+    ds_all = []
+    for p in pts_list:
+        ds = np.linalg.norm(np.diff(p, axis=0), axis=1)
+        ds = ds[np.isfinite(ds)]
+        if ds.size:
+            ds_all.append(ds)
+
+    if not ds_all:
+        print("[SAMPLE CONSISTENCY] skipped: no finite segment lengths")
+        return
+
+    ds_all = np.concatenate(ds_all)
+
+    # ------------------------------------------------------------
+    # Color normalization
+    # ------------------------------------------------------------
+    vmin = np.percentile(ds_all, 10)
+    vmax = np.percentile(ds_all, 90)
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+        vmin = float(np.min(ds_all))
+        vmax = float(np.max(ds_all))
+        if vmax <= vmin:
+            vmax = vmin + 1e-6
+
+    cmap = plt.get_cmap("viridis")
+    norm = plt.Normalize(vmin, vmax)
+
+    # ------------------------------------------------------------
+    # Figure
+    # ------------------------------------------------------------
+    fig, (axO, axR) = plt.subplots(1, 2, figsize=(13.8, 5.2), dpi=200)
+
+    # ------------------------------------------------------------
+    # Background mask (safe crop)
+    # ------------------------------------------------------------
+    x0 = y0 = 0
+    if mask_bin is not None and crop is not None:
+        h, w = mask_bin.shape[:2]
+        x0, y0, x1, y1 = crop
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(w, x1), min(h, y1)
+
+        if x1 > x0 and y1 > y0:
+            for ax in (axO, axR):
+                ax.imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
+
+    for ax in (axO, axR):
+        ax.axis("off")
+
+    # ------------------------------------------------------------
+    # Draw ORIGINAL polylines (NO cross-run connections)
+    # ------------------------------------------------------------
+    for p in pts_list:
+        ds = np.linalg.norm(np.diff(p, axis=0), axis=1)
+        ds = ds[np.isfinite(ds)]
+        if ds.size < 1:
+            continue
+
+        ds_p = np.r_[ds[0], ds]  # per-point values
+        draw_colored_polyline(axO, p, ds_p, x0, y0, 2, cmap, norm, 0.85)
+
+    # ------------------------------------------------------------
+    # Draw RESAMPLED polylines (NO cross-run connections)
+    # ------------------------------------------------------------
+    for p in ptsr_list:
+        ds = np.linalg.norm(np.diff(p, axis=0), axis=1)
+        ds = ds[np.isfinite(ds)]
+        if ds.size < 1:
+            continue
+
+        ds_p = np.r_[ds[0], ds]
+        draw_colored_polyline(axR, p, ds_p, x0, y0, 2, cmap, norm, 0.90)
+
+    # ------------------------------------------------------------
+    # Colorbar
+    # ------------------------------------------------------------
+    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    plt.colorbar(sm, ax=[axO, axR], fraction=0.03, pad=0.03)
+
+    fig.text(
+        0.5, 0.985, title,
+        ha="center", va="top",
+        fontsize=11, fontweight="bold"
+    )
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight", dpi=200)
+    plt.close(fig)
+
+    print(f"[SAMPLE CONSISTENCY] wrote: {out_path}")
+
+
+def plot_width_error_distribution(*, runs, title, out_path, bins=25):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import os
+
+    d_all = []
+    for r in runs:
+        d1 = np.asarray(r.get("d_rs", []), float)
+        if len(d1) >= 2:
+            d_all.append(d1[:-1])
+
+    if not d_all:
+        print(f"[PART2 WIDTH DIST] skipped (no valid samples): {out_path}")
+        return
+
+    d_all = np.concatenate(d_all)
+    d_all = d_all[np.isfinite(d_all)]
+    if d_all.size < 10:
+        print(f"[PART2 WIDTH DIST] skipped (too few samples): {out_path}")
+        return
+
+    fig, ax = plt.subplots(1, 1, figsize=(8.8, 4.8), dpi=200)
+
+    ax.hist(d_all, bins=bins, density=True, alpha=0.55, label="resampled")
+
+    ax.axvline(0.0, lw=1.4, color="black", alpha=0.8)
+
+    rmse = float(np.sqrt(np.mean(d_all ** 2)))
+    mean = float(np.mean(d_all))
+
+    ax.axvline(mean, lw=1.2, linestyle="--", alpha=0.8)
+
+    ax.set_xlabel("Width error (pred − gt) [px]", fontsize=9)
+    ax.set_ylabel("Density", fontsize=9)
+    ax.grid(True, alpha=0.25)
+    ax.legend(fontsize=8)
+
+    ax.text(
+        0.02, 0.96,
+        f"RMSE (resampled) = {rmse:.3f}px",
+        transform=ax.transAxes,
+        va="top",
+        fontsize=8,
+        bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
+    )
+
+    fig.suptitle(title, fontsize=11, fontweight="bold")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight", dpi=200)
+    plt.close(fig)
+
+    print(f"[PART2 WIDTH DIST] wrote: {out_path}")
+
+    
+def plot_part2_width_signals_preservation(
+    *,
+    run,
+    title,
+    out_path,
+):
+    """
+    Plot GT width and predicted width vs arclength for a SINGLE run,
+    showing ORIGINAL vs RESAMPLED signals (shape preservation).
+
+    Expects run dict keys (from Part-2 cache):
+    ORIGINAL (plot-only):
+        - s
+        - gruthw
+        - predw
+
+    RESAMPLED (metrics domain):
+        - s_rs
+        - gtruthw_rs
+        - predw_rs
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import os
+
+    # ------------------------------------------------------------
+    # Pull ORIGINAL signals (optional but preferred)
+    # ------------------------------------------------------------
+    s0   = np.asarray(run.get("s", []), float)
+    gtw0 = np.asarray(run.get("gruthw", []), float)
+    pw0  = np.asarray(run.get("predw", []), float)
+
+    have_orig = (s0.size >= 2 and gtw0.size >= 2 and pw0.size >= 2)
+
+    # ------------------------------------------------------------
+    # Pull RESAMPLED signals (required)
+    # ------------------------------------------------------------
+    s1   = np.asarray(run.get("s_rs", []), float)
+    gtw1 = np.asarray(run.get("gtruthw_rs", []), float)
+    pw1  = np.asarray(run.get("predw_rs", []), float)
+
+    if s1.size < 2 or gtw1.size < 2 or pw1.size < 2:
+        print("[PART2 SIGNAL] skipped (missing/short resampled signals)")
+        return
+
+    # ------------------------------------------------------------
+    # Align lengths safely (resampled)
+    # ------------------------------------------------------------
+    n1 = min(len(s1), len(gtw1), len(pw1))
+    s1, gtw1, pw1 = s1[:n1], gtw1[:n1], pw1[:n1]
+
+    ok1 = np.isfinite(s1) & np.isfinite(gtw1) & np.isfinite(pw1)
+    if not np.any(ok1):
+        print("[PART2 SIGNAL] skipped (no finite resampled samples)")
+        return
+
+    # ------------------------------------------------------------
+    # Align lengths safely (original)
+    # ------------------------------------------------------------
+    if have_orig:
+        n0 = min(len(s0), len(gtw0), len(pw0))
+        s0, gtw0, pw0 = s0[:n0], gtw0[:n0], pw0[:n0]
+        ok0 = np.isfinite(s0) & np.isfinite(gtw0) & np.isfinite(pw0)
+        have_orig = np.any(ok0)
+
+    # ------------------------------------------------------------
+    # Means (visual reference only)
+    # ------------------------------------------------------------
+    gtw1_mean = float(np.mean(gtw1[ok1]))
+    pw1_mean  = float(np.mean(pw1[ok1]))
+
+    if have_orig:
+        gtw0_mean = float(np.mean(gtw0[ok0]))
+        pw0_mean  = float(np.mean(pw0[ok0]))
+
+    # ------------------------------------------------------------
+    # Shared axis limits
+    # ------------------------------------------------------------
+    s_max = float(np.max(s1[ok1]))
+    w_max = float(max(np.max(gtw1[ok1]), np.max(pw1[ok1])))
+
+    if have_orig:
+        s_max = max(s_max, float(np.max(s0[ok0])))
+        w_max = max(w_max, float(np.max(gtw0[ok0])), float(np.max(pw0[ok0])))
+
+    # ------------------------------------------------------------
+    # Plot
+    # ------------------------------------------------------------
+    fig, (axG, axP) = plt.subplots(
+        1, 2, figsize=(13.8, 5.2), dpi=200, sharex=True, sharey=True
+    )
+
+    fig.suptitle(title, fontsize=14, fontweight="bold")
+
+    # ---------------- GT panel ----------------
+    if have_orig:
+        axG.plot(
+            s0[ok0], gtw0[ok0],
+            lw=2.2, color="tab:blue", alpha=0.85,
+            label="gt (orig)"
+        )
+        axG.axhline(gtw0_mean, lw=1.3, alpha=0.35, color="tab:blue")
+
+    axG.plot(
+        s1[ok1], gtw1[ok1],
+        lw=2.6, ls="--", color="tab:orange",
+        label="gt (resampled)"
+    )
+    axG.axhline(gtw1_mean, lw=1.3, alpha=0.35, ls="--", color="tab:orange")
+
+    axG.set_title("GT width vs arclength", fontsize=12)
+    axG.set_xlabel("arclength s (px)", fontsize=11)
+    axG.set_ylabel("width (px)", fontsize=11)
+    axG.grid(True, alpha=0.25)
+    axG.legend(fontsize=10)
+
+    # ---------------- Pred panel ----------------
+    if have_orig:
+        axP.plot(
+            s0[ok0], pw0[ok0],
+            lw=2.2, color="darkgreen", alpha=0.85,
+            label="pred (orig)"
+        )
+        axP.axhline(pw0_mean, lw=1.3, alpha=0.35, color="darkgreen")
+
+    axP.plot(
+        s1[ok1], pw1[ok1],
+        lw=2.6, ls="--", color="red",
+        label="pred (resampled)"
+    )
+    axP.axhline(pw1_mean, lw=1.3, alpha=0.35, ls="--", color="red")
+
+    axP.set_title("Predicted width vs arclength", fontsize=12)
+    axP.set_xlabel("arclength s (px)", fontsize=11)
+    axP.set_ylabel("width (px)", fontsize=11)
+    axP.grid(True, alpha=0.25)
+    axP.legend(fontsize=10)
+
+    # ---------------- Limits ----------------
+    axG.set_xlim(0.0, s_max * 1.02)
+    axG.set_ylim(0.0, w_max * 1.05)
+
+    # ------------------------------------------------------------
+    # Save
+    # ------------------------------------------------------------
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight", dpi=200)
+    plt.close(fig)
+
+    print(f"[PART2 SIGNAL] wrote: {out_path}")
+        
+def part2_plot_worst_and_all(
+        *,
+        worst_cid_runs,
+        all_runs_global,
+        mask_bin,
+        crop_worst,
+        crop_all,
+        part2_resample_dir,
+        worst_cid,
+    ):
+    import os
+    import numpy as np
+
+    # ------------------------------------------------------------
+    # WORST CID — ALL segments
+    # ------------------------------------------------------------
+    plot_sampling_consistency(
+        pts_list=[r.get("pts") for r in worst_cid_runs if r.get("pts") is not None],
+        ptsr_list=[r.get("pts_rs") for r in worst_cid_runs if r.get("pts_rs") is not None],
+        mask_bin=mask_bin,
+        crop=crop_worst,
+        title=f"Part 2 sampling consistency — WORST CID={worst_cid}",
+        out_path=os.path.join(
+            part2_resample_dir,
+            f"part2_sampling_WORST_cid{worst_cid}.png",
+        ),
+    )
+
+    plot_width_error_distribution(
+        runs=worst_cid_runs,
+        title=f"Part 2 width error distribution — WORST CID={worst_cid}",
+        out_path=os.path.join(part2_resample_dir, f"part2_width_dist_WORST_cid{worst_cid}.png"),
+    )
+
+    # Worst representative run (longest finite length)
+    worst_run = None
+    bestL = -1.0
+    for r in worst_cid_runs:
+        L = float(r.get("run_len_px", 0.0))
+        if np.isfinite(L) and L > bestL:
+            bestL = L
+            worst_run = r
+
+    if worst_run is not None:
+        plot_part2_width_signals_preservation(
+            run=worst_run,
+            title=f"Part 2 worst-run width signals — cid={worst_cid}",
+            out_path=os.path.join(part2_resample_dir, f"part2_width_signals_WORST_cid{worst_cid}.png"),
+        )
+
+    # ------------------------------------------------------------
+    # GLOBAL — ALL CIDs
+    # ------------------------------------------------------------
+    plot_sampling_consistency(
+        pts_list=[r.get("pts") for r in all_runs_global if r.get("pts") is not None],
+        ptsr_list=[r.get("pts_rs") for r in all_runs_global if r.get("pts_rs") is not None],
+        mask_bin=mask_bin,
+        crop=crop_all,
+        title="Part 2 sampling consistency — ALL CIDs",
+        out_path=os.path.join(
+            part2_resample_dir,
+            "part2_sampling_ALL_CIDS.png",
+        ),
+    )
+
+    plot_width_error_distribution(
+        runs=all_runs_global,
+        title="Part 2 width error distribution — ALL CIDs",
+        out_path=os.path.join(part2_resample_dir, "part2_width_dist_ALL_CIDS.png"),
+    )
+
+    # Representative GLOBAL signal (longest run across all CIDs)
+    global_run = None
+    bestL = -1.0
+    for r in all_runs_global:
+        L = float(r.get("run_len_px", 0.0))
+        if np.isfinite(L) and L > bestL:
+            bestL = L
+            global_run = r
+
+    if global_run is not None:
+        plot_part2_width_signals_preservation(
+            run=global_run,
+            title="Part 2 width signals — ALL CIDs (representative)",
+            out_path=os.path.join(part2_resample_dir, "part2_width_signals_ALL_CIDS.png"),
+        )
+
+def export_width_distribution_summary(
+    *,
+    pred_widths,
+    gt_widths,
+    out_dir,
+    image_name,
+
+    # ---- identity ----
+    variant,                  # e.g. "medial", "auto", "manual"
+    midline_type,              # REQUIRED: baseline / auto / manual
+    crack_type=None,           # "atomic" | "combined"
+
+    # ---- crack identity (NEW) ----
+    cid=None,                  # atomic crack id (string or int)
+    group_id=None,             # combined branch / group id (string or int)
+
+    # ---- GT semantics ----
+    gt_tier,                   # "atomic" | "combined_unfiltered" | "combined_filtered"
+    gt_pairing="none",         # "none" | "manual" | "auto"
+    filtered=False,            # True if mutual filtering applied
+
+    # ---- bookkeeping ----
+    method_family=None,        # optional grouping tag ("baseline" | "model")
+):
+    """
+    Distributional width comparison (Regime A).
+
+    Properties:
+      - Geometry-agnostic
+      - No alignment assumed
+      - No resampling
+      - No clipping
+      - Descriptive statistics ONLY
+
+    Identifiers:
+      - cid:      atomic crack id (diagnostic)
+      - group_id: combined branch / group id (diagnostic)
+
+    Output:
+      Appends ONE row to:
+        <out_dir>/width_distribution_summary.csv
+    """
+
+    import os
+    import numpy as np
+    import pandas as pd
+    from scipy.stats import wasserstein_distance, ks_2samp
+
+    os.makedirs(out_dir, exist_ok=True)
+    out_csv = os.path.join(out_dir, "width_distribution_summary.csv")
+
+    # -------------------------------------------------
+    # Sanitize inputs
+    # -------------------------------------------------
+    pw = np.asarray(pred_widths, float).reshape(-1)
+    gw = np.asarray(gt_widths, float).reshape(-1)
+
+    mask = (
+        np.isfinite(pw) &
+        np.isfinite(gw) &
+        (pw > 0) &
+        (gw > 0)
+    )
+
+    pw = pw[mask]
+    gw = gw[mask]
+
+    if pw.size < 5 or gw.size < 5:
+        print("[DIST] skipped: insufficient valid samples")
+        return
+
+    # -------------------------------------------------
+    # Distributional differences (NOT error)
+    # -------------------------------------------------
+    median_diff = float(np.median(pw) - np.median(gw))
+    mean_diff   = float(np.mean(pw)   - np.mean(gw))
+
+    iqr_pred = float(np.percentile(pw, 75) - np.percentile(pw, 25))
+    iqr_gt   = float(np.percentile(gw, 75) - np.percentile(gw, 25))
+    iqr_ratio = float(iqr_pred / (iqr_gt + 1e-12))
+
+    std_ratio = float(np.std(pw) / (np.std(gw) + 1e-12))
+
+    try:
+        w_dist = float(wasserstein_distance(pw, gw))
+    except Exception:
+        w_dist = np.nan
+
+    try:
+        ks_stat = float(ks_2samp(pw, gw).statistic)
+    except Exception:
+        ks_stat = np.nan
+
+    # -------------------------------------------------
+    # Row
+    # -------------------------------------------------
+    row = {
+        # ---- identifiers ----
+        "image": image_name,
+        "variant": str(variant),
+        "midline_type": str(midline_type),
+        "crack_type": crack_type,
+
+        # ---- NEW diagnostic identifiers ----
+        "cid": None if cid is None else str(cid),
+        "member_id": None if group_id is None else str(group_id),
+
+        "method_family": method_family,
+
+        # ---- GT semantics ----
+        "gt_tier": gt_tier,
+        "gt_pairing": gt_pairing,
+        "filtered": bool(filtered),
+
+        # ---- sample counts ----
+        "n_samples": int(min(pw.size, gw.size)),
+
+        # ---- GT distribution ----
+        "gt_mean": float(np.mean(gw)),
+        "gt_median": float(np.median(gw)),
+        "gt_iqr": float(iqr_gt),
+        "gt_std": float(np.std(gw)),
+
+        # ---- Pred distribution ----
+        "pred_mean": float(np.mean(pw)),
+        "pred_median": float(np.median(pw)),
+        "pred_iqr": float(iqr_pred),
+        "pred_std": float(np.std(pw)),
+
+        # ---- Distributional divergence ----
+        "median_diff": median_diff,
+        "mean_diff": mean_diff,
+        "iqr_ratio": iqr_ratio,
+        "std_ratio": std_ratio,
+        "wasserstein_dist": w_dist,
+        "ks_stat": ks_stat,
+    }
+
+    df = pd.DataFrame([row])
+
+    # -------------------------------------------------
+    # Append safely
+    # -------------------------------------------------
+    if os.path.exists(out_csv):
+        df.to_csv(out_csv, mode="a", header=False, index=False)
+    else:
+        df.to_csv(out_csv, index=False)
+
+    print(
+        f"[DIST] wrote distribution row | "
+        f"variant={variant} | gt={gt_tier} | "
+        f"cid={cid} | group={group_id} | "
+        f"n={row['n_samples']}"
+    )
+
+def compare_widths_for_aligned_cracks(
     ann,
     crack_mask,
     base_name,
@@ -1090,32 +2006,42 @@ def compare_widths_for_cracks(
     normals_dir=None,
     max_radius=50,
     gt_sup_root=None,
+    *,
+    variant_id="main",
+    write_part2_tables=True,
 ):
     """
-    WIDTH COMPARISON — SINGLE-MODE (ATOMIC OR COMBINED)
+    WIDTH COMPARISON — ALIGNED CRACKS ONLY (ATOMIC OR COMBINED)
 
     Contract:
       - This function MUST be called with exactly one of:
           { "atomic_cracks": {...} }  OR
           { "combined_cracks": {...} }
 
-    Guarantees (retained):
+    Scope:
+      - This function assumes **geometrically alignable cracks**
+      - Used for:
+          * GT vs MANUAL
+          * GT vs AUTO
+          * MANUAL vs AUTO (after opsec pruning)
+      - NOT used for baseline evaluation
+
+    Guarantees:
       - Segment-safe (no flattening)
       - Geodesic fallback if normals missing
       - Zoom uses ONLY union of provided mask_bbox values
       - Solid blue bbox overlay
       - TwoSlopeNorm always monotonic (0 included)
 
-    NEW (combined opsec):
-      - Stage 0: match combined crack to GT supervision by member overlap (fallback to best-overlap)
-      - Stage 1: prune segments to shared atomic IDs (when segment meta exists)
-      - Stage 2: optional branch matching using branch membership (when both sides provide metadata)
-      - Stage 3: symmetric bite-union clipping (when bite masks exist)
-      - GT widths for combined are computed along the FINAL clipped polyline (mask-based),
-        so segment ordering differences cannot corrupt alignment.
+    Combined-specific behavior:
+      - Stage 0: match combined crack to GT supervision by member overlap
+      - Stage 1: prune segments to shared atomic IDs
+      - Stage 2: optional branch matching
+      - Stage 3: symmetric bite-union clipping
+      - GT widths computed along FINAL clipped polyline
     """
 
-    import os, json, base64
+    import os, json
     import numpy as np
     import matplotlib.pyplot as plt
     from matplotlib.colors import TwoSlopeNorm
@@ -1123,16 +2049,21 @@ def compare_widths_for_cracks(
 
     os.makedirs(metrics_dir, exist_ok=True)
 
+    # ---------------- variant tag (output isolation only) ----------------
+    variant_id = str(variant_id or "main").strip()
+    file_tag = "main" if variant_id in ("", "main") else variant_id
+
     H, W = crack_mask.shape
     mask_bin = (crack_mask > 0).astype(np.uint8)
 
     atomic   = ann.get("atomic_cracks")
     combined = ann.get("combined_cracks")
+    #print(f"!!!!!!!!!!!!!!!!!{combined.keys()}")
 
     # ---------------- enforce SINGLE MODE ----------------
     if (atomic is None) == (combined is None):
         raise RuntimeError(
-            "compare_widths_for_cracks expects EXACTLY ONE of "
+            "compare_widths_for_aligned_cracks expects EXACTLY ONE of "
             "'atomic_cracks' or 'combined_cracks'"
         )
 
@@ -1140,226 +2071,6 @@ def compare_widths_for_cracks(
     cracks = atomic if mode == "atomic" else combined
 
     print(f"\n[WIDTH DEBUG] === RUN MODE: {mode.upper()} ===")
-
-    # ---------------- helpers ----------------
-    def _split_on_nans(arr):
-        arr = np.asarray(arr, float)
-        if arr.ndim != 2 or arr.shape[1] != 2:
-            return []
-        good = np.isfinite(arr[:, 0]) & np.isfinite(arr[:, 1])
-        segs, s = [], None
-        for i, g in enumerate(good):
-            if g and s is None:
-                s = i
-            elif not g and s is not None:
-                if i - s >= 2:
-                    segs.append(arr[s:i])
-                s = None
-        if s is not None and len(arr) - s >= 2:
-            segs.append(arr[s:])
-        return segs
-
-    def _get_edges(crack):
-        geo = crack.get("normal_edge_points") or crack.get("geodesic_edges") or {}
-        e1 = np.asarray(geo.get("edge1", []), float)
-        e2 = np.asarray(geo.get("edge2", []), float)
-        return e1, e2
-
-    def _union_bboxes(bboxes):
-        xs0, ys0, xs1, ys1 = [], [], [], []
-        for b in bboxes:
-            if not b or len(b) != 4:
-                continue
-            x, y, w, h = b
-            if w <= 0 or h <= 0:
-                continue
-            xs0.append(x); ys0.append(y)
-            xs1.append(x + w); ys1.append(y + h)
-        if not xs0:
-            return None
-        return [min(xs0), min(ys0), max(xs1) - min(xs0), max(ys1) - min(ys0)]
-
-    def _decode_packbits_mask(blob):
-        """
-        blob = {"shape":[h,w], "packbits_b64": "..."}
-        returns uint8 mask (h,w)
-        """
-        if not blob:
-            return None
-        shape = blob.get("shape") or [0, 0]
-        h, w = int(shape[0]), int(shape[1])
-        s = blob.get("packbits_b64") or ""
-        if h <= 0 or w <= 0 or not s:
-            return np.zeros((h, w), np.uint8)
-        raw = base64.b64decode(s.encode("ascii"))
-        packed = np.frombuffer(raw, dtype=np.uint8)
-        # packed is (h * ceil(w/8),) flatten
-        row_bytes = int((w + 7) // 8)
-        if packed.size < h * row_bytes:
-            # corrupted / mismatch: fail closed to empty
-            return np.zeros((h, w), np.uint8)
-        packed = packed[: h * row_bytes].reshape((h, row_bytes))
-        unpacked = np.unpackbits(packed, axis=1)[:, :w]
-        return unpacked.astype(np.uint8)
-
-    def _points_hit_bite(points_xy, bite_obj):
-        """
-        bite_obj:
-          {"bbox":[x0,y0,w,h], "shape":[h,w], "packbits_b64":"..."}
-        returns boolean mask len(points)
-        """
-        if bite_obj is None:
-            return np.zeros((len(points_xy),), bool)
-
-        bb = bite_obj.get("bbox")
-        if not bb or len(bb) != 4:
-            return np.zeros((len(points_xy),), bool)
-
-        x0, y0, bw, bh = map(int, bb)
-        if bw <= 0 or bh <= 0:
-            return np.zeros((len(points_xy),), bool)
-
-        m = _decode_packbits_mask({
-            "shape": bite_obj.get("shape"),
-            "packbits_b64": bite_obj.get("packbits_b64"),
-        })
-        if m is None or m.size == 0:
-            return np.zeros((len(points_xy),), bool)
-
-        pts = np.asarray(points_xy, float)
-        xs = np.round(pts[:, 0]).astype(int) - x0
-        ys = np.round(pts[:, 1]).astype(int) - y0
-        ok = (xs >= 0) & (xs < bw) & (ys >= 0) & (ys < bh)
-        hit = np.zeros((len(pts),), bool)
-        if np.any(ok):
-            hit[ok] = (m[ys[ok], xs[ok]] > 0)
-        return hit
-
-    def _split_by_keep_mask(points, keep_mask):
-        """
-        points: (N,2)
-        keep_mask: (N,) bool
-        returns list of (run_points, run_indices_in_original)
-        """
-        pts = np.asarray(points, float)
-        keep = np.asarray(keep_mask, bool)
-        out = []
-        s = None
-        for i, k in enumerate(keep):
-            if k and s is None:
-                s = i
-            elif (not k) and (s is not None):
-                if i - s >= 2:
-                    idx = np.arange(s, i, dtype=int)
-                    out.append((pts[s:i], idx))
-                s = None
-        if s is not None and len(pts) - s >= 2:
-            idx = np.arange(s, len(pts), dtype=int)
-            out.append((pts[s:], idx))
-        return out
-
-    def _linestring_length(S):
-        S = np.asarray(S, float)
-        if S.ndim != 2 or len(S) < 2:
-            return 0.0
-        d = np.linalg.norm(S[1:] - S[:-1], axis=1)
-        d = d[np.isfinite(d)]
-        return float(d.sum()) if len(d) else 0.0
-
-    def _extract_segments_and_meta(crack):
-        """
-        Returns:
-          segs: list[np.ndarray (Ni,2)]
-          seg_meta: list[dict] same length as segs (best effort)
-          bite_obj: dict or None
-          members_set: set(str)
-        """
-        if mode == "atomic":
-            segs = _split_on_nans(crack.get("midline", []))
-            seg_meta = [{"branch_id": 0, "atomic_id": str(crack.get("id", ""))} for _ in segs]
-            return segs, seg_meta, None, {str(crack.get("id", ""))}
-        else:
-            #print(f"\n------------{crack.keys()}-----------\n")
-            segs = [np.asarray(s, float) for s in (crack.get("midline_segments", []) or [])]
-            seg_meta = crack.get("midline_segments_meta") or crack.get("segments_meta") or []
-            if not isinstance(seg_meta, list):
-                seg_meta = []
-            if len(seg_meta) != len(segs):
-                # best effort padding
-                tmp = []
-                for i in range(len(segs)):
-                    d = seg_meta[i] if i < len(seg_meta) and isinstance(seg_meta[i], dict) else {}
-                    tmp.append(d)
-                seg_meta = tmp
-                for i in range(len(seg_meta)):
-                    if "branch_id" not in seg_meta[i]:
-                        seg_meta[i]["branch_id"] = int(seg_meta[i].get("branch_id", i))
-            bite_obj = None
-            dom = crack.get("dominance_meta") or crack.get("dominance") or crack.get("dominance_info") or {}
-            if isinstance(dom, dict) and "bite" in dom and isinstance(dom["bite"], dict):
-                bite_obj = dom["bite"]
-            else:
-                # some pipelines store bite directly
-                b = crack.get("bite")
-                if isinstance(b, dict) and "bbox" in b:
-                    bite_obj = b
-            members = crack.get("members") or []
-            members_set = set(map(str, members))
-            return segs, seg_meta, bite_obj, members_set
-
-    def _build_branch_table(segs, seg_meta, shared_members=None):
-        """
-        Builds branch dict:
-          branch_id -> {"members":set(str), "seg_idxs":[int], "length":float}
-        If seg_meta has atomic_id, that's used for branch membership.
-        """
-        if shared_members is None:
-            shared_members = None
-        branches = {}
-        for i, (S, m) in enumerate(zip(segs, seg_meta)):
-            if S is None or len(S) < 2:
-                continue
-            bid = int(m.get("branch_id", i))
-            aid = m.get("atomic_id")
-            if bid not in branches:
-                branches[bid] = {"members": set(), "seg_idxs": [], "length": 0.0}
-            branches[bid]["seg_idxs"].append(i)
-            branches[bid]["length"] += _linestring_length(S)
-            if aid is not None:
-                aid = str(aid)
-                if shared_members is None or aid in shared_members:
-                    branches[bid]["members"].add(aid)
-        return branches
-
-    def _greedy_match_branches(gt_br, pr_br):
-        """
-        gt_br, pr_br: dict branch_id -> {"members", "length", ...}
-        Returns:
-          list of (gt_bid, pr_bid, shared_count, shared_len)
-        """
-        pairs = []
-        for g_id, g in gt_br.items():
-            for p_id, p in pr_br.items():
-                inter = g["members"] & p["members"]
-                sc = len(inter)
-                if sc <= 0:
-                    continue
-                # tie-break with min length (stable, doesn't depend on float dominance noise)
-                sl = float(min(g.get("length", 0.0), p.get("length", 0.0)))
-                pairs.append((g_id, p_id, sc, sl))
-        # sort by (shared_count, shared_len) desc
-        pairs.sort(key=lambda t: (t[2], t[3]), reverse=True)
-
-        gt_used = set()
-        pr_used = set()
-        out = []
-        for g_id, p_id, sc, sl in pairs:
-            if g_id in gt_used or p_id in pr_used:
-                continue
-            gt_used.add(g_id)
-            pr_used.add(p_id)
-            out.append((g_id, p_id, sc, sl))
-        return out
 
     # ---------------- load GT supervision ----------------
     gt_sup = {}
@@ -1370,14 +2081,58 @@ def compare_widths_for_cracks(
                 data = json.load(f)
             for e in data.get("cracks", []):
                 if e.get("kind") == mode:
-                    key = str(e["id"]) if mode == "atomic" else frozenset(map(str, e.get("members", [])))
+                    key = (
+                        str(e["id"])
+                        if mode == "atomic"
+                        else frozenset(map(str, e.get("members", [])))
+                    )
                     gt_sup[key] = e
+
+    def _extract_segments_and_meta(crack):
+        """
+        Returns:
+            segs: list[np.ndarray (Ni,2)]
+            seg_meta: list[dict] same length as segs (best effort)
+            bite_obj: dict or None
+            members_set: set(str)
+        """
+        if mode == "atomic":
+            segs = _split_on_nans(crack.get("midline", []))
+            seg_meta = [{"branch_id": 0, "atomic_id": str(crack.get("id", ""))} for _ in segs]
+            return segs, seg_meta, None, {str(crack.get("id", ""))}
+        else:
+            segs = [np.asarray(s, float) for s in (crack.get("midline_segments", []) or [])]
+            seg_meta = crack.get("midline_segments_meta") or crack.get("segments_meta") or []
+            if not isinstance(seg_meta, list):
+                seg_meta = []
+            if len(seg_meta) != len(segs):
+                tmp = []
+                for i in range(len(segs)):
+                    d = seg_meta[i] if i < len(seg_meta) and isinstance(seg_meta[i], dict) else {}
+                    tmp.append(d)
+                seg_meta = tmp
+                for i in range(len(seg_meta)):
+                    if "branch_id" not in seg_meta[i]:
+                        seg_meta[i]["branch_id"] = int(seg_meta[i].get("branch_id", i))
+
+            bite_obj = None
+            dom = crack.get("dominance_meta") or crack.get("dominance") or crack.get("dominance_info") or {}
+            if isinstance(dom, dict) and "bite" in dom and isinstance(dom["bite"], dict):
+                bite_obj = dom["bite"]
+            else:
+                b = crack.get("bite")
+                if isinstance(b, dict) and "bbox" in b:
+                    bite_obj = b
+
+            members = crack.get("members") or []
+            members_set = set(map(str, members))
+            return segs, seg_meta, bite_obj, members_set
 
     # ---------------- accumulators ----------------
     coords, diffs, bboxes = [], [], []
     rows = []
-    midline_metric_rows = []   # NEW: for combined midline diagnostics
-    
+    midline_metric_rows = []   # for combined midline diagnostics
+
     width_pairs = []
     width_metric_rows = []
 
@@ -1385,8 +2140,43 @@ def compare_widths_for_cracks(
     opsec_dir = os.path.join(metrics_dir, midline_type or "unknown", "opsec_debug")
     os.makedirs(opsec_dir, exist_ok=True)
 
-    # ---------------- iterate cracks ----------------
-    for cid, crack in cracks.items():
+    # ---------------- local: predicted width trace extraction ----------------
+    def _get_pred_width_full(crack_obj, midline_concat_pts, widths_geo_fallback):
+        """
+        Returns a per-point width vector aligned to CONCATENATED midline points.
+        Preference order:
+          1) crack_obj["width_px"] / ["midline_width_px"] / ["pred_width_px"]
+          2) edge distance (widths_geo_fallback)
+          3) sample width_map / width_map_crop at points
+        """
+        for k in ("pred_width_px", "midline_width_px", "width_px", "widths_px"):
+            w = crack_obj.get(k, None)
+            if w is not None:
+                w = np.asarray(w, float).reshape(-1)
+                if w.size >= 2:
+                    return w
+
+        if widths_geo_fallback is not None:
+            w = np.asarray(widths_geo_fallback, float).reshape(-1)
+            if w.size >= 2:
+                return w
+
+        wm = crack_obj.get("width_map", None)
+        if wm is not None:
+            return _sample_width_map_at_pts(wm, midline_concat_pts, bbox=None)
+
+        wm_crop = crack_obj.get("width_map_crop", None)
+        bb = crack_obj.get("mask_bbox", None)
+        if wm_crop is not None and bb is not None:
+            return _sample_width_map_at_pts(wm_crop, midline_concat_pts, bbox=bb)
+
+        return None
+
+    # ---------------- iterate cracks (NO baseline_mode; baseline is injected via pred_widths) ----------------
+    crack_iter = list(cracks.items())
+    print(f"cracks iterating through: {len(crack_iter)}")
+
+    for cid, crack in crack_iter:
         print(f"\n[WIDTH DEBUG] {mode.upper()} cid={cid}")
 
         segs, seg_meta, bite_pred, pred_members = _extract_segments_and_meta(crack)
@@ -1398,71 +2188,72 @@ def compare_widths_for_cracks(
             continue
         m_edge = min(len(e1), len(e2))
         widths_geo = np.linalg.norm(e1[:m_edge] - e2[:m_edge], axis=1)
-        
-        ##############################################
-        # Part 1
-        ##############################################
 
-        # --------------------------------------------
-        # ATOMIC MODE (Part-2 compatible; NO diffs here)
-        # --------------------------------------------
+        # Build concatenated midline points in the same order as segs for width trace alignment
+        mid_concat = (
+            np.vstack([np.asarray(s, float) for s in segs if s is not None and len(s) >= 2])
+            if segs else None
+        )
+
+        # ------------------------------------------------------------
+        # Predicted width source:
+        #   - baseline injection uses crack["pred_widths"]
+        #   - otherwise compute from geometry / cached traces
+        # ------------------------------------------------------------
+        if isinstance(crack, dict) and "pred_widths" in crack:
+            predw_full_any = np.asarray(crack["pred_widths"], float).reshape(-1)
+        else:
+            predw_full_any = _get_pred_width_full(crack, mid_concat, widths_geo)
+
+        # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+        # Everything AFTER this point can remain exactly as-is
+        # in your current compare_widths_for_aligned_cracks implementation.
+        # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+
+        ##############################################
+        # Part 1 (atomic): push width_pairs only
+        #   - pred widths come from precomputed widths / edges / width-map
+        #   - GT widths computed on the same samples from mask (here, not by index matching)
+        ##############################################
         if mode == "atomic":
-            gt_widths = []
+            if predw_full_any is None or predw_full_any.size < 2:
+                print(f"[WIDTH DEBUG] atomic cid={cid} has no usable pred width trace -> skip")
+                continue
 
-            # ---- Prefer GT supervision if available ----
-            if gt_sup_root and str(cid) in gt_sup:
-                try:
-                    gt_widths = [
-                        np.asarray(
-                            gt_sup[str(cid)]["gt_normals"]["width_px"],
-                            float
-                        )
-                    ]
-                except Exception:
-                    gt_widths = []
+            predw_full_any = np.asarray(predw_full_any, float).reshape(-1)
 
-            # ---- Fallback recompute (optional) ----
-            # If you truly want this gone, replace this whole block with `if not gt_widths: continue`
-            if not gt_widths:
-                print("WARNING! No gt widths found. Recomputing (atomic fallback)")
-                for s in segs:
-                    (_, _, _, _, w), _ = normals_from_mask_for_midline(
-                        s, mask_bin, max_radius
-                    )
-                    gt_widths.append(np.asarray(w, float))
-
-            off = 0  # running offset into widths_geo
-
-            for s, gtw in zip(segs, gt_widths):
+            off = 0
+            for s in segs:
                 if s is None or len(s) < 2:
                     continue
 
-                # ---- determine safe aligned length ----
-                m = min(
-                    len(s),
-                    len(gtw),
-                    max(0, len(widths_geo) - off)
-                )
+                pts = np.asarray(s, float)
+                m = min(len(pts), max(0, predw_full_any.size - off))
                 if m < 2:
-                    off += max(m, 0)
+                    off += max(len(pts), 0)
                     continue
 
-                # ---- aligned geometry + widths (raw sampling; Part 2 will resample) ----
-                pts    = np.asarray(s[:m], float)
-                gtruthw = np.asarray(gtw[:m], float)
-                predw  = np.asarray(widths_geo[off:off + m], float)
+                pts = pts[:m]
+                predw = predw_full_any[off:off + m].astype(float, copy=False)
 
-                # ---- Part 2 input only ----
+                # GT widths measured along the SAME pts (mask-based)
+                (_, _, _, _, gtw), _ = normals_from_mask_for_midline(
+                    pts, mask_bin, max_radius
+                )
+                gtw = np.asarray(gtw, float)
+
                 width_pairs.append({
                     "image": base_name,
+                    "variant": variant_id,
                     "cid": str(cid),
-                    "crack_type": mode,            # "atomic"
-                    "midline_type": midline_type,  # "auto"/"manual"/...
+                    "crack_type": "atomic",
+                    "midline_type": midline_type,
                     "bbox": crack.get("mask_bbox"),
                     "pts": pts,
                     "predw": predw,
-                    "gruthw": gtruthw,             # authoritative for atomic if from supervision
-                    "gt_source": "supervision" if (gt_sup_root and str(cid) in gt_sup) else "mask_fallback",
+                    "gruthw": gtw,
+                    "gt_source": "mask_same_samples",
                 })
 
                 off += m
@@ -2283,16 +3074,13 @@ def compare_widths_for_cracks(
                                         
         # ============================================================
         # Stage 5: width slicing (DOMINANCE-APPLIED GEOMETRY)
+        #   - Collect per-segment width_pairs (for Regime B / C)
+        #   - ALSO accumulate per-CID buffers for Regime A
         # ============================================================
 
         final_pred_segs = []
-        stage4_pairs = []             # (pts_ok, width_diff)
+        stage4_pairs = []
 
-        # ---- GT plot segments (dominance-clipped, symmetric) ----
-        gt_plot_segs = [np.asarray(s, float) for s in (gt_stage5_segs or []) if s is not None and len(s) >= 2]
-        gt_plot_meta = gt_stage5_meta if isinstance(gt_stage5_meta, list) else []
-
-                
         for si, (S, m) in enumerate(zip(pruned_segs, pruned_meta)):
             if S is None or len(S) < 2:
                 continue
@@ -2315,13 +3103,6 @@ def compare_widths_for_cracks(
             predw_full = widths_geo[s0:s1]
             pts_full   = S[:len(predw_full)]
 
-            print(
-                f"[WIDTH DEBUG] cid={cid} seg#{si} "
-                f"branch={m.get('branch_id')} src={src} "
-                f"geom_pts={len(S)} predw_pts={len(predw_full)} "
-                f"s0={s0} s1={s1}"
-            )
-
             off_fallback += L
 
             if len(pts_full) < 2 or len(predw_full) < 2:
@@ -2334,17 +3115,38 @@ def compare_widths_for_cracks(
             pts_raw   = np.asarray(pts_full[:mlen], float)
             predw_raw = np.asarray(predw_full[:mlen], float)
 
-            # ---- Part 2 input only (gt widths will be computed from mask AFTER resampling) ----
+            # ---- GT widths measured on SAME geometry ----
+            (_, _, _, _, gtw_raw), _ = normals_from_mask_for_midline(
+                pts_raw, mask_bin, max_radius
+            )
+            gtw_raw = np.asarray(gtw_raw, float)
+            
+            # ---- width difference on FINAL Stage-5 geometry ----
+            d_raw = predw_raw - gtw_raw
+
+            # ---- Stage-4→5 provenance buffer (for OPSEC plotting ONLY) ----
+            # Each entry is (geometry, width_diff)
+            stage4_pairs.append((
+                pts_raw,
+                d_raw,
+            ))
+
+            # ========================================================
+            # Regime B / C input (UNCHANGED)
+            # ========================================================
+            
             width_pairs.append({
                 "image": base_name,
-                "cid": str(cid),
-                "crack_type": mode,               # "combined"
-                "midline_type": midline_type,     # "auto"/"manual"/...
+                "variant": variant_id,
+                "cid": str(cid),                    # group id
+                "member_id": str(m.get("atomic_id")) if isinstance(m, dict) else None,
+                "crack_type": "combined",
+                "midline_type": midline_type,
                 "bbox": crack.get("mask_bbox"),
                 "pts": pts_raw,
                 "predw": predw_raw,
-                "gruthw": None,                   # computed in Part 2 from mask after resampling
-                "gt_source": "mask_after_resample",
+                "gruthw": gtw_raw,
+                "gt_source": "mask_same_samples",
                 "branch_id": m.get("branch_id") if isinstance(m, dict) else None,
                 "seg_idx":   m.get("seg_idx")   if isinstance(m, dict) else None,
             })
@@ -2425,7 +3227,13 @@ def compare_widths_for_cracks(
             # --------------------------------------------------
             # TOPOLOGY-PRUNED geometry (compute against pre-4.5 snapshot)
             # --------------------------------------------------
-            keep_set = _polyline_points_keyset(pred_stage5_support)
+            #keep_set = _polyline_points_keyset(pred_stage5_support)
+            #if bite_pruned_pred_segs:
+            #    keep_set |= _polyline_points_keyset(bite_pruned_pred_segs)
+            # Keep everything that truly survives into Stage-5 prediction geometry
+            keep_set = _polyline_points_keyset(final_pred_segs)
+
+            # Also keep explicit bite-pruned pieces (so they don't show as topology-pruned)
             if bite_pruned_pred_segs:
                 keep_set |= _polyline_points_keyset(bite_pruned_pred_segs)
             
@@ -2683,7 +3491,7 @@ def compare_widths_for_cracks(
         debug_root = os.path.join(metrics_dir, midline_type or "unknown", "compare_widths_debug")
         os.makedirs(debug_root, exist_ok=True)
 
-        debug_mode_dir = os.path.join(debug_root, str(mode))
+        debug_mode_dir = os.path.join(debug_root, str(mode), file_tag)
         os.makedirs(debug_mode_dir, exist_ok=True)
 
         part2_dir = os.path.join(debug_mode_dir, "part2")
@@ -2862,6 +3670,45 @@ def compare_widths_for_cracks(
             s_orig       = np.asarray(s_orig[:m0], float)
             predw_orig   = np.asarray(predw_orig[:m0], float)
             gtruthw_orig = np.asarray(gtruthw_orig[:m0], float)
+            
+            # ============================================================
+            # DISTRIBUTIONAL WIDTH SUMMARY (Regime A)
+            #   - Geometry-agnostic
+            #   - MUST be called BEFORE resampling
+            #   - Uses ORIGINAL-domain widths only
+            # ============================================================
+            export_width_distribution_summary(
+                pred_widths = predw_orig,
+                gt_widths   = gtruthw_orig,
+                out_dir     = metrics_dir,   # image-level metrics root (NOT part2)
+
+                # ---- identity ----
+                image_name  = image,
+                variant     = wp.get("variant", variant_id),
+                midline_type= mtype,
+                crack_type  = ctype,
+
+                # ---- NEW: crack identity ----
+                cid         = cid_s,                 # atomic crack id
+                group_id    = wp.get("member_id", None),  # combined branch id (None for atomic)
+
+                # ---- GT semantics ----
+                gt_tier     = (
+                    "atomic"
+                    if mode == "atomic"
+                    else ("combined_filtered" if write_part2_tables else "combined_unfiltered")
+                ),
+                gt_pairing  = wp.get("variant", variant_id),
+                filtered    = (mode == "combined"),
+
+                # ---- bookkeeping ----
+                method_family = (
+                    "baseline"
+                    if str(wp.get("variant", "")).startswith("medial")
+                    else "model"
+                ),
+            )
+
 
             # ------------------------------------------------------------
             # RESAMPLE GEOMETRY + WIDTHS (authoritative domain)
@@ -3011,8 +3858,11 @@ def compare_widths_for_cracks(
             # ------------------------------------------------------------
             # Per-crack aggregation
             # ------------------------------------------------------------
-            key = (image, cid_s, ctype, mtype)
-            if key not in per_crack:
+            #key = (image, cid_s, ctype, mtype)
+            vtag = str(wp.get("variant", variant_id))
+            key = (image, vtag, cid_s, ctype, mtype)
+
+            '''if key not in per_crack:
                 per_crack[key] = {
                     "total_len_px": total_len,
                     "finite_len_px": 0.0,
@@ -3020,11 +3870,25 @@ def compare_widths_for_cracks(
                     "sum_mae_L": 0.0,
                     "sum_mse_L": 0.0,
                     "bbox": bbox,
+                }'''
+            if key not in per_crack:
+                per_crack[key] = {
+                    "total_pred_len_px": 0.0,   # SUM of all candidate midline length
+                    "finite_len_px": 0.0,       # SUM of finite-evaluable length
+                    "sum_bias_L": 0.0,
+                    "sum_mae_L": 0.0,
+                    "sum_mse_L": 0.0,
+                    "bbox": bbox,
                 }
 
             bin_ = per_crack[key]
-            bin_["total_len_px"] = max(bin_["total_len_px"], total_len)
+            bin_["total_pred_len_px"] += max(total_len, 0.0)
             bin_["finite_len_px"] += finite_len
+
+
+#            bin_ = per_crack[key]
+#            bin_["total_len_px"] = max(bin_["total_len_px"], total_len)
+#            bin_["finite_len_px"] += finite_len
 
             for st in run_stats:
                 L = st["run_len_px"]
@@ -3037,7 +3901,7 @@ def compare_widths_for_cracks(
         # ------------------------------------------------------------
         # Emit per-crack metric rows
         # ------------------------------------------------------------
-        for (image, cid_s, ctype, mtype), bin_ in per_crack.items():
+        '''for (image, cid_s, ctype, mtype), bin_ in per_crack.items():
             finL = bin_["finite_len_px"]
             totL = bin_["total_len_px"]
             if finL <= 0 or totL <= 0:
@@ -3058,7 +3922,53 @@ def compare_widths_for_cracks(
                 "width_bias_L": bin_["sum_bias_L"] / (finL + 1e-12),
                 "width_mae_L":  bin_["sum_mae_L"]  / (finL + 1e-12),
                 "width_rmse_L": np.sqrt(bin_["sum_mse_L"] / (finL + 1e-12)),
+            })'''
+        
+        for (image, vtag, cid_s, ctype, mtype), bin_ in per_crack.items():
+            finL = float(bin_["finite_len_px"])
+            totL = float(bin_["total_pred_len_px"])
+            if finL <= 0 or totL <= 0:
+                continue
+
+            width_metric_rows.append({
+                "image": image,
+                "variant": vtag,
+                "crack_id": cid_s,
+                "crack_type": ctype,
+                "midline_type": mtype,
+
+                # lengths / coverage
+                "total_pred_len_px": totL,
+                "finite_len_px": finL,
+                "coverage_pred_len_frac": finL / (totL + 1e-12),
+
+                # legacy key for older plotting (keep it)
+                "finite_len_frac": finL / (totL + 1e-12),
+
+                "bbox_area": (
+                    bin_["bbox"][2] * bin_["bbox"][3]
+                    if bin_["bbox"] is not None else np.nan
+                ),
+
+                # length-weighted error
+                "width_bias_L": bin_["sum_bias_L"] / (finL + 1e-12),
+                "width_mae_L":  bin_["sum_mae_L"]  / (finL + 1e-12),
+                "width_rmse_L": np.sqrt(bin_["sum_mse_L"] / (finL + 1e-12)),
             })
+            
+        # ------------------------------------------------------------
+        # Write per-crack metric table (accuracy + coverage)
+        # ------------------------------------------------------------
+        if write_part2_tables and width_metric_rows:
+            try:
+                import pandas as pd
+                out_tbl = os.path.join(part2_metrics_dir, f"{base_name}__{variant_id}__width_metrics_{mode}_{midline_type}.csv")
+                pd.DataFrame(width_metric_rows).to_csv(out_tbl, index=False)
+                print(f"[PART2] wrote width metric table: {out_tbl}")
+            except Exception as e:
+                print(f"[PART2] failed to write width metric table: {e}")
+
+            
 
         # ------------------------------------------------------------
         # IMPORTANT: overwrite legacy plot buffers
@@ -3067,456 +3977,6 @@ def compare_widths_for_cracks(
         diffs  = diffs_part2
         bboxes = bboxes_part2
 
-        # ------------------------------------------------------------
-        # Part 2 plots
-        #   (A) TopK metrics: RMSE + MAE + Bias + finite_len_px (weight)
-        #   (B) Resampling explainers:
-        #       - worst / median / best by RMSE
-        #       - for each: show ALL finite runs (original + resampled)
-        #       - show d(s) curves per-run
-        #       - if predw/gtruthw available, also show predw(s), gtruthw(s) before/after
-        # ------------------------------------------------------------
-
-
-        # ======================================================================
-        # Part 2 PLOT HELPERS (MUST BE DEFINED BEFORE USE)
-        # ======================================================================
-        import numpy as np
-        import matplotlib.pyplot as plt
-        from matplotlib.collections import LineCollection
-
-        def draw_colored_polyline(ax, pts, vals, x0, y0, lw, cmap, norm, alpha=1.0):
-            if pts is None or vals is None or len(pts) < 2:
-                return
-            segs = [
-                [(pts[i,0]-x0, pts[i,1]-y0),
-                (pts[i+1,0]-x0, pts[i+1,1]-y0)]
-                for i in range(len(pts)-1)
-            ]
-            lc = LineCollection(
-                segs, array=vals, cmap=cmap, norm=norm,
-                linewidths=lw, alpha=alpha,
-                capstyle="round", joinstyle="round", zorder=3
-            )
-            ax.add_collection(lc)
-    
-        def plot_sampling_consistency(
-            *,
-            pts_list,
-            ptsr_list,
-            mask_bin,
-            crop,
-            title,
-            out_path,
-        ):
-            import numpy as np
-            import matplotlib.pyplot as plt
-            import os
-
-            print("[SAMPLE CONSISTENCY] enter")
-
-            # ------------------------------------------------------------
-            # Validate inputs
-            # ------------------------------------------------------------
-            if not pts_list or not ptsr_list:
-                print("[SAMPLE CONSISTENCY] skipped: empty pts_list or ptsr_list")
-                return
-
-            # KEEP POLYLINES SEPARATE (CRITICAL)
-            pts_list  = [np.asarray(p, float) for p in pts_list  if p is not None and len(p) >= 2]
-            ptsr_list = [np.asarray(p, float) for p in ptsr_list if p is not None and len(p) >= 2]
-
-            if not pts_list or not ptsr_list:
-                print("[SAMPLE CONSISTENCY] skipped: no valid polylines after filtering")
-                return
-
-            # ------------------------------------------------------------
-            # Collect segment lengths ONLY for color normalization
-            # ------------------------------------------------------------
-            ds_all = []
-            for p in pts_list:
-                ds = np.linalg.norm(np.diff(p, axis=0), axis=1)
-                ds = ds[np.isfinite(ds)]
-                if ds.size:
-                    ds_all.append(ds)
-
-            if not ds_all:
-                print("[SAMPLE CONSISTENCY] skipped: no finite segment lengths")
-                return
-
-            ds_all = np.concatenate(ds_all)
-
-            # ------------------------------------------------------------
-            # Color normalization
-            # ------------------------------------------------------------
-            vmin = np.percentile(ds_all, 10)
-            vmax = np.percentile(ds_all, 90)
-            if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
-                vmin = float(np.min(ds_all))
-                vmax = float(np.max(ds_all))
-                if vmax <= vmin:
-                    vmax = vmin + 1e-6
-
-            cmap = plt.get_cmap("viridis")
-            norm = plt.Normalize(vmin, vmax)
-
-            # ------------------------------------------------------------
-            # Figure
-            # ------------------------------------------------------------
-            fig, (axO, axR) = plt.subplots(1, 2, figsize=(13.8, 5.2), dpi=200)
-
-            # ------------------------------------------------------------
-            # Background mask (safe crop)
-            # ------------------------------------------------------------
-            x0 = y0 = 0
-            if mask_bin is not None and crop is not None:
-                h, w = mask_bin.shape[:2]
-                x0, y0, x1, y1 = crop
-                x0, y0 = max(0, x0), max(0, y0)
-                x1, y1 = min(w, x1), min(h, y1)
-
-                if x1 > x0 and y1 > y0:
-                    for ax in (axO, axR):
-                        ax.imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
-
-            for ax in (axO, axR):
-                ax.axis("off")
-
-            # ------------------------------------------------------------
-            # Draw ORIGINAL polylines (NO cross-run connections)
-            # ------------------------------------------------------------
-            for p in pts_list:
-                ds = np.linalg.norm(np.diff(p, axis=0), axis=1)
-                ds = ds[np.isfinite(ds)]
-                if ds.size < 1:
-                    continue
-
-                ds_p = np.r_[ds[0], ds]  # per-point values
-                draw_colored_polyline(axO, p, ds_p, x0, y0, 2, cmap, norm, 0.85)
-
-            # ------------------------------------------------------------
-            # Draw RESAMPLED polylines (NO cross-run connections)
-            # ------------------------------------------------------------
-            for p in ptsr_list:
-                ds = np.linalg.norm(np.diff(p, axis=0), axis=1)
-                ds = ds[np.isfinite(ds)]
-                if ds.size < 1:
-                    continue
-
-                ds_p = np.r_[ds[0], ds]
-                draw_colored_polyline(axR, p, ds_p, x0, y0, 2, cmap, norm, 0.90)
-
-            # ------------------------------------------------------------
-            # Colorbar
-            # ------------------------------------------------------------
-            sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
-            sm.set_array([])
-            plt.colorbar(sm, ax=[axO, axR], fraction=0.03, pad=0.03)
-
-            fig.text(
-                0.5, 0.985, title,
-                ha="center", va="top",
-                fontsize=11, fontweight="bold"
-            )
-
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            fig.savefig(out_path, bbox_inches="tight", dpi=200)
-            plt.close(fig)
-
-            print(f"[SAMPLE CONSISTENCY] wrote: {out_path}")
-
-      
-        def plot_width_error_distribution(*, runs, title, out_path, bins=25):
-            import numpy as np
-            import matplotlib.pyplot as plt
-            import os
-
-            d_all = []
-            for r in runs:
-                d1 = np.asarray(r.get("d_rs", []), float)
-                if len(d1) >= 2:
-                    d_all.append(d1[:-1])
-
-            if not d_all:
-                print(f"[PART2 WIDTH DIST] skipped (no valid samples): {out_path}")
-                return
-
-            d_all = np.concatenate(d_all)
-            d_all = d_all[np.isfinite(d_all)]
-            if d_all.size < 10:
-                print(f"[PART2 WIDTH DIST] skipped (too few samples): {out_path}")
-                return
-
-            fig, ax = plt.subplots(1, 1, figsize=(8.8, 4.8), dpi=200)
-
-            ax.hist(d_all, bins=bins, density=True, alpha=0.55, label="resampled")
-
-            ax.axvline(0.0, lw=1.4, color="black", alpha=0.8)
-
-            rmse = float(np.sqrt(np.mean(d_all ** 2)))
-            mean = float(np.mean(d_all))
-
-            ax.axvline(mean, lw=1.2, linestyle="--", alpha=0.8)
-
-            ax.set_xlabel("Width error (pred − gt) [px]", fontsize=9)
-            ax.set_ylabel("Density", fontsize=9)
-            ax.grid(True, alpha=0.25)
-            ax.legend(fontsize=8)
-
-            ax.text(
-                0.02, 0.96,
-                f"RMSE (resampled) = {rmse:.3f}px",
-                transform=ax.transAxes,
-                va="top",
-                fontsize=8,
-                bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
-            )
-
-            fig.suptitle(title, fontsize=11, fontweight="bold")
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            fig.savefig(out_path, bbox_inches="tight", dpi=200)
-            plt.close(fig)
-
-            print(f"[PART2 WIDTH DIST] wrote: {out_path}")
-
-         
-        def plot_part2_width_signals_preservation(
-            *,
-            run,
-            title,
-            out_path,
-        ):
-            """
-            Plot GT width and predicted width vs arclength for a SINGLE run,
-            showing ORIGINAL vs RESAMPLED signals (shape preservation).
-
-            Expects run dict keys (from Part-2 cache):
-            ORIGINAL (plot-only):
-                - s
-                - gruthw
-                - predw
-
-            RESAMPLED (metrics domain):
-                - s_rs
-                - gtruthw_rs
-                - predw_rs
-            """
-            import numpy as np
-            import matplotlib.pyplot as plt
-            import os
-
-            # ------------------------------------------------------------
-            # Pull ORIGINAL signals (optional but preferred)
-            # ------------------------------------------------------------
-            s0   = np.asarray(run.get("s", []), float)
-            gtw0 = np.asarray(run.get("gruthw", []), float)
-            pw0  = np.asarray(run.get("predw", []), float)
-
-            have_orig = (s0.size >= 2 and gtw0.size >= 2 and pw0.size >= 2)
-
-            # ------------------------------------------------------------
-            # Pull RESAMPLED signals (required)
-            # ------------------------------------------------------------
-            s1   = np.asarray(run.get("s_rs", []), float)
-            gtw1 = np.asarray(run.get("gtruthw_rs", []), float)
-            pw1  = np.asarray(run.get("predw_rs", []), float)
-
-            if s1.size < 2 or gtw1.size < 2 or pw1.size < 2:
-                print("[PART2 SIGNAL] skipped (missing/short resampled signals)")
-                return
-
-            # ------------------------------------------------------------
-            # Align lengths safely (resampled)
-            # ------------------------------------------------------------
-            n1 = min(len(s1), len(gtw1), len(pw1))
-            s1, gtw1, pw1 = s1[:n1], gtw1[:n1], pw1[:n1]
-
-            ok1 = np.isfinite(s1) & np.isfinite(gtw1) & np.isfinite(pw1)
-            if not np.any(ok1):
-                print("[PART2 SIGNAL] skipped (no finite resampled samples)")
-                return
-
-            # ------------------------------------------------------------
-            # Align lengths safely (original)
-            # ------------------------------------------------------------
-            if have_orig:
-                n0 = min(len(s0), len(gtw0), len(pw0))
-                s0, gtw0, pw0 = s0[:n0], gtw0[:n0], pw0[:n0]
-                ok0 = np.isfinite(s0) & np.isfinite(gtw0) & np.isfinite(pw0)
-                have_orig = np.any(ok0)
-
-            # ------------------------------------------------------------
-            # Means (visual reference only)
-            # ------------------------------------------------------------
-            gtw1_mean = float(np.mean(gtw1[ok1]))
-            pw1_mean  = float(np.mean(pw1[ok1]))
-
-            if have_orig:
-                gtw0_mean = float(np.mean(gtw0[ok0]))
-                pw0_mean  = float(np.mean(pw0[ok0]))
-
-            # ------------------------------------------------------------
-            # Shared axis limits
-            # ------------------------------------------------------------
-            s_max = float(np.max(s1[ok1]))
-            w_max = float(max(np.max(gtw1[ok1]), np.max(pw1[ok1])))
-
-            if have_orig:
-                s_max = max(s_max, float(np.max(s0[ok0])))
-                w_max = max(w_max, float(np.max(gtw0[ok0])), float(np.max(pw0[ok0])))
-
-            # ------------------------------------------------------------
-            # Plot
-            # ------------------------------------------------------------
-            fig, (axG, axP) = plt.subplots(
-                1, 2, figsize=(13.8, 5.2), dpi=200, sharex=True, sharey=True
-            )
-
-            fig.suptitle(title, fontsize=14, fontweight="bold")
-
-            # ---------------- GT panel ----------------
-            if have_orig:
-                axG.plot(
-                    s0[ok0], gtw0[ok0],
-                    lw=2.2, color="tab:blue", alpha=0.85,
-                    label="gt (orig)"
-                )
-                axG.axhline(gtw0_mean, lw=1.3, alpha=0.35, color="tab:blue")
-
-            axG.plot(
-                s1[ok1], gtw1[ok1],
-                lw=2.6, ls="--", color="tab:orange",
-                label="gt (resampled)"
-            )
-            axG.axhline(gtw1_mean, lw=1.3, alpha=0.35, ls="--", color="tab:orange")
-
-            axG.set_title("GT width vs arclength", fontsize=12)
-            axG.set_xlabel("arclength s (px)", fontsize=11)
-            axG.set_ylabel("width (px)", fontsize=11)
-            axG.grid(True, alpha=0.25)
-            axG.legend(fontsize=10)
-
-            # ---------------- Pred panel ----------------
-            if have_orig:
-                axP.plot(
-                    s0[ok0], pw0[ok0],
-                    lw=2.2, color="darkgreen", alpha=0.85,
-                    label="pred (orig)"
-                )
-                axP.axhline(pw0_mean, lw=1.3, alpha=0.35, color="darkgreen")
-
-            axP.plot(
-                s1[ok1], pw1[ok1],
-                lw=2.6, ls="--", color="red",
-                label="pred (resampled)"
-            )
-            axP.axhline(pw1_mean, lw=1.3, alpha=0.35, ls="--", color="red")
-
-            axP.set_title("Predicted width vs arclength", fontsize=12)
-            axP.set_xlabel("arclength s (px)", fontsize=11)
-            axP.set_ylabel("width (px)", fontsize=11)
-            axP.grid(True, alpha=0.25)
-            axP.legend(fontsize=10)
-
-            # ---------------- Limits ----------------
-            axG.set_xlim(0.0, s_max * 1.02)
-            axG.set_ylim(0.0, w_max * 1.05)
-
-            # ------------------------------------------------------------
-            # Save
-            # ------------------------------------------------------------
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            fig.savefig(out_path, bbox_inches="tight", dpi=200)
-            plt.close(fig)
-
-            print(f"[PART2 SIGNAL] wrote: {out_path}")
-                
-        def part2_plot_worst_and_all(
-                *,
-                worst_cid_runs,
-                all_runs_global,
-                mask_bin,
-                crop_worst,
-                crop_all,
-                part2_resample_dir,
-                worst_cid,
-            ):
-            import os
-            import numpy as np
-
-            # ------------------------------------------------------------
-            # WORST CID — ALL segments
-            # ------------------------------------------------------------
-            plot_sampling_consistency(
-                pts_list=[r.get("pts") for r in worst_cid_runs if r.get("pts") is not None],
-                ptsr_list=[r.get("pts_rs") for r in worst_cid_runs if r.get("pts_rs") is not None],
-                mask_bin=mask_bin,
-                crop=crop_worst,
-                title=f"Part 2 sampling consistency — WORST CID={worst_cid}",
-                out_path=os.path.join(
-                    part2_resample_dir,
-                    f"part2_sampling_WORST_cid{worst_cid}.png",
-                ),
-            )
-
-            plot_width_error_distribution(
-                runs=worst_cid_runs,
-                title=f"Part 2 width error distribution — WORST CID={worst_cid}",
-                out_path=os.path.join(part2_resample_dir, f"part2_width_dist_WORST_cid{worst_cid}.png"),
-            )
-
-            # Worst representative run (longest finite length)
-            worst_run = None
-            bestL = -1.0
-            for r in worst_cid_runs:
-                L = float(r.get("run_len_px", 0.0))
-                if np.isfinite(L) and L > bestL:
-                    bestL = L
-                    worst_run = r
-
-            if worst_run is not None:
-                plot_part2_width_signals_preservation(
-                    run=worst_run,
-                    title=f"Part 2 worst-run width signals — cid={worst_cid}",
-                    out_path=os.path.join(part2_resample_dir, f"part2_width_signals_WORST_cid{worst_cid}.png"),
-                )
-
-            # ------------------------------------------------------------
-            # GLOBAL — ALL CIDs
-            # ------------------------------------------------------------
-            plot_sampling_consistency(
-                pts_list=[r.get("pts") for r in all_runs_global if r.get("pts") is not None],
-                ptsr_list=[r.get("pts_rs") for r in all_runs_global if r.get("pts_rs") is not None],
-                mask_bin=mask_bin,
-                crop=crop_all,
-                title="Part 2 sampling consistency — ALL CIDs",
-                out_path=os.path.join(
-                    part2_resample_dir,
-                    "part2_sampling_ALL_CIDS.png",
-                ),
-            )
-
-            plot_width_error_distribution(
-                runs=all_runs_global,
-                title="Part 2 width error distribution — ALL CIDs",
-                out_path=os.path.join(part2_resample_dir, "part2_width_dist_ALL_CIDS.png"),
-            )
-
-            # Representative GLOBAL signal (longest run across all CIDs)
-            global_run = None
-            bestL = -1.0
-            for r in all_runs_global:
-                L = float(r.get("run_len_px", 0.0))
-                if np.isfinite(L) and L > bestL:
-                    bestL = L
-                    global_run = r
-
-            if global_run is not None:
-                plot_part2_width_signals_preservation(
-                    run=global_run,
-                    title="Part 2 width signals — ALL CIDs (representative)",
-                    out_path=os.path.join(part2_resample_dir, "part2_width_signals_ALL_CIDS.png"),
-                )
                                         
         try:
             import matplotlib.pyplot as plt
@@ -3777,7 +4237,7 @@ def compare_widths_for_cracks(
 
 
         except Exception as e:
-            print(f"[PART2] plots skipped: {e}")
+            print(f"[PART2]1 plots skipped: {e}")
 
         # ------------------------------------------------------------
         # Swap final compare-width plotting inputs to Stage-6 resampled segments
@@ -3881,9 +4341,12 @@ def compare_widths_for_cracks(
         cb.set_ticks(cleaned)
         cb.set_ticklabels([f"{t:.1f}" for t in cleaned])
 
+    # Variant-isolated output dir + filename
     out_dir = os.path.join(metrics_dir, midline_type or "unknown", crack_type)
-    os.makedirs(out_dir, exist_ok=True)
     out = os.path.join(out_dir, f"{midline_type}_{crack_type}_width_diffs.png")
+
+    os.makedirs(out_dir, exist_ok=True)
+
     fig.savefig(out, dpi=200, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
     
@@ -4338,7 +4801,7 @@ def _auto_cache_key(self):
 ###########################################################
 
 # -------------------- NORMALS CACHE KEY --------------------
-# If you keep compare_widths_for_cracks here, make sure this is visible:
+# If you keep compare_widths_for_aligned_cracks here, make sure this is visible:
 import hashlib
 def _mask_midline_cache_key(mask_bin, midline):
     h = hashlib.blake2b(digest_size=16)
