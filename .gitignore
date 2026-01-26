@@ -3,12 +3,14 @@
 #*.mp4
 *.gif
 *.jpg
-*.png
+#*.png
 folder_config.json
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+debug_compare/
+debug_failures/
 
 # C extensions
 *.so
