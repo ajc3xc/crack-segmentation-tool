@@ -1571,53 +1571,126 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 import numpy as np
 
                 # ------------------------------------------------------------
-                # BASELINE MODE — STUB ONLY (NO aligned evaluation)
+                # BASELINE MODE — Regime B1 + B2
                 # ------------------------------------------------------------
                 if baseline_maps_local:
                     print(f"[BASELINE DEBUG] methods: {list(baseline_maps_local.keys())}")
 
-                    # ---- placeholder stub (replace later with Regime A evaluator) ----
-                    baseline_stub = lambda *args, **kwargs: print(
-                        "    [BASELINE STUB] distributional evaluator not implemented yet"
-                    )
+                    # --------------------------------------------------
+                    # BASELINE MUST USE COMBINED GT
+                    # --------------------------------------------------
+                    if not isinstance(gt_full, dict) or "combined_cracks" not in gt_full:
+                        raise TypeError(
+                            "[BASELINE] gt_full must be dict with 'combined_cracks' for baseline evaluation"
+                        )
 
-                    for method, (wmap, supp) in baseline_maps_local.items():
+                    combined_gt = gt_full["combined_cracks"]
+
+                    for method, rec in baseline_maps_local.items():
                         print(f"[BASELINE] evaluating method='{method}'")
 
-                        # ---- per-method isolation ----
+                        # ----------------------------
+                        # REQUIRED baseline artifacts
+                        # ----------------------------
+                        if not isinstance(rec, dict):
+                            raise TypeError(f"[BASELINE] expected dict for method '{method}', got {type(rec)}")
+
+                        for k in ("width_map", "support_mask", "skel"):
+                            if k not in rec:
+                                raise KeyError(
+                                    f"[BASELINE] missing '{k}' for method '{method}'. "
+                                    f"Found keys={list(rec.keys())}"
+                                )
+
+                        wmap = rec["width_map"]
+                        supp = rec["support_mask"]
+                        skel = rec["skel"]
+
                         metrics_dir_local = os.path.join(metrics_dir, method)
                         os.makedirs(metrics_dir_local, exist_ok=True)
 
-                        baseline_payload = {"atomic_cracks": {}}
-
-                        for cid, cr in (payload.get("atomic_cracks") or {}).items():
-                            mid_xy = np.asarray(cr.get("midline", []), float)
-                            if mid_xy.ndim != 2 or len(mid_xy) < 2:
-                                continue
-
-                            predw = sample_widths_from_wmap(wmap, supp, mid_xy)
-
-                            baseline_payload["atomic_cracks"][cid] = {
-                                "id": cr.get("id", cid),
-                                "midline": mid_xy.tolist(),
-                                "mask_bbox": cr.get("mask_bbox"),
-                                "gt_normals": cr.get("gt_normals", {}),
-                                "pred_widths": predw.tolist(),  # injected baseline widths
-                            }
-
-                        # ---- CALL STUB (instead of aligned evaluation) ----
-                        baseline_stub(
-                            baseline_payload,
-                            gt_full,
-                            base_name,
-                            metrics_dir_local,
+                        # ============================================================
+                        # Regime B1 — GT-PROJECTED WIDTH DIFFS (COMBINED)
+                        # ============================================================
+                        rows = compute_projected_width_diffs(
+                            gt_payload={"combined_cracks": combined_gt},
+                            baseline_maps={method: (wmap, supp)},
+                            base_name=base_name,
                             midline_type=midline_type,
-                            crack_type="atomic",
-                            variant_id=method,
+                            crack_type="combined",
                         )
 
-                    print(f"[WIDTH BASELINE] finished (stubbed) baselines for {base_name}")
+                        if not rows:
+                            print(f"[BASELINE] no width rows for method='{method}'")
+                            continue
+
+                        export_width_metrics_all(
+                            metrics_dir_local,
+                            base_name,
+                            rows,
+                            midline_type,
+                            crack_type="combined",
+                        )
+
+                        # ============================================================
+                        # Regime B2 — BASELINE MIDLINE GEOMETRY (ORDER-INVARIANT)
+                        # ============================================================
+                        try:
+                            from helpers.metrics import compute_midline_metrics_baseline
+                            import numpy as np
+
+                            # ---- GT combined midlines (authoritative) ----
+                            gt_mid_all = []
+                            for cid, cr in combined_gt.items():
+                                mid = np.asarray(cr.get("midline", []), float)
+                                if mid.ndim == 2 and len(mid) >= 2:
+                                    gt_mid_all.append(mid)
+
+                            if not gt_mid_all:
+                                print("[BASELINE MIDLINE] no GT combined midlines")
+                                continue
+
+                            gt_mid = np.vstack(gt_mid_all)
+
+                            # ---- baseline skeleton → point cloud ----
+                            pred_xy = np.column_stack(np.nonzero(skel))        # (row, col)
+                            gt_xy   = gt_mid[:, ::-1]                           # (x,y) → (row,col)
+
+                            mm = compute_midline_metrics_baseline(pred_xy, gt_xy)
+
+                            midline_metric_rows.append({
+                                "image": base_name,
+                                "crack_id": "baseline",
+                                "variant_global_id": -1,
+                                "os_mode": "baseline",
+                                "method": method,
+
+                                # --- selection metrics ---
+                                "nn_mean_bidirectional": mm.get("nn_mean_bidirectional"),
+                                "hausdorff_max": mm.get("hausdorff_max"),
+                                "coverage_min": mm.get("coverage_min"),
+                                "precision_tau": mm.get("precision_tau"),
+                                "recall_tau": mm.get("recall_tau"),
+                                "f1_tau": mm.get("f1_tau"),
+
+                                # --- diagnostics ---
+                                "mean_tan_angle_error_deg": mm.get("mean_tan_angle_error_deg"),
+                                "relative_length_error": mm.get("relative_length_error"),
+                                "orth_mean": mm.get("orth_mean"),
+                                "orth_std": mm.get("orth_std"),
+                                "signed_bias_z": mm.get("signed_bias_z"),
+                            })
+
+                            print(f"[BASELINE MIDLINE] geometry metrics written for '{method}'")
+
+                        except Exception as e:
+                            print(f"[BASELINE MIDLINE] failed for method='{method}': {e}")
+                            import traceback
+                            traceback.print_exc()
+
+                    print(f"[WIDTH BASELINE] finished Regime B1 + B2 for {base_name}")
                     return
+
 
                 # ------------------------------------------------------------
                 # NORMAL MODE (main / auto) — UNCHANGED
@@ -1692,20 +1765,32 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             # ------------------------------------------------------------
             # Run baseline variants (atomic only, manual call)
             # ------------------------------------------------------------
-            if baseline_root and os.path.isdir(baseline_root) and atomic_src is not None and midline_type == "manual":
+            import traceback
+
+            if (
+                baseline_root
+                and os.path.isdir(baseline_root)
+                and atomic_src is not None
+                and midline_type == "manual"
+            ):
                 print("[WIDTH] running baselines")
                 try:
                     baseline_maps = load_baseline_widthmaps_for_image(baseline_root)
-                    print(baseline_maps.keys())
+                    print("[BASELINE DEBUG] loaded methods:", list(baseline_maps.keys()))
+
                     if baseline_maps:
                         _run_one_mode(
                             variant_id="baseline",
                             crack_type="atomic",
                             payload={"atomic_cracks": atomic_src},
-                            baseline_maps_local=baseline_maps
+                            baseline_maps_local=baseline_maps,
                         )
                 except Exception as e:
-                    print(f"[WIDTH] baseline evaluation failed: {e}")
+                    print("[WIDTH] baseline evaluation failed:")
+                    print("--------------------------------------------------")
+                    traceback.print_exc()
+                    print("--------------------------------------------------")
+
 
 
         # ------------------------------------------------------------------

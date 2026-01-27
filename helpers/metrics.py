@@ -1316,10 +1316,14 @@ def _sample_width_map_at_pts(width_map_2d, pts_xy, *, bbox=None):
 
 def load_baseline_widthmaps_for_image(baseline_img_dir: str):
     """
-    Loads baseline width maps from your NPZ files saved with _save_npz.
+    Loads baseline NPZ artifacts.
 
-    Returns:
-        dict[method] = (wmap: np.float32 array, supp: bool array)
+    REQUIRED per method:
+      - width_map
+      - support_mask
+      - skel
+
+    Any missing field is a HARD ERROR.
     """
     import os
     import numpy as np
@@ -1329,6 +1333,7 @@ def load_baseline_widthmaps_for_image(baseline_img_dir: str):
         return {}
 
     out = {}
+
     for method in os.listdir(baseline_img_dir):
         method_dir = os.path.join(baseline_img_dir, method)
         if not os.path.isdir(method_dir):
@@ -1338,28 +1343,29 @@ def load_baseline_widthmaps_for_image(baseline_img_dir: str):
         if not os.path.isfile(p):
             continue
 
-        try:
-            z = np.load(p, allow_pickle=True)
-            #print(f"[BASELINE DEBUG] keys in {p}: {list(z.keys())}")  # for sanity check
+        z = np.load(p, allow_pickle=True)
 
-            wmap = z["width_map"].astype(np.float32)
-            supp = z["support_mask"].astype(bool)
+        for k in ("width_map", "support_mask", "skel"):
+            if k not in z:
+                raise KeyError(f"[BASELINE LOAD] missing '{k}' in {p}")
 
-            # optional: parse meta
-            meta = {}
-            if "meta" in z:
-                try:
-                    meta = json.loads(z["meta"])
-                except Exception:
-                    pass
+        record = {
+            "width_map": z["width_map"].astype(np.float32),
+            "support_mask": z["support_mask"].astype(bool),
+            "skel": z["skel"].astype(bool),
+        }
 
-            out[method] = (wmap, supp)
+        if "meta" in z:
+            try:
+                record["meta"] = json.loads(z["meta"])
+            except Exception:
+                record["meta"] = {}
+        else:
+            record["meta"] = {}
 
-        except Exception as e:
-            print(f"[BASELINE] failed load {p}: {e}")
+        out[method] = record
 
     return out
-
 
 def sample_widths_from_wmap(wmap, supp, mid_xy):
     """
@@ -1384,6 +1390,89 @@ def sample_widths_from_wmap(wmap, supp, mid_xy):
         out[ok] = wmap[y[ok], x[ok]].astype(np.float32)
 
     return out
+
+
+#baseline width comparison function (extremely simple)
+def compute_projected_width_diffs(
+    *,
+    gt_payload,
+    baseline_maps,
+    base_name,
+    midline_type,
+    crack_type,
+):
+    """
+    Regime B1: GT-conditioned width evaluation (projection-based).
+
+    Semantics:
+      - Geometry source: GT midline ONLY
+      - Width source: baseline width map sampled along GT midline
+      - Skeleton disagreement is NOT penalized here
+
+    Returns:
+      width_rows: list[dict] suitable for export_width_metrics_all
+    """
+    import numpy as np
+
+    width_rows = []
+
+    # baseline_maps: {method: (wmap, support_mask)}
+    for method, (wmap, supp) in baseline_maps.items():
+        cracks = (
+            gt_payload.get("combined_cracks")
+            or gt_payload.get("atomic_cracks")
+            or {}
+        )
+
+
+        for cid, cr in cracks.items():
+            gt_mid = np.asarray(cr.get("midline", []), float)
+            if gt_mid.ndim != 2 or len(gt_mid) < 2:
+                continue
+
+            # --- GT widths (authoritative) ---
+            gt_widths = np.asarray(
+                cr.get("gt_widths") or cr.get("widths") or [],
+                float
+            )
+
+            if gt_widths.size != len(gt_mid):
+                # fallback: recompute GT widths if needed
+                gt_normals = cr.get("gt_normals")
+                if gt_normals is None:
+                    continue
+                gt_widths = np.asarray(
+                    [n.get("width", np.nan) for n in gt_normals],
+                    float
+                )
+
+            # --- baseline widths sampled along GT geometry ---
+            pred_widths = sample_widths_from_wmap(
+                wmap,
+                supp,
+                gt_mid,
+            )
+
+            n = min(len(gt_widths), len(pred_widths))
+            if n < 2:
+                continue
+
+            gt_widths   = gt_widths[:n]
+            pred_widths = pred_widths[:n]
+            diff        = pred_widths - gt_widths
+
+            for i in range(n):
+                width_rows.append({
+                    "image": base_name,
+                    "cid": str(cid),
+                    "method": method,
+                    "gt_width_px": float(gt_widths[i]),
+                    "pred_width_px": float(pred_widths[i]),
+                    "diff_px": float(diff[i]),
+                    "s_idx": i,
+                })
+
+    return width_rows
 
 
 
@@ -4631,6 +4720,41 @@ def compute_midline_metrics_for_image(app):
     print(f"[DEBUG MIDLINE] wrote {len(df)} rows → {out_csv}")
 
 # ---------- NEW helpers ----------
+def compute_midline_metrics_baseline(pred_xy, gt_xy, tau=3.0):
+    mm = compute_midline_metrics(pred_xy, gt_xy, tau=tau)
+
+    # Ordering-based metrics are meaningless for baseline
+    mm["frechet_discrete_ds"] = np.nan
+
+    # --------------------------------------------------
+    # Explicit τ-precision (spurious geometry penalty)
+    # --------------------------------------------------
+    if pred_xy is not None and len(pred_xy) > 0 and gt_xy is not None and len(gt_xy) > 0:
+        from scipy.spatial import cKDTree
+
+        gt_tree   = cKDTree(gt_xy)
+        pred_tree = cKDTree(pred_xy)
+
+        # distance from pred → nearest GT
+        d_pred_to_gt, _ = gt_tree.query(pred_xy, k=1)
+        precision_tau = float(np.mean(d_pred_to_gt <= tau))
+
+        mm["precision_tau"] = precision_tau
+        mm["recall_tau"]    = mm.get("coverage_min", np.nan)  # semantic clarity
+
+        if np.isfinite(precision_tau) and np.isfinite(mm["recall_tau"]):
+            mm["f1_tau"] = (
+                2 * precision_tau * mm["recall_tau"]
+                / max(1e-6, precision_tau + mm["recall_tau"])
+            )
+        else:
+            mm["f1_tau"] = np.nan
+    else:
+        mm["precision_tau"] = np.nan
+        mm["recall_tau"]    = np.nan
+        mm["f1_tau"]        = np.nan
+
+    return mm
 
 def compute_midline_metrics(auto_xy, man_xy, tau=3.0):
     """

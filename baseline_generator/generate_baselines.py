@@ -112,12 +112,35 @@ def _safe_mkdir(p: str) -> None:
     os.makedirs(p, exist_ok=True)
 
 
-def _save_npz(out_path: str, width_map: np.ndarray, support_mask: np.ndarray, meta: Dict[str, Any]) -> None:
+def _save_npz(
+    out_path: str,
+    *,
+    width_map: np.ndarray,
+    support_mask: np.ndarray,
+    skel: np.ndarray,
+    meta: Dict[str, Any],
+) -> None:
+    """
+    Save baseline artifacts.
+
+    REQUIRED fields:
+      - width_map      (float32)
+      - support_mask   (uint8 / bool)
+      - skel           (uint8 / bool)  ← MANDATORY
+      - meta           (JSON)
+
+    This function MUST NOT silently omit geometry.
+    """
     _safe_mkdir(os.path.dirname(out_path))
+
+    if skel is None:
+        raise ValueError(f"[SAVE_NPZ] skel is None for {out_path}")
+
     np.savez_compressed(
         out_path,
         width_map=width_map.astype(np.float32),
         support_mask=support_mask.astype(np.uint8),
+        skel=skel.astype(np.uint8),
         meta=json.dumps(meta),
     )
 
@@ -154,7 +177,6 @@ def _plot_overview(
 # ----------------------------
 # Baseline methods
 # ----------------------------
-
 def width_medial_gpu(
     bw: np.ndarray,
     min_area_px: int,
@@ -165,7 +187,11 @@ def width_medial_gpu(
       - raw medial axis (no DSE)
       - pruned medial axis (with DSE, if available)
 
-    Also returns fine-grained timing:
+    ALSO RETURNS:
+      - raw skeleton (bool)
+      - DSE-pruned skeleton (bool, if available)
+
+    Timing:
       - medial_gpu_s : cucim medial axis + distance
       - dse_cpu_s    : DSE pruning only
     """
@@ -196,7 +222,11 @@ def width_medial_gpu(
     supp_raw = sk.astype(np.uint8)
 
     results = {
-        "medial": (w_raw, supp_raw),
+        "medial": {
+            "width_map": w_raw,
+            "support_mask": supp_raw,
+            "skel": sk,
+        },
     }
 
     # --------------------------------------------------
@@ -217,12 +247,19 @@ def width_medial_gpu(
         w_dse = np.zeros_like(dist, dtype=np.float32)
         w_dse[pruned] = dist[pruned] * 2.0
         supp_dse = pruned.astype(np.uint8)
+
+        results["medial_dse"] = {
+            "width_map": w_dse,
+            "support_mask": supp_dse,
+            "skel": pruned,
+        }
     else:
         timings["dse_cpu_s"] = 0.0
-        w_dse = w_raw.copy()
-        supp_dse = supp_raw.copy()
-
-    results["medial_dse"] = (w_dse, supp_dse)
+        results["medial_dse"] = {
+            "width_map": w_raw.copy(),
+            "support_mask": supp_raw.copy(),
+            "skel": sk.copy(),
+        }
 
     return {
         "results": results,
@@ -422,7 +459,7 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
     medial_dse_mask = None
 
     # --------------------------------------------------
-    # (A) Medial axis (GPU, single call → raw + DSE, timed)
+    # (A) Medial axis (GPU, raw + DSE)
     # --------------------------------------------------
     if "medial_dse" in methods:
         try:
@@ -441,8 +478,11 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
 
         # ---- raw medial (no DSE) ----
         if "medial" in medial_results:
-            wmap, supp = medial_results["medial"]
-            medial_mask = supp.astype(bool)
+            rec = medial_results["medial"]
+
+            wmap = rec["width_map"]
+            supp = rec["support_mask"]
+            sk_medial = rec["skel"]
 
             outp = os.path.join(img_out_root, "medial", "width_map.npz")
             meta = {
@@ -452,15 +492,24 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
                 "W": W,
                 "crack_px": crack_px,
             }
-            _save_npz(outp, wmap, supp, meta)
+            _save_npz(
+                outp,
+                width_map=wmap,
+                support_mask=supp,
+                skel=sk_medial,
+                meta=meta,
+            )
 
             if make_plots:
-                panels.append(("Medial (no DSE)", wmap, medial_mask))
+                panels.append(("Medial (no DSE)", wmap, sk_medial))
 
         # ---- medial + DSE ----
         if "medial_dse" in medial_results:
-            wmap, supp = medial_results["medial_dse"]
-            medial_dse_mask = supp.astype(bool)
+            rec = medial_results["medial_dse"]
+
+            wmap = rec["width_map"]
+            supp = rec["support_mask"]
+            sk_dse = rec["skel"]
 
             outp = os.path.join(img_out_root, "medial_dse", "width_map.npz")
             meta = {
@@ -470,10 +519,17 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
                 "W": W,
                 "crack_px": crack_px,
             }
-            _save_npz(outp, wmap, supp, meta)
+            _save_npz(
+                outp,
+                width_map=wmap,
+                support_mask=supp,
+                skel=sk_dse,
+                meta=meta,
+            )
 
             if make_plots:
-                panels.append(("Medial + DSE", wmap, medial_dse_mask))
+                panels.append(("Medial + DSE", wmap, sk_dse))
+
 
     # --------------------------------------------------
     # (B) Profile-normal (CPU)
@@ -496,10 +552,17 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
             "W": W,
             "crack_px": crack_px,
         }
-        _save_npz(outp, wmap, supp, meta)
+        _save_npz(
+            outp,
+            width_map=wmap,
+            support_mask=supp,
+            skel=skel,
+            meta=meta,
+        )
 
         if make_plots:
-            panels.append(("Profile-Normal", wmap, supp.astype(bool)))
+            panels.append(("Profile-Normal", wmap, skel))
+
 
     # --------------------------------------------------
     # (C) PCA-local (CPU)
@@ -524,10 +587,17 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
             "W": W,
             "crack_px": crack_px,
         }
-        _save_npz(outp, wmap, skel.astype(np.uint8), meta)
+        _save_npz(
+            outp,
+            width_map=wmap,
+            support_mask=skel.astype(np.uint8),
+            skel=skel,
+            meta=meta,
+        )
 
         if make_plots:
             panels.append(("PCA-Local", wmap, skel))
+
 
     # --------------------------------------------------
     # (D) Adaptive PCA (CPU)
@@ -552,7 +622,13 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
             "W": W,
             "crack_px": crack_px,
         }
-        _save_npz(outp, wmap, skel.astype(np.uint8), meta)
+        _save_npz(
+            outp,
+            width_map=wmap,
+            support_mask=skel.astype(np.uint8),
+            skel=skel,
+            meta=meta,
+        )
 
         if make_plots:
             panels.append(("Adaptive PCA", wmap, skel))
