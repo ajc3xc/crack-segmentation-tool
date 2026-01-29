@@ -1564,7 +1564,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             # ------------------------------------------------------------
             # Build variant payloads (main variant)
             # ------------------------------------------------------------
-            variants = {"main": {"atomic": atomic_src, "combined": combined_src}}
+            #variants = {"main": {"atomic": atomic_src, "combined": combined_src}}
 
             def _run_one_mode(*, variant_id, crack_type, payload, baseline_maps_local=None):
                 import os
@@ -1574,17 +1574,29 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 # BASELINE MODE — Regime B1 + B2
                 # ------------------------------------------------------------
                 if baseline_maps_local:
+                    import numpy as np
+                    import traceback
+
                     print(f"[BASELINE DEBUG] methods: {list(baseline_maps_local.keys())}")
 
                     # --------------------------------------------------
-                    # BASELINE MUST USE COMBINED GT
+                    # BASELINE MUST USE PAYLOAD + COMBINED CRACKS
                     # --------------------------------------------------
-                    if not isinstance(gt_full, dict) or "combined_cracks" not in gt_full:
+                    if not isinstance(payload, dict):
+                        raise TypeError(f"[BASELINE] payload must be dict, got {type(payload)}")
+
+                    if "combined_cracks" not in payload:
+                        print("[BASELINE DEBUG] payload keys:", list(payload.keys()))
+                        raise KeyError("[BASELINE] payload missing 'combined_cracks'")
+
+                    combined_gt = payload["combined_cracks"]
+
+                    if not isinstance(combined_gt, dict):
                         raise TypeError(
-                            "[BASELINE] gt_full must be dict with 'combined_cracks' for baseline evaluation"
+                            f"[BASELINE] combined_cracks must be dict, got {type(combined_gt)}"
                         )
 
-                    combined_gt = gt_full["combined_cracks"]
+                    print(f"[BASELINE DEBUG] combined_gt entries: {len(combined_gt)}")
 
                     for method, rec in baseline_maps_local.items():
                         print(f"[BASELINE] evaluating method='{method}'")
@@ -1593,14 +1605,16 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         # REQUIRED baseline artifacts
                         # ----------------------------
                         if not isinstance(rec, dict):
-                            raise TypeError(f"[BASELINE] expected dict for method '{method}', got {type(rec)}")
+                            raise TypeError(
+                                f"[BASELINE] expected dict for method '{method}', got {type(rec)}"
+                            )
 
-                        for k in ("width_map", "support_mask", "skel"):
-                            if k not in rec:
-                                raise KeyError(
-                                    f"[BASELINE] missing '{k}' for method '{method}'. "
-                                    f"Found keys={list(rec.keys())}"
-                                )
+                        missing = [k for k in ("width_map", "support_mask", "skel") if k not in rec]
+                        if missing:
+                            raise KeyError(
+                                f"[BASELINE] missing fields for '{method}': {missing}, "
+                                f"found keys={list(rec.keys())}"
+                            )
 
                         wmap = rec["width_map"]
                         supp = rec["support_mask"]
@@ -1621,25 +1635,23 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         )
 
                         if not rows:
-                            print(f"[BASELINE] no width rows for method='{method}'")
-                            continue
-
-                        export_width_metrics_all(
-                            metrics_dir_local,
-                            base_name,
-                            rows,
-                            midline_type,
-                            crack_type="combined",
-                        )
+                            print(f"[BASELINE] no width rows for '{method}'")
+                        else:
+                            export_width_metrics_all(
+                                metrics_dir_local,
+                                base_name,
+                                rows,
+                                midline_type,
+                                crack_type="combined",
+                            )
 
                         # ============================================================
                         # Regime B2 — BASELINE MIDLINE GEOMETRY (ORDER-INVARIANT)
                         # ============================================================
                         try:
                             from helpers.metrics import compute_midline_metrics_baseline
-                            import numpy as np
 
-                            # ---- GT combined midlines (authoritative) ----
+                            # ---- GT combined midlines ----
                             gt_mid_all = []
                             for cid, cr in combined_gt.items():
                                 mid = np.asarray(cr.get("midline", []), float)
@@ -1647,20 +1659,21 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                                     gt_mid_all.append(mid)
 
                             if not gt_mid_all:
-                                print("[BASELINE MIDLINE] no GT combined midlines")
+                                print("[BASELINE MIDLINE] no valid GT combined midlines")
                                 continue
 
                             gt_mid = np.vstack(gt_mid_all)
 
                             # ---- baseline skeleton → point cloud ----
-                            pred_xy = np.column_stack(np.nonzero(skel))        # (row, col)
-                            gt_xy   = gt_mid[:, ::-1]                           # (x,y) → (row,col)
+                            pred_xy = np.column_stack(np.nonzero(skel))   # (row, col)
+                            gt_xy   = gt_mid[:, ::-1]                      # (x,y) → (row,col)
 
                             mm = compute_midline_metrics_baseline(pred_xy, gt_xy)
 
+                            midline_metric_rows = []
                             midline_metric_rows.append({
                                 "image": base_name,
-                                "crack_id": "baseline",
+                                "crack_id": "baseline_combined",
                                 "variant_global_id": -1,
                                 "os_mode": "baseline",
                                 "method": method,
@@ -1684,13 +1697,11 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                             print(f"[BASELINE MIDLINE] geometry metrics written for '{method}'")
 
                         except Exception as e:
-                            print(f"[BASELINE MIDLINE] failed for method='{method}': {e}")
-                            import traceback
+                            print(f"[BASELINE MIDLINE] failed for '{method}': {e}")
                             traceback.print_exc()
 
                     print(f"[WIDTH BASELINE] finished Regime B1 + B2 for {base_name}")
                     return
-
 
                 # ------------------------------------------------------------
                 # NORMAL MODE (main / auto) — UNCHANGED
@@ -1747,9 +1758,23 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 )'''
 
                 print(f"[WIDTH] finished summaries for {crack_type} / {variant_id}")
-
-
+                
             # ------------------------------------------------------------
+            # Build variant payloads (AUTHORITATIVE)
+            # ------------------------------------------------------------
+            combined_aug = augment_combined_with_orphan_atomics(
+                combined_src=combined_src,
+                atomic_src=atomic_src,
+            )
+
+            variants = {
+                "main": {
+                    "atomic": atomic_src,
+                    "combined": combined_aug,
+                }
+            }
+
+            ## ------------------------------------------------------------
             # Run main variant
             # ------------------------------------------------------------
             for vid, pack in variants.items():
@@ -1757,20 +1782,28 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 c = pack.get("combined")
 
                 if a is not None:
-                    _run_one_mode(variant_id=vid, crack_type="atomic", payload={"atomic_cracks": a})
+                    _run_one_mode(
+                        variant_id=vid,
+                        crack_type="atomic",
+                        payload={"atomic_cracks": a},
+                    )
 
                 if c is not None:
-                    _run_one_mode(variant_id=vid, crack_type="combined", payload={"combined_cracks": c})
+                    _run_one_mode(
+                        variant_id=vid,
+                        crack_type="combined",
+                        payload={"combined_cracks": c},
+                    )
 
             # ------------------------------------------------------------
-            # Run baseline variants (atomic only, manual call)
+            # Run baseline variants (COMBINED, AUTHORITATIVE)
             # ------------------------------------------------------------
             import traceback
 
             if (
                 baseline_root
                 and os.path.isdir(baseline_root)
-                and atomic_src is not None
+                and combined_aug is not None
                 and midline_type == "manual"
             ):
                 print("[WIDTH] running baselines")
@@ -1781,17 +1814,16 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     if baseline_maps:
                         _run_one_mode(
                             variant_id="baseline",
-                            crack_type="atomic",
-                            payload={"atomic_cracks": atomic_src},
+                            crack_type="combined",
+                            payload={"combined_cracks": combined_aug},
                             baseline_maps_local=baseline_maps,
                         )
-                except Exception as e:
+
+                except Exception:
                     print("[WIDTH] baseline evaluation failed:")
                     print("--------------------------------------------------")
                     traceback.print_exc()
                     print("--------------------------------------------------")
-
-
 
         # ------------------------------------------------------------------
         # DRIVER

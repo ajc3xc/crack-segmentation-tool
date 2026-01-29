@@ -1391,6 +1391,80 @@ def sample_widths_from_wmap(wmap, supp, mid_xy):
 
     return out
 
+def augment_combined_with_orphan_atomics(
+    *,
+    combined_src: dict,
+    atomic_src: dict,
+):
+    """
+    Returns a NEW combined_cracks dict that includes:
+      - all existing combined cracks
+      - PLUS atomic cracks that are not members of any combined crack,
+        injected as singleton-combined cracks.
+
+    This is AUTHORITATIVE for width evaluation.
+    """
+    if not combined_src:
+        combined_src = {}
+
+    if not atomic_src:
+        return dict(combined_src)
+
+    # --- collect combined members ---
+    combined_members = {
+        str(m)
+        for cmb in combined_src.values()
+        for m in (cmb.get("members") or [])
+    }
+
+    print(f"[COMBINED AUGMENT] combined members = {sorted(combined_members)}")
+
+    out = {}
+
+    # --- copy real combined cracks verbatim ---
+    for ccid, cmb in combined_src.items():
+        out[str(ccid)] = cmb
+
+    # --- inject orphan atomics ---
+    for aid, acr in atomic_src.items():
+        aid_s = str(aid)
+        if aid_s in combined_members:
+            continue
+
+        mid = acr.get("midline")
+        if mid is None or len(mid) < 2:
+            continue
+
+        print(f"[COMBINED AUGMENT] injecting orphan atomic {aid_s}")
+
+        out[f"atomic_{aid_s}"] = {
+            # treat atomic midline as a single combined segment
+            "midline_segments": [mid],
+            "midline_segments_meta": [{
+                "branch_id": 0,
+                "atomic_id": aid_s,
+            }],
+            "members": [aid_s],
+
+            # width / geometry sources (pass through)
+            "normal_edge_points": acr.get("normal_edge_points"),
+            "geodesic_edges": acr.get("geodesic_edges"),
+            "mask_bbox": acr.get("mask_bbox"),
+            "mask_crop": acr.get("mask_crop"),
+
+            # IMPORTANT: no dominance pruning for singleton
+            "dominance_meta": None,
+
+            # optional passthrough
+            "timing": acr.get("timing", {}),
+        }
+
+    print(
+        f"[COMBINED AUGMENT] final combined count = {len(out)} "
+        f"(original={len(combined_src)}, injected={len(out) - len(combined_src)})"
+    )
+
+    return out
 
 #baseline width comparison function (extremely simple)
 def compute_projected_width_diffs(
@@ -1408,53 +1482,110 @@ def compute_projected_width_diffs(
       - Geometry source: GT midline ONLY
       - Width source: baseline width map sampled along GT midline
       - Skeleton disagreement is NOT penalized here
-
-    Returns:
-      width_rows: list[dict] suitable for export_width_metrics_all
     """
     import numpy as np
 
+    if not isinstance(gt_payload, dict):
+        raise TypeError(f"[B1] gt_payload must be dict, got {type(gt_payload)}")
+
+    if crack_type == "combined":
+        if "combined_cracks" not in gt_payload:
+            raise KeyError("[B1] gt_payload missing 'combined_cracks'")
+        cracks = gt_payload["combined_cracks"]
+    else:
+        if "atomic_cracks" not in gt_payload:
+            raise KeyError("[B1] gt_payload missing 'atomic_cracks'")
+        cracks = gt_payload["atomic_cracks"]
+
+    if not isinstance(cracks, dict):
+        raise TypeError(f"[B1] cracks must be dict, got {type(cracks)}")
+
     width_rows = []
 
-    # baseline_maps: {method: (wmap, support_mask)}
-    for method, (wmap, supp) in baseline_maps.items():
-        cracks = (
-            gt_payload.get("combined_cracks")
-            or gt_payload.get("atomic_cracks")
-            or {}
-        )
+    # -----------------------------
+    # Baseline debug counters
+    # -----------------------------
+    dbg = {
+        "cr_total": 0,
+        "cr_not_dict": 0,
+        "no_midline_segments": 0,
+        "no_valid_midline_pts": 0,
+        "no_gt_widths": 0,
+        "gt_widths_too_short": 0,
+        "pred_widths_too_short": 0,
+        "rows_emitted": 0,
+    }
+    dbg_examples = {
+        "no_midline_segments": [],
+        "no_valid_midline_pts": [],
+        "no_gt_widths": [],
+        "pred_widths_too_short": [],
+    }
+    MAX_EX = 5  # max examples printed per category
 
+    for method, (wmap, supp) in baseline_maps.items():
+        # per-method counters (optional, but useful)
+        dbg_m = dict(dbg)
 
         for cid, cr in cracks.items():
-            gt_mid = np.asarray(cr.get("midline", []), float)
-            if gt_mid.ndim != 2 or len(gt_mid) < 2:
+            dbg_m["cr_total"] += 1
+
+            if not isinstance(cr, dict):
+                dbg_m["cr_not_dict"] += 1
                 continue
 
-            # --- GT widths (authoritative) ---
-            gt_widths = np.asarray(
-                cr.get("gt_widths") or cr.get("widths") or [],
-                float
-            )
+            segs = cr.get("midline_segments") or []
+            if not segs:
+                dbg_m["no_midline_segments"] += 1
+                if len(dbg_examples["no_midline_segments"]) < MAX_EX:
+                    dbg_examples["no_midline_segments"].append(str(cid))
+                continue
 
-            if gt_widths.size != len(gt_mid):
-                # fallback: recompute GT widths if needed
+            gt_mid_parts = []
+            for s in segs:
+                if s is None:
+                    continue
+                s = np.asarray(s, float)
+                if s.ndim == 2 and len(s) >= 2:
+                    gt_mid_parts.append(s)
+
+            if not gt_mid_parts:
+                dbg_m["no_valid_midline_pts"] += 1
+                if len(dbg_examples["no_valid_midline_pts"]) < MAX_EX:
+                    dbg_examples["no_valid_midline_pts"].append(str(cid))
+                continue
+
+            gt_mid = np.vstack(gt_mid_parts)
+            if gt_mid.ndim != 2 or len(gt_mid) < 2:
+                dbg_m["no_valid_midline_pts"] += 1
+                if len(dbg_examples["no_valid_midline_pts"]) < MAX_EX:
+                    dbg_examples["no_valid_midline_pts"].append(str(cid))
+                continue
+
+            # --- GT widths ---
+            gt_widths = cr.get("gt_widths") or cr.get("widths")
+            if gt_widths is None:
                 gt_normals = cr.get("gt_normals")
                 if gt_normals is None:
+                    dbg_m["no_gt_widths"] += 1
+                    if len(dbg_examples["no_gt_widths"]) < MAX_EX:
+                        dbg_examples["no_gt_widths"].append(str(cid))
                     continue
-                gt_widths = np.asarray(
-                    [n.get("width", np.nan) for n in gt_normals],
-                    float
-                )
+                gt_widths = [n.get("width", np.nan) for n in gt_normals]
+
+            gt_widths = np.asarray(gt_widths, float)
+            if gt_widths.size < 2:
+                dbg_m["gt_widths_too_short"] += 1
+                continue
 
             # --- baseline widths sampled along GT geometry ---
-            pred_widths = sample_widths_from_wmap(
-                wmap,
-                supp,
-                gt_mid,
-            )
+            pred_widths = sample_widths_from_wmap(wmap, supp, gt_mid)
 
             n = min(len(gt_widths), len(pred_widths))
             if n < 2:
+                dbg_m["pred_widths_too_short"] += 1
+                if len(dbg_examples["pred_widths_too_short"]) < MAX_EX:
+                    dbg_examples["pred_widths_too_short"].append(str(cid))
                 continue
 
             gt_widths   = gt_widths[:n]
@@ -1469,12 +1600,32 @@ def compute_projected_width_diffs(
                     "gt_width_px": float(gt_widths[i]),
                     "pred_width_px": float(pred_widths[i]),
                     "diff_px": float(diff[i]),
-                    "s_idx": i,
+                    "s_idx": int(i),
                 })
+            dbg_m["rows_emitted"] += int(n)
+
+        # -----------------------------
+        # Per-method debug print
+        # -----------------------------
+        if dbg_m["rows_emitted"] == 0:
+            print(f"[BASELINE B1 DEBUG] method='{method}' produced 0 rows.")
+            print(f"  total_cracks={dbg_m['cr_total']}")
+            print(f"  not_dict={dbg_m['cr_not_dict']}")
+            print(f"  no_midline_segments={dbg_m['no_midline_segments']}")
+            print(f"  no_valid_midline_pts={dbg_m['no_valid_midline_pts']}")
+            print(f"  no_gt_widths={dbg_m['no_gt_widths']}")
+            print(f"  gt_widths_too_short={dbg_m['gt_widths_too_short']}")
+            print(f"  pred_widths_too_short={dbg_m['pred_widths_too_short']}")
+            if dbg_examples["no_midline_segments"]:
+                print(f"  example cids (no_midline_segments): {dbg_examples['no_midline_segments']}")
+            if dbg_examples["no_valid_midline_pts"]:
+                print(f"  example cids (no_valid_midline_pts): {dbg_examples['no_valid_midline_pts']}")
+            if dbg_examples["no_gt_widths"]:
+                print(f"  example cids (no_gt_widths): {dbg_examples['no_gt_widths']}")
+            if dbg_examples["pred_widths_too_short"]:
+                print(f"  example cids (pred_widths_too_short): {dbg_examples['pred_widths_too_short']}")
 
     return width_rows
-
-
 
 # ------------------------------------------------------------
 # Part 2 plots
@@ -2081,6 +2232,19 @@ def export_width_distribution_summary(
         f"cid={cid} | group={group_id} | "
         f"n={row['n_samples']}"
     )
+    
+def _atomic_pred_matches_combined_gt(cid, gt_sup):
+    """
+    Returns True if this atomic prediction ID appears inside ANY combined GT crack.
+    gt_sup keys for combined are frozensets of member IDs.
+    """
+    if not gt_sup:
+        return False
+    cid_s = str(cid)
+    for k in gt_sup.keys():
+        if isinstance(k, frozenset) and cid_s in k:
+            return True
+    return False
 
 def compare_widths_for_aligned_cracks(
     ann,
@@ -2147,7 +2311,12 @@ def compare_widths_for_aligned_cracks(
 
     atomic   = ann.get("atomic_cracks")
     combined = ann.get("combined_cracks")
-    #print(f"!!!!!!!!!!!!!!!!!{combined.keys()}")
+
+    print(
+        f"!!!!!!!!!!![WIDTH DEBUG] ann keys: "
+        f"atomic={None if atomic is None else list(atomic.keys())[:5]}, "
+        f"combined={None if combined is None else list(combined.keys())[:5]}"
+    )
 
     # ---------------- enforce SINGLE MODE ----------------
     if (atomic is None) == (combined is None):
@@ -2161,21 +2330,28 @@ def compare_widths_for_aligned_cracks(
 
     print(f"\n[WIDTH DEBUG] === RUN MODE: {mode.upper()} ===")
 
-    # ---------------- load GT supervision ----------------
+    # ---------------- load GT supervision (COMBINED ONLY) ----------------
     gt_sup = {}
+
     if gt_sup_root:
         p = os.path.join(gt_sup_root, "gt_supervision.json")
         if os.path.exists(p):
             with open(p, "r") as f:
                 data = json.load(f)
+
             for e in data.get("cracks", []):
-                if e.get("kind") == mode:
-                    key = (
-                        str(e["id"])
-                        if mode == "atomic"
-                        else frozenset(map(str, e.get("members", [])))
-                    )
-                    gt_sup[key] = e
+                if e.get("kind") != "combined":
+                    continue
+
+                members = e.get("members") or []
+                if not members:
+                    continue
+
+                key = frozenset(map(str, members))
+                gt_sup[key] = e
+
+    print(f"[GT SUP] loaded {len(gt_sup)} combined GT entries")
+
 
     def _extract_segments_and_meta(crack):
         """
@@ -2305,7 +2481,11 @@ def compare_widths_for_aligned_cracks(
         #   - pred widths come from precomputed widths / edges / width-map
         #   - GT widths computed on the same samples from mask (here, not by index matching)
         ##############################################
-        if mode == "atomic":
+        if mode == "atomic" or cid.startswith("atomic_"):
+
+            # --- detect GT semantic mismatch (atomic pred vs combined GT) ---
+            atomic_vs_combined_gt = _atomic_pred_matches_combined_gt(cid, gt_sup)
+
             if predw_full_any is None or predw_full_any.size < 2:
                 print(f"[WIDTH DEBUG] atomic cid={cid} has no usable pred width trace -> skip")
                 continue
@@ -2334,15 +2514,23 @@ def compare_widths_for_aligned_cracks(
 
                 width_pairs.append({
                     "image": base_name,
-                    "variant": variant_id,
                     "cid": str(cid),
                     "crack_type": "atomic",
                     "midline_type": midline_type,
+                    "member_id": None,
                     "bbox": crack.get("mask_bbox"),
                     "pts": pts,
                     "predw": predw,
                     "gruthw": gtw,
                     "gt_source": "mask_same_samples",
+
+                    # -------- NEW FLAGS --------
+                    "gt_mismatch": atomic_vs_combined_gt,
+                    "gt_relation": (
+                        "atomic_vs_combined"
+                        if atomic_vs_combined_gt
+                        else "atomic_vs_atomic"
+                    ),
                 })
 
                 off += m
@@ -2409,169 +2597,6 @@ def compare_widths_for_aligned_cracks(
             continue
 
         print(f"[WIDTH DEBUG] cid={cid} kept {len(pruned_segs)} segments after atomic prune")
-        
-        # ============================================================
-        # OPSEC PLOT — STAGE 1 ATOMIC PRUNING (GT vs PRED)
-        #   - LEFT : GT mask (gt_full -> mask_bin) + GT final geometry
-        #   - RIGHT: PRED mask (from crack["mask_crop"] + crack["mask_bbox"])
-        #           + kept/pruned pred segments (Stage 1 rule)
-        # ============================================================
-        try:
-            import matplotlib.pyplot as plt
-            from matplotlib.lines import Line2D
-            import numpy as np
-
-            # ---- reconstruct PRED mask from mask_crop + mask_bbox ----
-            pred_mask_full = np.zeros((H, W), np.uint8)
-            bb = crack.get("mask_bbox")
-            crop_list = crack.get("mask_crop")
-
-            if bb and crop_list is not None:
-                x, y, w, h = map(int, bb)
-                crop_u8 = np.asarray(crop_list, dtype=np.uint8)
-
-                # safety: handle mismatched shapes gracefully
-                hh = min(h, crop_u8.shape[0]) if crop_u8.ndim >= 2 else 0
-                ww = min(w, crop_u8.shape[1]) if crop_u8.ndim >= 2 else 0
-                if hh > 0 and ww > 0:
-                    pred_mask_full[y:y+hh, x:x+ww] = (crop_u8[:hh, :ww] > 0).astype(np.uint8)
-
-            # ---- bbox crop window ----
-            if bb:
-                x, y, w, h = map(int, bb)
-                pad = 25
-                x0 = max(0, x - pad)
-                y0 = max(0, y - pad)
-                x1 = min(W, x + w + pad)
-                y1 = min(H, y + h + pad)
-            else:
-                x, y, w, h = 0, 0, W, H
-                x0, y0, x1, y1 = 0, 0, W, H
-
-            # ---- classify PRED segments (Stage 1 rule) ----
-            pred_kept = []
-            pred_pruned = []
-            for S, m in zip(segs, seg_meta):
-                if S is None or len(S) < 2:
-                    continue
-                aid = m.get("atomic_id", None)
-                if aid is not None and str(aid) not in shared:
-                    pred_pruned.append(np.asarray(S, float))
-                else:
-                    pred_kept.append(np.asarray(S, float))
-
-            # ---- GT segments (Stage-1 pruning — symmetric when possible) ----
-            gt_kept = []
-            gt_pruned = []
-
-            if gt_entry is not None:
-                gt_segs_all  = gt_entry.get("midline_segments") or []
-                gt_meta_all  = gt_entry.get("midline_segments_meta") or []
-
-                if len(gt_segs_all) != len(gt_meta_all):
-                    # No reliable atomic metadata → do NOT prune GT
-                    for Sg in gt_segs_all:
-                        if Sg is None or len(Sg) < 2:
-                            continue
-                        gt_kept.append(np.asarray(Sg, float))
-                else:
-                    for Sg, mg in zip(gt_segs_all, gt_meta_all):
-                        if Sg is None or len(Sg) < 2:
-                            continue
-
-                        aid = mg.get("atomic_id", None)
-                        if aid is not None and str(aid) not in shared:
-                            gt_pruned.append(np.asarray(Sg, float))
-                        else:
-                            gt_kept.append(np.asarray(Sg, float))
-
-            # ---- figure ----
-            fig, axes = plt.subplots(
-                1, 2, figsize=(10, 5), dpi=200, sharex=True, sharey=True
-            )
-
-            # ---- descriptor for titles ----
-            member_list = sorted(shared) if shared else sorted(pred_members)
-            member_str = ", ".join(member_list)
-
-            combo_label = f"Combined crack cid={cid}"
-            members_label = f"Atomic members: [{member_str}]"
-
-            
-            axes[0].set_title(
-                "GT supervision (final geometry)",
-                fontsize=10,
-            )
-
-            axes[1].set_title(
-                "Prediction (atomic pruning)",
-                fontsize=10,
-            )
-
-            for ax in axes:
-                ax.axis("off")
-
-
-            # backgrounds
-            axes[0].imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
-            axes[1].imshow(pred_mask_full[y0:y1, x0:x1], cmap="gray", zorder=0)
-
-            # ---- colors ----
-            col_keep = (0.2, 0.4, 0.8)   # muted blue
-            col_drop = (0.5, 0.0, 0.0)   # dark red
-
-            # ---- GT plot ----
-            for S in gt_pruned:
-                S2 = S - np.array([x0, y0])
-                axes[0].plot(S2[:, 0], S2[:, 1], color=col_drop, lw=2.0, alpha=0.8)
-
-            for S in gt_kept:
-                S2 = S - np.array([x0, y0])
-                axes[0].plot(S2[:, 0], S2[:, 1], color=col_keep, lw=2.5)
-
-            # ---- Pred plot ----
-            for S in pred_pruned:
-                S2 = S - np.array([x0, y0])
-                axes[1].plot(S2[:, 0], S2[:, 1], color=col_drop, lw=2.0, alpha=0.8)
-
-            for S in pred_kept:
-                S2 = S - np.array([x0, y0])
-                axes[1].plot(S2[:, 0], S2[:, 1], color=col_keep, lw=2.5)
-
-            # ---- bbox overlay (same bbox coords for both panels) ----
-            for ax in axes:
-                ax.add_patch(
-                    plt.Rectangle(
-                        (x - x0, y - y0),
-                        w, h,
-                        fill=False,
-                        edgecolor="dodgerblue",
-                        lw=1.5,
-                    )
-                )
-
-            # ---- legend ----
-            legend_items = [
-                Line2D([0], [0], color=col_keep, lw=3, label="Kept segments"),
-                Line2D([0], [0], color=col_drop, lw=3, label="Pruned segments"),
-                Line2D([0], [0], color="dodgerblue", lw=1.5, label="BBox"),
-            ]
-            axes[1].legend(handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9)
-
-            fig.suptitle(
-                f"Stage 1 Atomic Pruning - "
-                f"{combo_label}  "
-                f"{members_label}",
-                fontsize=11,
-                fontweight="bold",
-            )
-
-            out = os.path.join(opsec_dir, f"stage1_prune_{cid}.png")
-            fig.savefig(out, bbox_inches="tight", dpi=200)
-            plt.close(fig)
-
-        except Exception as e:
-            print(f"[OPSEC STAGE1 PLOT] skipped cid={cid}: {e}")
 
         # --------------------------------------------
         # Stage 2: optional branch matching (SYMMETRIC)
@@ -2622,6 +2647,194 @@ def compare_widths_for_aligned_cracks(
         if not pruned_segs:
             print(f"[WIDTH DEBUG] cid={cid} -> NO SEGMENTS AFTER BRANCH MATCH")
             continue
+        
+        # ============================================================
+        # OPSEC PLOT — POST STAGE-2 (KEPT vs PRUNED, CID-LOCAL)
+        #   - LEFT : GT mask + GT kept/pruned for THIS CID (fallback: plot all kept)
+        #   - RIGHT: PRED mask + PRED kept/pruned (Stage1+2 outcome)
+        # ============================================================
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.lines import Line2D
+            import numpy as np
+
+            # ---- reconstruct PRED mask from mask_crop + mask_bbox ----
+            pred_mask_full = np.zeros((H, W), np.uint8)
+            bb = crack.get("mask_bbox")
+            crop_list = crack.get("mask_crop")
+
+            if bb and crop_list is not None:
+                x, y, w, h = map(int, bb)
+                crop_u8 = np.asarray(crop_list, dtype=np.uint8)
+
+                hh = min(h, crop_u8.shape[0]) if crop_u8.ndim >= 2 else 0
+                ww = min(w, crop_u8.shape[1]) if crop_u8.ndim >= 2 else 0
+                if hh > 0 and ww > 0:
+                    pred_mask_full[y:y+hh, x:x+ww] = (crop_u8[:hh, :ww] > 0).astype(np.uint8)
+
+            # ---- bbox crop window ----
+            if bb:
+                x, y, w, h = map(int, bb)
+                pad = 25
+                x0 = max(0, x - pad)
+                y0 = max(0, y - pad)
+                x1 = min(W, x + w + pad)
+                y1 = min(H, y + h + pad)
+            else:
+                x, y, w, h = 0, 0, W, H
+                x0, y0, x1, y1 = 0, 0, W, H
+
+            # ------------------------------------------------------------
+            # PRED: compute kept vs pruned AFTER Stage-2
+            #   - segs/seg_meta : ORIGINAL predicted segments for this CID
+            #   - pruned_segs/pruned_meta : FINAL KEPT predicted segments after Stage-2
+            # ------------------------------------------------------------
+            def _seg_key(S):
+                S = np.asarray(S, float)
+                if S.ndim != 2 or len(S) < 2:
+                    return None
+                # stable-ish: endpoints + length
+                a = tuple(np.round(S[0], 3))
+                b = tuple(np.round(S[-1], 3))
+                L = float(len(S))
+                return (a, b, L)
+
+            kept_keys = set()
+            for S in (pruned_segs or []):
+                if S is None or len(S) < 2:
+                    continue
+                k = _seg_key(S)
+                if k is not None:
+                    kept_keys.add(k)
+
+            pred_kept, pred_pruned = [], []
+            for S, m in zip(segs, seg_meta):
+                if S is None or len(S) < 2:
+                    continue
+                k = _seg_key(S)
+                if k in kept_keys:
+                    pred_kept.append(np.asarray(S, float))
+                else:
+                    pred_pruned.append(np.asarray(S, float))
+
+            # ---- GT segments (CID-local, Stage-1 semantics) ----
+            gt_kept = []
+            gt_pruned = []
+
+            if gt_entry is not None:
+                gt_segs_all = gt_entry.get("midline_segments") or []
+                dom = gt_entry.get("dominance_meta") or {}
+                gt_meta_all = dom.get("segments_meta") or []
+
+                print("\n[GT DEBUG] ===== GT ENTRY =====")
+                print("[GT DEBUG] cid:", cid)
+                print("[GT DEBUG] gt members:", gt_entry.get("members"))
+                print("[GT DEBUG] pred members:", sorted(pred_members))
+                print("[GT DEBUG] shared:", sorted(shared))
+                print("[GT DEBUG] #gt_segs:", len(gt_segs_all))
+                print("[GT DEBUG] #gt_meta:", len(gt_meta_all))
+
+                if len(gt_segs_all) != len(gt_meta_all):
+                    print("[GT DEBUG] meta mismatch → cannot reason about atomic ownership, SKIP GT plotting")
+                else:
+                    for gi, (Sg, mg) in enumerate(zip(gt_segs_all, gt_meta_all)):
+                        if Sg is None or len(Sg) < 2:
+                            continue
+
+                        mg = mg if isinstance(mg, dict) else {}
+                        aid = mg.get("atomic_id", None)
+                        Sg = np.asarray(Sg, float)
+
+                        box = (
+                            f"({Sg[:,0].min():.1f},{Sg[:,1].min():.1f})-"
+                            f"({Sg[:,0].max():.1f},{Sg[:,1].max():.1f})"
+                        )
+
+                        # 🔴 KEY FIX: ignore GT segments not part of THIS predicted crack
+                        if aid is None or str(aid) not in pred_members:
+                            print(f"[GT DEBUG] seg#{gi} SKIP (out-of-scope) atomic={aid} bbox={box}")
+                            continue
+
+                        if str(aid) in shared:
+                            print(f"[GT DEBUG] seg#{gi} KEEP atomic={aid} bbox={box}")
+                            gt_kept.append(Sg)
+                        else:
+                            print(f"[GT DEBUG] seg#{gi} PRUNE atomic={aid} bbox={box}")
+                            gt_pruned.append(Sg)
+            else:
+                print("[GT DEBUG] gt_entry is None -> nothing to plot")
+
+            # ---- figure ----
+            fig, axes = plt.subplots(1, 2, figsize=(10, 5), dpi=200, sharex=True, sharey=True)
+
+            member_list = sorted(shared) if shared else sorted(pred_members)
+            member_str = ", ".join(member_list)
+
+            axes[0].set_title("GT supervision (kept/pruned)", fontsize=10)
+            axes[1].set_title("Prediction (kept/pruned)", fontsize=10)
+            for ax in axes:
+                ax.axis("off")
+
+            axes[0].imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
+            axes[1].imshow(pred_mask_full[y0:y1, x0:x1], cmap="gray", zorder=0)
+
+            col_keep = (0.2, 0.4, 0.8)   # blue
+            col_drop = (0.5, 0.0, 0.0)   # dark red
+
+            # ---- GT plot ----
+            for S in gt_pruned:
+                S2 = S - np.array([x0, y0])
+                axes[0].plot(S2[:, 0], S2[:, 1], color=col_drop, lw=2.0, alpha=0.8)
+            for S in gt_kept:
+                S2 = S - np.array([x0, y0])
+                axes[0].plot(S2[:, 0], S2[:, 1], color=col_keep, lw=2.5)
+
+            # ---- Pred plot ----
+            for S in pred_pruned:
+                S2 = S - np.array([x0, y0])
+                axes[1].plot(S2[:, 0], S2[:, 1], color=col_drop, lw=2.0, alpha=0.8)
+            for S in pred_kept:
+                S2 = S - np.array([x0, y0])
+                axes[1].plot(S2[:, 0], S2[:, 1], color=col_keep, lw=2.5)
+
+            # ---- bbox overlay ----
+            if bb:
+                for ax in axes:
+                    ax.add_patch(
+                        plt.Rectangle(
+                            (x - x0, y - y0),
+                            w, h,
+                            fill=False,
+                            edgecolor="dodgerblue",
+                            lw=1.5,
+                        )
+                    )
+
+            # ---- legend ----
+            axes[1].legend(
+                handles=[
+                    Line2D([0], [0], color=col_keep, lw=3, label="Kept segments"),
+                    Line2D([0], [0], color=col_drop, lw=3, label="Pruned segments"),
+                    Line2D([0], [0], color="dodgerblue", lw=1.5, label="BBox"),
+                ],
+                loc="lower right",
+                fontsize=8,
+                framealpha=0.9,
+            )
+
+            fig.suptitle(
+                f"Aligned Combined Crack cid={cid}\nAtomic members: [{member_str}]",
+                fontsize=11,
+                fontweight="bold",
+            )
+
+            out = os.path.join(opsec_dir, f"stage12_prune_{cid}.png")
+            fig.savefig(out, bbox_inches="tight", dpi=200)
+            plt.close(fig)
+
+        except Exception as e:
+            print(f"[OPSEC STAGE12 PLOT] skipped cid={cid}: {e}")
+
 
         # --------------------------------------------
         # Stage 3: build ORIGINAL segment offsets
@@ -3223,11 +3436,9 @@ def compare_widths_for_aligned_cracks(
             # ========================================================
             # Regime B / C input (UNCHANGED)
             # ========================================================
-            
             width_pairs.append({
                 "image": base_name,
-                "variant": variant_id,
-                "cid": str(cid),                    # group id
+                "cid": str(cid),                    # combined group id
                 "member_id": str(m.get("atomic_id")) if isinstance(m, dict) else None,
                 "crack_type": "combined",
                 "midline_type": midline_type,
@@ -3236,8 +3447,13 @@ def compare_widths_for_aligned_cracks(
                 "predw": predw_raw,
                 "gruthw": gtw_raw,
                 "gt_source": "mask_same_samples",
+
                 "branch_id": m.get("branch_id") if isinstance(m, dict) else None,
                 "seg_idx":   m.get("seg_idx")   if isinstance(m, dict) else None,
+
+                # -------- CONSISTENCY FLAGS --------
+                "gt_mismatch": False,
+                "gt_relation": "combined_vs_combined",
             })
 
         # ============================================================
