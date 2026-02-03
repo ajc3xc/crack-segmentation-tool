@@ -659,7 +659,23 @@ def _decode_packbits_b64_to_mask(packbits_b64, shape):
     return arr[:n].reshape((H, W)).astype(np.uint8)
 
 
-def bite_blob_to_fullmask(bite_blob, H, W):
+def bite_blob_to_fullmask(bite_blob, H, W, base_bbox=None, assume_local=None):
+    """
+    Decode bite blob into a GLOBAL fullmask (H,W).
+
+    bite_blob["bbox"] is *supposed* to be global xywh, but some exporters store it
+    relative to the combined crack's mask_bbox (local coords). This function supports both.
+
+    Args:
+        base_bbox: optional [bx,by,bw,bh] of the combined crack. If provided, we can
+                   interpret bite bbox as local-to-base when needed.
+        assume_local:
+            - None  : auto-detect (recommended)
+            - True  : always treat bite bbox as local to base_bbox
+            - False : always treat bite bbox as global
+    """
+    import numpy as np
+
     full = np.zeros((H, W), np.uint8)
     if not bite_blob:
         return full
@@ -673,10 +689,37 @@ def bite_blob_to_fullmask(bite_blob, H, W):
 
     x0, y0, w, h = map(int, bb)
     mask = _decode_packbits_b64_to_mask(b64, shape)
+    if mask is None or mask.ndim != 2:
+        return full
 
+    # -------------------------
+    # Decide whether bbox is local
+    # -------------------------
+    local = False
+    if base_bbox is not None:
+        bx, by, bw, bh = map(int, base_bbox)
+
+        if assume_local is True:
+            local = True
+        elif assume_local is False:
+            local = False
+        else:
+            # Heuristic auto-detect:
+            # If bbox appears to fit *inside* base bbox dimensions, it's likely local.
+            # (This is extremely common for bite blobs packed relative to the combined crop.)
+            if 0 <= x0 <= bw and 0 <= y0 <= bh and (x0 + w) <= (bw + 2) and (y0 + h) <= (bh + 2):
+                local = True
+
+        if local:
+            x0 += bx
+            y0 += by
+
+    # -------------------------
+    # Paste into full global mask
+    # -------------------------
     hh = min(h, mask.shape[0], H - y0)
     ww = min(w, mask.shape[1], W - x0)
-    if hh > 0 and ww > 0:
+    if hh > 0 and ww > 0 and x0 >= 0 and y0 >= 0:
         full[y0:y0+hh, x0:x0+ww] = mask[:hh, :ww]
 
     return full
@@ -852,10 +895,12 @@ def _dump_json(path, obj):
     except Exception:
         pass
 
-def _decode_by_losing_branch(dom_meta, H, W):
+def _decode_by_losing_branch(dom_meta, H, W, base_bbox=None, assume_local=None):
     """
     Returns: dict[int bid] -> bool fullmask
-    AUTHORITATIVE decoder.
+
+    If bite blobs are stored local-to-combined mask_bbox, pass base_bbox so we can
+    lift them into GLOBAL coords correctly.
     """
     out = {}
     if not isinstance(dom_meta, dict):
@@ -881,7 +926,7 @@ def _decode_by_losing_branch(dom_meta, H, W):
             blob["bbox"] = fallback_bbox
 
         try:
-            m = bite_blob_to_fullmask(blob, H, W)
+            m = bite_blob_to_fullmask(blob, H, W, base_bbox=base_bbox, assume_local=assume_local)
             if m is not None and np.any(m):
                 out[bid] = (m > 0)
         except Exception:
@@ -2246,6 +2291,55 @@ def _atomic_pred_matches_combined_gt(cid, gt_sup):
             return True
     return False
 
+import base64
+import numpy as np
+
+
+def _decode_packbits_mask(blob):
+    """
+    Decode a packed mask blob:
+      {
+        "shape": [H, W],
+        "packbits_b64": "..."
+      }
+
+    Returns:
+        np.ndarray bool (H, W) or None
+    """
+    if not isinstance(blob, dict):
+        return None
+
+    shape = blob.get("shape")
+    b64 = blob.get("packbits_b64")
+
+    if (
+        not shape
+        or len(shape) != 2
+        or not b64
+        or shape[0] <= 0
+        or shape[1] <= 0
+    ):
+        return None
+
+    H, W = map(int, shape)
+
+    raw = base64.b64decode(b64.encode("ascii"))
+    packed = np.frombuffer(raw, dtype=np.uint8)
+
+    row_bytes = (W + 7) // 8
+    expected = H * row_bytes
+    if packed.size != expected:
+        print(
+            f"[PACKBITS ERROR] size mismatch: "
+            f"got={packed.size}, expected={expected}"
+        )
+        return None
+
+    packed = packed.reshape(H, row_bytes)
+    mask = np.unpackbits(packed, axis=1)[:, :W]
+
+    return mask.astype(bool)
+
 def compare_widths_for_aligned_cracks(
     ann,
     crack_mask,
@@ -2575,6 +2669,143 @@ def compare_widths_for_aligned_cracks(
             continue
 
         print(f"[WIDTH DEBUG] cid={cid} shared_members={sorted(shared)}")
+        
+        # ============================================================
+        # STAGE 0.5 — DECODE GT DOMINANCE BITE (AUTHORITATIVE)
+        # ============================================================
+
+        loss_masks_gt_by_branch = {}
+
+        if gt_entry and isinstance(gt_entry, dict):
+            dom_gt = gt_entry.get("dominance_meta")
+            if isinstance(dom_gt, dict):
+                bite = dom_gt.get("bite")
+                if isinstance(bite, dict):
+                    bb = bite.get("bbox")
+                    by_branch = bite.get("by_losing_branch")
+
+                    if bb and isinstance(by_branch, dict):
+                        bx, by, bw, bh = map(int, bb)
+
+                        for bid, info in by_branch.items():
+                            m_local = _decode_packbits_mask(info)
+                            if m_local is None:
+                                print(
+                                    f"[GT BITE WARN] cid={cid} bid={bid} decode failed"
+                                )
+                                continue
+
+                            # Place into GLOBAL canvas
+                            full = np.zeros((H, W), dtype=bool)
+
+                            y1 = min(H, by + m_local.shape[0])
+                            x1 = min(W, bx + m_local.shape[1])
+
+                            full[by:y1, bx:x1] = m_local[: y1 - by, : x1 - bx]
+
+                            loss_masks_gt_by_branch[int(bid)] = full
+
+        print(
+            f"[GT BITE OK] cid={cid} "
+            f"branches={sorted(loss_masks_gt_by_branch.keys())}"
+        )
+        
+        for bid, m in loss_masks_gt_by_branch.items():
+            assert m.shape == (H, W), (
+                f"[ASSERT FAIL] GT bite shape wrong for bid={bid}: {m.shape}"
+            )
+            assert m.any(), (
+                f"[ASSERT FAIL] GT bite EMPTY for bid={bid}"
+            )
+
+        for bid, m in loss_masks_gt_by_branch.items():
+            assert m.shape == (H, W), (
+                f"[ASSERT FAIL] GT bite shape wrong for bid={bid}: {m.shape}"
+            )
+            assert m.any(), (
+                f"[ASSERT FAIL] GT bite EMPTY for bid={bid}"
+            )
+
+        def debug_plot_gt_sup_dominance_raw(
+            cid,
+            gt_entry,
+            out_dir,
+        ):
+            """
+            Plot GT dominance_meta.bite EXACTLY as stored.
+
+            - Proper packbits decode
+            - Proper bite-local frame
+            - No rebasing hacks
+            """
+
+            import os
+            import matplotlib.pyplot as plt
+
+            if not isinstance(gt_entry, dict):
+                return
+
+            dom = gt_entry.get("dominance_meta")
+            if not isinstance(dom, dict):
+                return
+
+            bite = dom.get("bite")
+            if not isinstance(bite, dict):
+                return
+
+            bb = bite.get("bbox")
+            by_branch = bite.get("by_losing_branch")
+
+            if not bb or not isinstance(by_branch, dict):
+                return
+
+            bx, by, bw, bh = map(int, bb)
+
+            union = None
+
+            for bid, info in by_branch.items():
+                m = _decode_packbits_mask(info)
+                if m is None:
+                    continue
+                union = m if union is None else (union | m)
+
+            if union is None or not union.any():
+                print(f"[GT_SUP DEBUG] cid={cid} bite EMPTY")
+                return
+
+            fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
+            ax.set_title(f"GT SUP — RAW DOMINANCE (cid={cid})")
+            ax.axis("off")
+
+            ax.imshow(union, cmap="hot", interpolation="nearest", alpha=0.9)
+
+            # Overlay stored midlines (GLOBAL → LOCAL)
+            segs = gt_entry.get("midline_segments") or []
+            for S in segs:
+                if S is None or len(S) < 2:
+                    continue
+                S = np.asarray(S, float)
+                ax.plot(S[:, 0] - bx, S[:, 1] - by, color="cyan", lw=2)
+
+            ax.add_patch(
+                plt.Rectangle(
+                    (0, 0), union.shape[1], union.shape[0],
+                    fill=False, edgecolor="lime", linewidth=2
+                )
+            )
+
+            os.makedirs(out_dir, exist_ok=True)
+            out = os.path.join(out_dir, f"gt_sup_dom_raw_{cid}.png")
+            fig.savefig(out, bbox_inches="tight")
+            plt.close(fig)
+
+            print(f"[GT_SUP DEBUG] wrote {out}")
+
+        debug_plot_gt_sup_dominance_raw(
+            cid=cid,
+            gt_entry=gt_entry,
+            out_dir=opsec_dir,
+        )
 
         # --------------------------------------------
         # Stage 1: prune segments by shared atomic IDs
@@ -2600,66 +2831,381 @@ def compare_widths_for_aligned_cracks(
 
         # --------------------------------------------
         # Stage 2: optional branch matching (SYMMETRIC)
+        #   + GT-local pruning
+        #   + compute GT-local decode frame (bbox) for Stage-4/5
         # --------------------------------------------
         matched_pred_branch_ids = None
+        matched_gt_branch_ids   = None
 
+        gt_pruned_segs = []
+        gt_pruned_meta = []
+
+        # ============================================================
+        # Stage-2 helpers: branch signatures & matching (GEOMETRY-BASED)
+        # ============================================================
+        def _seg_endpoints(S):
+            S = np.asarray(S, float)
+            if S.ndim != 2 or len(S) < 2:
+                return None
+            a = S[0].astype(float)
+            b = S[-1].astype(float)
+            return a, b
+
+        def _endpoint_pair_key(S, snap=5.0):
+            """
+            Order-invariant snapped endpoint key. Used to group segs into branches.
+            snap is in pixels (5 px default).
+            """
+            ep = _seg_endpoints(S)
+            if ep is None:
+                return None
+            a, b = ep
+            a = tuple((np.round(a / snap) * snap).tolist())
+            b = tuple((np.round(b / snap) * snap).tolist())
+            return tuple(sorted([a, b]))
+
+        def _poly_centroid(S):
+            S = np.asarray(S, float)
+            return np.nanmean(S, axis=0)
+
+        def _poly_length(S):
+            try:
+                return float(_linestring_length(np.asarray(S, float)))
+            except Exception:
+                S = np.asarray(S, float)
+                if len(S) < 2:
+                    return 0.0
+                d = np.diff(S, axis=0)
+                return float(np.nansum(np.sqrt(np.sum(d * d, axis=1))))
+
+        def _build_branch_table_geom(segs_in, meta_in, *, scope_members=None):
+            """
+            Build branches by shared endpoints key (snapped).
+            Returns list of dicts:
+            {
+                "branch_id": int (synthetic),
+                "segs": [S...],
+                "meta": [m...],
+                "endpoints": (a,b) from the longest seg,
+                "centroid": (cx,cy),
+                "length": total length,
+                "atomic_ids": set(str)
+            }
+            """
+            groups = {}
+            for S, m in zip(segs_in, meta_in):
+                if S is None or len(S) < 2:
+                    continue
+                m = m if isinstance(m, dict) else {}
+
+                # optional: drop segments that are out of scope
+                if scope_members is not None:
+                    aid = m.get("atomic_id", None)
+                    if aid is not None and str(aid) not in scope_members:
+                        continue
+
+                k = _endpoint_pair_key(S, snap=5.0)
+                if k is None:
+                    continue
+                groups.setdefault(k, []).append((np.asarray(S, float), dict(m)))
+
+            out = []
+            for bi, (k, items) in enumerate(groups.items()):
+                segs_k = [it[0] for it in items]
+                meta_k = [it[1] for it in items]
+
+                # choose representative endpoints from the longest seg
+                lens = [ _poly_length(S) for S in segs_k ]
+                j = int(np.argmax(lens)) if lens else 0
+                rep = segs_k[j]
+                ep = _seg_endpoints(rep)
+                if ep is None:
+                    continue
+                a, b = ep
+
+                # centroid over all points
+                all_pts = np.vstack(segs_k) if segs_k else rep
+                c = _poly_centroid(all_pts)
+
+                # total length
+                L = float(np.sum([_poly_length(S) for S in segs_k]))
+
+                aids = set()
+                for mm in meta_k:
+                    aid = mm.get("atomic_id", None)
+                    if aid is not None:
+                        aids.add(str(aid))
+
+                out.append({
+                    "branch_id": int(bi),   # synthetic, stable only inside this call
+                    "segs": segs_k,
+                    "meta": meta_k,
+                    "endpoints": (np.asarray(a, float), np.asarray(b, float)),
+                    "centroid": np.asarray(c, float),
+                    "length": float(L),
+                    "atomic_ids": aids,
+                })
+
+            return out
+
+        def _branch_geom_cost(gtb, prb):
+            """
+            Lower is better. Cost uses:
+            - min endpoint pairing distance (order invariant)
+            - centroid distance
+            - length ratio penalty
+            """
+            ga, gb = gtb["endpoints"]
+            pa, pb = prb["endpoints"]
+
+            # endpoint distance (order invariant)
+            d1 = float(np.linalg.norm(ga - pa) + np.linalg.norm(gb - pb))
+            d2 = float(np.linalg.norm(ga - pb) + np.linalg.norm(gb - pa))
+            d_end = min(d1, d2)
+
+            d_cent = float(np.linalg.norm(gtb["centroid"] - prb["centroid"]))
+
+            # length ratio penalty
+            Lg = max(1e-6, float(gtb["length"]))
+            Lp = max(1e-6, float(prb["length"]))
+            ratio = max(Lg / Lp, Lp / Lg)   # >= 1
+            d_len = float((ratio - 1.0) * 50.0)  # 50px penalty per 1x mismatch
+
+            return d_end + 0.25 * d_cent + d_len
+
+        def _greedy_match_branches_geom(gt_br, pr_br, *, max_cost=250.0):
+            """
+            Greedy one-to-one matching by geometry cost.
+            Returns list of tuples: (gt_branch_id, pr_branch_id, cost)
+            """
+            pairs = []
+            for gi, g in enumerate(gt_br):
+                for pi, p in enumerate(pr_br):
+                    c = _branch_geom_cost(g, p)
+                    pairs.append((c, gi, pi))
+
+            pairs.sort(key=lambda t: t[0])
+
+            used_g = set()
+            used_p = set()
+            matches = []
+            for c, gi, pi in pairs:
+                if c > max_cost:
+                    break
+                if gi in used_g or pi in used_p:
+                    continue
+                used_g.add(gi)
+                used_p.add(pi)
+                matches.append((gt_br[gi]["branch_id"], pr_br[pi]["branch_id"], float(c)))
+
+            return matches
+
+
+        # ============================================================
+        # (A) GT prune — IMPORTANT FIX:
+        #   1) scope to pred_members first
+        #   2) then prune to shared
+        # ============================================================
         if gt_entry is not None:
             gt_segs_all = gt_entry.get("midline_segments") or []
             gt_meta_all = (gt_entry.get("dominance_meta", {}).get("segments_meta") or [])
 
-            gt_pruned_segs = []
-            gt_pruned_meta = []
+            print(
+                f"[STAGE2 DBG] cid={cid} GT segs={len(gt_segs_all)} "
+                f"GT meta={len(gt_meta_all)} shared={sorted(shared)}"
+            )
 
             if len(gt_segs_all) == len(gt_meta_all) and len(gt_segs_all) > 0:
-                for Sg, mg in zip(gt_segs_all, gt_meta_all):
+                for i, (Sg, mg) in enumerate(zip(gt_segs_all, gt_meta_all)):
                     if Sg is None or len(Sg) < 2:
                         continue
-                    # allow None branch_id; branch matcher can still use geometry
+                    mg = mg if isinstance(mg, dict) else {}
+                    aid = mg.get("atomic_id")
+
+                    # --- scope gate: drop GT segments not in THIS predicted crack ---
+                    if aid is not None and str(aid) not in pred_members:
+                        print(f"[STAGE2 DBG] SKIP GT seg#{i} atomic={aid} (out-of-scope)")
+                        continue
+
+                    # --- shared gate: drop GT segments not shared with prediction ---
+                    if aid is not None and str(aid) not in shared:
+                        print(f"[STAGE2 DBG] DROP GT seg#{i} atomic={aid} (not shared)")
+                        continue
+
                     gt_pruned_segs.append(np.asarray(Sg, float))
-                    gt_pruned_meta.append(mg if isinstance(mg, dict) else {})
+                    gt_pruned_meta.append(dict(mg))
             else:
-                for Sg in gt_segs_all:
+                # meta mismatch → keep geometry but you lose ability to do atomic/shared gating reliably
+                for i, Sg in enumerate(gt_segs_all):
                     if Sg is None or len(Sg) < 2:
                         continue
                     gt_pruned_segs.append(np.asarray(Sg, float))
-                    gt_pruned_meta.append({})  # dummy meta
+                    gt_pruned_meta.append({})
 
-            if gt_pruned_segs and pruned_segs:
-                gt_br = _build_branch_table(gt_pruned_segs, gt_pruned_meta, shared_members=shared)
-                pr_br = _build_branch_table(pruned_segs, pruned_meta, shared_members=shared)
+            print(f"[STAGE2 DBG] cid={cid} GT kept {len(gt_pruned_segs)} segs after scoped+shared prune")
 
-                if gt_br and pr_br:
-                    matches = _greedy_match_branches(gt_br, pr_br)
-                    if matches:
-                        matched_pred_branch_ids = {p for (_, p, _, _) in matches}
+
+        # ============================================================
+        # (B) symmetric branch matching (GEOMETRY-BASED)
+        #   NOTE: do NOT trust GT/PRED branch_id numbering!
+        # ============================================================
+        if gt_pruned_segs and pruned_segs:
+            gt_br = _build_branch_table_geom(gt_pruned_segs, gt_pruned_meta, scope_members=shared)
+            pr_br = _build_branch_table_geom(pruned_segs, pruned_meta, scope_members=shared)
+
+            if gt_br and pr_br:
+                matches = _greedy_match_branches_geom(gt_br, pr_br, max_cost=250.0)
+
+                if matches:
+                    matched_gt_branch_ids   = {g for (g, p, c) in matches}
+                    matched_pred_branch_ids = {p for (g, p, c) in matches}
+
+                    print(
+                        f"[STAGE2 DBG] cid={cid} branch matches (geom): "
+                        f"GT={sorted(matched_gt_branch_ids)} "
+                        f"PRED={sorted(matched_pred_branch_ids)} "
+                        f"costs={[round(c,1) for (_,_,c) in matches]}"
+                    )
+
+
+        # ============================================================
+        # (C) apply branch prune symmetrically
+        #   Here: branch_id is SYNTHETIC from our geom tables.
+        #   So we must rebuild a map from seg->synthetic branch_id.
+        # ============================================================
+        def _assign_synth_branch_ids(segs_in, meta_in, scope_members=None):
+            br = _build_branch_table_geom(segs_in, meta_in, scope_members=scope_members)
+            seg_to_bid = {}
+
+            def _key(S):
+                S = np.asarray(S, float)
+                a = tuple(np.round(S[0], 3))
+                b = tuple(np.round(S[-1], 3))
+                n = int(len(S))
+                return (a, b, n)
+
+            for b in br:
+                bid = int(b["branch_id"])
+                for S in b["segs"]:
+                    seg_to_bid[_key(S)] = bid
+            return seg_to_bid
 
         if matched_pred_branch_ids is not None:
+            seg2bid = _assign_synth_branch_ids(pruned_segs, pruned_meta, scope_members=shared)
             keep_s, keep_m = [], []
+
             for S, m in zip(pruned_segs, pruned_meta):
-                bid = int(m.get("branch_id", -1))
+                if S is None or len(S) < 2:
+                    continue
+                k = (tuple(np.round(np.asarray(S, float)[0], 3)),
+                    tuple(np.round(np.asarray(S, float)[-1], 3)),
+                    int(len(S)))
+                bid = seg2bid.get(k, None)
+
                 if bid in matched_pred_branch_ids:
                     keep_s.append(S)
                     keep_m.append(m)
                 else:
-                    print(f"[WIDTH DEBUG] DROP branch={bid} (unmatched)")
+                    print(f"[STAGE2 DBG] DROP PRED synth_branch={bid} (unmatched)")
+
             pruned_segs, pruned_meta = keep_s, keep_m
 
+        if matched_gt_branch_ids is not None:
+            seg2bid = _assign_synth_branch_ids(gt_pruned_segs, gt_pruned_meta, scope_members=shared)
+            keep_s, keep_m = [], []
+
+            for S, m in zip(gt_pruned_segs, gt_pruned_meta):
+                if S is None or len(S) < 2:
+                    continue
+                k = (tuple(np.round(np.asarray(S, float)[0], 3)),
+                    tuple(np.round(np.asarray(S, float)[-1], 3)),
+                    int(len(S)))
+                bid = seg2bid.get(k, None)
+
+                if bid in matched_gt_branch_ids:
+                    keep_s.append(S)
+                    keep_m.append(m)
+                else:
+                    print(f"[STAGE2 DBG] DROP GT synth_branch={bid} (unmatched)")
+
+            gt_pruned_segs, gt_pruned_meta = keep_s, keep_m
+
+
         if not pruned_segs:
-            print(f"[WIDTH DEBUG] cid={cid} -> NO SEGMENTS AFTER BRANCH MATCH")
+            print(f"[WIDTH DEBUG] cid={cid} -> NO PRED SEGMENTS AFTER BRANCH MATCH")
             continue
+
+        if not gt_pruned_segs:
+            print(f"[WIDTH DEBUG] cid={cid} -> NO GT SEGMENTS AFTER BRANCH MATCH")
+            # allowed; Stage-4 should just show GT empty
+
+
+        # ============================================================
+        # (D) compute GT-local bbox for Stage-4/5
+        #   IMPORTANT FIX: use kept GT segs ONLY (already scoped+shared)
+        # ============================================================
+        gt_bite_bbox_local = None
+        if gt_pruned_segs:
+            xs = np.concatenate([np.asarray(S)[:, 0] for S in gt_pruned_segs])
+            ys = np.concatenate([np.asarray(S)[:, 1] for S in gt_pruned_segs])
+
+            x0 = int(max(0, np.floor(xs.min())))
+            y0 = int(max(0, np.floor(ys.min())))
+            x1 = int(min(W, np.ceil(xs.max())))
+            y1 = int(min(H, np.ceil(ys.max())))
+
+            if x1 > x0 and y1 > y0:
+                gt_bite_bbox_local = [x0, y0, x1 - x0, y1 - y0]
+                print(f"[STAGE2 DBG] cid={cid} GT-local bite bbox={gt_bite_bbox_local}")
+            else:
+                print(f"[STAGE2 DBG] cid={cid} GT-local bbox collapsed; leaving None")
+
+        gt_bite_reframe = {
+            "bbox": gt_bite_bbox_local,     # xywh in FULL IMAGE coords
+            "segments": gt_pruned_segs,
+            "segments_meta": gt_pruned_meta,
+        }
         
-        # ============================================================
-        # OPSEC PLOT — POST STAGE-2 (KEPT vs PRUNED, CID-LOCAL)
-        #   - LEFT : GT mask + GT kept/pruned for THIS CID (fallback: plot all kept)
-        #   - RIGHT: PRED mask + PRED kept/pruned (Stage1+2 outcome)
-        # ============================================================
-        try:
+        def plot_stage2_prune_opsec(
+            *,
+            cid,
+            crack,
+            H,
+            W,
+            mask_bin,
+            segs,
+            seg_meta,
+            pruned_segs,
+            pruned_meta,
+            gt_entry,
+            gt_pruned_segs,
+            gt_pruned_meta,
+            pred_members,
+            shared,
+            out_dir,
+        ):
+            """
+            Stage-2 OPSEC plot (CID-local):
+
+            LEFT  : GT supervision (kept vs dropped for THIS predicted crack)
+            RIGHT : Prediction (kept vs dropped after Stage-2)
+
+            - Geometry only (no dominance masks yet)
+            - CID-local crop based on predicted mask_bbox
+            """
+
+            import os
+            import numpy as np
             import matplotlib.pyplot as plt
             from matplotlib.lines import Line2D
-            import numpy as np
 
-            # ---- reconstruct PRED mask from mask_crop + mask_bbox ----
+            os.makedirs(out_dir, exist_ok=True)
+
+            # ------------------------------------------------------------
+            # Reconstruct predicted FULL mask
+            # ------------------------------------------------------------
             pred_mask_full = np.zeros((H, W), np.uint8)
+
             bb = crack.get("mask_bbox")
             crop_list = crack.get("mask_crop")
 
@@ -2669,10 +3215,13 @@ def compare_widths_for_aligned_cracks(
 
                 hh = min(h, crop_u8.shape[0]) if crop_u8.ndim >= 2 else 0
                 ww = min(w, crop_u8.shape[1]) if crop_u8.ndim >= 2 else 0
+
                 if hh > 0 and ww > 0:
                     pred_mask_full[y:y+hh, x:x+ww] = (crop_u8[:hh, :ww] > 0).astype(np.uint8)
 
-            # ---- bbox crop window ----
+            # ------------------------------------------------------------
+            # CID-local crop window (from PRED bbox)
+            # ------------------------------------------------------------
             if bb:
                 x, y, w, h = map(int, bb)
                 pad = 25
@@ -2681,33 +3230,30 @@ def compare_widths_for_aligned_cracks(
                 x1 = min(W, x + w + pad)
                 y1 = min(H, y + h + pad)
             else:
-                x, y, w, h = 0, 0, W, H
                 x0, y0, x1, y1 = 0, 0, W, H
 
             # ------------------------------------------------------------
-            # PRED: compute kept vs pruned AFTER Stage-2
-            #   - segs/seg_meta : ORIGINAL predicted segments for this CID
-            #   - pruned_segs/pruned_meta : FINAL KEPT predicted segments after Stage-2
+            # Helper: stable segment key
             # ------------------------------------------------------------
             def _seg_key(S):
                 S = np.asarray(S, float)
                 if S.ndim != 2 or len(S) < 2:
                     return None
-                # stable-ish: endpoints + length
                 a = tuple(np.round(S[0], 3))
                 b = tuple(np.round(S[-1], 3))
-                L = float(len(S))
-                return (a, b, L)
+                n = int(len(S))
+                return (a, b, n)
 
+            # ------------------------------------------------------------
+            # PRED kept vs dropped
+            # ------------------------------------------------------------
             kept_keys = set()
-            for S in (pruned_segs or []):
-                if S is None or len(S) < 2:
-                    continue
+            for S in pruned_segs or []:
                 k = _seg_key(S)
                 if k is not None:
                     kept_keys.add(k)
 
-            pred_kept, pred_pruned = [], []
+            pred_kept, pred_dropped = [], []
             for S, m in zip(segs, seg_meta):
                 if S is None or len(S) < 2:
                     continue
@@ -2715,63 +3261,48 @@ def compare_widths_for_aligned_cracks(
                 if k in kept_keys:
                     pred_kept.append(np.asarray(S, float))
                 else:
-                    pred_pruned.append(np.asarray(S, float))
+                    pred_dropped.append(np.asarray(S, float))
 
-            # ---- GT segments (CID-local, Stage-1 semantics) ----
-            gt_kept = []
-            gt_pruned = []
+            # ------------------------------------------------------------
+            # GT kept vs dropped (SCOPED + SHARED semantics)
+            # ------------------------------------------------------------
+            gt_kept = [np.asarray(S, float) for S in (gt_pruned_segs or [])]
 
+            gt_dropped = []
             if gt_entry is not None:
-                gt_segs_all = gt_entry.get("midline_segments") or []
-                dom = gt_entry.get("dominance_meta") or {}
-                gt_meta_all = dom.get("segments_meta") or []
+                gt_all = gt_entry.get("midline_segments") or []
+                gt_meta_all = (gt_entry.get("dominance_meta", {}) or {}).get("segments_meta") or []
 
-                print("\n[GT DEBUG] ===== GT ENTRY =====")
-                print("[GT DEBUG] cid:", cid)
-                print("[GT DEBUG] gt members:", gt_entry.get("members"))
-                print("[GT DEBUG] pred members:", sorted(pred_members))
-                print("[GT DEBUG] shared:", sorted(shared))
-                print("[GT DEBUG] #gt_segs:", len(gt_segs_all))
-                print("[GT DEBUG] #gt_meta:", len(gt_meta_all))
-
-                if len(gt_segs_all) != len(gt_meta_all):
-                    print("[GT DEBUG] meta mismatch → cannot reason about atomic ownership, SKIP GT plotting")
-                else:
-                    for gi, (Sg, mg) in enumerate(zip(gt_segs_all, gt_meta_all)):
+                if len(gt_all) == len(gt_meta_all):
+                    for Sg, mg in zip(gt_all, gt_meta_all):
                         if Sg is None or len(Sg) < 2:
                             continue
-
                         mg = mg if isinstance(mg, dict) else {}
-                        aid = mg.get("atomic_id", None)
-                        Sg = np.asarray(Sg, float)
+                        aid = mg.get("atomic_id")
 
-                        box = (
-                            f"({Sg[:,0].min():.1f},{Sg[:,1].min():.1f})-"
-                            f"({Sg[:,0].max():.1f},{Sg[:,1].max():.1f})"
-                        )
-
-                        # 🔴 KEY FIX: ignore GT segments not part of THIS predicted crack
-                        if aid is None or str(aid) not in pred_members:
-                            print(f"[GT DEBUG] seg#{gi} SKIP (out-of-scope) atomic={aid} bbox={box}")
+                        # out-of-scope GT never plotted
+                        if aid is not None and str(aid) not in pred_members:
                             continue
 
-                        if str(aid) in shared:
-                            print(f"[GT DEBUG] seg#{gi} KEEP atomic={aid} bbox={box}")
-                            gt_kept.append(Sg)
-                        else:
-                            print(f"[GT DEBUG] seg#{gi} PRUNE atomic={aid} bbox={box}")
-                            gt_pruned.append(Sg)
-            else:
-                print("[GT DEBUG] gt_entry is None -> nothing to plot")
+                        Sg = np.asarray(Sg, float)
+                        k = _seg_key(Sg)
+                        if k not in {_seg_key(S) for S in gt_kept}:
+                            gt_dropped.append(Sg)
 
-            # ---- figure ----
-            fig, axes = plt.subplots(1, 2, figsize=(10, 5), dpi=200, sharex=True, sharey=True)
+            # ------------------------------------------------------------
+            # Plot
+            # ------------------------------------------------------------
+            fig, axes = plt.subplots(
+                1, 2,
+                figsize=(10, 5),
+                dpi=200,
+                sharex=True,
+                sharey=True
+            )
 
-            member_list = sorted(shared) if shared else sorted(pred_members)
-            member_str = ", ".join(member_list)
+            axes[0].set_title("GT supervision (Stage-2)", fontsize=10)
+            axes[1].set_title("Prediction (Stage-2)", fontsize=10)
 
-            axes[0].set_title("GT supervision (kept/pruned)", fontsize=10)
-            axes[1].set_title("Prediction (kept/pruned)", fontsize=10)
             for ax in axes:
                 ax.axis("off")
 
@@ -2781,23 +3312,25 @@ def compare_widths_for_aligned_cracks(
             col_keep = (0.2, 0.4, 0.8)   # blue
             col_drop = (0.5, 0.0, 0.0)   # dark red
 
-            # ---- GT plot ----
-            for S in gt_pruned:
+            # ---- GT ----
+            for S in gt_dropped:
                 S2 = S - np.array([x0, y0])
                 axes[0].plot(S2[:, 0], S2[:, 1], color=col_drop, lw=2.0, alpha=0.8)
+
             for S in gt_kept:
                 S2 = S - np.array([x0, y0])
                 axes[0].plot(S2[:, 0], S2[:, 1], color=col_keep, lw=2.5)
 
-            # ---- Pred plot ----
-            for S in pred_pruned:
+            # ---- PRED ----
+            for S in pred_dropped:
                 S2 = S - np.array([x0, y0])
                 axes[1].plot(S2[:, 0], S2[:, 1], color=col_drop, lw=2.0, alpha=0.8)
+
             for S in pred_kept:
                 S2 = S - np.array([x0, y0])
                 axes[1].plot(S2[:, 0], S2[:, 1], color=col_keep, lw=2.5)
 
-            # ---- bbox overlay ----
+            # ---- bbox ----
             if bb:
                 for ax in axes:
                     ax.add_patch(
@@ -2810,11 +3343,10 @@ def compare_widths_for_aligned_cracks(
                         )
                     )
 
-            # ---- legend ----
             axes[1].legend(
                 handles=[
                     Line2D([0], [0], color=col_keep, lw=3, label="Kept segments"),
-                    Line2D([0], [0], color=col_drop, lw=3, label="Pruned segments"),
+                    Line2D([0], [0], color=col_drop, lw=3, label="Dropped segments"),
                     Line2D([0], [0], color="dodgerblue", lw=1.5, label="BBox"),
                 ],
                 loc="lower right",
@@ -2822,19 +3354,36 @@ def compare_widths_for_aligned_cracks(
                 framealpha=0.9,
             )
 
+            member_str = ", ".join(sorted(shared)) if shared else ", ".join(sorted(pred_members))
             fig.suptitle(
-                f"Aligned Combined Crack cid={cid}\nAtomic members: [{member_str}]",
+                f"Stage-2 prune — cid={cid}\nAtomic members: [{member_str}]",
                 fontsize=11,
                 fontweight="bold",
             )
 
-            out = os.path.join(opsec_dir, f"stage12_prune_{cid}.png")
+            out = os.path.join(out_dir, f"stage2_prune_{cid}.png")
             fig.savefig(out, bbox_inches="tight", dpi=200)
             plt.close(fig)
 
-        except Exception as e:
-            print(f"[OPSEC STAGE12 PLOT] skipped cid={cid}: {e}")
+            print(f"[STAGE2 OPSEC] wrote {out}")
 
+        plot_stage2_prune_opsec(
+            cid=cid,
+            crack=crack,
+            H=H,
+            W=W,
+            mask_bin=mask_bin,
+            segs=segs,
+            seg_meta=seg_meta,
+            pruned_segs=pruned_segs,
+            pruned_meta=pruned_meta,
+            gt_entry=gt_entry,
+            gt_pruned_segs=gt_pruned_segs,
+            gt_pruned_meta=gt_pruned_meta,
+            pred_members=pred_members,
+            shared=shared,
+            out_dir=opsec_dir,
+        )
 
         # --------------------------------------------
         # Stage 3: build ORIGINAL segment offsets
@@ -2855,168 +3404,340 @@ def compare_widths_for_aligned_cracks(
 
         off_fallback = 0
         
-        # ============================================================
-        # Stage 4: DOMINANCE-AWARE BITE (AUTHORITATIVE, EXPLANATORY)
-        #
-        # Purpose (READ-ONLY):
-        #   - Visualize WHERE each branch loses dominance
-        #   - Separate GT vs PRED vs OR(expanded) loss regions
-        #   - Overlay segments to show what geometry is at risk
-        #
-        # Semantics:
-        #   - RED    : GT-only loss
-        #   - BLUE   : PRED-only loss (OR expansion)
-        #   - PURPLE : GT ∩ PRED (agreement)
-        #
-        # NO GEOMETRY IS REMOVED HERE
-        # ============================================================
+        
+        
+        def _mask_bbox_bool(m):
+            ys, xs = np.where(m)
+            if xs.size == 0:
+                return None
+            return int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+
+        def _mask_centroid_bool(m):
+            ys, xs = np.where(m)
+            if xs.size == 0:
+                return None
+            return float(xs.mean()), float(ys.mean())
+
+        def _shift_mask_bool(fullmask_bool, dx, dy):
+            """
+            Shift an HxW bool mask by (dx,dy) in pixel coords.
+            Positive dx moves right; positive dy moves down.
+            """
+            H, W = fullmask_bool.shape
+            out = np.zeros((H, W), dtype=bool)
+
+            dx = int(round(dx))
+            dy = int(round(dy))
+            if dx == 0 and dy == 0:
+                return fullmask_bool.copy()
+
+            # Source and destination slices
+            x0s = max(0, -dx)
+            x1s = min(W, W - dx)
+            y0s = max(0, -dy)
+            y1s = min(H, H - dy)
+
+            x0d = max(0, dx)
+            x1d = min(W, W + dx)
+            y0d = max(0, dy)
+            y1d = min(H, H + dy)
+
+            if x1s <= x0s or y1s <= y0s or x1d <= x0d or y1d <= y0d:
+                return out
+
+            out[y0d:y1d, x0d:x1d] = fullmask_bool[y0s:y1s, x0s:x1s]
+            return out
+
+        def _pts_centroid_xy(pts):
+            if pts is None:
+                return None
+            pts = np.asarray(pts, float)
+            if pts.ndim != 2 or pts.shape[0] == 0:
+                return None
+            return float(pts[:, 0].mean()), float(pts[:, 1].mean())
 
         # ============================================================
-        # Stage 4: DOMINANCE-AWARE BITE — LOGIC ONLY
-        #   (no plotting, no matplotlib)
+        # Stage 4: DOMINANCE-AWARE BITE — READ-ONLY (STAGE0-STYLE)
+        #   - decode packbits in BITE-LOCAL frame
+        #   - union in local frame
+        #   - optional clip to (x0,y0,x1,y1) view window
+        #   - NO SHIFT
+        #   - NO rebuilding into full HxW
         # ============================================================
 
         # ----------------------------
-        # decode dominance
+        # SAFETY + GT GEOMETRY SOURCE (Stage-4 authoritative)
         # ----------------------------
-        dom_pred = crack.get("dominance_meta")
-        dom_gt   = gt_entry.get("dominance_meta") if gt_entry else None
+
+        # Prefer Stage-2-pruned GT geometry (correct + scoped)
+        if "gt_pruned_segs" in locals() and gt_pruned_segs:
+            gt_plot_segs = gt_pruned_segs
+            gt_plot_meta = gt_pruned_meta if "gt_pruned_meta" in locals() else [{}] * len(gt_pruned_segs)
+            print(f"[STAGE4] using gt_pruned_segs ({len(gt_plot_segs)}) for GT plot")
+
+        # Fallback: raw GT midlines (only if Stage-2 GT missing)
+        elif isinstance(gt_entry, dict) and gt_entry.get("midline_segments"):
+            gt_plot_segs = gt_entry.get("midline_segments")
+            gt_plot_meta = (
+                (gt_entry.get("dominance_meta", {}) or {}).get("segments_meta")
+                or [{}] * len(gt_plot_segs)
+            )
+            print(f"[STAGE4 WARN] falling back to RAW GT midlines ({len(gt_plot_segs)})")
+
+        # Last-resort safety (should not happen)
+        else:
+            gt_plot_segs = []
+            gt_plot_meta = []
+            print("[STAGE4 WARN] no GT geometry available for plotting")
+
+        import os
+        import numpy as np
+        import matplotlib.pyplot as plt
+
+        dom_pred = crack.get("dominance_meta") if isinstance(crack, dict) else None
+        dom_gt   = gt_entry.get("dominance_meta") if isinstance(gt_entry, dict) else None
 
         os.makedirs(opsec_dir, exist_ok=True)
         _dump_json(os.path.join(opsec_dir, f"dom_pred_{cid}.json"), dom_pred)
         _dump_json(os.path.join(opsec_dir, f"dom_gt_{cid}.json"), dom_gt)
 
-        loss_pred = _decode_by_losing_branch(dom_pred, H, W)
-        loss_gt   = _decode_by_losing_branch(dom_gt,   H, W)
+        def _get_bite_union_local(dom):
+            """
+            Returns:
+            bbox_xywh (list[int] or None)
+            union_bool (Hloc, Wloc) bool or None
+            by_branch (dict[str]->bool mask) in local coords (optional)
+            """
+            if not isinstance(dom, dict):
+                return None, None, {}
 
-        # ------------------------------------------------------------
-        # Dominance loss masks (AUTHORITATIVE)
-        #   - pred loss masks clip prediction geometry
-        #   - gt   loss masks clip GT geometry
-        # ------------------------------------------------------------
-        loss_masks_pred_by_branch = loss_pred if isinstance(loss_pred, dict) else {}
-        loss_masks_gt_by_branch   = loss_gt   if isinstance(loss_gt, dict) else {}
+            bite = dom.get("bite")
+            if not isinstance(bite, dict):
+                return None, None, {}
 
-        # Backwards-compat aliases (so older Stage-5 code doesn’t explode)
-        loss_masks_by_branch = loss_masks_pred_by_branch     # historical meaning: PRED side
-        loss_gt_by_branch    = loss_masks_gt_by_branch       # if any code uses this name
+            bb = bite.get("bbox")
+            by_branch = bite.get("by_losing_branch")
 
-        if loss_masks_pred_by_branch:
-            print(
-                f"[BITE DOM] cid={cid} "
-                f"loss_masks_pred_by_branch (PRED) = {sorted(loss_masks_pred_by_branch.keys())}"
-            )
-        else:
-            print(
-                f"[BITE DOM] cid={cid} "
-                f"no prediction-side dominance loss (no pruning will occur)"
-            )
+            if not (isinstance(bb, (list, tuple)) and len(bb) == 4):
+                return None, None, {}
 
-        if loss_masks_gt_by_branch:
-            print(
-                f"[BITE DOM] cid={cid} "
-                f"loss_masks_gt_by_branch (GT) = {sorted(loss_masks_gt_by_branch.keys())}"
-            )
+            bx, by, bw, bh = map(int, bb)
 
-        # ----------------------------
-        # union of branch IDs involved
-        # ----------------------------
-        all_bids = sorted(set(loss_pred.keys()) | set(loss_gt.keys()))
+            if not isinstance(by_branch, dict) or not by_branch:
+                return [bx, by, bw, bh], None, {}
 
-        if not all_bids:
-            print(f"[STAGE4] cid={cid} no losing branches in GT or PRED")
-            
-        # ----------------------------
-        # build GT segments to plot (robust)
-        #   Priority:
-        #     (A) keep GT segments whose atomic_id is in this combined crack's members
-        #     (B) else fallback to branch_id matching (if present)
-        #     (C) else fallback: plot ALL GT segments (better than blank)
-        # ----------------------------
-        gt_plot_segs = []
-        gt_plot_meta = []
+            union = None
+            out_by_branch = {}
 
-        # members of this combined crack (strings)
-        _members = crack.get("members", []) or []
-        members_set = set(str(m) for m in _members)
+            for bid, info in by_branch.items():
+                # IMPORTANT: this must decode into BITE-LOCAL coordinates
+                m = _decode_packbits_mask(info)  # expected shape (bh, bw) or similar
+                if m is None:
+                    continue
+                m = np.asarray(m).astype(bool)
+                if m.ndim != 2 or m.size == 0:
+                    continue
 
-        if gt_entry is not None:
-            gt_segs_all = gt_entry.get("midline_segments") or []
+                out_by_branch[str(bid)] = m
+                union = m if union is None else (union | m)
 
-            # AUTHORITATIVE: GT segment metadata lives ONLY here
-            gt_meta_all = (
-                gt_entry.get("dominance_meta", {}).get("segments_meta") or []
-            )
+            return [bx, by, bw, bh], union, out_by_branch
 
+        def _plot_bite_local_union(*, title, bbox_xywh, union, segs_global, out_png, clip_global_xyxy=None):
+            """
+            Plot union in bite-local frame, overlay global segs shifted by -bbox origin.
+            Optional clip to a global xyxy window (x0,y0,x1,y1):
+            - clip is applied in LOCAL coords by intersecting with bbox.
+            """
+            if bbox_xywh is None or union is None or (not np.any(union)):
+                print(f"[STAGE4] {title}: EMPTY (bbox={bbox_xywh})")
+                return
 
-            print(f"[STAGE4 DBG] cid={cid} GT segs={len(gt_segs_all)} GT meta={len(gt_meta_all)} members={sorted(members_set) if members_set else 'NONE'}")
+            bx, by, bw, bh = map(int, bbox_xywh)
 
-            # ---- Case 1: metadata aligned ----
-            if len(gt_segs_all) == len(gt_meta_all) and len(gt_segs_all) > 0:
-                kept_by_atomic = 0
-                kept_by_branch = 0
-                kept_all       = 0
+            # Optional clip (global window -> local window)
+            U = union
+            lx0 = ly0 = 0
+            if clip_global_xyxy is not None:
+                gx0, gy0, gx1, gy1 = map(int, clip_global_xyxy)
 
-                for Sg, mg in zip(gt_segs_all, gt_meta_all):
-                    if Sg is None or len(Sg) < 2:
-                        continue
-                    mg = mg if isinstance(mg, dict) else {}
+                # intersection in GLOBAL
+                ix0 = max(gx0, bx)
+                iy0 = max(gy0, by)
+                ix1 = min(gx1, bx + bw)
+                iy1 = min(gy1, by + bh)
 
-                    # (A) atomic_id membership filter (preferred)
-                    aid = mg.get("atomic_id", None)
-                    if members_set and aid is not None and str(aid) in members_set:
-                        gt_plot_segs.append(np.asarray(Sg, float))
-                        gt_plot_meta.append(mg)
-                        kept_by_atomic += 1
-                        continue
+                if ix1 > ix0 and iy1 > iy0:
+                    # convert to LOCAL slice
+                    lx0 = ix0 - bx
+                    ly0 = iy0 - by
+                    lx1 = ix1 - bx
+                    ly1 = iy1 - by
+                    U = U[ly0:ly1, lx0:lx1]
+                else:
+                    # no overlap -> treat as empty plot
+                    print(f"[STAGE4] {title}: clip window does not intersect bite bbox -> skip")
+                    return
 
-                    # (B) branch_id fallback (only if it exists)
-                    bid = _safe_int(mg.get("branch_id"), None)
-                    if bid is not None and bid in all_bids:
-                        gt_plot_segs.append(np.asarray(Sg, float))
-                        gt_plot_meta.append(mg)
-                        kept_by_branch += 1
-                        continue
+            fig, ax = plt.subplots(figsize=(6, 6), dpi=220)
+            ax.set_title(title, fontsize=12)
+            ax.axis("off")
 
-                    # (C) if neither key exists AND we have no members_set, keep-all fallback
-                    if not members_set and bid is None and aid is None:
-                        gt_plot_segs.append(np.asarray(Sg, float))
-                        gt_plot_meta.append(mg)
-                        kept_all += 1
+            ax.imshow(U.astype(np.uint8), cmap="hot", interpolation="nearest", alpha=0.95)
 
-                print(
-                    f"[STAGE4 DBG] cid={cid} GT kept: "
-                    f"by_atomic={kept_by_atomic} by_branch={kept_by_branch} keepall={kept_all} "
-                    f"TOTAL={len(gt_plot_segs)}"
+            # overlay segs (global -> bite-local -> optionally clipped window offset)
+            for S in segs_global or []:
+                if S is None or len(S) < 2:
+                    continue
+                S = np.asarray(S, float)
+                X = S[:, 0] - bx - float(lx0)
+                Y = S[:, 1] - by - float(ly0)
+                ax.plot(X, Y, color="cyan", lw=2)
+
+            # draw frame boundary (local)
+            ax.add_patch(
+                plt.Rectangle(
+                    (0, 0),
+                    U.shape[1],
+                    U.shape[0],
+                    fill=False,
+                    edgecolor="lime",
+                    linewidth=2,
                 )
+            )
 
-                # If we filtered everything out (common when keys don't match), do NOT go blank:
-                if len(gt_plot_segs) == 0:
-                    print(f"[STAGE4 DBG] cid={cid} GT kept=0 after filtering → fallback to plotting ALL GT segs")
-                    for Sg, mg in zip(gt_segs_all, gt_meta_all):
-                        if Sg is None or len(Sg) < 2:
-                            continue
-                        gt_plot_segs.append(np.asarray(Sg, float))
-                        gt_plot_meta.append(mg if isinstance(mg, dict) else {})
+            fig.savefig(out_png, bbox_inches="tight")
+            plt.close(fig)
+            print(f"[STAGE4] wrote {out_png}")
 
-            # ---- Case 2: metadata not aligned or missing → plot all GT segments ----
-            else:
-                print(f"[STAGE4 DBG] cid={cid} GT meta mismatch/missing → plotting ALL GT segs")
-                for Sg in gt_segs_all:
-                    if Sg is None or len(Sg) < 2:
-                        continue
-                    gt_plot_segs.append(np.asarray(Sg, float))
-                    gt_plot_meta.append({})
-        else:
-            print(f"[STAGE4 DBG] cid={cid} gt_entry is None → no GT midlines available")
+        def _paste_pred_into_gt_frame(*, gt_bbox, gt_union, pred_bbox, pred_union):
+            """
+            Create two masks in GT bite-local frame:
+            - gt_local = gt_union (as-is)
+            - pred_in_gt = pred_union pasted into GT frame using bbox offset
+            Returns: (gt_local_bool, pred_in_gt_bool)
+            """
+            if gt_bbox is None or gt_union is None:
+                return None, None
+            if pred_bbox is None or pred_union is None:
+                return gt_union.astype(bool), np.zeros_like(gt_union, dtype=bool)
+
+            gbx, gby, gbw, gbh = map(int, gt_bbox)
+            pbx, pby, pbw, pbh = map(int, pred_bbox)
+
+            gt_local = gt_union.astype(bool)
+
+            # pred pixel at global (pbx + x, pby + y)
+            # maps to GT-local (x + (pbx-gbx), y + (pby-gby))
+            dx = int(pbx - gbx)
+            dy = int(pby - gby)
+
+            canvas = np.zeros((gt_local.shape[0], gt_local.shape[1]), dtype=bool)
+
+            # paste with clipping to canvas bounds
+            y0 = max(0, dy)
+            x0 = max(0, dx)
+            y1 = min(canvas.shape[0], dy + pred_union.shape[0])
+            x1 = min(canvas.shape[1], dx + pred_union.shape[1])
+
+            sy0 = max(0, -dy)
+            sx0 = max(0, -dx)
+            sy1 = sy0 + (y1 - y0)
+            sx1 = sx0 + (x1 - x0)
+
+            if (y1 > y0) and (x1 > x0) and (sy1 > sy0) and (sx1 > sx0):
+                canvas[y0:y1, x0:x1] = pred_union.astype(bool)[sy0:sy1, sx0:sx1]
+
+            return gt_local, canvas
+
+        def _plot_overlay_in_gt_frame(*, gt_bbox, gt_union, pred_bbox, pred_union, out_png, clip_global_xyxy=None):
+            """
+            Overlay GT (red) and Pred (blue) in GT bite-local frame, optionally clipped to a global window.
+            """
+            if gt_bbox is None or gt_union is None or not np.any(gt_union):
+                print("[STAGE4] overlay: GT union empty -> skip")
+                return
+
+            gbx, gby, gbw, gbh = map(int, gt_bbox)
+
+            gt_local, pred_in_gt = _paste_pred_into_gt_frame(
+                gt_bbox=gt_bbox,
+                gt_union=gt_union,
+                pred_bbox=pred_bbox,
+                pred_union=pred_union,
+            )
+
+            # Optional clip window (global -> gt-local)
+            lx0 = ly0 = 0
+            GT = gt_local
+            PR = pred_in_gt
+            if clip_global_xyxy is not None:
+                gx0, gy0, gx1, gy1 = map(int, clip_global_xyxy)
+
+                ix0 = max(gx0, gbx)
+                iy0 = max(gy0, gby)
+                ix1 = min(gx1, gbx + gbw)
+                iy1 = min(gy1, gby + gbh)
+
+                if ix1 <= ix0 or iy1 <= iy0:
+                    print("[STAGE4] overlay: clip does not intersect GT bite bbox -> skip")
+                    return
+
+                lx0 = ix0 - gbx
+                ly0 = iy0 - gby
+                lx1 = ix1 - gbx
+                ly1 = iy1 - gby
+
+                GT = GT[ly0:ly1, lx0:lx1]
+                PR = PR[ly0:ly1, lx0:lx1]
+
+            overlay = np.zeros((GT.shape[0], GT.shape[1], 3), dtype=np.float32)
+            overlay[..., 0] = GT.astype(np.float32)  # R
+            overlay[..., 2] = PR.astype(np.float32)  # B
+
+            fig, ax = plt.subplots(figsize=(7, 6), dpi=220)
+            ax.set_title("Stage4 overlay in GT bite-local frame (GT=R, Pred=B)", fontsize=11)
+            ax.imshow(overlay, interpolation="nearest")
+            ax.axis("off")
+
+            ax.add_patch(
+                plt.Rectangle(
+                    (0, 0),
+                    overlay.shape[1],
+                    overlay.shape[0],
+                    fill=False,
+                    edgecolor="lime",
+                    linewidth=2,
+                )
+            )
+
+            fig.savefig(out_png, bbox_inches="tight")
+            plt.close(fig)
+            print(f"[STAGE4] wrote {out_png}")
 
         # ----------------------------
-        # crop window (shared by plots)
+        # Decode unions in bite-local coordinates (Stage0 style)
         # ----------------------------
-        bb = crack.get("mask_bbox")
+        gt_bbox, gt_union_local, _ = _get_bite_union_local(dom_gt)
+        pr_bbox, pr_union_local, _ = _get_bite_union_local(dom_pred)
+
+        print(f"[STAGE4] cid={cid} GT bite bbox={gt_bbox} union_px={(0 if gt_union_local is None else int(gt_union_local.sum()))}")
+        print(f"[STAGE4] cid={cid} PR bite bbox={pr_bbox} union_px={(0 if pr_union_local is None else int(pr_union_local.sum()))}")
+
+        # Build seg lists for overlay:
+        gt_segs_for_plot = gt_entry.get("midline_segments") if isinstance(gt_entry, dict) else []
+        pr_segs_for_plot = pruned_segs if ("pruned_segs" in locals()) else []
+
+        # ============================================================
+        # Stage-4 VIEW WINDOW (MATCHES STAGE 2 / STAGE 5)
+        #   - ALWAYS pred mask_bbox + pad
+        # ============================================================
+
+        pad = 25
+
+        bb = crack.get("mask_bbox") if isinstance(crack, dict) else None
         if bb:
             x, y, w, h = map(int, bb)
-            pad = 25
             x0 = max(0, x - pad)
             y0 = max(0, y - pad)
             x1 = min(W, x + w + pad)
@@ -3024,62 +3745,176 @@ def compare_widths_for_aligned_cracks(
         else:
             x0, y0, x1, y1 = 0, 0, W, H
 
+        clip_xyxy = (x0, y0, x1, y1)
+
+        print(f"[STAGE4 VIEW] cid={cid} view bbox = {(x0, y0, x1, y1)}")
+
         # ----------------------------
-        # categorical dominance map
-        #   0 = background
-        #   1 = GT-only
-        #   2 = PRED-only
-        #   3 = BOTH (GT ∩ PRED)
+        # PLOT 1: GT bite-local raw (like Stage 0)
         # ----------------------------
-        dom_label = np.zeros((H, W), dtype=np.uint8)
-
-        for bid in all_bids:
-            m_gt   = loss_gt.get(bid)
-            m_pred = loss_pred.get(bid)
-
-            if m_gt is None and m_pred is None:
-                continue
-
-            if m_gt is not None:
-                dom_label[m_gt.astype(bool)] |= 1
-
-            if m_pred is not None:
-                dom_label[m_pred.astype(bool)] |= 2
-
-        # cropped + masked version (used only for plotting)
-        dom_crop   = dom_label[y0:y1, x0:x1]
-        dom_masked = np.ma.array(dom_crop, mask=(dom_crop == 0))
-        dom_crop = dom_crop.astype(np.uint8)
-        dom_masked = np.ma.array(dom_crop, mask=(dom_crop == 0))
-        
-        # --------------------------------------------------
-        # Build atomic_id → branch_id map from prediction
-        # --------------------------------------------------
-        atomic_to_branch = {}
-
-        for m in pruned_meta:
-            if not isinstance(m, dict):
-                continue
-            aid = m.get("atomic_id", None)
-            bid = m.get("branch_id", None)
-            if aid is not None and bid is not None:
-                atomic_to_branch[str(aid)] = int(bid)
-
-        print(
-            f"[STAGE4 DBG] cid={cid} atomic→branch map: {atomic_to_branch}"
+        _plot_bite_local_union(
+            title=f"Stage4 GT — RAW bite-local union (cid={cid})",
+            bbox_xywh=gt_bbox,
+            union=gt_union_local,
+            segs_global=gt_segs_for_plot,
+            out_png=os.path.join(opsec_dir, f"stage4_gt_dom_raw_local_{cid}.png"),
+            clip_global_xyxy=None,  # full bite-local
         )
 
+        # ----------------------------
+        # PLOT 2: PRED bite-local raw
+        # ----------------------------
+        _plot_bite_local_union(
+            title=f"Stage4 PRED — RAW bite-local union (cid={cid})",
+            bbox_xywh=pr_bbox,
+            union=pr_union_local,
+            segs_global=pr_segs_for_plot,
+            out_png=os.path.join(opsec_dir, f"stage4_pred_dom_raw_local_{cid}.png"),
+            clip_global_xyxy=None,
+        )
 
+        # ----------------------------
+        # PLOT 3: Overlay pred pasted into GT bite-local frame (no modification, just bbox mapping)
+        # ----------------------------
+        _plot_overlay_in_gt_frame(
+            gt_bbox=gt_bbox,
+            gt_union=gt_union_local,
+            pred_bbox=pr_bbox,
+            pred_union=pr_union_local,
+            out_png=os.path.join(opsec_dir, f"stage4_dom_overlay_in_gt_frame_{cid}.png"),
+            clip_global_xyxy=None,
+        )
+
+        # ----------------------------
+        # CLIPPED VERSIONS (Stage-2/5-style view window)
+        # ----------------------------
+
+        _plot_bite_local_union(
+            title=f"Stage4 GT — RAW bite-local union (CLIPPED view) (cid={cid})",
+            bbox_xywh=gt_bbox,
+            union=gt_union_local,
+            segs_global=gt_segs_for_plot,
+            out_png=os.path.join(opsec_dir, f"stage4_gt_dom_raw_local_clipped_{cid}.png"),
+            clip_global_xyxy=clip_xyxy,
+        )
+
+        _plot_bite_local_union(
+            title=f"Stage4 PRED — RAW bite-local union (CLIPPED view) (cid={cid})",
+            bbox_xywh=pr_bbox,
+            union=pr_union_local,
+            segs_global=pr_segs_for_plot,
+            out_png=os.path.join(opsec_dir, f"stage4_pred_dom_raw_local_clipped_{cid}.png"),
+            clip_global_xyxy=clip_xyxy,
+        )
+
+        _plot_overlay_in_gt_frame(
+            gt_bbox=gt_bbox,
+            gt_union=gt_union_local,
+            pred_bbox=pr_bbox,
+            pred_union=pr_union_local,
+            out_png=os.path.join(opsec_dir, f"stage4_dom_overlay_in_gt_frame_clipped_{cid}.png"),
+            clip_global_xyxy=clip_xyxy,
+        )
         
         # ============================================================
-        # Stage 4: DOMINANCE-AWARE BITE — PLOTTING ONLY
+        # Stage 4 — PLOT B (crop-local visualization, Stage-0 truthful)
+        #   - dominance comes ONLY from bite-local packbits
+        #   - rasterized into crop-local frame for plotting
+        #   - NO shift, NO rebase, NO metric side effects
         # ============================================================
 
+        import numpy as np
         import matplotlib.pyplot as plt
         from matplotlib.lines import Line2D
         from matplotlib.colors import ListedColormap
 
-        # ---- helper: rebuild pred mask exactly like Stage 1 ----
+        # ----------------------------
+        # SAFETY
+        # ----------------------------
+        if gt_plot_segs is None:
+            gt_plot_segs = []
+        if gt_plot_meta is None:
+            gt_plot_meta = []
+
+        # ----------------------------
+        # Crop geometry
+        # ----------------------------
+        Hc = int(y1 - y0)
+        Wc = int(x1 - x0)
+
+        # ----------------------------
+        # Build dom_label *only for Plot B*
+        #   0 = background
+        #   1 = GT-only
+        #   2 = Pred-only
+        #   3 = both
+        # ----------------------------
+        dom_label = np.zeros((Hc, Wc), dtype=np.uint8)
+
+        def _raster_bite_into_crop(*, bbox, union, value):
+            """
+            bbox: [bx,by,bw,bh] in GLOBAL coords
+            union: (bh,bw) bool, BITE-LOCAL
+            value: 1 (GT) or 2 (Pred)
+            """
+            if bbox is None or union is None or not np.any(union):
+                return
+
+            bx, by, bw, bh = map(int, bbox)
+
+            # intersection in GLOBAL coords
+            ix0 = max(x0, bx)
+            iy0 = max(y0, by)
+            ix1 = min(x1, bx + bw)
+            iy1 = min(y1, by + bh)
+
+            if ix1 <= ix0 or iy1 <= iy0:
+                return
+
+            # crop-local indices
+            cx0 = ix0 - x0
+            cy0 = iy0 - y0
+            cx1 = ix1 - x0
+            cy1 = iy1 - y0
+
+            # bite-local indices
+            ux0 = ix0 - bx
+            uy0 = iy0 - by
+            ux1 = ux0 + (cx1 - cx0)
+            uy1 = uy0 + (cy1 - cy0)
+
+            dom_label[cy0:cy1, cx0:cx1] |= (
+                union[uy0:uy1, ux0:ux1].astype(np.uint8) * value
+            )
+
+        # rasterize GT and Pred
+        _raster_bite_into_crop(
+            bbox=gt_bbox,
+            union=gt_union_local,
+            value=1,
+        )
+
+        _raster_bite_into_crop(
+            bbox=pr_bbox,
+            union=pr_union_local,
+            value=2,
+        )
+
+        # ----------------------------
+        # Prepare masked dominance
+        # ----------------------------
+        dom_masked = np.ma.array(dom_label, mask=(dom_label == 0))
+
+        DOM_CMAP = ListedColormap([
+            "#000000",  # 0 background (masked)
+            "#e41a1c",  # 1 GT-only
+            "#377eb8",  # 2 Pred-only
+            "#984ea3",  # 3 GT ∩ Pred
+        ])
+
+        # ----------------------------
+        # Rebuild prediction mask (background only)
+        # ----------------------------
         def _rebuild_pred_mask(crack, H, W):
             pm = np.zeros((H, W), np.uint8)
             bb = crack.get("mask_bbox")
@@ -3094,7 +3929,11 @@ def compare_widths_for_aligned_cracks(
                         pm[y:y+hh, x:x+ww] = (crop[:hh, :ww] > 0).astype(np.uint8)
             return pm
 
-        # ---- figure ----
+        pred_mask_full = _rebuild_pred_mask(crack, H, W)
+
+        # ----------------------------
+        # Plot
+        # ----------------------------
         fig, axes = plt.subplots(
             1, 2, figsize=(12, 6), dpi=240, sharex=True, sharey=True
         )
@@ -3105,55 +3944,38 @@ def compare_widths_for_aligned_cracks(
         for ax in axes:
             ax.axis("off")
 
-        # ---- backgrounds ----
-        # LEFT: GT mask
+        # backgrounds
         axes[0].imshow(
             (mask_bin[y0:y1, x0:x1] > 0).astype(np.uint8),
-            cmap="gray",
-            vmin=0, vmax=1,
-            interpolation="nearest",
-            zorder=0,
+            cmap="gray", vmin=0, vmax=1,
+            interpolation="nearest", zorder=0
         )
 
-        # RIGHT: pred mask if AUTO, otherwise black (MANUAL)
-        pred_mask_full = _rebuild_pred_mask(crack, H, W)
-        if np.any(pred_mask_full):
-            axes[1].imshow(
-                pred_mask_full[y0:y1, x0:x1],
-                cmap="gray",
-                vmin=0, vmax=1,
-                interpolation="nearest",
-                zorder=0,
-            )
-        else:
-            axes[1].imshow(
-                np.zeros((y1 - y0, x1 - x0), np.uint8),
-                cmap="gray",
-                vmin=0, vmax=1,
-                interpolation="nearest",
-                zorder=0,
-            )
+        axes[1].imshow(
+            pred_mask_full[y0:y1, x0:x1] if np.any(pred_mask_full)
+            else np.zeros((Hc, Wc), np.uint8),
+            cmap="gray", vmin=0, vmax=1,
+            interpolation="nearest", zorder=0
+        )
 
-        # ---- dominance overlay (UNCHANGED semantics) ----
-        DOM_CMAP = ListedColormap([
-            "#000000",  # 0 unused (masked)
-            "#e41a1c",  # GT-only
-            "#377eb8",  # Pred-only
-            "#984ea3",  # GT ∩ Pred
-        ])
-
+        # dominance overlay
+        extent = [0, Wc, Hc, 0]
         for ax in axes:
             ax.imshow(
                 dom_masked,
                 cmap=DOM_CMAP,
                 interpolation="nearest",
-                vmin=0,
-                vmax=3,
+                vmin=0, vmax=3,
                 alpha=0.9,
                 zorder=1,
+                extent=extent,
             )
+            ax.set_xlim(0, Wc)
+            ax.set_ylim(Hc, 0)
 
-        # ---- overlay segments ----
+        # ----------------------------
+        # Midlines
+        # ----------------------------
         color_cycle = [
             (0.95, 0.90, 0.25),
             (0.25, 0.85, 0.35),
@@ -3161,42 +3983,35 @@ def compare_widths_for_aligned_cracks(
             (0.95, 0.35, 0.35),
         ]
 
+        # atomic -> branch map (best effort)
+        atomic_to_branch = {}
+        for mg in gt_plot_meta or []:
+            if isinstance(mg, dict):
+                aid = mg.get("atomic_id")
+                bid = mg.get("branch_id")
+                if aid is not None and bid is not None:
+                    atomic_to_branch[str(aid)] = int(bid)
+
         legend_handles = []
         seen = set()
 
-
-        # ----------------------------
-        # LEFT: GT supervision midlines (PRUNED)
-        # ----------------------------
-        for Sg, mg in zip(gt_plot_segs, gt_plot_meta):
+        # GT midlines (left)
+        for Sg, mg in zip(gt_plot_segs or [], gt_plot_meta or []):
             if Sg is None or len(Sg) < 2:
                 continue
+            mg = mg if isinstance(mg, dict) else {}
+            aid = mg.get("atomic_id")
 
-            # Resolve GT segment → branch via atomic_id
-            aid = mg.get("atomic_id", None)
             bid = None
-
             if aid is not None:
-                bid = atomic_to_branch.get(str(aid), None)
-
-            # Fallbacks (never collapse everything silently)
+                bid = atomic_to_branch.get(str(aid))
             if bid is None:
-                bid = _safe_int(mg.get("branch_id"), None)
+                bid = _safe_int(mg.get("branch_id"), 0)
 
-            if bid is None:
-                bid = 0  # last-resort fallback, explicit
+            col = color_cycle[int(bid) % len(color_cycle)]
+            S2 = np.asarray(Sg, float) - np.array([x0, y0], float)
 
-            col = color_cycle[bid % len(color_cycle)]
-
-            S2 = Sg - np.array([x0, y0], float)
-
-            axes[0].plot(
-                S2[:, 0],
-                S2[:, 1],
-                color=col,
-                lw=2.3,
-                zorder=5,
-            )
+            axes[0].plot(S2[:, 0], S2[:, 1], color=col, lw=2.3, zorder=5)
 
             if bid not in seen:
                 legend_handles.append(
@@ -3204,28 +4019,17 @@ def compare_widths_for_aligned_cracks(
                 )
                 seen.add(bid)
 
-        # ----------------------------
-        # RIGHT: prediction midlines
-        # ----------------------------
-        for S, m in zip(pruned_segs, pruned_meta):
+        # Pred midlines (right)
+        for S, m in zip(pruned_segs or [], pruned_meta or []):
             if S is None or len(S) < 2:
                 continue
-
+            m = m if isinstance(m, dict) else {}
             bid = _safe_int(m.get("branch_id"), 0)
-            col = color_cycle[bid % len(color_cycle)]
+            col = color_cycle[int(bid) % len(color_cycle)]
+            S2 = np.asarray(S, float) - np.array([x0, y0], float)
+            axes[1].plot(S2[:, 0], S2[:, 1], color=col, lw=2.3, zorder=5)
 
-            S = np.asarray(S, float)
-            S2 = S - np.array([x0, y0], float)
-
-            axes[1].plot(
-                S2[:, 0],
-                S2[:, 1],
-                color=col,
-                lw=2.3,
-                zorder=5,
-            )
-
-        # ---- legend ----
+        # dominance legend
         legend_handles += [
             Line2D([0], [0], color="#e41a1c", lw=6, label="GT-only loss"),
             Line2D([0], [0], color="#377eb8", lw=6, label="Pred-only loss"),
@@ -3239,11 +4043,121 @@ def compare_widths_for_aligned_cracks(
             framealpha=0.9,
         )
 
-        out = os.path.join(opsec_dir, f"stage4_dominance_bite_{cid}.png")
-        fig.savefig(out, bbox_inches="tight")
+        outB = os.path.join(opsec_dir, f"stage4_dominance_bite_{cid}.png")
+        fig.savefig(outB, bbox_inches="tight")
         plt.close(fig)
 
-        print(f"[OPSEC] Stage-4 dominance plot written: {out}")
+        print(f"[OPSEC] Stage-4 dominance plot written: {outB}")
+        
+        # ============================================================
+        # Stage 4.5 PRELUDE: ensure dominance loss masks exist (FULL-FRAME)
+        #   - builds loss_masks_pred_by_branch / loss_masks_gt_by_branch if missing
+        #   - uses dominance_meta.bite.bbox + bite-local packbits masks
+        #   - inflates each bite-local mask into global HxW
+        #   - NO SHIFT, NO CLIP, purely for dominance pruning + Stage5 overlay
+        # ============================================================
+
+        import numpy as np
+
+        # Local-safe getters (dom_pred/dom_gt might already exist; don’t assume)
+        dom_pred = crack.get("dominance_meta") if isinstance(crack, dict) else None
+        dom_gt   = gt_entry.get("dominance_meta") if isinstance(gt_entry, dict) else None
+
+        def _inflate_local_to_full(*, bbox_xywh, m_local, H, W):
+            """
+            bbox_xywh: [bx,by,bw,bh] in GLOBAL coords
+            m_local  : (bh,bw) bool mask in BITE-LOCAL coords
+            returns  : (H,W) bool full-frame mask
+            """
+            if bbox_xywh is None or m_local is None:
+                return None
+
+            bx, by, bw, bh = map(int, bbox_xywh)
+            m = np.asarray(m_local).astype(bool)
+            if m.ndim != 2 or m.size == 0:
+                return None
+
+            # In case stored bw/bh don't perfectly match decoded mask dims
+            mh, mw = m.shape[0], m.shape[1]
+
+            full = np.zeros((H, W), dtype=bool)
+
+            # destination bounds (global)
+            x0 = max(0, bx)
+            y0 = max(0, by)
+            x1 = min(W, bx + mw)
+            y1 = min(H, by + mh)
+
+            if x1 <= x0 or y1 <= y0:
+                return full  # valid empty
+
+            # source bounds (local)
+            sx0 = max(0, -bx)
+            sy0 = max(0, -by)
+            sx1 = sx0 + (x1 - x0)
+            sy1 = sy0 + (y1 - y0)
+
+            if sx1 <= sx0 or sy1 <= sy0:
+                return full
+
+            full[y0:y1, x0:x1] = m[sy0:sy1, sx0:sx1]
+            return full
+
+        def _decode_bite_loss_masks_full(dom, H, W):
+            """
+            Returns: (bbox_xywh, dict[int -> bool(H,W)])
+            """
+            if not isinstance(dom, dict):
+                return None, {}
+
+            bite = dom.get("bite")
+            if not isinstance(bite, dict):
+                return None, {}
+
+            bb = bite.get("bbox")
+            by_branch = bite.get("by_losing_branch")
+
+            if not (isinstance(bb, (list, tuple)) and len(bb) == 4):
+                return None, {}
+
+            if not isinstance(by_branch, dict) or not by_branch:
+                return list(map(int, bb)), {}
+
+            out = {}
+            for bid, info in by_branch.items():
+                # IMPORTANT: _decode_packbits_mask must return bite-local 2D mask
+                m_local = _decode_packbits_mask(info)
+                if m_local is None:
+                    continue
+
+                m_full = _inflate_local_to_full(
+                    bbox_xywh=bb,
+                    m_local=m_local,
+                    H=H,
+                    W=W,
+                )
+                if m_full is None:
+                    continue
+
+                # normalize key to int when possible
+                try:
+                    bid_i = int(bid)
+                except Exception:
+                    continue
+
+                out[bid_i] = m_full.astype(bool)
+
+            return list(map(int, bb)), out
+
+        # Build only if missing in this scope
+        if "loss_masks_pred_by_branch" not in locals() or loss_masks_pred_by_branch is None:
+            _, loss_masks_pred_by_branch = _decode_bite_loss_masks_full(dom_pred, H, W)
+            print(f"[STAGE4.5] built loss_masks_pred_by_branch bids={sorted(loss_masks_pred_by_branch.keys())}")
+
+        if "loss_masks_gt_by_branch" not in locals() or loss_masks_gt_by_branch is None:
+            _, loss_masks_gt_by_branch = _decode_bite_loss_masks_full(dom_gt, H, W)
+            print(f"[STAGE4.5] built loss_masks_gt_by_branch bids={sorted(loss_masks_gt_by_branch.keys())}")
+
 
         # ============================================================
         # Stage 4.5: APPLY DOMINANCE BITE (SYMMETRIC, DISPOSABLE)
@@ -3266,17 +4180,27 @@ def compare_widths_for_aligned_cracks(
         # Union-bite helper (GT ∪ PRED)
         # ------------------------------------------------------------
         def _union_bite_for_branch(bid):
-            mg = loss_masks_gt_by_branch.get(bid)
-            mp = loss_masks_pred_by_branch.get(bid)
+            """
+            Union dominance-bite mask for a branch_id (full-frame HxW bool).
+            Returns None if nothing exists for that branch.
+            """
+            if bid is None:
+                return None
+            try:
+                bid = int(bid)
+            except Exception:
+                return None
+
+            mg = loss_masks_gt_by_branch.get(bid) if isinstance(loss_masks_gt_by_branch, dict) else None
+            mp = loss_masks_pred_by_branch.get(bid) if isinstance(loss_masks_pred_by_branch, dict) else None
 
             if mg is None and mp is None:
                 return None
             if mg is None:
-                return mp
+                return mp.astype(bool)
             if mp is None:
-                return mg
+                return mg.astype(bool)
             return (mg.astype(bool) | mp.astype(bool))
-
 
         # ------------------------------------------------------------
         # Snapshot BEFORE dominance (for provenance / topology plot)

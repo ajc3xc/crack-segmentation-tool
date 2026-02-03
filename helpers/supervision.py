@@ -522,6 +522,252 @@ def _pack_arrs_with_none_separators(arr_list):
         out.extend([float(v) if np.isfinite(v) else None for v in a])
     return out
 
+def _dom_mask_to_local_array(m, bw, bh):
+    """
+    Convert a stored dominance bite mask to a (bh, bw) bool array, best-effort.
+
+    Supported:
+      - list[list[int/bool]] shape ~= (bh,bw)
+      - flat list length == bw*bh
+      - numpy array any of the above
+    Returns:
+      (arr_bool, info_str) or (None, reason_str)
+    """
+    import numpy as np
+
+    if m is None:
+        return None, "mask=None"
+
+    arr = np.asarray(m)
+
+    if arr.size == 0:
+        return None, f"mask empty array shape={arr.shape}"
+
+    # list-of-lists (2D)
+    if arr.ndim == 2:
+        if arr.shape[0] == bh and arr.shape[1] == bw:
+            return (arr.astype(bool), f"ndim2 ok shape={arr.shape}")
+        # sometimes transposed
+        if arr.shape[0] == bw and arr.shape[1] == bh:
+            return (arr.T.astype(bool), f"ndim2 transposed -> {arr.T.shape}")
+        return None, f"ndim2 wrong shape={arr.shape} expected {(bh,bw)}"
+
+    # flat
+    if arr.ndim == 1:
+        if arr.size == bw * bh:
+            arr2 = arr.reshape((bh, bw))
+            return (arr2.astype(bool), f"flat reshape -> {arr2.shape}")
+        return None, f"flat wrong size={arr.size} expected {bw*bh}"
+
+    return None, f"unsupported ndim={arr.ndim} shape={arr.shape}"
+
+def _unpack_mask_b64(blob):
+    """
+    blob = {"shape":[h,w], "packbits_b64":"..."}
+    Returns uint8 mask of shape (h,w) with values {0,1}.
+    """
+    import base64
+    import numpy as np
+
+    if not isinstance(blob, dict):
+        return None
+
+    shape = blob.get("shape", None)
+    b64 = blob.get("packbits_b64", "")
+
+    if not shape or len(shape) != 2:
+        return None
+
+    h, w = int(shape[0]), int(shape[1])
+    if h <= 0 or w <= 0:
+        return np.zeros((max(h, 0), max(w, 0)), np.uint8)
+
+    if not isinstance(b64, str) or len(b64) == 0:
+        return np.zeros((h, w), np.uint8)
+
+    raw = base64.b64decode(b64.encode("ascii"))
+    packed = np.frombuffer(raw, dtype=np.uint8)
+
+    # packed is (h, ceil(w/8)) when created with np.packbits(..., axis=1)
+    row_bytes = (w + 7) // 8
+    need = h * row_bytes
+    if packed.size < need:
+        # corrupted blob
+        return None
+
+    packed = packed[:need].reshape(h, row_bytes)
+    bits = np.unpackbits(packed, axis=1)[:, :w]
+    return (bits > 0).astype(np.uint8)
+
+
+def debug_plot_gt_sup_dominance_bite_packed(
+    *,
+    base_name,
+    ccid,
+    members,
+    dom_meta,
+    segs,
+    gt_mask,
+    out_dir,
+    zoom_pad=10,
+):
+    """
+    Plots dominance_meta["bite"] exactly as stored by dominant_segments_from_group(),
+    which uses packbits_b64 + shape for masks.
+
+    Panels:
+      (1) RAW LOCAL union (bite frame)
+      (2) FULL placement on GT mask (global canvas)
+      (3) ZOOM crop (union bbox)
+
+    Writes:
+      out_dir/gt_sup_dom_bite_debug_{base_name}_ccid{ccid}_<members>.png
+    """
+    import os
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    if not isinstance(dom_meta, dict):
+        print(f"[GT_SUP DOMDBG] base={base_name} ccid={ccid} dominance_meta missing")
+        return
+
+    bite = dom_meta.get("bite", None)
+    if not isinstance(bite, dict):
+        print(f"[GT_SUP DOMDBG] base={base_name} ccid={ccid} bite missing")
+        return
+
+    bb = bite.get("bbox", None)
+    if not bb or len(bb) != 4:
+        print(f"[GT_SUP DOMDBG] base={base_name} ccid={ccid} bite bbox missing/invalid: {bb}")
+        return
+
+    bx, by, bw, bh = map(int, bb)
+    if bw <= 0 or bh <= 0:
+        print(f"[GT_SUP DOMDBG] base={base_name} ccid={ccid} bite bbox non-positive: {bb}")
+        return
+
+    print(f"[GT_SUP DOMDBG] base={base_name} ccid={ccid} RAW bite bbox={bb} members={members}")
+
+    H, W = gt_mask.shape[:2]
+
+    # -----------------------------
+    # 1) RAW LOCAL union (bite frame)
+    # -----------------------------
+    local_union = np.zeros((bh, bw), np.uint8)
+
+    # First try union blob (backward compatible)
+    if "packbits_b64" in bite and "shape" in bite:
+        u = _unpack_mask_b64({"shape": bite.get("shape"), "packbits_b64": bite.get("packbits_b64")})
+        if u is None:
+            print(f"[GT_SUP DOMDBG] base={base_name} ccid={ccid} union blob decode failed")
+        else:
+            if u.shape == (bh, bw):
+                local_union |= (u > 0).astype(np.uint8)
+
+    # Also try per-losing-branch union blobs (new format)
+    by_lb = bite.get("by_losing_branch", {}) or {}
+    if isinstance(by_lb, dict):
+        for bid, entry in by_lb.items():
+            if not isinstance(entry, dict):
+                continue
+            # entry itself is a blob: {"shape":..,"packbits_b64":..,"by_cause":..}
+            u = _unpack_mask_b64(entry)
+            if u is None:
+                print(f"[GT_SUP DOMDBG]  bid={bid}: BAD packed blob decode (entry keys={list(entry.keys())})")
+                continue
+            if u.shape != (bh, bw):
+                print(f"[GT_SUP DOMDBG]  bid={bid}: shape mismatch {u.shape} vs {(bh,bw)}")
+                continue
+            if np.any(u):
+                local_union |= (u > 0).astype(np.uint8)
+
+    if not np.any(local_union):
+        print(f"[GT_SUP DOMDBG] base={base_name} ccid={ccid} RAW LOCAL union is EMPTY")
+        # still write a figure so you see placement context
+        # (this helps diagnose “bbox exists but union empty”)
+    # -----------------------------
+    # 2) FULL placement on GT mask
+    # -----------------------------
+    placed = np.zeros((H, W), np.uint8)
+    y1 = min(H, by + bh)
+    x1 = min(W, bx + bw)
+    yy = max(0, by)
+    xx = max(0, bx)
+    ph = y1 - yy
+    pw = x1 - xx
+    if ph > 0 and pw > 0:
+        placed[yy:y1, xx:x1] = local_union[(yy - by):(yy - by + ph), (xx - bx):(xx - bx + pw)]
+
+    # -----------------------------
+    # 3) ZOOM crop around bite bbox (or nonzero union)
+    # -----------------------------
+    if np.any(placed):
+        ys, xs = np.where(placed > 0)
+        zx0, zx1 = int(xs.min()), int(xs.max())
+        zy0, zy1 = int(ys.min()), int(ys.max())
+    else:
+        # fallback: zoom to bite bbox
+        zx0, zy0 = bx, by
+        zx1, zy1 = bx + bw - 1, by + bh - 1
+
+    zx0 = max(0, zx0 - zoom_pad)
+    zy0 = max(0, zy0 - zoom_pad)
+    zx1 = min(W - 1, zx1 + zoom_pad)
+    zy1 = min(H - 1, zy1 + zoom_pad)
+
+    # -----------------------------
+    # Plot
+    # -----------------------------
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4), dpi=220)
+    for ax in axes:
+        ax.axis("off")
+
+    axes[0].set_title("RAW LOCAL union (bite frame)", fontsize=9)
+    axes[1].set_title("FULL placement on GT mask", fontsize=9)
+    axes[2].set_title("ZOOM crop (union or bbox)", fontsize=9)
+
+    # panel 0: local
+    axes[0].imshow(local_union, cmap="hot", interpolation="nearest", alpha=0.9)
+    axes[0].add_patch(plt.Rectangle((0, 0), bw, bh, fill=False, edgecolor="lime", linewidth=2))
+
+    # overlay segs projected into bite frame
+    for S in (segs or []):
+        S = np.asarray(S, float)
+        if S.ndim == 2 and len(S) >= 2:
+            axes[0].plot(S[:, 0] - bx, S[:, 1] - by, color="cyan", lw=2)
+
+    # panel 1: full placement on gt mask (use gt_mask as context)
+    axes[1].imshow((gt_mask > 0).astype(np.uint8), cmap="gray", interpolation="nearest")
+    axes[1].imshow(placed, cmap="hot", interpolation="nearest", alpha=0.9)
+    axes[1].add_patch(plt.Rectangle((bx, by), bw, bh, fill=False, edgecolor="lime", linewidth=2))
+    for S in (segs or []):
+        S = np.asarray(S, float)
+        if S.ndim == 2 and len(S) >= 2:
+            axes[1].plot(S[:, 0], S[:, 1], color="cyan", lw=1.2)
+
+    # panel 2: zoom
+    zoom_gt = (gt_mask[zy0:zy1+1, zx0:zx1+1] > 0).astype(np.uint8)
+    zoom_pl = placed[zy0:zy1+1, zx0:zx1+1]
+    axes[2].imshow(zoom_gt, cmap="gray", interpolation="nearest")
+    axes[2].imshow(zoom_pl, cmap="hot", interpolation="nearest", alpha=0.9)
+    axes[2].add_patch(
+        plt.Rectangle((bx - zx0, by - zy0), bw, bh, fill=False, edgecolor="lime", linewidth=2)
+    )
+    for S in (segs or []):
+        S = np.asarray(S, float)
+        if S.ndim == 2 and len(S) >= 2:
+            axes[2].plot(S[:, 0] - zx0, S[:, 1] - zy0, color="cyan", lw=1.6)
+
+    fig.suptitle(f"GT dominance bite debug — base={base_name} ccid={ccid}", fontsize=11)
+
+    os.makedirs(out_dir, exist_ok=True)
+    tag = f"ccid{ccid}_" + "_".join([str(m) for m in members])
+    out = os.path.join(out_dir, f"gt_sup_dom_bite_debug_{base_name}_{tag}.png")
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"[GT_SUP DOMDBG] wrote {out}")
+
 # ============================================================
 # MAIN EXPORT FUNCTION
 # ============================================================
@@ -698,6 +944,24 @@ def export_gt_supervision_for_image(
 
         if not segs:
             continue
+        
+        # -------------------------------------------------
+        # DEBUG: dominance bite as-written (RAW, no decode)
+        # -------------------------------------------------
+        try:
+            debug_plot_gt_sup_dominance_bite_packed(
+                base_name=base_name,
+                ccid=ccid,
+                members=members,
+                dom_meta=dom_meta,
+                segs=segs,
+                gt_mask=gt_mask,
+                out_dir=debug_dir,  # or sup_root, up to you
+            )
+
+        except Exception as e:
+            print(f"[GT_SUP DOMDBG] plot failed: {e}")
+
 
         # -------------------------------------------------
         # Compute GT normals per segment
