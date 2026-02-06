@@ -4049,7 +4049,7 @@ def compare_widths_for_aligned_cracks(
 
         print(f"[OPSEC] Stage-4 dominance plot written: {outB}")
         
-        # ============================================================
+        '''# ============================================================
         # Stage 4.5 PRELUDE: ensure dominance loss masks exist (FULL-FRAME)
         #   - builds loss_masks_pred_by_branch / loss_masks_gt_by_branch if missing
         #   - uses dominance_meta.bite.bbox + bite-local packbits masks
@@ -4378,7 +4378,230 @@ def compare_widths_for_aligned_cracks(
                 # -------- CONSISTENCY FLAGS --------
                 "gt_mismatch": False,
                 "gt_relation": "combined_vs_combined",
+            })'''
+            
+        # ============================================================
+        # Stage 4.5 + Stage 5 — STRICT DOMINANCE APPLICATION
+        #   HARD RULES:
+        #     - MUST start from Stage-4 pruned geometry
+        #     - GT MUST come from Stage-2/4-scoped GT (gt_pruned_segs)
+        #     - If those do not exist → FAIL
+        # ============================================================
+
+        import numpy as np
+
+        # ------------------------------------------------------------
+        # HARD FAILS — NO FALLBACKS
+        # ------------------------------------------------------------
+        if "pruned_segs" not in locals() or not pruned_segs:
+            raise RuntimeError("[STAGE4.5 FATAL] pruned_segs missing — must start from Stage-4 geometry")
+
+        if "pruned_meta" not in locals() or pruned_meta is None:
+            raise RuntimeError("[STAGE4.5 FATAL] pruned_meta missing — must start from Stage-4 geometry")
+
+        if "gt_pruned_segs" not in locals() or not gt_pruned_segs:
+            raise RuntimeError("[STAGE4.5 FATAL] gt_pruned_segs missing — must start from Stage-2/4 GT geometry")
+
+        gt_stage5_source_segs = gt_pruned_segs
+        gt_stage5_source_meta = (
+            gt_pruned_meta
+            if ("gt_pruned_meta" in locals() and gt_pruned_meta)
+            else [{}] * len(gt_stage5_source_segs)
+        )
+
+        print(f"[STAGE4.5] using Stage-4 PRED segs: {len(pruned_segs)}")
+        print(f"[STAGE4.5] using Stage-2/4 GT segs: {len(gt_stage5_source_segs)}")
+
+        # ------------------------------------------------------------
+        # Decode dominance loss masks (FULL FRAME)
+        # ------------------------------------------------------------
+        dom_pred = crack.get("dominance_meta") if isinstance(crack, dict) else None
+        dom_gt   = gt_entry.get("dominance_meta") if isinstance(gt_entry, dict) else None
+
+        def _inflate_local_to_full(bbox_xywh, m_local, H, W):
+            if bbox_xywh is None or m_local is None:
+                return None
+            bx, by, bw, bh = map(int, bbox_xywh)
+            m = np.asarray(m_local).astype(bool)
+            if m.ndim != 2 or m.size == 0:
+                return None
+
+            full = np.zeros((H, W), bool)
+            mh, mw = m.shape
+            x0, y0 = max(0, bx), max(0, by)
+            x1, y1 = min(W, bx + mw), min(H, by + mh)
+            if x1 <= x0 or y1 <= y0:
+                return full
+
+            sx0, sy0 = max(0, -bx), max(0, -by)
+            sx1, sy1 = sx0 + (x1 - x0), sy0 + (y1 - y0)
+            full[y0:y1, x0:x1] = m[sy0:sy1, sx0:sx1]
+            return full
+
+        def _decode_bite_loss_masks_full(dom, H, W):
+            if not isinstance(dom, dict):
+                return {}
+            bite = dom.get("bite")
+            if not isinstance(bite, dict):
+                return {}
+            bb = bite.get("bbox")
+            by_branch = bite.get("by_losing_branch")
+            if not (isinstance(bb, (list, tuple)) and len(bb) == 4):
+                return {}
+            out = {}
+            for bid, info in (by_branch or {}).items():
+                m_local = _decode_packbits_mask(info)
+                if m_local is None:
+                    continue
+                m_full = _inflate_local_to_full(bb, m_local, H, W)
+                if m_full is None:
+                    continue
+                try:
+                    out[int(bid)] = m_full.astype(bool)
+                except Exception:
+                    pass
+            return out
+
+        loss_masks_pred_by_branch = _decode_bite_loss_masks_full(dom_pred, H, W)
+        loss_masks_gt_by_branch   = _decode_bite_loss_masks_full(dom_gt,   H, W)
+
+        # ------------------------------------------------------------
+        # Union-bite helper
+        # ------------------------------------------------------------
+        def _union_bite_for_branch(bid):
+            if bid is None:
+                return None
+            try:
+                bid = int(bid)
+            except Exception:
+                return None
+            mg = loss_masks_gt_by_branch.get(bid)
+            mp = loss_masks_pred_by_branch.get(bid)
+            if mg is None and mp is None:
+                return None
+            if mg is None:
+                return mp
+            if mp is None:
+                return mg
+            return (mg | mp)
+
+        # ------------------------------------------------------------
+        # Snapshot BEFORE dominance
+        # ------------------------------------------------------------
+        pred_pre45_segs = [np.asarray(S, float) for S in pruned_segs if S is not None and len(S) >= 2]
+
+        # ============================================================
+        # Stage 4.5 — APPLY UNION DOMINANCE (PRED)
+        # ============================================================
+        pred_dom_segs = []
+        pred_dom_meta = []
+        bite_pruned_pred_segs = []
+
+        for S, m in zip(pruned_segs, pruned_meta):
+            if S is None or len(S) < 2:
+                continue
+            m = m if isinstance(m, dict) else {}
+            bid = _safe_int(m.get("branch_id"), None)
+            rm = _union_bite_for_branch(bid)
+            if rm is None:
+                pred_dom_segs.append(np.asarray(S, float))
+                pred_dom_meta.append(m)
+                continue
+            kept, removed = _clip_polyline_into_runs(S, rm, H, W, min_pts=2)
+            bite_pruned_pred_segs.extend(removed)
+            for k in kept:
+                pred_dom_segs.append(np.asarray(k, float))
+                pred_dom_meta.append(m)
+
+        pruned_segs = pred_dom_segs
+        pruned_meta = pred_dom_meta
+
+        print(f"[STAGE4.5] PRED kept {len(pruned_segs)} runs")
+
+        # ============================================================
+        # Stage 4.5 — APPLY UNION DOMINANCE (GT)
+        # ============================================================
+        gt_stage5_segs = []
+        gt_stage5_meta = []
+        bite_pruned_gt_segs = []
+
+        for Sg, mg in zip(gt_stage5_source_segs, gt_stage5_source_meta):
+            if Sg is None or len(Sg) < 2:
+                continue
+            mg = mg if isinstance(mg, dict) else {}
+            bid = _safe_int(mg.get("branch_id"), None)
+            rm = _union_bite_for_branch(bid)
+            if rm is None:
+                gt_stage5_segs.append(np.asarray(Sg, float))
+                gt_stage5_meta.append(mg)
+                continue
+            kept, removed = _clip_polyline_into_runs(Sg, rm, H, W, min_pts=2)
+            bite_pruned_gt_segs.extend(removed)
+            for k in kept:
+                gt_stage5_segs.append(np.asarray(k, float))
+                gt_stage5_meta.append(mg)
+
+        print(f"[STAGE4.5] GT kept {len(gt_stage5_segs)} runs")
+
+        # ============================================================
+        # Stage 5 — WIDTH SLICING (STRICT)
+        # ============================================================
+        if not pruned_segs:
+            raise RuntimeError("[STAGE5 FATAL] no prediction geometry after dominance")
+        if not gt_stage5_segs:
+            raise RuntimeError("[STAGE5 FATAL] no GT geometry after dominance")
+
+        final_pred_segs = []
+        stage4_pairs = []
+
+        for S, m in zip(pruned_segs, pruned_meta):
+            if S is None or len(S) < 2:
+                continue
+
+            if have_valid_seg_idx and isinstance(m.get("seg_idx"), int) and m["seg_idx"] in seg_start:
+                s0 = seg_start[m["seg_idx"]]
+            else:
+                s0 = off_fallback
+
+            L = len(S)
+            s1 = min(s0 + L, len(widths_geo))
+            predw = widths_geo[s0:s1]
+            pts = S[:len(predw)]
+            off_fallback += L
+
+            if len(pts) < 2 or len(predw) < 2:
+                continue
+
+            pts = np.asarray(pts, float)
+            predw = np.asarray(predw, float)
+
+            (_, _, _, _, gtw), _ = normals_from_mask_for_midline(
+                pts, mask_bin, max_radius
+            )
+            gtw = np.asarray(gtw, float)
+
+            d = predw - gtw
+            stage4_pairs.append((pts, d))
+            final_pred_segs.append(pts)
+
+            width_pairs.append({
+                "image": base_name,
+                "cid": str(cid),
+                "member_id": str(m.get("atomic_id")) if isinstance(m, dict) else None,
+                "crack_type": "combined",
+                "midline_type": midline_type,
+                "bbox": crack.get("mask_bbox"),
+                "pts": pts,
+                "predw": predw,
+                "gruthw": gtw,
+                "gt_source": "mask_same_samples",
+                "branch_id": m.get("branch_id"),
+                "seg_idx": m.get("seg_idx"),
+                "gt_mismatch": False,
+                "gt_relation": "combined_vs_combined",
             })
+
+        print(f"[STAGE5] width slicing complete — {len(stage4_pairs)} segments")
 
         # ============================================================
         # OPSEC PLOT — STAGE 5 FINAL GEOMETRY (DOMINANCE-RESOLVED)
