@@ -210,7 +210,9 @@ def auto_groups_from_atomic(annotation_dict_or_atomic,
     print(df_dbg.to_string(index=False))
     if save_debug:
         df_dbg.to_csv(out_csv, index=False)
-    print(f"[COMBINE_DBG] detailed pairwise debug table → {out_csv}")
+        print(f"[COMBINE_DBG] detailed pairwise debug table → {out_csv}")
+    else:
+        print("[COMBINE_DBG] detailed pairwise debug table not written (debug_root=None)")
 
     # ----------------------------- #
     # Connected components = groups
@@ -240,4 +242,3 @@ def auto_groups_from_atomic(annotation_dict_or_atomic,
     for i, g in enumerate(groups)
     if len(g) >= 2
 }
-

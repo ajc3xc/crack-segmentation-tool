@@ -1640,15 +1640,17 @@ def build_combined_crack_stateless(
 
     crack_mask_full = (crack_mask_full > 0).astype(np.uint8)
 
+    # --------------------------------------------------------
+    # Dominance + branch-aware execution (WITH run-splitting)
+    # --------------------------------------------------------
     segs, dom_meta = dominant_segments_from_group(
         members=member_ids,
         atomic=authoring_atomic,
-        #crack_mask_u8=crack_mask_full,
+        # crack_mask_u8=crack_mask_full,
         window_half_size=window_half_size,
         debug_dir=debug_dir,
     )
 
-    # attach metadata so width eval can do opsec
     midline_segments_meta = dom_meta.get("segments_meta", [])
     dominance_meta = dom_meta
 
@@ -1656,164 +1658,222 @@ def build_combined_crack_stateless(
     stitching_sec = float(t_stitch1 - t_stitch0)
 
     # --------------------------------------------------------
-    # Per-segment processing timing
+    # Group segments by branch_id
+    # --------------------------------------------------------
+    from collections import defaultdict
+
+    branch_to_segs = defaultdict(list)
+
+    # Be robust if lengths ever diverge
+    for i, S in enumerate(segs):
+        if S is None or len(S) < 2:
+            continue
+        if i >= len(midline_segments_meta):
+            # fallback: treat as its own "unknown" branch
+            bid = -1
+        else:
+            bid = int(midline_segments_meta[i].get("branch_id", -1))
+        branch_to_segs[bid].append(np.asarray(S, float))
+
+    # --------------------------------------------------------
+    # Helper: split on discontinuities (CRITICAL)
+    # --------------------------------------------------------
+    def split_polyline_on_jumps(S, max_step=5.0):
+        S = np.asarray(S, float)
+        if S.ndim != 2 or S.shape[1] != 2 or len(S) < 2:
+            return []
+        d = np.sqrt(np.sum(np.diff(S, axis=0) ** 2, axis=1))
+        breaks = np.where(d > float(max_step))[0]
+        out = []
+        s = 0
+        for b in breaks:
+            if b + 1 - s >= 2:
+                out.append(S[s : b + 1])
+            s = b + 1
+        if len(S) - s >= 2:
+            out.append(S[s:])
+        return out
+
+    # --------------------------------------------------------
+    # Outputs
     # --------------------------------------------------------
     edge1_segs, edge2_segs = [], []
     norm1_segs, norm2_segs = [], []
     union_mask = np.zeros((H, W), np.uint8)
     all_widths = []
 
-    # NEW timers
     t_masks_total = 0.0
     t_edges_total = 0.0
-    t_post_total = 0.0
-    t_loop_total = 0.0
+    t_post_total  = 0.0
+    t_loop_total  = 0.0
 
-    for S in segs:
-        t_loop0 = time.perf_counter()
+    print(f"[COMBINER] branches = {len(branch_to_segs)}")
 
-        if S is None or len(S) < 2:
+    # --------------------------------------------------------
+    # Process EACH BRANCH as one bbox, but run edges per CONTIGUOUS RUN
+    # --------------------------------------------------------
+    for branch_id, seg_list in branch_to_segs.items():
+        t_branch0 = time.perf_counter()
+
+        # ---- concatenate branch midline (may contain jumps) ----
+        S_branch = np.vstack(seg_list) if len(seg_list) else None
+        if S_branch is None or len(S_branch) < 3:
             continue
 
-        x0 = max(0, int(np.floor(S[:, 0].min()) - pad))
-        x1 = min(W, int(np.ceil(S[:, 0].max()) + pad))
-        y0 = max(0, int(np.floor(S[:, 1].min()) - pad))
-        y1 = min(H, int(np.ceil(S[:, 1].max()) + pad))
-        if x1 - x0 < 2 or y1 - y0 < 2:
+        # ------------------------------------------------
+        # Split into continuous runs (prevents teleports)
+        # ------------------------------------------------
+        runs = split_polyline_on_jumps(S_branch, max_step=5.0)
+
+        if not runs:
             continue
 
-        crop = gray_full[y0:y1, x0:x1]
-        track_local_yx = np.vstack([S[:, 1] - y0, S[:, 0] - x0])
-        pts_crop = [S[0] - [x0, y0], S[-1] - [x0, y0]]
-
-        # -------------------------
-        # edge_masks timing
-        # -------------------------
-        t_em0 = time.perf_counter()
-        
-        # -----------------------------
-        # INSTRUMENTATION: pre-edge audit
-        # -----------------------------
-        n_pts = track_local_yx.shape[1]
-        if n_pts < 3:
-            print(
-                f"[COMBINER AUDIT] ⚠ short segment skipped: "
-                f"n_pts={n_pts}, "
-                f"bbox=({x0},{y0})-({x1},{y1}), "
-                f"pad={pad}"
-            )
-            continue
-
-        
-        em1, em2 = edge_masks(
-            crop.astype(np.uint8),
-            track_local_yx,
-            window_half_size=window_half_size,
-            mode=mode
-        )
-        t_em1 = time.perf_counter()
-        t_masks_total += (t_em1 - t_em0)
-
-        # -------------------------
-        # edges_tracking timing
-        # -------------------------
-        midline_xy_crop = np.column_stack([track_local_yx[1], track_local_yx[0]])
-        t_et0 = time.perf_counter()
-        res = edges_tracking(
-            image_crop=crop,
-            pts_cropp=pts_crop,
-            edge_mask1_cropp=em1, edge_mask2_cropp=em2,
-            midline=midline_xy_crop,
-            mu=int(mu), l=int(l), p=int(p),
-            return_normal_edges=True,
-            prefer_gpu=prefer_gpu,
-            mode=mode
-        )
-        t_et1 = time.perf_counter()
-        t_edges_total += (t_et1 - t_et0)
-
-        if not isinstance(res, dict):
-            continue
-
-        ge = res.get("geodesic_edges", [None, None])
-        if ge is None or len(ge) != 2:
-            continue
-        e1, e2 = ge
-        if e1 is None or e2 is None or len(e1) < 2 or len(e2) < 2:
-            continue
-
-        # -------------------------
-        # post-processing timing
-        # -------------------------
-        t_post0 = time.perf_counter()
-
-        # ---- lift edges into full image coordinates (NO MODIFICATION) ----
-        e1 = _finite_xy(np.asarray(e1, float))
-        e2 = _finite_xy(np.asarray(e2, float))
-
-        if len(e1) < 2 or len(e2) < 2:
-            raise ValueError(
-                "postprocess: edge1 / edge2 have fewer than 2 valid points"
-            )
-
-        e1_full = _finite_xy(np.column_stack([e1[:, 0] + x0, e1[:, 1] + y0]))
-        e2_full = _finite_xy(np.column_stack([e2[:, 0] + x0, e2[:, 1] + y0]))
-
-        if len(e1_full) < 2 or len(e2_full) < 2:
-            raise ValueError(
-                "postprocess: lifted edges invalid after bbox offset"
-            )
-
-        # ---- normals (metrics only; NOT used for mask) ----
-        normals = res.get("normal_edge_points")
-        if normals is not None:
-            (e1x, e1y), (e2x, e2y) = normals
-
-            n1_full = _finite_xy(
-                np.column_stack([np.asarray(e1x) + x0, np.asarray(e1y) + y0])
-            )
-            n2_full = _finite_xy(
-                np.column_stack([np.asarray(e2x) + x0, np.asarray(e2y) + y0])
-            )
-
-            m = min(len(n1_full), len(n2_full))
-            if m >= 2:
-                d = np.sqrt(np.sum((n1_full[:m] - n2_full[:m]) ** 2, axis=1))
-                if d.size:
-                    all_widths.append(d[np.isfinite(d)])
-        else:
-            n1_full = np.empty((0, 2))
-            n2_full = np.empty((0, 2))
-
-        # ---- store geometry (authoritative) ----
-        edge1_segs.append(e1_full)
-        edge2_segs.append(e2_full)
-        norm1_segs.append(n1_full)
-        norm2_segs.append(n2_full)
-
-        from cracktools.segmentation import generate_mask_from_edges
-        # ---- MASK GENERATION (AUTHORITATIVE) ----
-        mask_seg = generate_mask_from_edges(
-            img_gray=gray_full,          # FULL image, not crop
-            edge1_xy=e1_full,
-            edge2_xy=e2_full,
-            midline_xy=S,                # DEBUG ONLY
-            out_dir=None,                # no disk writes here
-            tag=None,
-            do_morph=False,
+        # ------------------------------------------------
+        # Branch-safe pad
+        # ------------------------------------------------
+        branch_pad = max(
+            pad,
+            window_half_size + 5,   # edge_mask window + solver lateral drift
         )
 
-        if mask_seg is None or not mask_seg.any():
-            raise ValueError(
-                "postprocess: generated mask is empty — invalid edge geometry"
+        # ------------------------------------------------
+        # Process each run independently
+        # ------------------------------------------------
+        for run_id, S_run in enumerate(runs):
+            t_loop0 = time.perf_counter()
+
+            if S_run is None or len(S_run) < 3:
+                continue
+
+            # -----------------------------
+            # Run bbox (pad included)
+            # -----------------------------
+            x0 = max(0, int(np.floor(S_run[:, 0].min() - branch_pad)))
+            x1 = min(W, int(np.ceil (S_run[:, 0].max() + branch_pad)))
+            y0 = max(0, int(np.floor(S_run[:, 1].min() - branch_pad)))
+            y1 = min(H, int(np.ceil (S_run[:, 1].max() + branch_pad)))
+            if x1 - x0 < 2 or y1 - y0 < 2:
+                continue
+
+            crop = gray_full[y0:y1, x0:x1]
+            track_local_yx = np.vstack([
+                S_run[:, 1] - y0,
+                S_run[:, 0] - x0
+            ])
+
+            # seeds/tips for THIS run
+            pts_crop = [
+                S_run[0]  - [x0, y0],
+                S_run[-1] - [x0, y0],
+            ]
+
+            # -------------------------
+            # edge_masks
+            # -------------------------
+            t_em0 = time.perf_counter()
+
+            if track_local_yx.shape[1] < 3:
+                continue
+
+            em1, em2 = edge_masks(
+                crop.astype(np.uint8),
+                track_local_yx,
+                window_half_size=window_half_size,
+                mode=mode
+            )
+            t_masks_total += (time.perf_counter() - t_em0)
+
+            # -------------------------
+            # edges_tracking (PER RUN)
+            # -------------------------
+            midline_xy_crop = np.column_stack([
+                track_local_yx[1],
+                track_local_yx[0],
+            ])
+
+            t_et0 = time.perf_counter()
+            res = edges_tracking(
+                image_crop=crop,
+                pts_cropp=pts_crop,
+                edge_mask1_cropp=em1,
+                edge_mask2_cropp=em2,
+                midline=midline_xy_crop,
+                mu=int(mu), l=int(l), p=int(p),
+                return_normal_edges=True,
+                prefer_gpu=prefer_gpu,
+                mode=mode
+            )
+            t_edges_total += (time.perf_counter() - t_et0)
+
+            if not isinstance(res, dict):
+                continue
+
+            e1, e2 = res.get("geodesic_edges", [None, None])
+            if e1 is None or e2 is None or len(e1) < 2 or len(e2) < 2:
+                continue
+
+            # -------------------------
+            # Post-processing
+            # -------------------------
+            t_post0 = time.perf_counter()
+
+            e1 = _finite_xy(np.asarray(e1, float))
+            e2 = _finite_xy(np.asarray(e2, float))
+            if len(e1) < 2 or len(e2) < 2:
+                continue
+
+            e1_full = _finite_xy(np.column_stack([e1[:, 0] + x0, e1[:, 1] + y0]))
+            e2_full = _finite_xy(np.column_stack([e2[:, 0] + x0, e2[:, 1] + y0]))
+            if len(e1_full) < 2 or len(e2_full) < 2:
+                continue
+
+            # ---- normals ----
+            normals = res.get("normal_edge_points")
+            if normals is not None:
+                (e1x, e1y), (e2x, e2y) = normals
+                n1_full = _finite_xy(np.column_stack([np.asarray(e1x) + x0, np.asarray(e1y) + y0]))
+                n2_full = _finite_xy(np.column_stack([np.asarray(e2x) + x0, np.asarray(e2y) + y0]))
+
+                m = min(len(n1_full), len(n2_full))
+                if m >= 2:
+                    d = np.sqrt(np.sum((n1_full[:m] - n2_full[:m]) ** 2, axis=1))
+                    if d.size:
+                        all_widths.append(d[np.isfinite(d)])
+            else:
+                n1_full = np.empty((0, 2))
+                n2_full = np.empty((0, 2))
+
+            # ---- store geometry ----
+            edge1_segs.append(e1_full)
+            edge2_segs.append(e2_full)
+            norm1_segs.append(n1_full)
+            norm2_segs.append(n2_full)
+
+            # ---- mask generation (AUTHORITATIVE) ----
+            from cracktools.segmentation import generate_mask_from_edges
+            mask_run = generate_mask_from_edges(
+                img_gray=gray_full,          # FULL image
+                edge1_xy=e1_full,
+                edge2_xy=e2_full,
+                midline_xy=S_run,            # DEBUG ONLY
+                out_dir=None,
+                tag=None,
+                do_morph=False,
             )
 
-        union_mask |= (mask_seg > 0).astype(np.uint8)
+            if mask_run is None or not mask_run.any():
+                # Don’t hard-crash on one bad run; skip it so the rest of branch survives
+                t_post_total += (time.perf_counter() - t_post0)
+                t_loop_total += (time.perf_counter() - t_loop0)
+                continue
 
-        t_post1 = time.perf_counter()
-        t_post_total += (t_post1 - t_post0)
-        t_loop_total += (time.perf_counter() - t_loop0)
+            union_mask |= (mask_run > 0).astype(np.uint8)
 
+            t_post_total += (time.perf_counter() - t_post0)
+            t_loop_total += (time.perf_counter() - t_loop0)
+
+        # optional: branch-level timing
+        _ = time.perf_counter() - t_branch0
 
     if np.any(union_mask):
         bb = bbox_from_mask(union_mask)

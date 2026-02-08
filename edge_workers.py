@@ -760,29 +760,51 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 print(f"[DEBUG VIS] ⚠ widths colormap failed cid{cid}: {e}")
 
             # =======================================================
-            # 4) GT normals (crop-level)
+            # 4) Normals-on-mask plots (crop-level)
+            #   - always: prediction-mask normals
+            #   - manual only: also GT-mask normals for side-by-side diagnosis
             # =======================================================
             try:
-                if gt_crop is not None:
+                pred_mask_u8 = (np.asarray(mask_crop) > 0).astype(np.uint8) * 255
+                (pe1x, pe1y, pe2x, pe2y, _), _ = normals_from_mask_for_midline(
+                    midline_xy_crop,
+                    pred_mask_u8 > 0,
+                    max_radius=50,
+                )
+                pe1 = np.column_stack([pe1x, pe1y])
+                pe2 = np.column_stack([pe2x, pe2y])
+
+                # Keep the historical filename as the prediction-mask plot.
+                pred_normals_path = os.path.join(dbg_dir, f"{midline_tag}_normals.png")
+                plot_gt_normals_on_gtbw(
+                    pred_mask_u8,
+                    midline_xy_crop,
+                    pe1,
+                    pe2,
+                    pred_normals_path,
+                )
+                print(f"[DEBUG VIS] wrote → {pred_normals_path}")
+
+                if midline_tag == "manual" and gt_crop is not None:
                     gt_mask_u8 = (np.asarray(gt_crop) > 0).astype(np.uint8) * 255
-                    (e1x, e1y, e2x, e2y, _), _ = normals_from_mask_for_midline(
+                    (ge1x, ge1y, ge2x, ge2y, _), _ = normals_from_mask_for_midline(
                         midline_xy_crop,
                         gt_mask_u8 > 0,
                         max_radius=50,
                     )
-                    e1 = np.column_stack([e1x, e1y])
-                    e2 = np.column_stack([e2x, e2y])
-                    gt_normals_path = os.path.join(dbg_dir, f"{midline_tag}_normals.png")
+                    ge1 = np.column_stack([ge1x, ge1y])
+                    ge2 = np.column_stack([ge2x, ge2y])
+                    gt_normals_path = os.path.join(dbg_dir, "manual_normals_on_gt.png")
                     plot_gt_normals_on_gtbw(
                         gt_mask_u8,
                         midline_xy_crop,
-                        e1,
-                        e2,
+                        ge1,
+                        ge2,
                         gt_normals_path,
                     )
                     print(f"[DEBUG VIS] wrote → {gt_normals_path}")
             except Exception as e:
-                print(f"[DEBUG VIS] ⚠ gt_normals plotting failed cid{cid}: {e}")
+                print(f"[DEBUG VIS] ⚠ normals plotting failed cid{cid}: {e}")
 
             # =======================================================
             # 5) GLOBAL overlay via save_gt_vs_manual_overlay

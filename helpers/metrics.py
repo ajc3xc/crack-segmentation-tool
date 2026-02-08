@@ -587,7 +587,207 @@ from matplotlib.colors import TwoSlopeNorm
 # import your existing primitives
 #   normals_from_mask_for_midline(midline_xy, mask, max_radius)
 #   (and any others you already have here)
-from helpers.metrics import normals_from_mask_for_midline  # if this file IS helpers.metrics, remove this line
+#from helpers.metrics import normals_from_mask_for_midline  # if this file IS helpers.metrics, remove this line
+
+def normals_from_mask_for_midline(midline_xy, mask, max_radius=50):
+    """
+    Pixel-accurate version:
+    - Polygonizes the mask into exact pixel-boundary polygons using rasterio.
+    - Shifts coords by -0.5 so edges align with imshow pixel grid.
+    - Intersects midline normals with those polygons so endpoints lie exactly on the mask edge.
+    Robustified to avoid NaNs / zero-length edges.
+    """
+    import numpy as np
+    import shapely
+    from shapely.geometry import shape, LineString, Point, MultiPoint
+    import rasterio.features
+
+    H, W = mask.shape
+    midline_xy = np.asarray(midline_xy, float)
+    if midline_xy.ndim != 2 or midline_xy.shape[1] != 2 or len(midline_xy) < 2:
+        n = len(midline_xy) if midline_xy.ndim > 0 else 0
+        return (np.full(n, np.nan),) * 5, []
+
+    # ---- tangent + normals ----
+    try:
+        from cracktools.segmentation import (
+            compute_smooth_tangent_normals,
+            resolve_normal_pair_with_fallback,
+        )
+        _, nor = compute_smooth_tangent_normals(midline_xy[:, 0], midline_xy[:, 1])
+    except Exception:
+        resolve_normal_pair_with_fallback = None
+        dx, dy = np.gradient(midline_xy[:, 0]), np.gradient(midline_xy[:, 1])
+        nrm = np.hypot(dx, dy) + 1e-12
+        tan = np.stack([dx / nrm, dy / nrm], axis=1)
+        nor = np.stack([-tan[:, 1], tan[:, 0]], axis=1)
+
+    # ---- polygonize mask -> shapely polygons ----
+    mask_bin = (mask > 0).astype(np.uint8)
+    polygons = []
+    for geom, val in rasterio.features.shapes(mask_bin, mask=mask_bin):
+        if val == 1:
+            poly = shape(geom)
+            # shift by -0.5 so edges align with imshow pixel grid
+            poly = shapely.affinity.translate(poly, xoff=-0.5, yoff=-0.5)
+            polygons.append(poly)
+
+    if not polygons:
+        # empty mask: nothing we can do safely
+        N = len(midline_xy)
+        return (np.full(N, np.nan),) * 5, []
+
+    edges = [poly.boundary for poly in polygons]
+
+    # ---- helper: clamp midline point to nearest polygon boundary if outside ----
+    from math import inf
+
+    def clamp_to_polygon(p):
+        """Ensure p lies on/in the mask: returns closest point on any polygon boundary."""
+        P = Point(p[0], p[1])
+        # already inside some polygon
+        for poly in polygons:
+            if poly.contains(P) or poly.touches(P):
+                return np.asarray(p, float)
+
+        best = None
+        best_d = inf
+        for edge in edges:
+            # nearest point on this boundary
+            proj = edge.interpolate(edge.project(P))
+            d = proj.distance(P)
+            if d < best_d:
+                best_d = d
+                best = (proj.x, proj.y)
+
+        if best is None:
+            # fall back to original point (will be skipped later if invalid)
+            return np.asarray(p, float)
+        return np.asarray(best, float)
+
+    N = len(midline_xy)
+    e1x = np.full(N, np.nan); e1y = np.full(N, np.nan)
+    e2x = np.full(N, np.nan); e2y = np.full(N, np.nan)
+    widths_mask = np.full(N, np.nan)
+
+    eps = 1e-6
+
+    for i, (p_raw, nvec) in enumerate(zip(midline_xy, nor)):
+        # basic sanity checks
+        if not np.all(np.isfinite(p_raw)) or not np.all(np.isfinite(nvec)):
+            continue
+
+        nlen = float(np.hypot(nvec[0], nvec[1]))
+        if nlen < eps:
+            # direction is undefined here; skip
+            continue
+        nvec = nvec / nlen
+
+        # clamp midline point to polygon if it's outside
+        p = clamp_to_polygon(p_raw)
+        if not np.all(np.isfinite(p)):
+            continue
+
+        # build long ray
+        A = (p[0] - max_radius * nvec[0], p[1] - max_radius * nvec[1])
+        B = (p[0] + max_radius * nvec[0], p[1] + max_radius * nvec[1])
+        if not (np.all(np.isfinite(A)) and np.all(np.isfinite(B))):
+            continue
+
+        ray = LineString([A, B])
+
+        hits = []
+        for edge in edges:
+            inter = edge.intersection(ray)
+            if inter.is_empty:
+                continue
+            if isinstance(inter, Point):
+                hits.append((inter.x, inter.y))
+            elif isinstance(inter, MultiPoint):
+                for g in inter.geoms:
+                    hits.append((g.x, g.y))
+            elif inter.geom_type == "LineString":
+                coords = np.asarray(inter.coords, float)
+                if len(coords) >= 1:
+                    hits.append(tuple(coords[0]))
+                if len(coords) >= 2:
+                    hits.append(tuple(coords[-1]))
+
+        if len(hits) < 2:
+            # cannot define a width here
+            continue
+
+        # remove exact duplicates among hits
+        hits_arr = np.asarray(hits, float)
+        hits_arr = np.unique(hits_arr, axis=0)
+        if len(hits_arr) < 2:
+            continue
+        hits = [tuple(h) for h in hits_arr]
+
+        # project hits along the normal direction
+        dists = [np.dot([hx - p[0], hy - p[1]], nvec) for (hx, hy) in hits]
+
+        # classify as "left" (negative side) / "right" (positive side)
+        left_pts  = [(hx, hy, d) for (hx, hy), d in zip(hits, dists) if d < -eps]
+        right_pts = [(hx, hy, d) for (hx, hy), d in zip(hits, dists) if d > eps]
+
+        left_cands = [(hx, hy) for (hx, hy, _) in left_pts]
+        right_cands = [(hx, hy) for (hx, hy, _) in right_pts]
+
+        def _nearest_boundary_on_side(side_sign):
+            P = Point(p[0], p[1])
+            best = None
+            best_dist = np.inf
+            for edge in edges:
+                proj = edge.interpolate(edge.project(P))
+                q = (float(proj.x), float(proj.y))
+                dside = float(np.dot([q[0] - p[0], q[1] - p[1]], nvec))
+                if side_sign < 0 and dside >= -eps:
+                    continue
+                if side_sign > 0 and dside <= eps:
+                    continue
+                dist = float(np.hypot(q[0] - p[0], q[1] - p[1]))
+                if np.isfinite(dist) and dist < best_dist:
+                    best_dist = dist
+                    best = q
+            return best
+
+        if resolve_normal_pair_with_fallback is not None:
+            pair = resolve_normal_pair_with_fallback(
+                p=p,
+                nvec=nvec,
+                cand_a=left_cands,
+                cand_b=right_cands,
+                fallback_a=lambda: _nearest_boundary_on_side(-1),
+                fallback_b=lambda: _nearest_boundary_on_side(+1),
+                score_a=lambda q: abs(float(np.dot([q[0] - p[0], q[1] - p[1]], nvec))),
+                score_b=lambda q: abs(float(np.dot([q[0] - p[0], q[1] - p[1]], nvec))),
+                max_dist=float(max_radius),
+                max_dist_mult=2.0,
+                scale_ref=float(np.sqrt(max(1.0, H * W))),
+                fallback_min_px=3.0,
+                fallback_max_px=5.0,
+                fallback_scale=0.003,
+                normal_align_min=0.30,
+                span_max_mult=2.0,
+            )
+            if pair is None:
+                continue
+            (lp, rp, _, _, w) = pair
+        else:
+            if not left_pts or not right_pts:
+                continue
+            lp, _ = min((((hx, hy), abs(d)) for (hx, hy, d) in left_pts), key=lambda t: t[1])
+            rp, _ = min((((hx, hy), abs(d)) for (hx, hy, d) in right_pts), key=lambda t: t[1])
+            w = float(np.hypot(rp[0] - lp[0], rp[1] - lp[1]))
+            if not np.isfinite(w) or w < eps:
+                continue
+
+        e1x[i], e1y[i] = lp
+        e2x[i], e2y[i] = rp
+        widths_mask[i] = w
+
+    return (e1x, e1y, e2x, e2y, widths_mask), polygons
 
 # -------------------- lightweight cache for mask-normals ----------------------
 _NORMALS_CACHE = {}  # key: (mask_sha1, midline_sha1) -> (e1x,e1y,e2x,e2y,w_mask)
@@ -2392,7 +2592,7 @@ def compare_widths_for_aligned_cracks(
     import numpy as np
     import matplotlib.pyplot as plt
     from matplotlib.colors import TwoSlopeNorm
-    from helpers.metrics import normals_from_mask_for_midline
+    #from helpers.metrics import normals_from_mask_for_midline
 
     os.makedirs(metrics_dir, exist_ok=True)
 
@@ -3752,7 +3952,7 @@ def compare_widths_for_aligned_cracks(
         # ----------------------------
         # PLOT 1: GT bite-local raw (like Stage 0)
         # ----------------------------
-        _plot_bite_local_union(
+        '''_plot_bite_local_union(
             title=f"Stage4 GT — RAW bite-local union (cid={cid})",
             bbox_xywh=gt_bbox,
             union=gt_union_local,
@@ -3814,7 +4014,7 @@ def compare_widths_for_aligned_cracks(
             pred_union=pr_union_local,
             out_png=os.path.join(opsec_dir, f"stage4_dom_overlay_in_gt_frame_clipped_{cid}.png"),
             clip_global_xyxy=clip_xyxy,
-        )
+        )'''
         
         # ============================================================
         # Stage 4 — PLOT B (crop-local visualization, Stage-0 truthful)
@@ -4048,337 +4248,6 @@ def compare_widths_for_aligned_cracks(
         plt.close(fig)
 
         print(f"[OPSEC] Stage-4 dominance plot written: {outB}")
-        
-        '''# ============================================================
-        # Stage 4.5 PRELUDE: ensure dominance loss masks exist (FULL-FRAME)
-        #   - builds loss_masks_pred_by_branch / loss_masks_gt_by_branch if missing
-        #   - uses dominance_meta.bite.bbox + bite-local packbits masks
-        #   - inflates each bite-local mask into global HxW
-        #   - NO SHIFT, NO CLIP, purely for dominance pruning + Stage5 overlay
-        # ============================================================
-
-        import numpy as np
-
-        # Local-safe getters (dom_pred/dom_gt might already exist; don’t assume)
-        dom_pred = crack.get("dominance_meta") if isinstance(crack, dict) else None
-        dom_gt   = gt_entry.get("dominance_meta") if isinstance(gt_entry, dict) else None
-
-        def _inflate_local_to_full(*, bbox_xywh, m_local, H, W):
-            """
-            bbox_xywh: [bx,by,bw,bh] in GLOBAL coords
-            m_local  : (bh,bw) bool mask in BITE-LOCAL coords
-            returns  : (H,W) bool full-frame mask
-            """
-            if bbox_xywh is None or m_local is None:
-                return None
-
-            bx, by, bw, bh = map(int, bbox_xywh)
-            m = np.asarray(m_local).astype(bool)
-            if m.ndim != 2 or m.size == 0:
-                return None
-
-            # In case stored bw/bh don't perfectly match decoded mask dims
-            mh, mw = m.shape[0], m.shape[1]
-
-            full = np.zeros((H, W), dtype=bool)
-
-            # destination bounds (global)
-            x0 = max(0, bx)
-            y0 = max(0, by)
-            x1 = min(W, bx + mw)
-            y1 = min(H, by + mh)
-
-            if x1 <= x0 or y1 <= y0:
-                return full  # valid empty
-
-            # source bounds (local)
-            sx0 = max(0, -bx)
-            sy0 = max(0, -by)
-            sx1 = sx0 + (x1 - x0)
-            sy1 = sy0 + (y1 - y0)
-
-            if sx1 <= sx0 or sy1 <= sy0:
-                return full
-
-            full[y0:y1, x0:x1] = m[sy0:sy1, sx0:sx1]
-            return full
-
-        def _decode_bite_loss_masks_full(dom, H, W):
-            """
-            Returns: (bbox_xywh, dict[int -> bool(H,W)])
-            """
-            if not isinstance(dom, dict):
-                return None, {}
-
-            bite = dom.get("bite")
-            if not isinstance(bite, dict):
-                return None, {}
-
-            bb = bite.get("bbox")
-            by_branch = bite.get("by_losing_branch")
-
-            if not (isinstance(bb, (list, tuple)) and len(bb) == 4):
-                return None, {}
-
-            if not isinstance(by_branch, dict) or not by_branch:
-                return list(map(int, bb)), {}
-
-            out = {}
-            for bid, info in by_branch.items():
-                # IMPORTANT: _decode_packbits_mask must return bite-local 2D mask
-                m_local = _decode_packbits_mask(info)
-                if m_local is None:
-                    continue
-
-                m_full = _inflate_local_to_full(
-                    bbox_xywh=bb,
-                    m_local=m_local,
-                    H=H,
-                    W=W,
-                )
-                if m_full is None:
-                    continue
-
-                # normalize key to int when possible
-                try:
-                    bid_i = int(bid)
-                except Exception:
-                    continue
-
-                out[bid_i] = m_full.astype(bool)
-
-            return list(map(int, bb)), out
-
-        # Build only if missing in this scope
-        if "loss_masks_pred_by_branch" not in locals() or loss_masks_pred_by_branch is None:
-            _, loss_masks_pred_by_branch = _decode_bite_loss_masks_full(dom_pred, H, W)
-            print(f"[STAGE4.5] built loss_masks_pred_by_branch bids={sorted(loss_masks_pred_by_branch.keys())}")
-
-        if "loss_masks_gt_by_branch" not in locals() or loss_masks_gt_by_branch is None:
-            _, loss_masks_gt_by_branch = _decode_bite_loss_masks_full(dom_gt, H, W)
-            print(f"[STAGE4.5] built loss_masks_gt_by_branch bids={sorted(loss_masks_gt_by_branch.keys())}")
-
-
-        # ============================================================
-        # Stage 4.5: APPLY DOMINANCE BITE (SYMMETRIC, DISPOSABLE)
-        #
-        # Key rule (per branch):
-        #   - BOTH GT and PRED are clipped by the UNION of:
-        #       (GT loss mask) ∪ (PRED loss mask)
-        #
-        # Dominance defines INVALID TERRITORY, not ownership.
-        #
-        # OUTPUTS (used by Stage 5 + OPSEC):
-        #   - pruned_segs / pruned_meta        : PRED geometry after union-bite clipping
-        #   - bite_pruned_pred_segs           : removed PRED runs (viz)
-        #   - gt_stage5_segs / gt_stage5_meta : GT geometry after union-bite clipping
-        #   - bite_pruned_gt_segs             : removed GT runs (viz)
-        #   - pred_pre45_segs                 : snapshot of PRED geometry BEFORE dominance
-        # ============================================================
-        
-        # ------------------------------------------------------------
-        # Union-bite helper (GT ∪ PRED)
-        # ------------------------------------------------------------
-        def _union_bite_for_branch(bid):
-            """
-            Union dominance-bite mask for a branch_id (full-frame HxW bool).
-            Returns None if nothing exists for that branch.
-            """
-            if bid is None:
-                return None
-            try:
-                bid = int(bid)
-            except Exception:
-                return None
-
-            mg = loss_masks_gt_by_branch.get(bid) if isinstance(loss_masks_gt_by_branch, dict) else None
-            mp = loss_masks_pred_by_branch.get(bid) if isinstance(loss_masks_pred_by_branch, dict) else None
-
-            if mg is None and mp is None:
-                return None
-            if mg is None:
-                return mp.astype(bool)
-            if mp is None:
-                return mg.astype(bool)
-            return (mg.astype(bool) | mp.astype(bool))
-
-        # ------------------------------------------------------------
-        # Snapshot BEFORE dominance (for provenance / topology plot)
-        # ------------------------------------------------------------
-        pred_pre45_segs = [
-            np.asarray(S, float)
-            for S in pruned_segs
-            if S is not None and len(S) >= 2
-        ]
-
-        # ============================================================
-        # PRED: clip by UNION dominance bite
-        # ============================================================
-        pred_dom_clipped_segs = []
-        pred_dom_clipped_meta = []
-        bite_pruned_pred_segs = []   # viz only
-
-        for S, m in zip(pruned_segs, pruned_meta):
-            if S is None or len(S) < 2:
-                continue
-
-            m = m if isinstance(m, dict) else {}
-            bid = _safe_int(m.get("branch_id"), None)
-            rm = _union_bite_for_branch(bid)
-
-            if rm is None:
-                pred_dom_clipped_segs.append(np.asarray(S, float))
-                pred_dom_clipped_meta.append(m)
-                continue
-
-            kept_runs, removed_runs = _clip_polyline_into_runs(S, rm, H, W, min_pts=2)
-            bite_pruned_pred_segs.extend(removed_runs)
-
-            for kr in kept_runs:
-                pred_dom_clipped_segs.append(np.asarray(kr, float))
-                pred_dom_clipped_meta.append(m)
-
-        print(
-            f"[DOM CLIP UNION | PRED] cid={cid} kept {len(pred_dom_clipped_segs)} runs "
-            f"(from {len(pruned_segs)} segs)"
-        )
-
-        # overwrite authoritative prediction geometry
-        pruned_segs = pred_dom_clipped_segs
-        pruned_meta = pred_dom_clipped_meta
-
-        # ============================================================
-        # GT: clip by SAME UNION dominance bite
-        # ============================================================
-        gt_stage5_segs = []
-        gt_stage5_meta = []
-        bite_pruned_gt_segs = []   # viz only
-
-        gt_segs_all = gt_entry.get("midline_segments", []) if gt_entry else []
-        gt_meta_all = (
-            gt_entry.get("dominance_meta", {}).get("segments_meta") or []
-        ) if gt_entry else []
-
-        if gt_entry and len(gt_segs_all) == len(gt_meta_all) and len(gt_segs_all) > 0:
-            for Sg, mg in zip(gt_segs_all, gt_meta_all):
-                if Sg is None or len(Sg) < 2:
-                    continue
-
-                mg = mg if isinstance(mg, dict) else {}
-                bid = _safe_int(mg.get("branch_id"), None)
-                rm = _union_bite_for_branch(bid)
-
-                if rm is None:
-                    gt_stage5_segs.append(np.asarray(Sg, float))
-                    gt_stage5_meta.append(mg)
-                    continue
-
-                kept_runs, removed_runs = _clip_polyline_into_runs(Sg, rm, H, W, min_pts=2)
-                bite_pruned_gt_segs.extend(removed_runs)
-
-                for kr in kept_runs:
-                    gt_stage5_segs.append(np.asarray(kr, float))
-                    gt_stage5_meta.append(mg)
-
-            print(
-                f"[DOM CLIP UNION | GT]   cid={cid} kept {len(gt_stage5_segs)} runs "
-                f"(from {len(gt_segs_all)} segs)"
-            )
-        else:
-            # fallback: cannot align GT meta → keep GT uncut
-            gt_stage5_segs = [
-                np.asarray(Sg, float)
-                for Sg in gt_segs_all
-                if Sg is not None and len(Sg) >= 2
-            ]
-            gt_stage5_meta = [{} for _ in gt_stage5_segs]
-            bite_pruned_gt_segs = []
-            print(
-                f"[DOM CLIP UNION | GT]   cid={cid} GT meta missing/misaligned → "
-                f"kept {len(gt_stage5_segs)} uncut segs"
-            )
-                                        
-        # ============================================================
-        # Stage 5: width slicing (DOMINANCE-APPLIED GEOMETRY)
-        #   - Collect per-segment width_pairs (for Regime B / C)
-        #   - ALSO accumulate per-CID buffers for Regime A
-        # ============================================================
-
-        final_pred_segs = []
-        stage4_pairs = []
-
-        for si, (S, m) in enumerate(zip(pruned_segs, pruned_meta)):
-            if S is None or len(S) < 2:
-                continue
-
-            # ---- determine width index source ----
-            if (
-                have_valid_seg_idx
-                and isinstance(m.get("seg_idx"), int)
-                and m["seg_idx"] in seg_start
-            ):
-                s0 = seg_start[m["seg_idx"]]
-                src = "seg_idx"
-            else:
-                s0 = off_fallback
-                src = "fallback"
-
-            L = len(S)
-            s1 = min(s0 + L, len(widths_geo))
-
-            predw_full = widths_geo[s0:s1]
-            pts_full   = S[:len(predw_full)]
-
-            off_fallback += L
-
-            if len(pts_full) < 2 or len(predw_full) < 2:
-                continue
-
-            mlen = min(len(pts_full), len(predw_full))
-            if mlen < 2:
-                continue
-
-            pts_raw   = np.asarray(pts_full[:mlen], float)
-            predw_raw = np.asarray(predw_full[:mlen], float)
-
-            # ---- GT widths measured on SAME geometry ----
-            (_, _, _, _, gtw_raw), _ = normals_from_mask_for_midline(
-                pts_raw, mask_bin, max_radius
-            )
-            gtw_raw = np.asarray(gtw_raw, float)
-            
-            # ---- width difference on FINAL Stage-5 geometry ----
-            d_raw = predw_raw - gtw_raw
-
-            # ---- Stage-4→5 provenance buffer (for OPSEC plotting ONLY) ----
-            # Each entry is (geometry, width_diff)
-            stage4_pairs.append((
-                pts_raw,
-                d_raw,
-            ))
-
-            # ========================================================
-            # Regime B / C input (UNCHANGED)
-            # ========================================================
-            width_pairs.append({
-                "image": base_name,
-                "cid": str(cid),                    # combined group id
-                "member_id": str(m.get("atomic_id")) if isinstance(m, dict) else None,
-                "crack_type": "combined",
-                "midline_type": midline_type,
-                "bbox": crack.get("mask_bbox"),
-                "pts": pts_raw,
-                "predw": predw_raw,
-                "gruthw": gtw_raw,
-                "gt_source": "mask_same_samples",
-
-                "branch_id": m.get("branch_id") if isinstance(m, dict) else None,
-                "seg_idx":   m.get("seg_idx")   if isinstance(m, dict) else None,
-
-                # -------- CONSISTENCY FLAGS --------
-                "gt_mismatch": False,
-                "gt_relation": "combined_vs_combined",
-            })'''
             
         # ============================================================
         # Stage 4.5 + Stage 5 — STRICT DOMINANCE APPLICATION
@@ -5353,28 +5222,6 @@ def compare_widths_for_aligned_cracks(
         # ------------------------------------------------------------
         # Emit per-crack metric rows
         # ------------------------------------------------------------
-        '''for (image, cid_s, ctype, mtype), bin_ in per_crack.items():
-            finL = bin_["finite_len_px"]
-            totL = bin_["total_len_px"]
-            if finL <= 0 or totL <= 0:
-                continue
-
-            width_metric_rows.append({
-                "image": image,
-                "crack_id": cid_s,
-                "crack_type": ctype,
-                "midline_type": mtype,
-                "total_len_px": totL,
-                "finite_len_px": finL,
-                "finite_len_frac": finL / (totL + 1e-12),
-                "bbox_area": (
-                    bin_["bbox"][2] * bin_["bbox"][3]
-                    if bin_["bbox"] is not None else np.nan
-                ),
-                "width_bias_L": bin_["sum_bias_L"] / (finL + 1e-12),
-                "width_mae_L":  bin_["sum_mae_L"]  / (finL + 1e-12),
-                "width_rmse_L": np.sqrt(bin_["sum_mse_L"] / (finL + 1e-12)),
-            })'''
         
         for (image, vtag, cid_s, ctype, mtype), bin_ in per_crack.items():
             finL = float(bin_["finite_len_px"])

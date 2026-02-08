@@ -298,6 +298,105 @@ def compute_smooth_tangent_normals(x, y, window=7, poly=2):
 
     return tangent, normal
 
+
+def resolve_normal_pair_with_fallback(
+    p,
+    nvec,
+    cand_a,
+    cand_b,
+    *,
+    fallback_a=None,
+    fallback_b=None,
+    score_a=None,
+    score_b=None,
+    max_dist=12.0,
+    max_dist_mult=3.0,
+    scale_ref=None,
+    fallback_min_px=3.0,
+    fallback_max_px=5.0,
+    fallback_scale=0.003,
+    normal_align_min=0.30,
+    span_max_mult=3.0,
+    eps=1e-9,
+):
+    """
+    Shared robust resolver for normal-edge point pairs.
+    """
+    p = np.asarray(p, float).reshape(2)
+    nvec = np.asarray(nvec, float).reshape(2)
+    nlen = float(np.hypot(nvec[0], nvec[1]))
+    if not np.isfinite(nlen) or nlen <= eps:
+        return None
+    nvec = nvec / nlen
+
+    fallback_cap = float(fallback_max_px)
+    if scale_ref is not None and np.isfinite(scale_ref):
+        fallback_cap = float(
+            np.clip(float(fallback_scale) * float(scale_ref), fallback_min_px, fallback_max_px)
+        )
+
+    def _pick(cands, score_fn):
+        if not cands:
+            return None, np.inf
+        best_pt, best_score = None, np.inf
+        for q in cands:
+            q = np.asarray(q, float).reshape(2)
+            if not np.all(np.isfinite(q)):
+                continue
+            if score_fn is None:
+                s = float(np.hypot(q[0] - p[0], q[1] - p[1]))
+            else:
+                s = float(score_fn((float(q[0]), float(q[1]))))
+            if np.isfinite(s) and s < best_score:
+                best_score = s
+                best_pt = (float(q[0]), float(q[1]))
+        return best_pt, best_score
+
+    pa, _ = _pick(cand_a, score_a)
+    pb, _ = _pick(cand_b, score_b)
+
+    if pa is None and callable(fallback_a):
+        q = fallback_a()
+        if q is not None:
+            q = np.asarray(q, float).reshape(2)
+            if np.all(np.isfinite(q)):
+                d = float(np.hypot(q[0] - p[0], q[1] - p[1]))
+                if d <= fallback_cap:
+                    pa = (float(q[0]), float(q[1]))
+
+    if pb is None and callable(fallback_b):
+        q = fallback_b()
+        if q is not None:
+            q = np.asarray(q, float).reshape(2)
+            if np.all(np.isfinite(q)):
+                d = float(np.hypot(q[0] - p[0], q[1] - p[1]))
+                if d <= fallback_cap:
+                    pb = (float(q[0]), float(q[1]))
+
+    if pa is None or pb is None:
+        return None
+
+    da = float(np.hypot(pa[0] - p[0], pa[1] - p[1]))
+    db = float(np.hypot(pb[0] - p[0], pb[1] - p[1]))
+    if da > max_dist_mult * max_dist or db > max_dist_mult * max_dist:
+        return None
+
+    v = np.asarray([pb[0] - pa[0], pb[1] - pa[1]], float)
+    w = float(np.hypot(v[0], v[1]))
+    if not np.isfinite(w) or w <= eps:
+        return None
+
+    # Reject implausible long bridges.
+    if w > span_max_mult * max_dist:
+        return None
+
+    # Reject pair directions that are nearly tangent (should align with normal).
+    align = float(abs(np.dot(v / w, nvec)))
+    if align < float(normal_align_min):
+        return None
+
+    return pa, pb, da, db, w
+
 def find_normal_pair(
     mid_x, mid_y, edge1, edge2,
     max_dist_ratio=0.18,
@@ -363,27 +462,36 @@ def find_normal_pair(
         inter1 = _collect_points(line1.intersection(ray_line))
         inter2 = _collect_points(line2.intersection(ray_line))
 
-        # fall back to projection if intersections empty
-        if not inter1:
-            np1 = nearest_points(line1, Point(mx, my))[0]
-            inter1 = [(np1.x, np1.y)]
-        if not inter2:
-            np2 = nearest_points(line2, Point(mx, my))[0]
-            inter2 = [(np2.x, np2.y)]
+        def _fallback1():
+            p1 = nearest_points(line1, Point(mx, my))[0]
+            return (p1.x, p1.y)
 
-        # pick nearest from each edge
-        def _nearest(pt_list):
-            dists = [np.hypot(px - mx, py - my) for (px, py) in pt_list]
-            j = int(np.argmin(dists))
-            return pt_list[j], dists[j]
+        def _fallback2():
+            p2 = nearest_points(line2, Point(mx, my))[0]
+            return (p2.x, p2.y)
 
-        (px1, py1), d1 = _nearest(inter1)
-        (px2, py2), d2 = _nearest(inter2)
+        pair = resolve_normal_pair_with_fallback(
+            p=(mx, my),
+            nvec=(nx, ny),
+            cand_a=inter1,
+            cand_b=inter2,
+            fallback_a=_fallback1,
+            fallback_b=_fallback2,
+            max_dist=max_dist,
+            max_dist_mult=3.0,
+            scale_ref=diag,
+            fallback_min_px=3.0,
+            fallback_max_px=5.0,
+            fallback_scale=0.003,
+            normal_align_min=0.30,
+            span_max_mult=3.0,
+        )
+        if pair is None:
+            continue
 
-        # accept if within relaxed max_dist (here ×3)
-        if d1 <= 3*max_dist and d2 <= 3*max_dist:
-            e1x[i], e1y[i] = px1, py1
-            e2x[i], e2y[i] = px2, py2
+        (p1, p2, _, _, _) = pair
+        e1x[i], e1y[i] = p1
+        e2x[i], e2y[i] = p2
 
     return e1x, e1y, e2x, e2y
 

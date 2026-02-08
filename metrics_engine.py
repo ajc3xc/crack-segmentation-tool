@@ -1734,9 +1734,6 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     return
 
                 rows = ret[0]
-                for r in rows:
-                    r["source"] = crack_type
-                    r["variant"] = variant_id
 
                 csv_root = os.path.join(metrics_dir_local, midline_type)
                 out_dir = os.path.join(metrics_dir_local, midline_type, crack_type, variant_id)
