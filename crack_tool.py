@@ -86,7 +86,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         
         
         self.draw_box_button.clicked.connect(self.draw_box)
-        self.save_b_button.clicked.connect(self.save_box)
+        self.save_b_button.clicked.connect(self.save_boxes)
         
         self.clear_boxes_button.clicked.connect(self.clear_boxes)
         self.clear_segmentation_button.clicked.connect(self.clear_segmentation)
@@ -225,6 +225,13 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
 
         ann = _ensure_ann()
         ac_store = ann["atomic_cracks"]
+
+        # Keep crack bbox assignments coherent with current user boxes before grouping pairs.
+        if hasattr(self, "_rematch_crack_bboxes_to_boxes"):
+            try:
+                self._rematch_crack_bboxes_to_boxes()
+            except Exception as e:
+                print(f"[bbox rematch] run_pipeline preflight failed: {e}")
 
         boxes = self.get_all_bounding_boxes()
         print(f"Loaded {len(boxes)} bounding boxes: {boxes}")
