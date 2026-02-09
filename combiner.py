@@ -1590,6 +1590,77 @@ def union_bboxes(bboxes, *, pad=5):
 
     return x0, y0, x1, y1
 
+def debug_bbox_only(
+    *,
+    debug_dir,
+    branch_id,
+    run_id,
+    gray_full,
+    bbox,
+    S_run,
+):
+    if debug_dir is None:
+        return
+
+    import os
+    import cv2
+    import numpy as np
+
+    os.makedirs(debug_dir, exist_ok=True)
+
+    x0, y0, x1, y1 = bbox
+
+    # -------------------------------------------------
+    # SAFE visualization conversion (NO side effects)
+    # -------------------------------------------------
+    if gray_full.dtype != np.uint8:
+        g = gray_full
+        # robust normalize → uint8
+        g = g.astype(np.float32)
+        g = g - np.min(g)
+        mx = np.max(g)
+        if mx > 0:
+            g = g / mx
+        g = (255.0 * g).clip(0, 255).astype(np.uint8)
+    else:
+        g = gray_full
+
+    vis = cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
+
+    # -------------------------------------------------
+    # Draw bbox
+    # -------------------------------------------------
+    cv2.rectangle(
+        vis,
+        (int(x0), int(y0)),
+        (int(x1), int(y1)),
+        (255, 255, 0),   # cyan
+        2,
+    )
+
+    # -------------------------------------------------
+    # Draw midline
+    # -------------------------------------------------
+    for i in range(len(S_run) - 1):
+        p1 = tuple(np.round(S_run[i]).astype(int))
+        p2 = tuple(np.round(S_run[i + 1]).astype(int))
+        cv2.line(vis, p1, p2, (255, 255, 255), 1)
+
+    # -------------------------------------------------
+    # Draw endpoints
+    # -------------------------------------------------
+    p_start = tuple(np.round(S_run[0]).astype(int))
+    p_end   = tuple(np.round(S_run[-1]).astype(int))
+    cv2.circle(vis, p_start, 3, (0, 255, 0), -1)
+    cv2.circle(vis, p_end,   3, (0, 0, 255), -1)
+
+    out_path = os.path.join(
+        debug_dir,
+        f"bbox_branch{branch_id}_run{run_id}.png"
+    )
+    cv2.imwrite(out_path, vis)
+
+import numpy as np
 def build_combined_crack_stateless(
     original_image: np.ndarray,
     authoring_atomic: dict,
@@ -1604,13 +1675,14 @@ def build_combined_crack_stateless(
     prefer_gpu: bool = True,
     debug_dir=None,
     debug_callback=None,
-    crack_mask_full: np.ndarray = None,   # ← NEW (H,W) uint8/bool
-    mode = "new"
+    crack_mask_full: np.ndarray = None,
+    mode="new",
 ):
     """
     Stateless “metrics-safe” combiner with fully instrumented timing.
     """
     import time
+    import numpy as np
 
     t0 = time.perf_counter()
 
@@ -1619,7 +1691,7 @@ def build_combined_crack_stateless(
 
     if img.ndim == 3:
         bgr_idx = {0: 2, 1: 0, 2: 1}.get(color_channel, 2)
-        gray_full = img[:, :, bgr_idx].astype(np.float32)
+        gray_full = img[:, :, bgr_idx].astype(float)
     else:
         gray_full = img.astype(np.float32)
 
@@ -1699,6 +1771,7 @@ def build_combined_crack_stateless(
     # --------------------------------------------------------
     edge1_segs, edge2_segs = [], []
     norm1_segs, norm2_segs = [], []
+    derived_midline_segs = []
     union_mask = np.zeros((H, W), np.uint8)
     all_widths = []
 
@@ -1710,44 +1783,154 @@ def build_combined_crack_stateless(
     print(f"[COMBINER] branches = {len(branch_to_segs)}")
 
     # --------------------------------------------------------
-    # Process EACH BRANCH as one bbox, but run edges per CONTIGUOUS RUN
+    # Process EACH BRANCH as ONE CHAIN (preferred)
     # --------------------------------------------------------
     for branch_id, seg_list in branch_to_segs.items():
         t_branch0 = time.perf_counter()
 
-        # ---- concatenate branch midline (may contain jumps) ----
-        S_branch = np.vstack(seg_list) if len(seg_list) else None
-        if S_branch is None or len(S_branch) < 3:
+        if not seg_list:
             continue
 
-        # ------------------------------------------------
-        # Split into continuous runs (prevents teleports)
-        # ------------------------------------------------
-        runs = split_polyline_on_jumps(S_branch, max_step=5.0)
+        # ====================================================
+        # 0) Stitch segments into ONE continuous polyline
+        # ====================================================
 
-        if not runs:
-            continue
+        def _pt_key(p, tol=1.5):
+            # stable key for "same endpoint" with pixel-ish tolerance
+            return (int(np.round(p[0] / tol)), int(np.round(p[1] / tol)))
 
-        # ------------------------------------------------
-        # Branch-safe pad
-        # ------------------------------------------------
-        branch_pad = max(
-            pad,
-            window_half_size + 5,   # edge_mask window + solver lateral drift
-        )
+        def stitch_branch_segments(seg_list, tol=1.5):
+            """
+            Try to order + orient segments into a single chain.
+            Returns (S_chain, ok, reason)
+            """
+            segs = [np.asarray(s, float) for s in seg_list if s is not None and len(s) >= 2]
+            if not segs:
+                return None, False, "no valid segs"
 
-        # ------------------------------------------------
-        # Process each run independently
-        # ------------------------------------------------
+            # endpoints for each segment
+            ends = []
+            for s in segs:
+                a = s[0]
+                b = s[-1]
+                ends.append((_pt_key(a, tol), _pt_key(b, tol)))
+
+            # Build endpoint -> list of (seg_idx, end_side)
+            # end_side: 0 means start endpoint, 1 means end endpoint
+            ep_map = {}
+            for i, (ka, kb) in enumerate(ends):
+                ep_map.setdefault(ka, []).append((i, 0))
+                ep_map.setdefault(kb, []).append((i, 1))
+
+            # Pick a start endpoint:
+            # Prefer degree-1 endpoint (an "end" of a chain); otherwise any endpoint.
+            degrees = {k: len(v) for k, v in ep_map.items()}
+            start_key = None
+            for k, deg in degrees.items():
+                if deg == 1:
+                    start_key = k
+                    break
+            if start_key is None:
+                # likely a loop or messy, pick arbitrary
+                start_key = ends[0][0]
+
+            used = set()
+
+            # Find a starting segment that touches start_key
+            candidates = ep_map.get(start_key, [])
+            if not candidates:
+                return None, False, "start_key missing in ep_map"
+
+            seg_idx, side = candidates[0]
+
+            # Orient first segment so it starts at start_key
+            s0 = segs[seg_idx]
+            if _pt_key(s0[0], tol) != start_key:
+                s0 = s0[::-1].copy()
+
+            chain = [s0]
+            used.add(seg_idx)
+
+            cur_key = _pt_key(chain[-1][-1], tol)
+
+            # Greedy walk along matching endpoints
+            while True:
+                nxt = None
+                for (j, side_j) in ep_map.get(cur_key, []):
+                    if j in used:
+                        continue
+                    nxt = j
+                    break
+
+                if nxt is None:
+                    break
+
+                sj = segs[nxt]
+                # orient sj so it starts at cur_key
+                if _pt_key(sj[0], tol) != cur_key:
+                    sj = sj[::-1].copy()
+
+                chain.append(sj)
+                used.add(nxt)
+                cur_key = _pt_key(chain[-1][-1], tol)
+
+            # Check if we consumed all segments
+            if len(used) != len(segs):
+                return None, False, f"disconnected: used {len(used)}/{len(segs)}"
+
+            # concatenate, avoiding duplicate endpoints
+            out = [chain[0]]
+            for s in chain[1:]:
+                if np.linalg.norm(out[-1][-1] - s[0]) <= tol:
+                    out.append(s[1:])  # drop duplicate join point
+                else:
+                    out.append(s)
+            S_chain = np.vstack(out)
+
+            # final sanity: ensure no giant teleports remain
+            d = np.sqrt(np.sum(np.diff(S_chain, axis=0) ** 2, axis=1))
+            if np.any(d > 10.0):
+                return None, False, "teleport remains after stitch"
+
+            return S_chain, True, "ok"
+
+        S_branch, ok, reason = stitch_branch_segments(seg_list, tol=1.5)
+
+        # ====================================================
+        # 1) If stitching fails, fall back to run splitting
+        # ====================================================
+        if not ok:
+            print(f"[COMBINER] branch {branch_id}: stitch failed ({reason}); falling back to runs")
+
+            # -- your existing split-on-jumps fallback --
+            S_branch_raw = np.vstack(seg_list)
+            runs = split_polyline_on_jumps(S_branch_raw, max_step=5.0)
+            if not runs:
+                continue
+        else:
+            runs = [S_branch]  # ONE RUN ONLY (what you want)
+
+        # ====================================================
+        # 2) Process each run (normally 1 per branch now)
+        # ====================================================
         for run_id, S_run in enumerate(runs):
             t_loop0 = time.perf_counter()
 
             if S_run is None or len(S_run) < 3:
                 continue
 
-            # -----------------------------
+            # ------------------------------------------------
+            # Branch-safe pad
+            # ------------------------------------------------
+            branch_pad = max(
+                pad,
+                window_half_size + 5,   # edge_mask window + solver lateral drift
+            )
+
+            # ------------------------------------------------
             # Run bbox (pad included)
-            # -----------------------------
+            # IMPORTANT: bbox from THIS run; if stitched ok, it's the whole branch
+            # ------------------------------------------------
             x0 = max(0, int(np.floor(S_run[:, 0].min() - branch_pad)))
             x1 = min(W, int(np.ceil (S_run[:, 0].max() + branch_pad)))
             y0 = max(0, int(np.floor(S_run[:, 1].min() - branch_pad)))
@@ -1755,13 +1938,24 @@ def build_combined_crack_stateless(
             if x1 - x0 < 2 or y1 - y0 < 2:
                 continue
 
+            # 🔴 DEBUG BEFORE ANY SOLVER LOGIC
+            '''debug_bbox_only(
+                debug_dir=debug_dir,
+                branch_id=branch_id,
+                run_id=run_id,
+                gray_full=gray_full,
+                bbox=(x0, y0, x1, y1),
+                S_run=S_run,
+            )'''
+
             crop = gray_full[y0:y1, x0:x1]
+
             track_local_yx = np.vstack([
                 S_run[:, 1] - y0,
                 S_run[:, 0] - x0
             ])
 
-            # seeds/tips for THIS run
+            # seeds/tips for THIS run (branch)
             pts_crop = [
                 S_run[0]  - [x0, y0],
                 S_run[-1] - [x0, y0],
@@ -1784,7 +1978,7 @@ def build_combined_crack_stateless(
             t_masks_total += (time.perf_counter() - t_em0)
 
             # -------------------------
-            # edges_tracking (PER RUN)
+            # edges_tracking (PER BRANCH now)
             # -------------------------
             midline_xy_crop = np.column_stack([
                 track_local_yx[1],
@@ -1801,8 +1995,9 @@ def build_combined_crack_stateless(
                 mu=int(mu), l=int(l), p=int(p),
                 return_normal_edges=True,
                 prefer_gpu=prefer_gpu,
-                mode=mode
+                mode=mode,
             )
+
             t_edges_total += (time.perf_counter() - t_et0)
 
             if not isinstance(res, dict):
@@ -1811,6 +2006,10 @@ def build_combined_crack_stateless(
             e1, e2 = res.get("geodesic_edges", [None, None])
             if e1 is None or e2 is None or len(e1) < 2 or len(e2) < 2:
                 continue
+            
+            derived_mid = res.get("derived_midline", None)
+            if derived_mid is None or len(derived_mid) < 2:
+                raise ValueError("[COMBINER] edges_tracking returned no derived midline")
 
             # -------------------------
             # Post-processing
@@ -1826,6 +2025,17 @@ def build_combined_crack_stateless(
             e2_full = _finite_xy(np.column_stack([e2[:, 0] + x0, e2[:, 1] + y0]))
             if len(e1_full) < 2 or len(e2_full) < 2:
                 continue
+            
+            derived_mid_full = _finite_xy(
+                np.column_stack([
+                    derived_mid[:, 0] + x0,
+                    derived_mid[:, 1] + y0
+                ])
+            )
+            if len(derived_mid_full) < 2:
+                raise ValueError("[COMBINER] derived midline collapsed after full-image mapping")
+            derived_midline_segs.append(derived_mid_full)
+
 
             # ---- normals ----
             normals = res.get("normal_edge_points")
@@ -1849,31 +2059,26 @@ def build_combined_crack_stateless(
             norm1_segs.append(n1_full)
             norm2_segs.append(n2_full)
 
-            # ---- mask generation (AUTHORITATIVE) ----
+            # ---- mask generation ----
             from cracktools.segmentation import generate_mask_from_edges
             mask_run = generate_mask_from_edges(
-                img_gray=gray_full,          # FULL image
+                img_gray=gray_full,
                 edge1_xy=e1_full,
                 edge2_xy=e2_full,
-                midline_xy=S_run,            # DEBUG ONLY
+                midline_xy=derived_mid_full,   # ✅ AUTHORITATIVE
                 out_dir=None,
                 tag=None,
                 do_morph=False,
             )
 
-            if mask_run is None or not mask_run.any():
-                # Don’t hard-crash on one bad run; skip it so the rest of branch survives
-                t_post_total += (time.perf_counter() - t_post0)
-                t_loop_total += (time.perf_counter() - t_loop0)
-                continue
-
-            union_mask |= (mask_run > 0).astype(np.uint8)
+            if mask_run is not None and mask_run.any():
+                union_mask |= (mask_run > 0).astype(np.uint8)
 
             t_post_total += (time.perf_counter() - t_post0)
             t_loop_total += (time.perf_counter() - t_loop0)
 
-        # optional: branch-level timing
         _ = time.perf_counter() - t_branch0
+
 
     if np.any(union_mask):
         bb = bbox_from_mask(union_mask)

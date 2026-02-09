@@ -623,19 +623,22 @@ def edges_tracking(
     debug_dir=None,             # None → no plots
 ):
     """
-    Edge tracking with conservative anti-quantization (new mode only).
+    Edge tracking with conservative anti-quantization.
+
+    HARD RULE (per your request):
+      - ALWAYS derive a midline from the extracted edges.
+      - If derived midline cannot be computed, this function RAISES.
+      - Normals are computed ONLY against the derived midline (no fallback).
 
     Guarantees:
-      - mode="old" is geometrically untouched
-      - mode="new" removes stair-step artifacts only
-      - normals computed on FINAL edges
-      - raw edges always preserved
+      - mode="old" edge geometry is untouched (same metric & geodesics)
+      - mode="new" keeps your postprocess only; edge masks are NEVER modified
     """
     import time
-    import os
     import numpy as np
+    import scipy.ndimage as ndi
     import scipy.ndimage
-    from agd.Metrics import Riemann
+    import cv2
 
     t0_all = time.perf_counter()
 
@@ -650,6 +653,46 @@ def edges_tracking(
     dims  = np.array([H, W])
 
     # --------------------------------------------------
+    # Small helpers
+    # --------------------------------------------------
+    def finite_xy(xy):
+        xy = np.asarray(xy, float)
+        if xy.ndim != 2 or xy.shape[1] != 2:
+            return np.empty((0, 2), float)
+        return xy[np.isfinite(xy).all(1)]
+
+    def arclen_resample(xy, N):
+        xy = np.asarray(xy, float)
+        if len(xy) < 2:
+            return xy
+        d = np.sqrt(np.sum(np.diff(xy, axis=0) ** 2, axis=1))
+        s = np.concatenate([[0.0], np.cumsum(d)])
+        if not np.isfinite(s[-1]) or s[-1] <= 1e-9:
+            return xy
+        t = np.linspace(0.0, s[-1], int(N))
+        x = np.interp(t, s, xy[:, 0])
+        y = np.interp(t, s, xy[:, 1])
+        return np.column_stack([x, y])
+
+    def _snap_xy_to_mask(xy, mask_u8):
+        """
+        Snap an (x,y) point to the nearest nonzero pixel in mask_u8.
+        Uses EDT with indices (fast, deterministic).
+        """
+        x, y = float(xy[0]), float(xy[1])
+        xi = int(np.clip(np.round(x), 0, W - 1))
+        yi = int(np.clip(np.round(y), 0, H - 1))
+
+        if mask_u8[yi, xi] > 0:
+            return np.array([xi, yi], float)
+
+        inv = (mask_u8 == 0)
+        dist, inds = ndi.distance_transform_edt(inv, return_indices=True)
+        ny = int(inds[0, yi, xi])
+        nx = int(inds[1, yi, xi])
+        return np.array([nx, ny], float)
+
+    # --------------------------------------------------
     # 1. Gradients
     # --------------------------------------------------
     t0 = time.perf_counter()
@@ -657,7 +700,7 @@ def edges_tracking(
     t_grad = time.perf_counter() - t0
 
     # --------------------------------------------------
-    # 2. Structure tensor
+    # 2. Structure tensor (KEEP OLD IDENTICAL; FIX new to numeric float64)
     # --------------------------------------------------
     t0 = time.perf_counter()
     if mode == "old":
@@ -671,13 +714,14 @@ def edges_tracking(
         a11 = scipy.ndimage.gaussian_filter(mu * Dx * Dx, 1)
         a22 = scipy.ndimage.gaussian_filter(mu * Dy * Dy, 1)
         a12 = scipy.ndimage.gaussian_filter(mu * Dx * Dy, 1)
-        a12 = a21 = a12
-        df = np.abs(np.array([[1 + a11, a12],
-                               [a21,     1 + a22]], dtype=object))
+        a21 = a12
+        df = np.array([[1.0 + a11, a12],
+                       [a21, 1.0 + a22]], dtype=np.float64)
+        df = np.abs(df)
     t_tensor = time.perf_counter() - t0
 
     # --------------------------------------------------
-    # 3. Mask normalization
+    # 3. Mask normalization (KEEP OLD IDENTICAL)
     # --------------------------------------------------
     t0 = time.perf_counter()
     if mode == "old":
@@ -686,28 +730,28 @@ def edges_tracking(
     else:
         def _norm01(m):
             m = m.astype(np.float64)
-            m -= m.min()
-            mx = m.max()
+            m -= float(m.min())
+            mx = float(m.max())
             return m / (mx + 1e-12) if mx > 0 else m
         em1 = _norm01(np.squeeze(edge_mask1_cropp))
         em2 = _norm01(np.squeeze(edge_mask2_cropp))
     t_mask_norm = time.perf_counter() - t0
 
     # --------------------------------------------------
-    # 4. Metric build
+    # 4. Metric build (KEEP OLD IDENTICAL; keep NEW conservative exponent cap)
     # --------------------------------------------------
     t0 = time.perf_counter()
     if mode == "old":
-        metric1 = (1 + em1 * l)**p * df
-        metric2 = (1 + em2 * l)**p * df
+        metric1 = (1 + em1 * l) ** p * df
+        metric2 = (1 + em2 * l) ** p * df
     else:
         pp = min(int(p), 4)
-        metric1 = (1 + em1 * l)**pp * df
-        metric2 = (1 + em2 * l)**pp * df
+        metric1 = (1 + em1 * l) ** pp * df
+        metric2 = (1 + em2 * l) ** pp * df
     t_metric = time.perf_counter() - t0
 
     # --------------------------------------------------
-    # 5. Geodesics (separate timers)
+    # 5. Edge geodesics (UNCHANGED behavior)
     # --------------------------------------------------
     t0 = time.perf_counter()
     g1_yx = _run_geodesic(metric1, seeds_yx, tips_yx, sides, dims, prefer_gpu=prefer_gpu)
@@ -717,28 +761,12 @@ def edges_tracking(
     g2_yx = _run_geodesic(metric2, seeds_yx, tips_yx, sides, dims, prefer_gpu=prefer_gpu)
     t_geo2 = time.perf_counter() - t0
 
-    e1_raw = np.stack([g1_yx[:, 1], g1_yx[:, 0]], axis=1)
-    e2_raw = np.stack([g2_yx[:, 1], g2_yx[:, 0]], axis=1)
+    e1_raw = np.stack([g1_yx[:, 1], g1_yx[:, 0]], axis=1)  # (x,y)
+    e2_raw = np.stack([g2_yx[:, 1], g2_yx[:, 0]], axis=1)  # (x,y)
 
     # --------------------------------------------------
     # 5b. Conservative anti-quantization (NEW only)
     # --------------------------------------------------
-    def finite_xy(xy):
-        xy = np.asarray(xy, float)
-        return xy[np.isfinite(xy).all(1)]
-
-    def arclen_resample(xy, N):
-        if len(xy) < 2:
-            return xy
-        d = np.sqrt(np.sum(np.diff(xy, axis=0)**2, axis=1))
-        s = np.concatenate([[0.0], np.cumsum(d)])
-        if s[-1] <= 1e-9:
-            return xy
-        t = np.linspace(0.0, s[-1], N)
-        x = np.interp(t, s, xy[:, 0])
-        y = np.interp(t, s, xy[:, 1])
-        return np.column_stack([x, y])
-
     e1 = finite_xy(e1_raw)
     e2 = finite_xy(e2_raw)
 
@@ -746,25 +774,26 @@ def edges_tracking(
 
     if do_pp and len(e1) >= 2 and len(e2) >= 2:
         baseN = max(len(e1), len(e2))
-        targetN = max(resample_min_points, int(baseN * resample_ratio))
+        targetN = max(int(resample_min_points), int(baseN * float(resample_ratio)))
         targetN = min(targetN, int(1.2 * baseN))
 
         e1 = arclen_resample(e1, targetN)
         e2 = arclen_resample(e2, targetN)
 
-        from scipy.signal import savgol_filter
+        if smooth_k and int(smooth_k) > 1:
+            from scipy.signal import savgol_filter
 
-        def _savgol_smooth(xy, k):
-            if k <= 1 or len(xy) < k:
-                return xy
-            k = int(k)
-            if k % 2 == 0:
-                k += 1
-            x = savgol_filter(xy[:,0], window_length=k, polyorder=2, mode="interp")
-            y = savgol_filter(xy[:,1], window_length=k, polyorder=2, mode="interp")
-            return np.column_stack([x, y])
+            def _savgol_smooth(xy, k):
+                xy = np.asarray(xy, float)
+                k = int(k)
+                if k <= 1 or len(xy) < k:
+                    return xy
+                if k % 2 == 0:
+                    k += 1
+                x = savgol_filter(xy[:, 0], window_length=k, polyorder=2, mode="interp")
+                y = savgol_filter(xy[:, 1], window_length=k, polyorder=2, mode="interp")
+                return np.column_stack([x, y])
 
-        if smooth_k > 1:
             e1 = _savgol_smooth(e1, smooth_k)
             e2 = _savgol_smooth(e2, smooth_k)
 
@@ -773,22 +802,105 @@ def edges_tracking(
         e2[:, 0] = np.clip(e2[:, 0], 0, W - 1)
         e2[:, 1] = np.clip(e2[:, 1], 0, H - 1)
 
+    if len(e1) < 2 or len(e2) < 2:
+        raise ValueError("[edges_tracking] extracted edges are degenerate (<2 pts); cannot derive midline")
+
     # --------------------------------------------------
-    # 6. Normals
+    # 5c. DERIVED MIDLINE from edges (DT corridor + Riemann2 geodesic)  [NO FALLBACK]
+    # --------------------------------------------------
+    t0 = time.perf_counter()
+
+    # resample edges to a common N so fillPoly is well-behaved
+    Np = int(max(80, min(len(e1), len(e2))))
+    e1p = arclen_resample(e1, Np)
+    e2p = arclen_resample(e2, Np)
+
+    poly = np.vstack([e1p, e2p[::-1]])
+    poly_i = np.round(poly).astype(np.int32)
+    poly_i[:, 0] = np.clip(poly_i[:, 0], 0, W - 1)
+    poly_i[:, 1] = np.clip(poly_i[:, 1], 0, H - 1)
+
+    corridor = np.zeros((H, W), np.uint8)
+    cv2.fillPoly(corridor, [poly_i.reshape(-1, 1, 2)], 255)
+    corridor = (corridor > 0).astype(np.uint8)
+
+    # keep corridor from collapsing on thin cracks
+    corridor = cv2.morphologyEx(
+        corridor, cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        iterations=1
+    )
+
+    if not corridor.any():
+        raise ValueError("[edges_tracking] derived corridor mask is empty; cannot derive midline")
+
+    # DT INSIDE corridor (distance to boundary)
+    dt_inside = cv2.distanceTransform(corridor, cv2.DIST_L2, 5).astype(np.float64)
+    if not np.isfinite(dt_inside).any() or float(np.nanmax(dt_inside)) <= 0.0:
+        raise ValueError("[edges_tracking] dt_inside invalid/zero; cannot derive midline")
+
+    # cost prefers ridge (center): cost = 1/(dt+eps) inside, huge outside
+    eps = 1e-6
+    cost = 1.0 / (dt_inside + eps)
+    cost[corridor == 0] = 1e6  # hard wall (should already be outside)
+
+    # light smoothing to reduce pixel staircases
+    cost = scipy.ndimage.gaussian_filter(cost, sigma=0.8)
+
+    # Metric for Riemann2: isotropic scalar field => diag(cost, cost)
+    metric_mid = np.array([[cost, np.zeros_like(cost)],
+                           [np.zeros_like(cost), cost]], dtype=np.float64)
+
+    # snap endpoints into corridor before solving
+    p0_xy = _snap_xy_to_mask(np.array([pts_cropp[0][0], pts_cropp[0][1]], float), corridor)
+    p1_xy = _snap_xy_to_mask(np.array([pts_cropp[1][0], pts_cropp[1][1]], float), corridor)
+
+    seeds_mid_yx = np.array([p0_xy[1], p0_xy[0]], dtype=float)
+    tips_mid_yx  = np.array([p1_xy[1], p1_xy[0]], dtype=float)
+
+    gmid_yx = _run_geodesic(metric_mid, seeds_mid_yx, tips_mid_yx, sides, dims, prefer_gpu=prefer_gpu)
+    derived_midline = np.stack([gmid_yx[:, 1], gmid_yx[:, 0]], axis=1)
+    derived_midline = finite_xy(derived_midline)
+
+    if len(derived_midline) < 2:
+        raise ValueError("[edges_tracking] derived midline geodesic is degenerate (<2 pts)")
+
+    # Optional mild cleanup to make normals stable
+    if do_pp:
+        baseN = len(derived_midline)
+        targetN = max(int(resample_min_points), int(baseN * 1.10))
+        targetN = min(targetN, int(1.25 * baseN))
+        derived_midline = arclen_resample(derived_midline, targetN)
+
+        if smooth_k and int(smooth_k) > 1:
+            from scipy.signal import savgol_filter
+            k = int(smooth_k)
+            if k % 2 == 0:
+                k += 1
+            if len(derived_midline) >= k:
+                mx = savgol_filter(derived_midline[:, 0], window_length=k, polyorder=2, mode="interp")
+                my = savgol_filter(derived_midline[:, 1], window_length=k, polyorder=2, mode="interp")
+                derived_midline = np.column_stack([mx, my])
+
+    derived_midline[:, 0] = np.clip(derived_midline[:, 0], 0, W - 1)
+    derived_midline[:, 1] = np.clip(derived_midline[:, 1], 0, H - 1)
+
+    t_midline = time.perf_counter() - t0
+
+    # --------------------------------------------------
+    # 6. Normals (ONLY against derived midline)  [NO FALLBACK]
     # --------------------------------------------------
     t0 = time.perf_counter()
     normal_edges = None
     normal_edges_clipped = None
 
-    if return_normal_edges and midline is not None:
+    if return_normal_edges:
         try:
             from .segmentation import find_normal_pair
         except Exception:
             from segmentation import find_normal_pair
 
-        m = np.asarray(midline)
-        mid_x, mid_y = (m[:, 0], m[:, 1]) if m.ndim == 2 else (m[0], m[1])
-
+        mid_x, mid_y = derived_midline[:, 0], derived_midline[:, 1]
         e1x, e1y, e2x, e2y = find_normal_pair(mid_x, mid_y, e1, e2)
         normal_edges = [[e1x.copy(), e1y.copy()], [e2x.copy(), e2y.copy()]]
         normal_edges_clipped = [
@@ -812,6 +924,8 @@ def edges_tracking(
         "edges_metric_build_sec": float(t_metric),
         "edges_geodesic1_sec": float(t_geo1),
         "edges_geodesic2_sec": float(t_geo2),
+
+        "derived_midline_sec": float(t_midline),
         "edges_pair_normals_sec": float(t_normals),
 
         "edges_postprocess": bool(do_pp),
@@ -823,8 +937,14 @@ def edges_tracking(
         "geodesic_edges": [e1, e2],
         "geodesic_edges_raw": [e1_raw, e2_raw],
         "geodesic_edges_proc": [e1, e2],
+
+        # REQUIRED output now
+        "derived_midline": derived_midline,
+
+        # normals computed against derived_midline only
         "normal_edge_points": normal_edges,
         "normal_edge_points_clipped": normal_edges_clipped,
+
         "subtiming": subtiming,
     }
 

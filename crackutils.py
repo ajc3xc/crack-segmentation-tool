@@ -2092,15 +2092,13 @@ class CrackUtils:
         # ----------------------------
         def _debug_cb(
             *,
-            image_rgb,
             segs,
             edge1_segs,
             edge2_segs,
             norm1_segs,
             norm2_segs,
             mask_bbox,
-            member_ids,
-            union_mask   # REQUIRED
+            **_unused,
         ):
             """
             Forward the stateless combined-crack output to the pure plotting helper.
@@ -2109,17 +2107,15 @@ class CrackUtils:
             import os
 
             plot_combined_debug(
-                original_image=image_rgb,
+                original_image=self.original_image,
                 segs=segs,
                 edge1_segs=edge1_segs,
                 edge2_segs=edge2_segs,
                 norm1_segs=norm1_segs,
                 norm2_segs=norm2_segs,
                 mask_bbox=mask_bbox,
-                member_ids=member_ids,
+                member_ids=[str(m) for m in member_ids],
                 out_dir=out_dir
-                # NOTE: union_mask is accepted here (required by signature)
-                # but not used by plot_combined_debug(), which is fine.
             )
             
         # ---------------------------------
