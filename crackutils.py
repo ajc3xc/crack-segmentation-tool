@@ -154,6 +154,72 @@ def plot_poly_before_after_to_file(
     fig.savefig(out_path, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig)
 
+
+def canonicalize_track_for_edges(
+    track_yx,
+    *,
+    ds_target=1.0,
+    min_spacing_auto=0.8,
+    min_spacing_manual=0.3,
+    preserve_endpoints=True,
+    source="auto",
+):
+    """
+    Canonicalize a [y,x] track to stable spacing before edge extraction.
+    """
+    tr = np.asarray(track_yx, float)
+    if tr.ndim != 2 or tr.shape[0] != 2:
+        return tr, {
+            "med_before": None,
+            "did_resample": False,
+            "n_before": 0,
+            "n_after": 0,
+        }
+
+    pts_xy = np.column_stack([tr[1], tr[0]])
+    pts_xy = pts_xy[np.isfinite(pts_xy).all(axis=1)]
+
+    n_before = int(len(pts_xy))
+    if n_before < 2:
+        return tr, {
+            "med_before": None,
+            "did_resample": False,
+            "n_before": n_before,
+            "n_after": n_before,
+        }
+
+    ds = local_step_sizes(pts_xy)
+    med = float(np.median(ds)) if ds.size else None
+
+    src = str(source or "auto").lower()
+    thresh = float(min_spacing_manual if src.startswith("manual") else min_spacing_auto)
+    do_resample = (med is not None and med < thresh)
+
+    out = tr
+    did = False
+    n_after = n_before
+
+    if do_resample:
+        rs, = resample_by_arclength(
+            pts_xy,
+            ds_target=float(ds_target),
+            preserve_endpoints=bool(preserve_endpoints),
+            fastpath=True,
+        )
+        if rs is not None:
+            rs = np.asarray(rs, float)
+            if rs.ndim == 2 and rs.shape[1] == 2 and len(rs) >= 2:
+                out = np.vstack([rs[:, 1], rs[:, 0]])
+                n_after = int(len(rs))
+                did = True
+
+    return out, {
+        "med_before": med,
+        "did_resample": did,
+        "n_before": n_before,
+        "n_after": n_after,
+    }
+
 #This class is basically is all of the utility / save and load or unimportant functions that aren't directly accessible via a ui button or aren't important
 #
 class CrackUtils:

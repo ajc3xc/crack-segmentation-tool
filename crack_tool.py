@@ -448,6 +448,30 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                                     print(f"[PIPE ALIGN] normalized track: start Δ={np.linalg.norm(track_local[0] - (p0g - np.array([xmin, ymin]))):.2f}px")
                                 except Exception as e:
                                     print(f"[PIPE ALIGN] ⚠ failed to normalize: {e}")
+
+                        # Canonicalize spacing before geometry consumers (edge_mask/edge_tracking).
+                        try:
+                            if getattr(self, "track", None) is not None:
+                                self.track, rs_info = canonicalize_track_for_edges(
+                                    self.track,
+                                    ds_target=1.0,
+                                    min_spacing_auto=0.8,
+                                    min_spacing_manual=0.3,
+                                    preserve_endpoints=True,
+                                    source=src,
+                                )
+                                med_txt = (
+                                    f"{rs_info['med_before']:.3f}"
+                                    if rs_info.get("med_before") is not None
+                                    else "None"
+                                )
+                                print(
+                                    f"[PIPE RESAMPLE {src}] med={med_txt}, "
+                                    f"resampled={rs_info.get('did_resample')}, "
+                                    f"len={rs_info.get('n_before')}→{rs_info.get('n_after')}"
+                                )
+                        except Exception as e:
+                            print(f"[PIPE RESAMPLE] ⚠ canonicalization failed: {e}")
                         
                         # ======= Assign a brand-new crack ID for THIS pair (gap-free) =======
                         new_cid = _next_crack_id_str()
@@ -464,20 +488,20 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                                 y, x = pts[:, i]
                                 print(f"  {i:02d}: (y={y:.6f}, x={x:.6f})")
 
-                        _dbg_track("PRE edge_mask (track)", self.track)
+                        #_dbg_track("PRE edge_mask (track)", self.track)
 
                         # Geodesic edges & masks for this pair
                         self.current_source = src
                         start_time = time()
                         self.edge_mask()
                         edgemask_time = time()
-                        _dbg_track("EXIT edge_mask (track)", self.track)
+                        #_dbg_track("EXIT edge_mask (track)", self.track)
                         print()
                         print(f"[TIME] Edge mask time: {edgemask_time - start_time}")
                         self.edge_tracking()
                         print()
                         print(f"[TIME] Edge tracking time: {time() - edgemask_time}")
-                        _dbg_track("EXIT edge_tracking (track)", self.track)
+                        #_dbg_track("EXIT edge_tracking (track)", self.track)
 
                         # Pair-local globals so save_current_segment writes them into that crack
                         self.user_points = pair_user_points

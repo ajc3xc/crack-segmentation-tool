@@ -1113,7 +1113,7 @@ class ManualDrawing(CrackUtils):
         By default, runs in full pipeline mode (creates usable mask_crop entries).
         Set pipeline=False for lightweight endpoint-only testing.
         """
-        if self.select_end_points_manmidlines(metrics=True) == -1:
+        if self.select_end_points_manmidlines(metrics=True) is None:
             return
         self.commit_manual_midlines_full()
         self.save_annotation()
