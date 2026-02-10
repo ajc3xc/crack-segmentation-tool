@@ -401,7 +401,8 @@ def find_normal_pair(
     mid_x, mid_y, edge1, edge2,
     max_dist_ratio=0.18,
     min_max_dist=12.0,
-    length_scale=1.5
+    length_scale=1.5,
+    allow_projection_fallback=True,
 ):
     """
     For each midline point, cast normals and intersect edges. 
@@ -463,10 +464,14 @@ def find_normal_pair(
         inter2 = _collect_points(line2.intersection(ray_line))
 
         def _fallback1():
+            if not allow_projection_fallback:
+                return None
             p1 = nearest_points(line1, Point(mx, my))[0]
             return (p1.x, p1.y)
 
         def _fallback2():
+            if not allow_projection_fallback:
+                return None
             p2 = nearest_points(line2, Point(mx, my))[0]
             return (p2.x, p2.y)
 
@@ -1060,7 +1065,8 @@ def generate_mask_from_edges(
     *,
     img_gray,                  # (H,W) uint8 crop
     edge1_xy, edge2_xy,         # (N,2) float arrays (x,y) — ALREADY FINAL
-    midline_xy=None,            # optional (N,2)
+    midline_xy=None,            # required (N,2) for robust masking
+    normals_xy=None,            # required tuple/list: (norm1_xy, norm2_xy)
     out_dir=None,
     tag="cidX",
     mode="new",
@@ -1072,6 +1078,8 @@ def generate_mask_from_edges(
     Assumptions:
       - edge1_xy / edge2_xy are ALREADY postprocessed
         (anti-quantization handled in edges_tracking)
+      - midline_xy must be provided and aligned to the same frame
+      - normals_xy must be provided and aligned to the same frame
       - this function must NOT modify geometry
 
     Outputs:
@@ -1110,15 +1118,59 @@ def generate_mask_from_edges(
             return mask0
 
     # --------------------------------------------------
-    # MASK: polygon fill (NO fattening)
+    # MASK: midline-normal span rasterization (robust)
     # --------------------------------------------------
-    poly = np.vstack([e1, e2[::-1]])
-    poly[:, 0] = np.clip(poly[:, 0], 0, W - 1)
-    poly[:, 1] = np.clip(poly[:, 1], 0, H - 1)
-    poly_i = np.round(poly).astype(np.int32).reshape(-1, 1, 2)
+    if midline_xy is None:
+        raise ValueError("generate_mask_from_edges requires midline_xy for robust masking")
+    if normals_xy is None or not isinstance(normals_xy, (tuple, list)) or len(normals_xy) != 2:
+        raise ValueError("generate_mask_from_edges requires normals_xy=(norm1_xy, norm2_xy)")
+
+    mid = finite_xy(midline_xy)
+    if len(mid) < 2:
+        raise ValueError("midline_xy invalid (<2 pts)")
+
+    n1 = np.asarray(normals_xy[0], float)
+    n2 = np.asarray(normals_xy[1], float)
+    if n1.ndim != 2 or n2.ndim != 2 or n1.shape[1] != 2 or n2.shape[1] != 2:
+        raise ValueError("normals_xy arrays must have shape (N,2)")
+
+    m = min(len(n1), len(n2))
+    if m < 2:
+        raise ValueError("normals_xy has insufficient points")
+    n1 = n1[:m]
+    n2 = n2[:m]
+
+    good = np.isfinite(n1).all(1) & np.isfinite(n2).all(1)
+    good_frac = float(np.mean(good)) if len(good) else 0.0
+    if good_frac < 0.70:
+        raise ValueError(f"insufficient usable normals ({good_frac*100.0:.1f}%)")
 
     mask = np.zeros((H, W), np.uint8)
-    cv2.fillPoly(mask, [poly_i], 1)
+
+    # Fill a continuous strip by rasterizing quads between consecutive normals.
+    good_idx = np.where(good)[0]
+    for k in range(len(good_idx) - 1):
+        i0 = int(good_idx[k])
+        i1 = int(good_idx[k + 1])
+
+        # Avoid bridging over invalid gaps; only connect true neighbors.
+        if i1 != i0 + 1:
+            continue
+
+        quad = np.array([
+            n1[i0],  # side 1 at i
+            n1[i1],  # side 1 at i+1
+            n2[i1],  # side 2 at i+1
+            n2[i0],  # side 2 at i
+        ], dtype=np.float32)
+
+        quad[:, 0] = np.clip(quad[:, 0], 0, W - 1)
+        quad[:, 1] = np.clip(quad[:, 1], 0, H - 1)
+        quad_i = np.round(quad).astype(np.int32).reshape(-1, 1, 2)
+        cv2.fillPoly(mask, [quad_i], 1)
+
+    if not np.any(mask):
+        raise ValueError("empty mask after midline-normal span rasterization")
 
     if do_morph:
         # ONLY hole filling — no opening / erosion
@@ -1132,7 +1184,15 @@ def generate_mask_from_edges(
     # DEBUG: GT-style overlay (KEEP THIS)
     # --------------------------------------------------
     if out_dir:
-        vis_gray = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR).astype(np.float32) / 255.0
+        src = np.asarray(img_gray)
+        if src.ndim == 2:
+            vis = cv2.cvtColor(src, cv2.COLOR_GRAY2BGR)
+        elif src.ndim == 3 and src.shape[2] == 3:
+            vis = src.copy()
+        else:
+            raise ValueError(f"unexpected img_gray shape: {src.shape}")
+
+        vis_gray = vis.astype(np.float32) / 255.0
         dark_base = np.clip(vis_gray * 0.35, 0.0, 1.0)
         overlay = dark_base.copy()
 
@@ -1141,7 +1201,8 @@ def generate_mask_from_edges(
 
         plot_edges_and_normals(
             base_image=(blended * 255).astype(np.uint8),
-            midline_segs=[midline_xy] if midline_xy is not None else [],
+            midline_segs=[],
+            derived_midline_segs=[midline_xy] if midline_xy is not None else [],
             edge1_segs=[e1],
             edge2_segs=[e2],
             norm1_segs=[],
@@ -1155,3 +1216,4 @@ def generate_mask_from_edges(
 
 def int2(a):
     return (int(np.round(a)))
+

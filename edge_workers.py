@@ -175,10 +175,21 @@ def extract_normals_from_res(res):
     m = min(len(e1), len(e2))
     return e1[:m], e2[:m]
     
-def plot_normals_pretty(image_gray, track_e1, track_e2, midline_xy, e1, e2, out_png, crack_id):
+def plot_normals_pretty(
+    image_gray,
+    track_e1,
+    track_e2,
+    midline_xy,
+    e1,
+    e2,
+    out_png,
+    crack_id,
+    derived_midline_xy=None,
+):
     plot_edges_and_normals(
         base_image=image_gray,
         midline_segs=[midline_xy],
+        derived_midline_segs=([derived_midline_xy] if derived_midline_xy is not None else []),
         edge1_segs=[track_e1],
         edge2_segs=[track_e2],
         norm1_segs=[e1],
@@ -582,6 +593,9 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             normals_e1      = np.asarray(data["normals_e1"], float)
             normals_e2      = np.asarray(data["normals_e2"], float)
             midline_xy_crop = np.asarray(data["midline_xy_crop"], float)
+            derived_midline_crop = np.asarray(
+                data["derived_midline_crop"], float
+            ) if "derived_midline_crop" in data else np.asarray(midline_xy_crop, float)
 
             bbox_arr = np.asarray(data["bbox"]).astype(int).ravel()
             if bbox_arr.size != 4:
@@ -646,6 +660,9 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
 
             track_e1 = np.asarray(track_e1, float)
             track_e2 = np.asarray(track_e2, float)
+            derived_midline_crop = np.asarray(res.get("derived_midline", []), float)
+            if derived_midline_crop.ndim != 2 or derived_midline_crop.shape[1] != 2 or len(derived_midline_crop) < 2:
+                return {"status": "fail_no_derived_midline", **P}
 
             normals_e1, normals_e2 = extract_normals_from_res(res)
             subtiming = res.get("subtiming", {}) or {}
@@ -659,6 +676,8 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 img_gray=img_norm,
                 edge1_xy=track_e1,
                 edge2_xy=track_e2,
+                midline_xy=derived_midline_crop,
+                normals_xy=(normals_e1, normals_e2),
                 out_dir=dbg_dir,
                 tag=f"cid{cid}",
                 do_morph=True,
@@ -679,6 +698,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                     normals_e1, normals_e2,
                     pretty_path,
                     cid,
+                    derived_midline_xy=derived_midline_crop,
                 )
             except Exception as e:
                 print(f"[DEBUG VIS] ⚠ plot_normals_pretty failed for cid{cid}: {e}")
@@ -739,7 +759,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                         gt_vs_manual_rgb = gt_vs_manual_overlay,
                         e1               = normals_e1 * S,
                         e2               = normals_e2 * S,
-                        midline_xy       = midline_xy_crop * S,
+                        midline_xy       = derived_midline_crop * S,
                         track_e1         = track_e1 * S,
                         track_e2         = track_e2 * S,
                         out_png          = widths_path,
@@ -750,7 +770,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                         gt_vs_manual_rgb = gray_rgb,
                         e1               = normals_e1,
                         e2               = normals_e2,
-                        midline_xy       = midline_xy_crop,
+                        midline_xy       = derived_midline_crop,
                         track_e1         = track_e1,
                         track_e2         = track_e2,
                         out_png          = widths_path,
@@ -767,7 +787,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             try:
                 pred_mask_u8 = (np.asarray(mask_crop) > 0).astype(np.uint8) * 255
                 (pe1x, pe1y, pe2x, pe2y, _), _ = normals_from_mask_for_midline(
-                    midline_xy_crop,
+                    derived_midline_crop,
                     pred_mask_u8 > 0,
                     max_radius=50,
                 )
@@ -778,7 +798,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 pred_normals_path = os.path.join(dbg_dir, f"{midline_tag}_normals.png")
                 plot_gt_normals_on_gtbw(
                     pred_mask_u8,
-                    midline_xy_crop,
+                    derived_midline_crop,
                     pe1,
                     pe2,
                     pred_normals_path,
@@ -788,7 +808,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 if midline_tag == "manual" and gt_crop is not None:
                     gt_mask_u8 = (np.asarray(gt_crop) > 0).astype(np.uint8) * 255
                     (ge1x, ge1y, ge2x, ge2y, _), _ = normals_from_mask_for_midline(
-                        midline_xy_crop,
+                        derived_midline_crop,
                         gt_mask_u8 > 0,
                         max_radius=50,
                     )
@@ -797,7 +817,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                     gt_normals_path = os.path.join(dbg_dir, "manual_normals_on_gt.png")
                     plot_gt_normals_on_gtbw(
                         gt_mask_u8,
-                        midline_xy_crop,
+                        derived_midline_crop,
                         ge1,
                         ge2,
                         gt_normals_path,
@@ -862,6 +882,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "normals_e1": np.asarray(normals_e1).astype(np.float32),
                     "normals_e2": np.asarray(normals_e2).astype(np.float32),
                     "midline_xy_crop": np.asarray(midline_xy_crop).astype(np.float32),
+                    "derived_midline_crop": np.asarray(derived_midline_crop).astype(np.float32),
                     "bbox": np.asarray([x, y, w, h], np.int32),
                 }
                 np.savez_compressed(
@@ -890,6 +911,10 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             "bbox": [x, y, w, h],
             "mask_bbox": [x, y, w, h],
             "mask_crop": np.asarray(mask_crop).tolist(),
+            "derived_midline": np.column_stack([
+                np.asarray(derived_midline_crop)[:, 0] + x,
+                np.asarray(derived_midline_crop)[:, 1] + y,
+            ]).tolist(),
             "geodesic_edges": {
                 "edge1": track_e1_global.tolist(),
                 "edge2": track_e2_global.tolist(),

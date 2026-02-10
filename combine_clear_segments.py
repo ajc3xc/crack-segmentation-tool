@@ -29,7 +29,10 @@ class CombineClearSegments(CrackUtils):
             3) Only if auto_groups_from_atomic returns no groups do we fall back
             to the old cracks_all_connected (overlap/endpoints) test.
         """
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
+        from PyQt5.QtWidgets import (
+            QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout,
+            QRadioButton, QButtonGroup, QLabel
+        )
         from PyQt5.QtGui import QImage, QPixmap
         from PyQt5.QtCore import Qt
         import numpy as np, cv2
@@ -130,6 +133,7 @@ class CombineClearSegments(CrackUtils):
         dlg = QDialog(self.MainWindow)
         dlg.setWindowTitle("Combine Segments")
         layout = QVBoxLayout(dlg)
+        layout.setSpacing(6)
 
         listwidget = QListWidget()
         listwidget.setSelectionMode(QListWidget.MultiSelection)
@@ -142,7 +146,26 @@ class CombineClearSegments(CrackUtils):
             listwidget.addItem(lbl)
         layout.addWidget(listwidget)
 
+        # --- MODE SELECTOR ---
+        rb_gt = QRadioButton("GT combining")
+        rb_pred = QRadioButton("Pred combining")
+        mode_group = QButtonGroup(dlg)
+        mode_group.addButton(rb_gt)
+        mode_group.addButton(rb_pred)
+        rb_gt.setChecked(True)
+
+        lbl_mode_info = QLabel("")
+        lbl_mode_info.setStyleSheet("color: gray; font-size: 9pt;")
+        lbl_mode_info.setVisible(False)
+
+        layout.addWidget(rb_gt)
+        layout.addWidget(rb_pred)
+        layout.addWidget(lbl_mode_info)
+
+        # Buttons directly under mode controls (tight spacing)
         btns = QHBoxLayout()
+        btns.setContentsMargins(0, 0, 0, 0)
+        btns.setSpacing(6)
         btn_ok = QPushButton("Combine Selected")
         btn_cancel = QPushButton("Cancel")
         btns.addWidget(btn_ok)
@@ -179,6 +202,25 @@ class CombineClearSegments(CrackUtils):
         listwidget.itemSelectionChanged.connect(highlight)
         highlight()
 
+        # detect if any displayed atomic is auto-derived; if yes, force Pred mode
+        def is_auto_segment(crack):
+            return bool(crack.get("auto_midline")) or str(crack.get("source", "")).lower() == "auto"
+
+        has_auto = any(
+            is_auto_segment(atomic_cracks[cid])
+            for tpe, cid in display_items
+            if tpe == "atomic" and cid in atomic_cracks
+        )
+        if has_auto:
+            rb_gt.setEnabled(False)
+            rb_pred.setChecked(True)
+            lbl_mode_info.setText("GT unavailable: contains auto segments.")
+            lbl_mode_info.setVisible(True)
+        else:
+            rb_gt.setEnabled(True)
+            lbl_mode_info.setText("")
+            lbl_mode_info.setVisible(False)
+
         if dlg.exec_() != QDialog.Accepted:
             self.change_image()
             return
@@ -201,52 +243,52 @@ class CombineClearSegments(CrackUtils):
                 selected_atomic_ids.update(combined_cracks[cid].get("members", []))
 
         # ==========================================================
-        # CONNECTIVITY CHECK (GT-first, then auto_groups, then legacy)
+        # CONNECTIVITY CHECK (STRICT MODE: GT or PRED, no fallback)
         # ==========================================================
         candidate = set(selected_atomic_ids)
+        use_gt_mode = rb_gt.isChecked()
+        connectivity_mode = "gt" if use_gt_mode else "pred"
 
-        # Try to get a GT mask
-        gt_mask = None
-        if hasattr(self, "gt_mask") and self.gt_mask is not None:
-            gt_mask = np.asarray(self.gt_mask)
-        elif ann_root.get("gt_mask") is not None:
-            gt_mask = np.asarray(ann_root["gt_mask"])
+        if use_gt_mode:
+            gt_mask = None
+            if hasattr(self, "current_mask") and self.current_mask is not None:
+                gt_mask = np.asarray(self.current_mask)
 
-        used_gt = False
-        if gt_mask is not None:
+            if gt_mask is None:
+                error("GT mask selected but none available.")
+                self.change_image()
+                return
+
             if gt_mask.ndim == 3:
                 gt_mask = cv2.cvtColor(gt_mask, cv2.COLOR_BGR2GRAY)
-            if gt_mask.shape[:2] == (H, W) and np.any(gt_mask):
-                used_gt = True
-                groups_gt = gt_groups_from_midlines_and_gtmask(atomic_cracks, gt_mask, H, W)
-                ok_gt = any(candidate.issubset(set(g["members"])) for g in groups_gt.values())
-                if not ok_gt:
-                    error("Selected cracks do not form a single GT-consistent group.")
-                    self.change_image()
-                    return
+            if gt_mask.shape[:2] != (H, W) or not np.any(gt_mask):
+                error("GT mask selected but unavailable/invalid for this image.")
+                self.change_image()
+                return
 
-        if not used_gt:
-            # No usable GT → use auto_groups_from_atomic instead of cracks_all_connected
+            groups_gt = gt_groups_from_midlines_and_gtmask(atomic_cracks, gt_mask, H, W)
+            ok_gt = any(candidate.issubset(set(g["members"])) for g in groups_gt.values())
+            if not ok_gt:
+                error("Selected cracks not in a single GT group.")
+                self.change_image()
+                return
+        else:
             groups_auto = auto_groups_from_atomic(
                 atomic_cracks,
                 image_hw=(H, W),
                 px_thresh=10.0,
-                debug_root=None,   # or a folder if you want CSV/overlays
+                debug_root=None,
             )
+            if not groups_auto:
+                error("No grouping found in auto/pred mode.")
+                self.change_image()
+                return
 
-            if groups_auto:
-                ok_auto = any(candidate.issubset(set(g["members"])) for g in groups_auto.values())
-                if not ok_auto:
-                    error("Selected cracks do not lie in a single auto-group (mask/endpoint/proximity).")
-                    self.change_image()
-                    return
-            else:
-                # Final fallback: legacy overlap/endpoints connectivity
-                selected_cracks = [atomic_cracks[cid] for cid in selected_atomic_ids if cid in atomic_cracks]
-                if not cracks_all_connected(selected_cracks):
-                    error("Selected cracks do not all connect (overlap or shared endpoints).")
-                    self.change_image()
-                    return
+            ok_auto = any(candidate.issubset(set(g["members"])) for g in groups_auto.values())
+            if not ok_auto:
+                error("Selected cracks not in a single auto/pred group.")
+                self.change_image()
+                return
 
         # ------------------------------------------------------------------
         # Remove any existing combined fully contained by this new merge
@@ -274,7 +316,8 @@ class CombineClearSegments(CrackUtils):
         # Build the combined crack (midline + edges + widths + crop)
         # ------------------------------------------------------------------
         combined_entry = self._build_combined_crack(
-            sorted(selected_atomic_ids, key=lambda s: int(s))
+            sorted(selected_atomic_ids, key=lambda s: int(s)),
+            connectivity_mode=connectivity_mode,
         )
         if combined_entry is None:
             error("Failed to build combined crack (no valid midlines or masks).")
@@ -362,13 +405,17 @@ class CombineClearSegments(CrackUtils):
             sel = [r.row() for r in lw.selectedIndexes()]
             for idx in sorted(sel, reverse=True):
                 combined.pop(keys_sorted[idx], None)
+
             self.save_annotation()
             self.change_image()
         else:
             self.change_image()
 
     def clear_segmentation(self):
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout
+        from PyQt5.QtWidgets import (
+            QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout,
+            QRadioButton, QButtonGroup, QLabel
+        )
         import numpy as np, cv2
 
         if not hasattr(self, "annotation") or not isinstance(self.annotation, dict):
@@ -400,13 +447,31 @@ class CombineClearSegments(CrackUtils):
         dlg = QDialog(self.MainWindow)
         dlg.setWindowTitle("Select Atomic Segments to Delete")
         layout = QVBoxLayout(dlg)
+        layout.setSpacing(6)
         listwidget = QListWidget()
         listwidget.setSelectionMode(QListWidget.MultiSelection)
         for lbl in labels:
             listwidget.addItem(lbl)
         layout.addWidget(listwidget)
 
+        # --- Mode selector (same semantics as combine_segments) ---
+        rb_gt = QRadioButton("GT combining")
+        rb_pred = QRadioButton("Pred combining")
+        mode_group = QButtonGroup(dlg)
+        mode_group.addButton(rb_gt)
+        mode_group.addButton(rb_pred)
+        rb_gt.setChecked(True)
+
+        lbl_mode_info = QLabel("")
+        lbl_mode_info.setStyleSheet("color: gray; font-size: 9pt;")
+        lbl_mode_info.setVisible(False)
+        layout.addWidget(rb_gt)
+        layout.addWidget(rb_pred)
+        layout.addWidget(lbl_mode_info)
+
         btns = QHBoxLayout()
+        btns.setContentsMargins(0, 0, 0, 0)
+        btns.setSpacing(6)
         btn_ok = QPushButton("Delete Selected")
         btn_cancel = QPushButton("Cancel")
         btns.addWidget(btn_ok)
@@ -440,11 +505,42 @@ class CombineClearSegments(CrackUtils):
         listwidget.itemSelectionChanged.connect(highlight_selected_segments)
         highlight_selected_segments()
 
+        def is_auto_segment(crack):
+            return bool(crack.get("auto_midline")) or str(crack.get("source", "")).lower() == "auto"
+
+        has_auto = any(is_auto_segment(c) for c in atomic_cracks.values())
+        if has_auto:
+            rb_gt.setEnabled(False)
+            rb_pred.setChecked(True)
+            lbl_mode_info.setText("GT unavailable: auto segments present.")
+            lbl_mode_info.setVisible(True)
+        else:
+            rb_gt.setEnabled(True)
+            lbl_mode_info.setText("")
+            lbl_mode_info.setVisible(False)
+
         if dlg.exec_() == QDialog.Accepted:
             selected_indices = [i.row() for i in listwidget.selectedIndexes()]
             if not selected_indices:
                 self.change_image()
                 return
+
+            use_gt_mode = rb_gt.isChecked()
+            connectivity_mode = "gt" if use_gt_mode else "pred"
+
+            # Strict mode validation: no silent fallback.
+            if connectivity_mode == "gt":
+                m = getattr(self, "current_mask", None)
+                if m is None or not np.any(np.asarray(m)):
+                    error("GT mask selected but unavailable/invalid.")
+                    self.change_image()
+                    return
+            else:
+                m = getattr(self, "full_prediction_mask", None)
+                if m is None or not np.any(np.asarray(m)):
+                    error("Pred mask selected but unavailable/invalid.")
+                    self.change_image()
+                    return
 
             print(f"[DEBUG] clear_segmentation START")
             print(f"  Atomic cracks before = {list(atomic_cracks.keys())}")
@@ -508,7 +604,10 @@ class CombineClearSegments(CrackUtils):
                         continue
 
                     # Recompute full combined geometry
-                    combined_entry = self._build_combined_crack(members_new)
+                    combined_entry = self._build_combined_crack(
+                        members_new,
+                        connectivity_mode=connectivity_mode,
+                    )
                     if combined_entry is None:
                         to_delete.append(cid)
                         continue
@@ -640,13 +739,10 @@ class CombineClearSegments(CrackUtils):
         
     def auto_combine_segments(self):
         """
-        Automatically combine atomic cracks using GT when possible.
-
-        Priority:
-        1) If a GT mask is available and matches the image size:
-            - use gt_groups_from_midlines_and_gtmask(atomic, gt_mask, H, W)
-        2) Otherwise:
-            - fall back to auto_groups_from_atomic(atomic, image_hw=(H, W))
+        Automatically combine atomic cracks in strict mode:
+        - If any auto-derived atomic exists: force Pred grouping
+        - Else: use GT grouping only if a valid GT mask exists
+        No silent fallback between modes.
 
         Then rebuild self.annotation['annotations']['combined_cracks']
         by calling self._build_combined_crack() for each group.
@@ -670,16 +766,12 @@ class CombineClearSegments(CrackUtils):
         H, W = self.original_image.shape[:2]
 
         # -----------------------------------------
-        # Try to locate a GT mask
-        #   - primary: self.gt_mask (if you use that)
-        #   - fallback: ann["gt_mask"] if stored in annotations
+        # Locate GT mask (if used)
         # -----------------------------------------
         gt_mask = None
 
-        if hasattr(self, "gt_mask") and self.gt_mask is not None:
-            gt_mask = np.asarray(self.gt_mask)
-        elif ann.get("gt_mask") is not None:
-            gt_mask = np.asarray(ann["gt_mask"])
+        if hasattr(self, "current_mask") and self.current_mask is not None:
+            gt_mask = np.asarray(self.current_mask)
 
         if gt_mask is not None:
             # convert to gray if needed
@@ -689,19 +781,26 @@ class CombineClearSegments(CrackUtils):
                 print(f"[COMBINE_DBG] gt_mask shape {gt_mask.shape[:2]} != image {(H, W)} — ignoring GT.")
                 gt_mask = None
 
-        # -----------------------------------------
-        # Choose grouping strategy
-        # -----------------------------------------
-        if gt_mask is not None and np.any(gt_mask):
-            print("[COMBINE_DBG] using GT-based grouping via gt_groups_from_midlines_and_gtmask()")
-            groups = gt_groups_from_midlines_and_gtmask(atomic, gt_mask, H, W)
+        def is_auto_segment(crack):
+            return bool(crack.get("auto_midline")) or str(crack.get("source", "")).lower() == "auto"
+
+        has_auto = any(is_auto_segment(cr) for cr in atomic.values())
+        use_gt = not has_auto
+
+        if use_gt:
+            if gt_mask is not None and np.any(gt_mask):
+                print("[COMBINE_DBG] using GT-based grouping via gt_groups_from_midlines_and_gtmask()")
+                groups = gt_groups_from_midlines_and_gtmask(atomic, gt_mask, H, W)
+            else:
+                print("[COMBINE_DBG] GT mode selected but no valid GT mask; skipping auto-combine.")
+                return
         else:
-            print("[COMBINE_DBG] no usable GT mask; falling back to auto_groups_from_atomic()")
+            print("[COMBINE_DBG] using Pred/auto grouping via auto_groups_from_atomic()")
             groups = auto_groups_from_atomic(
                 atomic,
                 image_hw=(H, W),
                 px_thresh=10.0,
-                debug_root=None  # or "combine_debug" if you want CSV/overlays
+                debug_root=None
             )
 
         print(f"[COMBINE_DBG] grouping produced {len(groups)} combined groups: {groups}")
@@ -722,7 +821,10 @@ class CombineClearSegments(CrackUtils):
             except Exception:
                 sorted_members = sorted(members)
 
-            entry = self._build_combined_crack(sorted_members)
+            entry = self._build_combined_crack(
+                sorted_members,
+                connectivity_mode=("gt" if use_gt else "pred"),
+            )
             if entry is None:
                 print(f"[COMBINE_DBG] _build_combined_crack failed for group {gid} ({members})")
                 continue

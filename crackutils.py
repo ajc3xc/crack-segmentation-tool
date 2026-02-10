@@ -162,7 +162,6 @@ class CrackUtils:
     These methods are copied verbatim from your current file.
     """
 
-    # --- moved verbatim ---
     def save_annotation(self):
         self._debug_print_atomic_cracks("save_annotation START")
         import numpy as np
@@ -177,36 +176,76 @@ class CrackUtils:
             mask_bin_path = os.path.join(self.save_folder, base_name + '_mask.png')
             mask_255_path = os.path.join(self.save_folder, base_name + '_mask255.png')
 
-            # NO MERGE: trust in-memory
-            atomic_cracks = ann.setdefault("atomic_cracks", {})
+            atomic = ann.setdefault("atomic_cracks", {})
+            combined = ann.get("combined_cracks", {}) or {}
 
-            # 1) Compact any legacy full masks
+            # ------------------------------------------------------------
+            # 1) Compact any legacy full-size masks
+            # ------------------------------------------------------------
             compact_full_masks_in_ann(ann, H, W)
 
-            # 2) Build combined mask from atomic cracks
-            mask_combined = build_combined_mask(ann.get("atomic_cracks", {}), H, W)
-            print(f"[DEBUG] mask_combined nonzero: {int(mask_combined.sum())}")
+            # ------------------------------------------------------------
+            # 2) Build FINAL authoritative full mask
+            #     (same logic as preview / change_image)
+            # ------------------------------------------------------------
+            full_mask = np.zeros((H, W), dtype=np.uint8)
 
-            # 3) Filter to valid cracks (and drop legacy 'mask' if we have compact)
-            ann["atomic_cracks"] = filter_valid_cracks(ann.get("atomic_cracks", {}), H, W)
+            combined_members = set()
+            for crack in combined.values():
+                combined_members |= set(str(m) for m in crack.get("members", []) or [])
+                full_mask |= reconstruct_full_mask_from_crack(crack, H, W)
+
+            for cid, crack in atomic.items():
+                scid = str(cid)
+                if scid in combined_members:
+                    continue
+                full_mask |= reconstruct_full_mask_from_crack(crack, H, W)
+
+            full_mask[full_mask > 0] = 1
+
+            self.full_prediction_mask = full_mask.copy()
+            print(f"[DEBUG] full_prediction_mask nonzero: {int(full_mask.sum())}")
+
+            # ------------------------------------------------------------
+            # 3) Filter atomic cracks AFTER mask construction
+            # ------------------------------------------------------------
+            ann["atomic_cracks"] = filter_valid_cracks(atomic, H, W)
             print(f"[DEBUG] save_annotation END: {len(ann['atomic_cracks'])} cracks kept.")
 
-            # Optional: keep combined_cracks if you manage them elsewhere
+            # ------------------------------------------------------------
+            # 4) Persist combined_cracks if present
+            # ------------------------------------------------------------
             if hasattr(self, "combined_cracks"):
                 ann["combined_cracks"] = self.combined_cracks
 
-            # 4) Safe JSON write
+            # ------------------------------------------------------------
+            # 5) Safe JSON write
+            # ------------------------------------------------------------
             safe_json_dump(self.annotation, json_path)
 
-            # 5) Write PNGs (compressed)
+            # ------------------------------------------------------------
+            # 6) Write PNGs from SAME authoritative mask
+            # ------------------------------------------------------------
             comp = int(getattr(self, "png_compression_level", 9))
             comp = max(0, min(comp, 9))
-            cv2.imwrite(mask_bin_path, (mask_combined * 1).astype(np.uint8), [cv2.IMWRITE_PNG_COMPRESSION, comp])
-            cv2.imwrite(mask_255_path, (mask_combined * 255).astype(np.uint8), [cv2.IMWRITE_PNG_COMPRESSION, comp])
-            print(f"Saved: {json_path}, {mask_bin_path}, {mask_255_path}  (png_compression_level={comp})")
+
+            cv2.imwrite(
+                mask_bin_path,
+                full_mask.astype(np.uint8),
+                [cv2.IMWRITE_PNG_COMPRESSION, comp],
+            )
+            cv2.imwrite(
+                mask_255_path,
+                (full_mask * 255).astype(np.uint8),
+                [cv2.IMWRITE_PNG_COMPRESSION, comp],
+            )
+
+            print(
+                f"Saved: {json_path}, {mask_bin_path}, {mask_255_path} "
+                f"(png_compression_level={comp})"
+            )
 
         except Exception as e:
-            # keep your existing global error() function in main file
             error(e)
 
     # --- moved verbatim ---
@@ -2052,7 +2091,7 @@ class CrackUtils:
             "all_user_connections": derived_conns,
         }'''
         
-    def _build_combined_crack(self, member_ids, pad=10):
+    def _build_combined_crack(self, member_ids, pad=10, connectivity_mode="gt"):
         """
         GUI-safe wrapper that delegates computation to the stateless combiner,
         and delegates DEBUG plotting to the pure helper plot function.
@@ -2093,6 +2132,7 @@ class CrackUtils:
         def _debug_cb(
             *,
             segs,
+            derived_midline_segs=None,
             edge1_segs,
             edge2_segs,
             norm1_segs,
@@ -2109,6 +2149,7 @@ class CrackUtils:
             plot_combined_debug(
                 original_image=self.original_image,
                 segs=segs,
+                derived_midline_segs=derived_midline_segs or [],
                 edge1_segs=edge1_segs,
                 edge2_segs=edge2_segs,
                 norm1_segs=norm1_segs,
@@ -2120,16 +2161,24 @@ class CrackUtils:
             
         # ---------------------------------
         # Choose authoritative crack mask
+        # connectivity_mode:
+        #   - "gt"   -> require current_mask
+        #   - "pred" -> require full_prediction_mask
         # ---------------------------------
         crack_mask_full = None
 
-        #gt mask first choice, predicted mask 2nd choice
-        if getattr(self, "current_mask", None) is not None:
-            # GT path
-            crack_mask_full = self.current_mask
+        mode = str(connectivity_mode or "gt").lower()
+
+        if mode == "gt":
+            crack_mask_full = getattr(self, "current_mask", None)
+            if crack_mask_full is None or not np.any(np.asarray(crack_mask_full)):
+                raise ValueError("_build_combined_crack: GT mode selected but current_mask is unavailable/empty")
+        elif mode == "pred":
+            crack_mask_full = getattr(self, "full_prediction_mask", None)
+            if crack_mask_full is None or not np.any(np.asarray(crack_mask_full)):
+                raise ValueError("_build_combined_crack: Pred mode selected but full_prediction_mask is unavailable/empty")
         else:
-            # Prediction path (example)
-            crack_mask_full = self.full_prediction_mask
+            raise ValueError(f"_build_combined_crack: unsupported connectivity_mode={connectivity_mode!r}")
 
         if crack_mask_full is None or not np.any(crack_mask_full):
             raise ValueError("_build_combined_crack: no valid crack mask available")
@@ -2138,6 +2187,8 @@ class CrackUtils:
             crack_mask_full = cv2.cvtColor(crack_mask_full, cv2.COLOR_BGR2GRAY)
 
         crack_mask_full = (crack_mask_full > 0).astype(np.uint8)
+        
+        print(np.count_nonzero(crack_mask_full), np.count_nonzero(self.current_mask), np.count_nonzero(self.full_prediction_mask))
 
 
         # ===== CALL STATELESS BUILDER =====

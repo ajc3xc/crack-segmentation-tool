@@ -507,7 +507,7 @@ def dominant_segments_from_group(
     crack_mask_u8=None,
     window_half_size,
     debug_dir=None,
-    debug_tag="group",
+    debug_tag="dominance_grouping",
 ):
     """
     FINAL dominance logic (portable version) + OPSEC metadata.
@@ -1037,176 +1037,24 @@ def dominant_segments_from_group(
 
 
     # -----------------------------
-    # DEBUG: PRE (territory + bite + user)
+    # DEBUG: PRE (territory + bite + user) via shared helper
     # -----------------------------
     if debug_dir:
-        import matplotlib.pyplot as plt
-        from matplotlib.patches import Rectangle
-        from matplotlib.lines import Line2D
-        import numpy as np
-        import os
-
-        os.makedirs(debug_dir, exist_ok=True)
-
-        pad = 30
-        x0 = max(0, bx0 - pad)
-        y0 = max(0, by0 - pad)
-        x1 = min(W, bx1 + pad)
-        y1 = min(H, by1 + pad)
-
-        Hc, Wc = y1 - y0, x1 - x0
-
-        fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
-        ax.imshow(plot_mask[y0:y1, x0:x1], cmap="gray", zorder=0)
-
-        # 5 branch colors (identity only)
-        branch_colors = [
-            np.array([0.18, 0.80, 0.32]),  # green
-            np.array([0.93, 0.54, 0.16]),  # orange
-            np.array([0.20, 0.50, 0.90]),  # blue
-            np.array([0.62, 0.35, 0.75]),  # purple
-            np.array([0.10, 0.75, 0.70]),  # teal
-        ]
-
-        # -------------------------------------------------
-        # TERRITORY (below user)
-        # -------------------------------------------------
-        for bi, terr in branch_terr_masks.items():
-            bm = terr[y0:y1, x0:x1]
-            if not np.any(bm):
-                continue
-            rgba = np.zeros((Hc, Wc, 4), float)
-            rgba[..., :3] = branch_colors[bi % len(branch_colors)]
-            rgba[..., 3] = 0.25 * (bm > 0)
-            ax.imshow(rgba, zorder=1)
-
-        # -------------------------------------------------
-        # USER GEOMETRY — draw short -> long so long is on top
-        # -------------------------------------------------
-        order_by_len = sorted(range(len(branch_user_segs)), key=lambda i: branch_user_len[i])
-
-        for rank, bi in enumerate(order_by_len):
-            col = branch_colors[bi % len(branch_colors)]
-            z = 3 + rank
-
-            # user geometry
-            for _, S in branch_user_segs[bi]:
-                if S is None or len(S) < 2:
-                    continue
-                if (
-                    S[:, 0].max() < x0 or S[:, 0].min() > x1 or
-                    S[:, 1].max() < y0 or S[:, 1].min() > y1
-                ):
-                    continue
-                S2 = S - np.array([x0, y0])
-                ax.plot(
-                    S2[:, 0], S2[:, 1],
-                    color=col,
-                    lw=3.2,
-                    alpha=0.95,
-                    solid_capstyle="round",
-                    zorder=z,
-                )
-
-            # label at midpoint of longest user segment (white box)
-            if branch_user_segs[bi]:
-                longest = max(branch_user_segs[bi], key=lambda t: _linestring_length(t[1]))[1]
-                mid = longest[len(longest) // 2]
-                if x0 <= mid[0] <= x1 and y0 <= mid[1] <= y1:
-                    mx, my = mid - np.array([x0, y0])
-                    ax.text(
-                        mx, my,
-                        f"{int(branch_user_len[bi])} px",
-                        fontsize=8,
-                        color="black",
-                        ha="center",
-                        va="center",
-                        zorder=z + 0.2,
-                        bbox=dict(
-                            boxstyle="round,pad=0.25",
-                            facecolor="white",
-                            edgecolor="none",
-                            alpha=0.85,
-                        ),
-                    )
-
-        # -------------------------------------------------
-        # BITE (between territory and user)
-        # -------------------------------------------------
-        bm = bite_total["mask"][y0:y1, x0:x1]
-        bt = bite_total["terr"][y0:y1, x0:x1]
-        bb = bite_total["both"][y0:y1, x0:x1]
-
-        if np.any(bm) or np.any(bt) or np.any(bb):
-            bite_rgba = np.zeros((Hc, Wc, 4), float)
-
-            # mask-only → red
-            bite_rgba[..., 0] += (bm > 0)
-
-            # territory-only → orange (red + green)
-            bite_rgba[..., 0] += 0.9 * (bt > 0)
-            bite_rgba[..., 1] += 0.5 * (bt > 0)
-
-            # both → purple (red + blue)
-            bite_rgba[..., 0] += (bb > 0)
-            bite_rgba[..., 2] += (bb > 0)
-
-            bite_rgba[..., 3] = 0.45 * ((bm | bt | bb) > 0)
-
-            ax.imshow(bite_rgba, zorder=2)
-
-        # -------------------------------------------------
-        # BBOX
-        # -------------------------------------------------
-        ax.add_patch(
-            Rectangle(
-                (bx0 - x0, by0 - y0),
-                bx1 - bx0,
-                by1 - by0,
-                fill=False,
-                edgecolor="#0033cc",
-                linewidth=1.5,
-                zorder=10,
-            )
+        plot_branch_territory_debug_pre(
+            debug_dir=debug_dir,
+            debug_tag=debug_tag,
+            plot_mask=plot_mask,
+            branch_terr_masks=branch_terr_masks,
+            branch_user_segs=branch_user_segs,
+            branch_user_len=branch_user_len,
+            bite_total=bite_total,
+            bx0=bx0,
+            by0=by0,
+            bx1=bx1,
+            by1=by1,
+            H=H,
+            W=W,
         )
-
-        # -------------------------------------------------
-        # LEGEND (colors = branch identity)
-        # -------------------------------------------------
-        legend_items = [
-            Line2D([0], [0], color="white", lw=2, linestyle=(0, (1, 3)),
-                label="User midlines (only if clipped)"),
-
-            Line2D([0], [0], color="black", lw=3,
-                label="Kept midlines (branch-colored)"),
-
-            Line2D([0], [0], color="red", lw=6, alpha=0.55,
-                label="Bite: mask dominance"),
-
-            Line2D([0], [0], color="#e67e22", lw=6, alpha=0.55,
-                label="Bite: territory dominance"),
-
-            Line2D([0], [0], color="#d16ba5", lw=6, alpha=0.55,
-                label="Bite: mask + territory dominance"),
-
-            Line2D([0], [0], color="#0033cc", lw=1.5,
-                label="BBox"),
-        ]
-
-        leg = ax.legend(
-            handles=legend_items,
-            loc="lower right",
-            fontsize=8,
-            framealpha=0.9,
-        )
-        leg.set_zorder(100)
-
-        ax.set_title(f"{debug_tag} — PRE", fontsize=10)
-        ax.axis("off")
-
-        out = os.path.join(debug_dir, f"{debug_tag}_pre.png")
-        fig.savefig(out, bbox_inches="tight", dpi=200)
-        plt.close(fig)
 
     # -----------------------------
     # DEBUG: FINAL (user dashed if clipped, kept solid, labels kept/user)
@@ -1422,6 +1270,158 @@ def dominant_segments_from_group(
     return kept, meta
 
 
+def plot_branch_territory_debug_pre(
+    *,
+    debug_dir,
+    debug_tag,
+    plot_mask,
+    branch_terr_masks,
+    branch_user_segs,
+    branch_user_len,
+    bite_total,
+    bx0,
+    by0,
+    bx1,
+    by1,
+    H,
+    W,
+    out_filename=None,
+):
+    """
+    Shared PRE renderer for branch territory + bite + user geometry.
+    Intended to be reusable by both dominance and derived-geometry debug flows.
+    """
+    import os
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+    from matplotlib.lines import Line2D
+
+    os.makedirs(debug_dir, exist_ok=True)
+
+    pad = 30
+    x0 = max(0, int(bx0) - pad)
+    y0 = max(0, int(by0) - pad)
+    x1 = min(int(W), int(bx1) + pad)
+    y1 = min(int(H), int(by1) + pad)
+
+    Hc, Wc = y1 - y0, x1 - x0
+
+    fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
+    ax.imshow(plot_mask[y0:y1, x0:x1], cmap="gray", zorder=0)
+
+    branch_colors = [
+        np.array([0.18, 0.80, 0.32]),  # green
+        np.array([0.93, 0.54, 0.16]),  # orange
+        np.array([0.20, 0.50, 0.90]),  # blue
+        np.array([0.62, 0.35, 0.75]),  # purple
+        np.array([0.10, 0.75, 0.70]),  # teal
+    ]
+
+    for bi, terr in branch_terr_masks.items():
+        bm = terr[y0:y1, x0:x1]
+        if not np.any(bm):
+            continue
+        rgba = np.zeros((Hc, Wc, 4), float)
+        rgba[..., :3] = branch_colors[int(bi) % len(branch_colors)]
+        rgba[..., 3] = 0.25 * (bm > 0)
+        ax.imshow(rgba, zorder=1)
+
+    order_by_len = sorted(range(len(branch_user_segs)), key=lambda i: branch_user_len[i])
+    for rank, bi in enumerate(order_by_len):
+        col = branch_colors[int(bi) % len(branch_colors)]
+        z = 3 + rank
+
+        for _, S in branch_user_segs[bi]:
+            if S is None or len(S) < 2:
+                continue
+            if (
+                S[:, 0].max() < x0 or S[:, 0].min() > x1 or
+                S[:, 1].max() < y0 or S[:, 1].min() > y1
+            ):
+                continue
+            S2 = S - np.array([x0, y0])
+            ax.plot(
+                S2[:, 0], S2[:, 1],
+                color=col,
+                lw=3.2,
+                alpha=0.95,
+                solid_capstyle="round",
+                zorder=z,
+            )
+
+        if branch_user_segs[bi]:
+            longest = max(branch_user_segs[bi], key=lambda t: _linestring_length(t[1]))[1]
+            mid = longest[len(longest) // 2]
+            if x0 <= mid[0] <= x1 and y0 <= mid[1] <= y1:
+                mx, my = mid - np.array([x0, y0])
+                ax.text(
+                    mx, my,
+                    f"{int(branch_user_len[bi])} px",
+                    fontsize=8,
+                    color="black",
+                    ha="center",
+                    va="center",
+                    zorder=z + 0.2,
+                    bbox=dict(
+                        boxstyle="round,pad=0.25",
+                        facecolor="white",
+                        edgecolor="none",
+                        alpha=0.85,
+                    ),
+                )
+
+    bm = bite_total["mask"][y0:y1, x0:x1]
+    bt = bite_total["terr"][y0:y1, x0:x1]
+    bb = bite_total["both"][y0:y1, x0:x1]
+
+    if np.any(bm) or np.any(bt) or np.any(bb):
+        bite_rgba = np.zeros((Hc, Wc, 4), float)
+        bite_rgba[..., 0] += (bm > 0)                     # red
+        bite_rgba[..., 0] += 0.9 * (bt > 0)              # orange
+        bite_rgba[..., 1] += 0.5 * (bt > 0)
+        bite_rgba[..., 0] += (bb > 0)                    # purple
+        bite_rgba[..., 2] += (bb > 0)
+        bite_rgba[..., 3] = 0.45 * ((bm | bt | bb) > 0)
+        ax.imshow(bite_rgba, zorder=2)
+
+    ax.add_patch(
+        Rectangle(
+            (int(bx0) - x0, int(by0) - y0),
+            int(bx1 - bx0),
+            int(by1 - by0),
+            fill=False,
+            edgecolor="#0033cc",
+            linewidth=1.5,
+            zorder=10,
+        )
+    )
+
+    legend_items = [
+        Line2D([0], [0], color="white", lw=2, linestyle=(0, (1, 3)),
+               label="User midlines (only if clipped)"),
+        Line2D([0], [0], color="black", lw=3,
+               label="Kept midlines (branch-colored)"),
+        Line2D([0], [0], color="red", lw=6, alpha=0.55,
+               label="Bite: mask dominance"),
+        Line2D([0], [0], color="#e67e22", lw=6, alpha=0.55,
+               label="Bite: territory dominance"),
+        Line2D([0], [0], color="#d16ba5", lw=6, alpha=0.55,
+               label="Bite: mask + territory dominance"),
+        Line2D([0], [0], color="#0033cc", lw=1.5, label="BBox"),
+    ]
+
+    leg = ax.legend(handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9)
+    leg.set_zorder(100)
+
+    ax.set_title(f"{debug_tag} — PRE", fontsize=10)
+    ax.axis("off")
+
+    out = os.path.join(debug_dir, out_filename or f"{debug_tag}_pre.png")
+    fig.savefig(out, bbox_inches="tight", dpi=200)
+    plt.close(fig)
+
+
 
 
 def gt_groups_from_midlines_and_gtmask(atomic: dict, gt_mask, H, W):
@@ -1539,6 +1539,7 @@ def plot_combined_debug(
     *,
     original_image,
     segs,
+    derived_midline_segs=None,
     edge1_segs,
     edge2_segs,
     norm1_segs,
@@ -1554,6 +1555,7 @@ def plot_combined_debug(
     plot_edges_and_normals(
         base_image=original_image,
         midline_segs=segs,
+        derived_midline_segs=derived_midline_segs or [],
         edge1_segs=edge1_segs,
         edge2_segs=edge2_segs,
         norm1_segs=norm1_segs,
@@ -1562,6 +1564,274 @@ def plot_combined_debug(
         out_png=out_png,
         title=f"Combined Crack (members={', '.join(member_ids)})",
     )
+
+
+def recompute_dominance_geometry_from_derived(
+    *,
+    dominance_meta,
+    branch_to_derived_runs,
+    atomic,
+    H,
+    W,
+    derived_domain_mask,
+    window_half_size,
+    members=None,
+    debug_dir=None,
+    debug_tag="derived_geometry_dominance",
+):
+    """
+    Geometry-only recomputation on derived midlines.
+    Topology stays fixed to dominance_meta:
+      - same order
+      - same branch IDs
+      - no clipping/suppression decisions here
+    """
+    import base64
+    import numpy as np
+    import cv2
+
+    def _pack_mask_b64(mask_u8):
+        m = (np.asarray(mask_u8) > 0).astype(np.uint8)
+        if m.size == 0:
+            return {"shape": [0, 0], "packbits_b64": ""}
+        packed = np.packbits(m, axis=1)
+        b64 = base64.b64encode(packed.tobytes()).decode("ascii")
+        return {"shape": [int(m.shape[0]), int(m.shape[1])], "packbits_b64": b64}
+
+    if not isinstance(dominance_meta, dict):
+        raise AssertionError("dominance_meta must be a dict")
+
+    order = [int(x) for x in (dominance_meta.get("order") or [])]
+    if not order:
+        raise AssertionError("dominance_meta.order missing/empty")
+
+    primary_branch_id = dominance_meta.get("primary_branch_id", None)
+    if primary_branch_id is not None:
+        primary_branch_id = int(primary_branch_id)
+        if primary_branch_id not in order:
+            raise AssertionError("primary_branch_id not in dominance order")
+
+    dom_branches = dominance_meta.get("branches") or []
+    branch_rows = {}
+    for r in dom_branches:
+        if isinstance(r, dict) and "branch_id" in r:
+            branch_rows[int(r["branch_id"])] = r
+
+    dom_branch_ids = set(branch_rows.keys())
+    order_ids = set(order)
+    if dom_branch_ids != order_ids:
+        raise AssertionError(
+            f"Dominance branch IDs and order mismatch: "
+            f"branches={sorted(dom_branch_ids)} order={sorted(order_ids)}"
+        )
+
+    derived_ids = set(int(k) for k in (branch_to_derived_runs or {}).keys())
+    if not derived_ids.issubset(order_ids):
+        raise AssertionError(
+            f"Derived branch IDs outside dominance order: "
+            f"{sorted(derived_ids - order_ids)}"
+        )
+
+    domain_mask = (np.asarray(derived_domain_mask) > 0).astype(np.uint8)
+    if domain_mask.shape[:2] != (H, W):
+        raise AssertionError("[derived dominance] derived_domain_mask shape mismatch")
+    if not np.any(domain_mask):
+        raise AssertionError("[derived dominance] empty derived_domain_mask")
+
+    dt = cv2.distanceTransform(domain_mask, cv2.DIST_L2, 5)
+
+    def seg_radius(S):
+        S = np.asarray(S, float)
+        ys = np.clip(np.round(S[:, 1]).astype(int), 0, H - 1)
+        xs = np.clip(np.round(S[:, 0]).astype(int), 0, W - 1)
+        d = dt[ys, xs]
+        d = d[np.isfinite(d)]
+        if len(d) == 0:
+            return 0.3 * float(window_half_size)
+        return max(3.0, min(float(np.median(d)), float(window_half_size)))
+
+    branch_atomic_masks = {}
+    for bi in order:
+        aids = [str(a) for a in (branch_rows[bi].get("atomic_ids", []) or [])]
+        m = np.zeros((H, W), np.uint8)
+        for aid in aids:
+            cr = atomic.get(str(aid), {}) or {}
+            am = _atomic_mask_global(cr, H, W)
+            if am is not None:
+                m |= (am > 0).astype(np.uint8)
+        branch_atomic_masks[int(bi)] = m
+
+    branch_terr_masks = {}
+    branch_rows_out = []
+    for rank, bi in enumerate(order):
+        terr = np.zeros((H, W), np.uint8)
+        runs = branch_to_derived_runs.get(int(bi), []) or []
+        derived_len = 0.0
+        derived_pts = 0
+
+        for S in runs:
+            S = np.asarray(S, float)
+            if S.ndim != 2 or S.shape[1] != 2 or len(S) < 2:
+                continue
+
+            derived_len += float(_linestring_length(S))
+            derived_pts += int(len(S))
+
+            r = seg_radius(S)
+            rad = int(max(4, min(1.2 * r, float(window_half_size))))
+            line = _polyline_mask(S, H, W)
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1)
+            )
+            terr |= cv2.dilate(line, kernel, iterations=1)
+
+        branch_terr_masks[int(bi)] = terr
+
+        src = branch_rows[int(bi)]
+        branch_rows_out.append({
+            "branch_id": int(bi),
+            "rank": int(rank),
+            "atomic_ids": [str(a) for a in (src.get("atomic_ids", []) or [])],
+            "user_len": float(src.get("user_len", 0.0)),
+            "kept_len": float(src.get("kept_len", 0.0)),
+            "suppressed": bool(src.get("suppressed", False)),
+            "derived_len": float(derived_len),
+            "derived_run_count": int(len(runs)),
+            "derived_point_count": int(derived_pts),
+        })
+
+    claimed = np.zeros((H, W), np.uint8)
+    bite_total = {
+        "mask": np.zeros((H, W), np.uint8),
+        "terr": np.zeros((H, W), np.uint8),
+        "both": np.zeros((H, W), np.uint8),
+    }
+    bite_by_losing_branch = {}
+
+    for rank, bi in enumerate(order):
+        bi = int(bi)
+        branch_terr = branch_terr_masks.get(bi, np.zeros((H, W), np.uint8))
+
+        if rank == 0:
+            claimed |= branch_terr
+            continue
+
+        terr_forbidden = claimed.copy()
+        mask_forbidden = np.zeros((H, W), np.uint8)
+        for obi in order[:rank]:
+            mask_forbidden |= branch_atomic_masks.get(int(obi), 0).astype(np.uint8)
+
+        bite_mask_only = branch_terr & mask_forbidden
+        bite_terr_only = branch_terr & terr_forbidden & (~mask_forbidden)
+        bite_both = branch_terr & terr_forbidden & mask_forbidden
+
+        bite_by_losing_branch[bi] = {
+            "mask": bite_mask_only.astype(np.uint8),
+            "territory": bite_terr_only.astype(np.uint8),
+            "both": bite_both.astype(np.uint8),
+        }
+
+        bite_total["mask"] |= bite_mask_only
+        bite_total["terr"] |= bite_terr_only
+        bite_total["both"] |= bite_both
+        claimed |= branch_terr
+
+    bite_old = (dominance_meta.get("bite") or {}) if isinstance(dominance_meta, dict) else {}
+    bb = bite_old.get("bbox")
+    if isinstance(bb, (list, tuple)) and len(bb) == 4:
+        bx0, by0, bw, bh = map(int, bb)
+        bx1, by1 = bx0 + bw, by0 + bh
+    else:
+        bx0, by0, bx1, by1 = 0, 0, W, H
+
+    bx0 = max(0, min(bx0, W)); bx1 = max(0, min(bx1, W))
+    by0 = max(0, min(by0, H)); by1 = max(0, min(by1, H))
+    if bx1 <= bx0 or by1 <= by0:
+        bx0, by0, bx1, by1 = 0, 0, W, H
+
+    bite_union = (bite_total["mask"] | bite_total["terr"] | bite_total["both"]).astype(np.uint8)
+    bite_blob = _pack_mask_b64(bite_union[by0:by1, bx0:bx1])
+
+    bite_by_losing_branch_export = {}
+    for bi, d in bite_by_losing_branch.items():
+        bu = (d["mask"] | d["territory"] | d["both"]).astype(np.uint8)
+        if not np.any(bu):
+            continue
+        bu_crop = bu[by0:by1, bx0:bx1]
+        blob = _pack_mask_b64(bu_crop)
+        bite_by_losing_branch_export[str(int(bi))] = {
+            "shape": blob["shape"],
+            "packbits_b64": blob["packbits_b64"],
+            "by_cause": {
+                "mask": _pack_mask_b64(d["mask"][by0:by1, bx0:bx1]),
+                "territory": _pack_mask_b64(d["territory"][by0:by1, bx0:bx1]),
+                "both": _pack_mask_b64(d["both"][by0:by1, bx0:bx1]),
+            },
+        }
+
+    if primary_branch_id is not None:
+        assert str(int(primary_branch_id)) not in bite_by_losing_branch_export
+
+    terr_by_branch_export = {}
+    for bi in order:
+        terr = branch_terr_masks.get(int(bi), np.zeros((H, W), np.uint8))
+        terr_crop = terr[by0:by1, bx0:bx1]
+        terr_by_branch_export[str(int(bi))] = _pack_mask_b64(terr_crop)
+
+    derived_geometry_meta = {
+        "members": [str(m) for m in (members or dominance_meta.get("members") or [])],
+        "primary_branch_id": primary_branch_id,
+        "order": [int(b) for b in order],
+        "branches": branch_rows_out,
+        "bite": {
+            "bbox": [int(bx0), int(by0), int(bx1 - bx0), int(by1 - by0)],
+            "shape": bite_blob["shape"],
+            "packbits_b64": bite_blob["packbits_b64"],
+            "by_cause": {
+                "mask": _pack_mask_b64(bite_total["mask"][by0:by1, bx0:bx1]),
+                "territory": _pack_mask_b64(bite_total["terr"][by0:by1, bx0:bx1]),
+                "both": _pack_mask_b64(bite_total["both"][by0:by1, bx0:bx1]),
+            },
+            "by_losing_branch": bite_by_losing_branch_export,
+        },
+        "territory_by_branch": terr_by_branch_export,
+        "diagnostics": {
+            "domain": "derived_domain_mask",
+            "window_half_size": int(window_half_size),
+        },
+    }
+
+    assert [int(b) for b in derived_geometry_meta["order"]] == [int(b) for b in dominance_meta.get("order", [])]
+    assert {int(b["branch_id"]) for b in derived_geometry_meta["branches"]} == set(order)
+
+    if debug_dir:
+        max_bid = max(order) if order else -1
+        branch_geom_segs = [[] for _ in range(max_bid + 1)]
+        branch_geom_len = [0.0 for _ in range(max_bid + 1)]
+        for bi in order:
+            runs = branch_to_derived_runs.get(int(bi), []) or []
+            branch_geom_segs[int(bi)] = [(None, np.asarray(S, float)) for S in runs if S is not None and len(S) >= 2]
+            branch_geom_len[int(bi)] = float(sum(_linestring_length(np.asarray(S, float)) for S in runs if S is not None and len(S) >= 2))
+
+        plot_mask = domain_mask.astype(np.uint8)
+        plot_branch_territory_debug_pre(
+            debug_dir=debug_dir,
+            debug_tag=debug_tag,
+            plot_mask=plot_mask,
+            branch_terr_masks=branch_terr_masks,
+            branch_user_segs=branch_geom_segs,
+            branch_user_len=branch_geom_len,
+            bite_total=bite_total,
+            bx0=bx0,
+            by0=by0,
+            bx1=bx1,
+            by1=by1,
+            H=H,
+            W=W,
+            out_filename="derived_geometry_dominance.png",
+        )
+
+    return derived_geometry_meta
     
 def union_bboxes(bboxes, *, pad=5):
     """
@@ -1721,6 +1991,7 @@ def build_combined_crack_stateless(
         # crack_mask_u8=crack_mask_full,
         window_half_size=window_half_size,
         debug_dir=debug_dir,
+        debug_tag="dominance_grouping",
     )
 
     midline_segments_meta = dom_meta.get("segments_meta", [])
@@ -1772,6 +2043,7 @@ def build_combined_crack_stateless(
     edge1_segs, edge2_segs = [], []
     norm1_segs, norm2_segs = [], []
     derived_midline_segs = []
+    branch_to_derived_runs = defaultdict(list)
     union_mask = np.zeros((H, W), np.uint8)
     all_widths = []
 
@@ -2007,8 +2279,8 @@ def build_combined_crack_stateless(
             if e1 is None or e2 is None or len(e1) < 2 or len(e2) < 2:
                 continue
             
-            derived_mid = res.get("derived_midline", None)
-            if derived_mid is None or len(derived_mid) < 2:
+            derived_mid = np.asarray(res.get("derived_midline", []), float)
+            if derived_mid.ndim != 2 or derived_mid.shape[1] != 2 or len(derived_mid) < 2:
                 raise ValueError("[COMBINER] edges_tracking returned no derived midline")
 
             # -------------------------
@@ -2035,6 +2307,7 @@ def build_combined_crack_stateless(
             if len(derived_mid_full) < 2:
                 raise ValueError("[COMBINER] derived midline collapsed after full-image mapping")
             derived_midline_segs.append(derived_mid_full)
+            branch_to_derived_runs[int(branch_id)].append(derived_mid_full)
 
 
             # ---- normals ----
@@ -2050,8 +2323,7 @@ def build_combined_crack_stateless(
                     if d.size:
                         all_widths.append(d[np.isfinite(d)])
             else:
-                n1_full = np.empty((0, 2))
-                n2_full = np.empty((0, 2))
+                raise ValueError("[COMBINER] edges_tracking returned no normal_edge_points")
 
             # ---- store geometry ----
             edge1_segs.append(e1_full)
@@ -2065,7 +2337,8 @@ def build_combined_crack_stateless(
                 img_gray=gray_full,
                 edge1_xy=e1_full,
                 edge2_xy=e2_full,
-                midline_xy=derived_mid_full,   # ✅ AUTHORITATIVE
+                midline_xy=derived_mid_full,
+                normals_xy=(n1_full, n2_full),
                 out_dir=None,
                 tag=None,
                 do_morph=False,
@@ -2099,6 +2372,19 @@ def build_combined_crack_stateless(
                 out.append([None, None])
         return out
 
+    derived_midline_meta = recompute_dominance_geometry_from_derived(
+        dominance_meta=dominance_meta,
+        branch_to_derived_runs=branch_to_derived_runs,
+        atomic=authoring_atomic,
+        H=H,
+        W=W,
+        derived_domain_mask=union_mask,
+        window_half_size=window_half_size,
+        members=member_ids,
+        debug_dir=debug_dir,
+        debug_tag="derived_geometry_dominance",
+    )
+
     combined_length = float(sum(_linestring_length(s) for s in segs))
     if len(all_widths):
         mean_width = float(np.nanmean(np.concatenate(all_widths)))
@@ -2112,6 +2398,7 @@ def build_combined_crack_stateless(
         try:
             debug_callback(
                 segs=segs,
+                derived_midline_segs=derived_midline_segs,
                 edge1_segs=edge1_segs,
                 edge2_segs=edge2_segs,
                 norm1_segs=norm1_segs,
@@ -2152,4 +2439,7 @@ def build_combined_crack_stateless(
         },
         "midline_segments_meta": midline_segments_meta,
         "dominance_meta": dominance_meta,
+        "derived_midline_meta": derived_midline_meta,
     }
+
+

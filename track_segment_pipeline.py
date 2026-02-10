@@ -357,6 +357,7 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
             )
 
             track_e1, track_e2 = res["geodesic_edges"]
+            derived_midline = res.get("derived_midline", None)
             normal_edges = res["normal_edge_points"]
             normal_edges_clipped = res["normal_edge_points_clipped"]
 
@@ -381,6 +382,12 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
             self.track_e1 = [track_e1[:, 0], track_e1[:, 1]]
             self.track_e2 = [track_e2[:, 0], track_e2[:, 1]]
 
+            # --- Store derived midline in crop + full-image coordinates ---
+            if not hasattr(self, "derived_midline_points"):
+                self.derived_midline_points = {}
+            if not hasattr(self, "derived_midline_points_full"):
+                self.derived_midline_points_full = {}
+
             # --- Store both crop and full-image normal edges ---
             if not hasattr(self, "normal_edge_points"):
                 self.normal_edge_points = {}
@@ -390,6 +397,14 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
             self.normal_edge_points[crack_id] = normal_edges  # crop coords
 
             xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
+            if derived_midline is not None:
+                dm = np.asarray(derived_midline, float)
+                if dm.ndim == 2 and dm.shape[1] == 2 and len(dm) >= 2:
+                    self.derived_midline_points[crack_id] = dm.tolist()
+                    dm_global = np.stack([dm[:, 0] + xmin, dm[:, 1] + ymin], axis=1)
+                    self.derived_midline_points_full[crack_id] = dm_global.tolist()
+                else:
+                    print(f"[WARN] derived_midline malformed for crack {crack_id}; skipping derived-midline save")
             (e1x, e1y), (e2x, e2y) = normal_edges
             e1_global = np.stack([e1x + xmin, e1y + ymin], axis=1)
             e2_global = np.stack([e2x + xmin, e2y + ymin], axis=1)
@@ -482,7 +497,7 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
                     f"minx={np.min(arr[1]):.2f} maxx={np.max(arr[1]):.2f} "
                     f"miny={np.min(arr[0]):.2f} maxy={np.max(arr[0]):.2f}")
 
-            # --------------------------------------------------------
+            '''# --------------------------------------------------------
             # 3️⃣ Build crop mask
             edge_x_crop = np.concatenate((self.track_e1[1][::-1], self.track_e2[1]))
             edge_y_crop = np.concatenate((self.track_e1[0][::-1], self.track_e2[0]))
@@ -497,8 +512,8 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
                 print(f"[WARN] edge coords out of crop bounds! "
                     f"x range=({edge_x_crop.min():.1f},{edge_x_crop.max():.1f}), "
                     f"y range=({edge_y_crop.min():.1f},{edge_y_crop.max():.1f}), "
-                    f"crop wh=({w},{h})")
-
+                    f"crop wh=({w},{h})")'''
+                    
             # --------------------------------------------------------
             src = getattr(self, "current_source", "auto")
             track_arr = np.array(self.adjusted_track, dtype=float)
@@ -506,6 +521,77 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
                             for i in range(track_arr.shape[1])]
             print(f"[DEBUG MIDLINE] len={len(midline_coords)}, "
                 f"first={midline_coords[0]}, last={midline_coords[-1]}")
+
+            # Derived midline is produced by edges_tracking and stored in both crop/full coords.
+            derived_midline_coords = getattr(self, "derived_midline_points_full", {}).get(self.current_crack_id)
+            dm_crop = getattr(self, "derived_midline_points", {}).get(self.current_crack_id)
+            if dm_crop is not None:
+                dm_crop = np.asarray(dm_crop, float)
+                if dm_crop.ndim != 2 or dm_crop.shape[1] != 2 or len(dm_crop) < 2:
+                    dm_crop = None
+            if derived_midline_coords is None and dm_crop is not None:
+                dm_global = np.stack([dm_crop[:, 0] + xmin, dm_crop[:, 1] + ymin], axis=1)
+                derived_midline_coords = dm_global.tolist()
+
+            # If derived midline is unavailable, use adjusted track as legacy fallback in crop coords.
+            if dm_crop is None:
+                dm_crop = np.column_stack([track_arr[1], track_arr[0]])
+
+            # --------------------------------------------------------
+            # 3️⃣ Build crop mask (CORRECT API + GEOMETRY)
+            # --------------------------------------------------------
+            e1 = np.column_stack([
+                np.asarray(self.track_e1[1], float),  # x
+                np.asarray(self.track_e1[0], float),  # y
+            ])
+            e2 = np.column_stack([
+                np.asarray(self.track_e2[1], float),  # x
+                np.asarray(self.track_e2[0], float),  # y
+            ])
+
+            # Authoritative normals from edges_tracking (crop coords)
+            normal_edges = getattr(self, "normal_edge_points", {}).get(self.current_crack_id)
+            if isinstance(normal_edges, dict) and "edge1" in normal_edges and "edge2" in normal_edges:
+                n1 = np.asarray(normal_edges["edge1"], float)
+                n2 = np.asarray(normal_edges["edge2"], float)
+            elif isinstance(normal_edges, (list, tuple)) and len(normal_edges) == 2:
+                n1 = np.column_stack([np.asarray(normal_edges[0][0], float), np.asarray(normal_edges[0][1], float)])
+                n2 = np.column_stack([np.asarray(normal_edges[1][0], float), np.asarray(normal_edges[1][1], float)])
+            else:
+                raise RuntimeError("save_current_segment requires normal_edge_points from edge_tracking")
+
+            dbg_dir = os.path.join(self.save_folder, "debug_masks", f"cid{self.current_crack_id}")
+            os.makedirs(dbg_dir, exist_ok=True)
+
+            mask_crop = ct.segmentation.generate_mask_from_edges(
+                img_gray=self.image_crop,
+                edge1_xy=e1,
+                edge2_xy=e2,
+                midline_xy=dm_crop,
+                normals_xy=(n1, n2),
+                out_dir=dbg_dir,
+                tag=f"cid{self.current_crack_id}",
+                do_morph=False,
+            ).astype(np.uint8)
+
+            h, w = mask_crop.shape[:2]
+            nz = int((mask_crop > 0).sum())
+            print(f"[DEBUG MASK_CROP] shape={mask_crop.shape}, nonzero={nz}")
+
+            if (
+                (e1[:, 0] < 0).any() or (e1[:, 1] < 0).any() or
+                (e2[:, 0] < 0).any() or (e2[:, 1] < 0).any() or
+                (e1[:, 0] >= w).any() or (e1[:, 1] >= h).any() or
+                (e2[:, 0] >= w).any() or (e2[:, 1] >= h).any()
+            ):
+                print(
+                    f"[WARN] edge coords out of crop bounds! "
+                    f"e1 x=({e1[:,0].min():.1f},{e1[:,0].max():.1f}) "
+                    f"y=({e1[:,1].min():.1f},{e1[:,1].max():.1f}), "
+                    f"e2 x=({e2[:,0].min():.1f},{e2[:,0].max():.1f}) "
+                    f"y=({e2[:,1].min():.1f},{e2[:,1].max():.1f}), "
+                    f"crop wh=({w},{h})"
+                )
 
             ann = self.annotation.setdefault("annotations", {})
             atomic_cracks = ann.setdefault("atomic_cracks", {})
@@ -546,6 +632,7 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
             crack_entry = {
                 "source": src,
                 "midline": midline_coords,
+                "derived_midline": derived_midline_coords,
                 "geodesic_edges": {
                     "edge1": np.stack([self.track_e1[0] + xmin, self.track_e1[1] + ymin], axis=1),
                     "edge2": np.stack([self.track_e2[0] + xmin, self.track_e2[1] + ymin], axis=1),

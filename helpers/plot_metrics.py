@@ -22,6 +22,7 @@ def plot_edges_and_normals(
     *,
     base_image,           # full-res image (BGR or gray)
     midline_segs,         # list of midline segments (list of Nx2 arrays)
+    derived_midline_segs=None,  # optional list of derived midline segments
     edge1_segs,           # list of Nx2 arrays
     edge2_segs,           # list of Nx2 arrays
     norm1_segs,           # list-of-lists of normals (Nx2 arrays)
@@ -125,6 +126,21 @@ def plot_edges_and_normals(
             ax.plot(s[:,0]-shift_x, s[:,1]-shift_y, "w-", lw=1.2)
 
     # ------------------------------
+    # Draw derived midline
+    # ------------------------------
+    for seg in (derived_midline_segs or []):
+        seg = np.asarray(seg)
+        if seg.ndim != 2 or len(seg) < 2:
+            continue
+        for s in split(seg):
+            ax.plot(
+                s[:,0]-shift_x, s[:,1]-shift_y,
+                color="darkorange",
+                lw=1.2,
+                linestyle="--",
+            )
+
+    # ------------------------------
     # Draw edges
     # ------------------------------
     if not gt_plot:
@@ -155,11 +171,13 @@ def plot_edges_and_normals(
     if gt_plot:
         handles = [
             Line2D([], [], color='white', lw=1.4, label='Midline'),
+            Line2D([], [], color='yellow', lw=1.4, linestyle='--', label='Derived Midline'),
             Line2D([], [], color='cyan', lw=1.4, label='Normals'),
         ]    
     else:    
         handles = [
             Line2D([], [], color='white', lw=1.4, label='Midline'),
+            Line2D([], [], color='darkorange', lw=1.4, linestyle='--', label='Derived Midline'),
             Line2D([], [], color='red', lw=1.4, label='Edge 1 (Left)'),
             Line2D([], [], color='green', lw=1.4, label='Edge 2 (Right)'),
             Line2D([], [], color='cyan', lw=1.4, label='Normals'),

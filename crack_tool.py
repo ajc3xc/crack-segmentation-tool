@@ -524,6 +524,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         # Persist JSON
         #self.save_annotation()
             
+        
         self.auto_combine_segments()
 
         # Debug print & refresh view
