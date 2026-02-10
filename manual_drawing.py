@@ -1100,7 +1100,7 @@ class ManualDrawing(CrackUtils):
                 continue
 
             crack["mask_bbox"] = bbox
-            crack.pop("mask_crop", None)  # ensure we don't leave stale crops
+            #crack.pop("mask_crop", None)  # ensure we don't leave stale crops
             updated += 1
             print(f"[MEM FULL] ✅ id={cid} mask_bbox={bbox} (no mask_crop)")
 
