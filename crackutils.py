@@ -275,7 +275,17 @@ class CrackUtils:
             # ------------------------------------------------------------
             # 3) Filter atomic cracks AFTER mask construction
             # ------------------------------------------------------------
+            in_ids = sorted([str(k) for k in atomic.keys()], key=lambda s: int(s) if s.isdigit() else s)
+            #print(f"[DEBUG save_annotation] atomic IDs before filter: {in_ids}")
+
             ann["atomic_cracks"] = filter_valid_cracks(atomic, H, W)
+
+            out_atomic = ann.get("atomic_cracks", {}) or {}
+            out_ids = sorted([str(k) for k in out_atomic.keys()], key=lambda s: int(s) if s.isdigit() else s)
+            dropped = [cid for cid in in_ids if cid not in set(out_ids)]
+            print(f"[DEBUG save_annotation] atomic IDs after filter:  {out_ids}")
+            if dropped:
+                print(f"[DEBUG save_annotation] dropped IDs: {dropped}")
             print(f"[DEBUG] save_annotation END: {len(ann['atomic_cracks'])} cracks kept.")
 
             # ------------------------------------------------------------
@@ -2396,7 +2406,7 @@ class CrackUtils:
         def _dbg_poly(label, poly, n=30):
             if not poly:
                 print(f"[DBG {label}] EMPTY")
-                return
+                return -1
             print(f"[DBG {label}] len={len(poly)} first {min(n, len(poly))}:")
             for i, (x, y) in enumerate(poly[:n]):
                 print(f"   {i:02d}: ({x:.6f}, {y:.6f})")
@@ -2976,7 +2986,7 @@ class CrackUtils:
         dlg.showMaximized()
         QApplication.processEvents()
         if dlg.exec_() != QDialog.Accepted:
-            return
+            return -1
 
         print(f"Points: {self.user_points}")
         print(f"Connections: {self.user_connections}")
@@ -3024,7 +3034,7 @@ class CrackUtils:
             print(f"metrics value: {metrics}")
 
             if metrics:
-                print("committing new manual_polys to in-memory annotations")
+                print(f"committing new manual_polys to in-memory annotations")
                 for k, poly in mm.items():
                     print(f"[DEBUG] keys in mm: {list(mm.keys())}")
                     # --- normalize key format ---
@@ -3061,6 +3071,7 @@ class CrackUtils:
                     print(f"[MEM] added manual_poly id={cid}, len={len(poly)} pts")
 
             # 🔹 ensure all nested dicts exist and rebind them
+            print(f"{len(atomic)} atomics added")
             self.annotation.setdefault("annotations", {})["atomic_cracks"] = atomic
             print(f"[MEM] committed manual_polys to self.annotation (len={len(atomic)})")
 

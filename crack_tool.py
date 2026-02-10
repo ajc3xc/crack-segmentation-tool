@@ -555,12 +555,12 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         self._debug_print_atomic_cracks("run_pipeline END")
         self.change_image()
             
-    #TODO: actually implement this
     def batch_run_pipeline(self):
         """
         Runs the pipeline (full segment generation, clearing endpoints/connections) on EVERY image in the selected folder.
         """
         from PyQt5.QtWidgets import QMessageBox
+        import os
         
         # Check existence and content
         if not hasattr(self, "image_names") or not self.image_names:
@@ -573,14 +573,103 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         n_success = 0
         orig_n = self.n
 
+        def _extract_pairs_from_annotation():
+            """
+            Build endpoint pairs + manual midlines from the currently loaded annotation.
+            Returns: (endpoint_pairs, manual_endpoint_pairs, manual_midlines_tmp,
+                      user_points, user_connections)
+            """
+            ann = (self.annotation or {}).get("annotations", {}) or {}
+            atomic = ann.get("atomic_cracks", {}) or {}
+            if not atomic:
+                return [], [], {}, [], []
+
+            points = []
+            point_index = {}
+
+            def _add_point(pt):
+                try:
+                    x = float(pt[0])
+                    y = float(pt[1])
+                except Exception:
+                    return None
+                key = (x, y)
+                idx = point_index.get(key)
+                if idx is None:
+                    idx = len(points)
+                    point_index[key] = idx
+                    points.append([x, y])
+                return idx
+
+            auto_conn_idx = []
+            manual_conn_idx = []
+            manual_midlines = {}
+            seen_auto = set()
+            seen_manual = set()
+
+            for crack in atomic.values():
+                src = str(crack.get("source") or crack.get("src") or "").lower()
+                up = crack.get("user_points") or []
+                if len(up) >= 2:
+                    p1, p2 = up[0], up[1]
+                else:
+                    ml = crack.get("midline") or []
+                    if len(ml) >= 2:
+                        p1, p2 = ml[0], ml[-1]
+                    else:
+                        continue
+
+                i1 = _add_point(p1)
+                i2 = _add_point(p2)
+                if i1 is None or i2 is None or i1 == i2:
+                    continue
+
+                if src in ("manual", "manual_poly", "manual_midline"):
+                    mid = crack.get("midline") or []
+                    if len(mid) < 2:
+                        continue
+                    key = (i1, i2)
+                    if key not in seen_manual and (i2, i1) not in seen_manual:
+                        seen_manual.add(key)
+                        seen_manual.add((i2, i1))
+                        manual_conn_idx.append((i1, i2))
+                    manual_midlines[key] = [(float(x), float(y)) for (x, y) in mid]
+                else:
+                    key = (i1, i2)
+                    if key in seen_auto or (i2, i1) in seen_auto:
+                        continue
+                    seen_auto.add(key)
+                    seen_auto.add((i2, i1))
+                    auto_conn_idx.append((i1, i2))
+
+            endpoint_pairs = [(points[i1], points[i2]) for (i1, i2) in auto_conn_idx]
+            manual_endpoint_pairs = [(points[i1], points[i2]) for (i1, i2) in manual_conn_idx]
+            return endpoint_pairs, manual_endpoint_pairs, manual_midlines, points, auto_conn_idx
+
         for idx, fname in enumerate(self.image_names):
             try:
+                base_name = os.path.splitext(os.path.basename(fname))[0]
+                ann_path = os.path.join(self.save_folder, f"{base_name}.json")
+                if not os.path.exists(ann_path):
+                    print(f"  [SKIP] No annotation JSON for {base_name}.")
+                    continue
+
                 self.n = idx
                 self.change_image()
-                # Only run if endpoints and connections are present
-                endpoints = getattr(self, "user_points", None)
-                connections = getattr(self, "user_connections", None)
-                if endpoints and connections:
+
+                endpoint_pairs, manual_endpoint_pairs, manual_midlines_tmp, pts, conns = (
+                    _extract_pairs_from_annotation()
+                )
+
+                # Only run if endpoints/connections are present
+                if endpoint_pairs or manual_endpoint_pairs:
+                    self.user_points = pts
+                    self.user_connections = [list(c) for c in conns]
+                    self.endpoint_pairs = endpoint_pairs
+                    self.manual_endpoint_pairs = manual_endpoint_pairs
+                    self.manual_midlines_tmp = manual_midlines_tmp
+                    self.all_selected_points = list(pts)
+
                     print(f"\n======= Processing image {idx+1}/{total}: {fname} =======")
                     self.run_pipeline(multirun=True)  # Will clear endpoints on success
                     n_success += 1

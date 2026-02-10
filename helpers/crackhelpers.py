@@ -76,29 +76,6 @@ def build_combined_mask(atomic_cracks: dict, H: int, W: int) -> np.ndarray:
     return out
 
 
-'''def filter_valid_cracks(atomic_cracks: dict, H: int, W: int) -> dict:
-    """
-    Keep only cracks that have a mask (crop or legacy) OR geodesic edges OR a real midline.
-    Ensures no bloated legacy 'mask' if compact info already exists.
-    """
-    kept = {}
-    for cid, crack in (atomic_cracks or {}).items():
-        has_crop = (crack.get("mask_crop") is not None) and (crack.get("mask_bbox") is not None) \
-                   and np.any(np.array(crack.get("mask_crop"), dtype=np.uint8))
-        full_m = np.array(crack.get("mask", []), dtype=np.uint8)
-        has_full = full_m.size > 0 and full_m.shape == (H, W) and np.any(full_m)
-        has_mask = has_crop or has_full
-
-        edges = crack.get("geodesic_edges", {}) or {}
-        has_edges = bool(edges.get("edge1")) or bool(edges.get("edge2"))
-        has_midline = len(crack.get("midline", [])) > 1
-
-        if has_mask or has_edges or has_midline:
-            if has_crop and "mask" in crack:
-                del crack["mask"]
-            kept[cid] = crack
-    return kept'''
-    
 def filter_valid_cracks(cracks, H, W):
     """
     Keep cracks that have:
@@ -151,6 +128,59 @@ def filter_valid_cracks(cracks, H, W):
           f"→ kept={len(valid)} (manual={kept_manual}, mask={kept_masked}, edges={kept_edges})")
     return valid
 
+def filter_valid_cracks(cracks, H=None, W=None):
+    """
+    A crack is valid if it represents intentional geometry.
+
+    Valid if:
+      - it has a midline with >= 2 points, OR
+      - it has exactly two user_points with at least one connection
+
+    Masks, edges, and compact forms are NOT validation criteria.
+    """
+    valid = {}
+    kept_midline = kept_endpoint = 0
+    rejects = []
+
+    for cid, crack in (cracks or {}).items():
+        if not isinstance(crack, dict):
+            rejects.append((str(cid), "non-dict crack entry"))
+            continue
+
+        # 1) midline-based crack (manual or pipeline)
+        ml = crack.get("midline")
+        if isinstance(ml, (list, tuple)) and len(ml) >= 2:
+            valid[cid] = crack
+            kept_midline += 1
+            continue
+
+        # 2) endpoint-defined crack (future materialization)
+        ups = crack.get("user_points") or []
+        conns = crack.get("user_connections") or []
+        if len(ups) == 2 and len(conns) >= 1:
+            valid[cid] = crack
+            kept_endpoint += 1
+            continue
+
+        src = crack.get("source", crack.get("src", "?"))
+        ml_len = len(ml) if isinstance(ml, (list, tuple)) else 0
+        rejects.append(
+            (
+                str(cid),
+                f"src={src}, midline_len={ml_len}, user_points={len(ups)}, user_connections={len(conns)}",
+            )
+        )
+
+    print(
+        f"[DEBUG filter_valid_cracks] total_in={len(cracks)} -> kept={len(valid)} "
+        f"(midline={kept_midline}, endpoint_only={kept_endpoint})"
+    )
+    if rejects:
+        print(f"[DEBUG filter_valid_cracks] rejected={len(rejects)}")
+        for cid, reason in rejects:
+            print(f"[DEBUG filter_valid_cracks] reject cid={cid}: {reason}")
+    return valid
+
 # ---------- Rendering helpers (numpy in / numpy out) ----------
 
 def overlay_mask_boundaries(image_rgb_uint8: np.ndarray, mask01: np.ndarray) -> np.ndarray:
@@ -198,3 +228,4 @@ def numpy_to_qimage_and_scaled_pixmap(img_uint8: np.ndarray, target_w: int, targ
 import os, cv2, numpy as np
 from typing import Any, Dict, List
 # uses your existing helpers from this repo
+

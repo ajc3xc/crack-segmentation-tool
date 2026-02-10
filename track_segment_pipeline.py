@@ -517,8 +517,13 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
             # --------------------------------------------------------
             src = getattr(self, "current_source", "auto")
             track_arr = np.array(self.adjusted_track, dtype=float)
-            midline_coords = [[int(track_arr[1][i] + xmin), int(track_arr[0][i] + ymin)]
-                            for i in range(track_arr.shape[1])]
+            track_arr = np.asarray(self.adjusted_track, dtype=float)
+
+            midline_coords = [
+                [round(float(track_arr[1, i] + xmin), 2), round(float(track_arr[0, i] + ymin), 2)]
+                for i in range(track_arr.shape[1])
+            ]
+
             print(f"[DEBUG MIDLINE] len={len(midline_coords)}, "
                 f"first={midline_coords[0]}, last={midline_coords[-1]}")
 
