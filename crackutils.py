@@ -158,15 +158,22 @@ def plot_poly_before_after_to_file(
 def canonicalize_track_for_edges(
     track_yx,
     *,
-    ds_target=1.0,
+    ds_target=0.75,
     min_spacing_auto=0.8,
     min_spacing_manual=0.3,
     preserve_endpoints=True,
     source="auto",
+    smooth_k=5,   # <---- NEW (default very conservative)
 ):
     """
     Canonicalize a [y,x] track to stable spacing before edge extraction.
+    Always resamples to ds_target (fastpath may early-return if already uniform).
+    Applies very light SavGol smoothing to stabilize normals.
     """
+
+    import numpy as np
+    from scipy.signal import savgol_filter
+
     tr = np.asarray(track_yx, float)
     if tr.ndim != 2 or tr.shape[0] != 2:
         return tr, {
@@ -191,31 +198,45 @@ def canonicalize_track_for_edges(
     ds = local_step_sizes(pts_xy)
     med = float(np.median(ds)) if ds.size else None
 
-    src = str(source or "auto").lower()
-    thresh = float(min_spacing_manual if src.startswith("manual") else min_spacing_auto)
-    do_resample = (med is not None and med < thresh)
+    # ---- Always resample ----
+    rs, = resample_by_arclength(
+        pts_xy,
+        ds_target=float(ds_target),
+        preserve_endpoints=bool(preserve_endpoints),
+        fastpath=True,
+    )
 
-    out = tr
-    did = False
-    n_after = n_before
+    if rs is None or len(rs) < 2:
+        return tr, {
+            "med_before": med,
+            "did_resample": False,
+            "n_before": n_before,
+            "n_after": n_before,
+        }
 
-    if do_resample:
-        rs, = resample_by_arclength(
-            pts_xy,
-            ds_target=float(ds_target),
-            preserve_endpoints=bool(preserve_endpoints),
-            fastpath=True,
-        )
-        if rs is not None:
-            rs = np.asarray(rs, float)
-            if rs.ndim == 2 and rs.shape[1] == 2 and len(rs) >= 2:
-                out = np.vstack([rs[:, 1], rs[:, 0]])
-                n_after = int(len(rs))
-                did = True
+    rs = np.asarray(rs, float)
+    n_after = int(len(rs))
+
+    # ---- VERY LIGHT smoothing ----
+    if smooth_k and smooth_k > 1 and n_after >= smooth_k:
+        k = int(smooth_k)
+        if k % 2 == 0:
+            k += 1  # must be odd
+
+        x = savgol_filter(rs[:, 0], window_length=k, polyorder=2, mode="interp")
+        y = savgol_filter(rs[:, 1], window_length=k, polyorder=2, mode="interp")
+        rs = np.column_stack([x, y])
+
+        # preserve endpoints EXACTLY
+        if preserve_endpoints:
+            rs[0]  = pts_xy[0]
+            rs[-1] = pts_xy[-1]
+
+    out = np.vstack([rs[:, 1], rs[:, 0]])
 
     return out, {
         "med_before": med,
-        "did_resample": did,
+        "did_resample": True,
         "n_before": n_before,
         "n_after": n_after,
     }
@@ -2896,59 +2917,50 @@ class CrackUtils:
 
 
             import numpy as np
-            from helpers.metrics import local_step_sizes, resample_by_arclength
 
-            def poly_median_spacing(poly):
-                poly = np.asarray(poly, float)
-                if len(poly) < 2:
-                    return None
-                ds = local_step_sizes(poly)
-                return float(np.median(ds)) if ds.size else None
-
-            # --- Anti-noise pass: sanitize newly drawn manual midlines ---
+            # --- Canonicalize newly drawn manual midlines (zoom invariant) ---
             for k, poly in self.manual_midlines_tmp.items():
                 poly = np.asarray(poly, float)
-                if len(poly) < 3:
+                if len(poly) < 2:
                     continue
 
-                med = poly_median_spacing(poly)
+                track_yx = np.vstack([poly[:, 1], poly[:, 0]])
+                track_rs, _ = canonicalize_track_for_edges(
+                    track_yx,
+                    ds_target=1.0,
+                    preserve_endpoints=True,
+                    source="manual",
+                )
+                if track_rs is None or track_rs.ndim != 2 or track_rs.shape[0] != 2 or track_rs.shape[1] < 2:
+                    continue
 
-                # only act when clearly oversampled/noisy
-                if med is not None and med < 0.3:
-                    poly_rs, = resample_by_arclength(
-                        poly,
-                        ds_target=1.0,
-                        preserve_endpoints=True,
-                        fastpath=True,   # safe; if already uniform it will just copy
+                poly_rs = np.column_stack([track_rs[1], track_rs[0]])
+
+                if DEBUG_MANUAL_RESAMPLING:
+                    # build debug output path
+                    img_idx = getattr(self, "n", "unknown")
+                    out_dir = os.path.join(
+                        self.save_folder,      # or your outputs root
+                        "resample_debug",
+                        f"img_{img_idx}",
                     )
-                    if poly_rs is None or len(poly_rs) < 2:
-                        continue
-                    
-                    if DEBUG_MANUAL_RESAMPLING:
-                        # build debug output path
-                        img_idx = getattr(self, "n", "unknown")
-                        out_dir = os.path.join(
-                            self.save_folder,      # or your outputs root
-                            "resample_debug",
-                            f"img_{img_idx}",
-                        )
-                        out_path = os.path.join(
-                            out_dir,
-                            f"resample_plot_k={k}.png"
-                        )
+                    out_path = os.path.join(
+                        out_dir,
+                        f"resample_plot_k={k}.png"
+                    )
 
-                        plot_poly_before_after_to_file(
-                            poly_raw=poly,
-                            poly_rs=poly_rs,
-                            image=self.original_image,
-                            overlay=getattr(self, "overlay_image", None),
-                            pad=5,
-                            title=f"Manual midline resampling (key={k})",
-                            out_path=out_path,
-                        )
+                    plot_poly_before_after_to_file(
+                        poly_raw=poly,
+                        poly_rs=poly_rs,
+                        image=self.original_image,
+                        overlay=getattr(self, "overlay_image", None),
+                        pad=5,
+                        title=f"Manual midline canonicalization (key={k})",
+                        out_path=out_path,
+                    )
 
-                    self.manual_midlines_tmp[k] = poly_rs.tolist()
-                    print(f"[ANTI-NOISE] midline {k}: median spacing {med:.3f}px → resampled ({len(poly)} → {len(poly_rs)})")
+                self.manual_midlines_tmp[k] = poly_rs.tolist()
+                print(f"[CANONICAL] midline {k}: {len(poly)} → {len(poly_rs)} pts (ds_target=1.0)")
 
 
             # DEBUG: inspect ONLY newly drawn midlines (not readonly)
