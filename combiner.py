@@ -2474,6 +2474,25 @@ def build_combined_crack_stateless(
             ])
 
             t_et0 = time.perf_counter()
+            # ------------------------------------------------
+            # Create per-branch/run debug directory (no refactor)
+            # ------------------------------------------------
+            branch_debug_dir = None
+
+            if debug_dir is not None:
+                import os
+
+                branch_debug_dir = os.path.join(
+                    debug_dir,
+                    f"branch_{branch_id}",
+                    f"run_{run_id}"
+                )
+
+                os.makedirs(branch_debug_dir, exist_ok=True)
+
+            # -------------------------
+            # edges_tracking
+            # -------------------------
             res = edges_tracking(
                 image_crop=crop,
                 pts_cropp=pts_crop,
@@ -2484,6 +2503,7 @@ def build_combined_crack_stateless(
                 return_normal_edges=True,
                 prefer_gpu=prefer_gpu,
                 mode=mode,
+                debug_dir=branch_debug_dir
             )
 
             t_edges_total += (time.perf_counter() - t_et0)

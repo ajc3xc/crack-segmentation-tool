@@ -3074,6 +3074,39 @@ def compare_widths_for_aligned_cracks(
 
         return kept_segs, kept_meta, removed_segs
 
+    def _k_ab(m):
+        m = m if isinstance(m, dict) else {}
+        aid = m.get("atomic_id", None)
+        bid = _safe_int(m.get("branch_id"), -1)
+        return (str(aid) if aid is not None else None, int(bid))
+
+    def _match_midline_to_derived(mid_keep_segs, mid_keep_meta, dsegs_in, dmeta_in, *, cid):
+        """
+        Enforce 1:1 mapping from kept MIDLINE segments to DERIVED segments by (atomic_id, branch_id).
+        """
+        if len(dsegs_in) != len(dmeta_in):
+            raise RuntimeError(
+                f"[FATAL] derived seg/meta mismatch in cid={cid}: {len(dsegs_in)} vs {len(dmeta_in)}"
+            )
+
+        buckets = {}
+        for S, m in zip(dsegs_in, dmeta_in):
+            if S is None or len(S) < 2:
+                continue
+            k = _k_ab(m)
+            buckets.setdefault(k, []).append((np.asarray(S, float), dict(m if isinstance(m, dict) else {})))
+
+        out_segs, out_meta = [], []
+        for _Sm, mm in zip(mid_keep_segs, mid_keep_meta):
+            k = _k_ab(mm)
+            if k not in buckets or not buckets[k]:
+                raise RuntimeError(f"[FATAL] Missing derived segment for key={k} in cid={cid}")
+            Sd, md = buckets[k].pop(0)
+            out_segs.append(Sd)
+            out_meta.append(md)
+
+        return out_segs, out_meta
+
     # ---------------- iterate cracks (NO baseline_mode; baseline is injected via pred_widths) ----------------
     crack_iter = list(cracks.items())
     print(f"cracks iterating through: {len(crack_iter)}")
@@ -3085,30 +3118,14 @@ def compare_widths_for_aligned_cracks(
         if not derived_segs:
             raise RuntimeError(f"Missing derived geometry (no fallback allowed) for cid={cid}")
 
-        geometry_streams = {
-            "midline": {
-                "segs": mid_segs,
-                "meta": mid_meta,
-                "compute_widths": False,
-            },
-            "derived": {
-                "segs": derived_segs,
-                "meta": derived_meta,
-                "compute_widths": True,
-            },
-        }
+        segs = list(mid_segs or [])
+        seg_meta = list(mid_meta or [])
+        dsegs = list(derived_segs or [])
+        dmeta = list(derived_meta or [])
 
         if mode == "atomic" or str(cid).startswith("atomic_"):
-            geometry_streams = {
-                "derived": {
-                    "segs": derived_segs,
-                    "meta": derived_meta,
-                    "compute_widths": True,
-                }
-            }
-
-        if not any(geom.get("segs") for geom in geometry_streams.values()):
-            continue
+            segs = dsegs
+            seg_meta = dmeta
 
         e1, e2 = _get_edges(crack)
         if len(e1) < 2 or len(e2) < 2:
@@ -3116,473 +3133,15 @@ def compare_widths_for_aligned_cracks(
         m_edge = min(len(e1), len(e2))
         widths_geo = np.linalg.norm(e1[:m_edge] - e2[:m_edge], axis=1)
 
-        # Build concatenated midline points in the same order as segs for width trace alignment
         derived_concat = (
-            np.vstack([np.asarray(s, float) for s in derived_segs if s is not None and len(s) >= 2])
-            if derived_segs else None
+            np.vstack([np.asarray(s, float) for s in dsegs if s is not None and len(s) >= 2])
+            if dsegs else None
         )
 
-        # ------------------------------------------------------------
-        # Predicted width source:
-        #   - baseline injection uses crack["pred_widths"]
-        #   - otherwise compute from geometry / cached traces
-        # ------------------------------------------------------------
         if isinstance(crack, dict) and "pred_widths" in crack:
             predw_full_any = np.asarray(crack["pred_widths"], float).reshape(-1)
         else:
             predw_full_any = _get_pred_width_full(crack, derived_concat, widths_geo)
-
-        gt_entry = None
-        gt_members = set(map(str, crack.get("members", []) or []))
-        shared = set(pred_members)
-        if mode == "combined":
-            # Stage 0: find best GT entry by overlap
-            pred_key = frozenset(map(str, crack.get("members", []) or []))
-            gt_entry = gt_sup.get(pred_key)
-
-            if gt_entry is None and gt_sup:
-                pm = set(map(str, crack.get("members", []) or []))
-                best = None
-                for _, e in gt_sup.items():
-                    gm = set(map(str, e.get("members", []) or []))
-                    inter = len(pm & gm)
-                    denom = max(1, max(len(pm), len(gm)))
-                    u = inter / denom
-                    if best is None or u > best[0]:
-                        best = (u, e)
-                if best is not None and best[0] >= 0.60:
-                    gt_entry = best[1]
-
-            if gt_entry is not None:
-                gt_members = set(map(str, gt_entry.get("members", []) or []))
-
-            shared = pred_members & gt_members
-            overlap = len(shared) / max(1, max(len(pred_members), len(gt_members)))
-            if overlap < 0.60:
-                print(f"[WIDTH DEBUG] combined cid={cid} overlap={overlap:.3f} -> SKIP")
-                continue
-
-            print(f"[WIDTH DEBUG] cid={cid} shared_members={sorted(shared)}")
-
-        dom_pred = (
-            crack.get("dominance_meta")
-            or crack.get("dominance")
-            or crack.get("dominance_info")
-            or {}
-        )
-        dom_gt = {}
-        if isinstance(gt_entry, dict):
-            dom_gt = (
-                gt_entry.get("dominance_meta")
-                or gt_entry.get("dominance")
-                or gt_entry.get("dominance_info")
-                or {}
-            )
-
-        loss_masks_pred_by_branch = _decode_bite_loss_masks_full(dom_pred, H, W)
-        loss_masks_gt_by_branch = _decode_bite_loss_masks_full(dom_gt, H, W)
-
-        for geom_name, geom in geometry_streams.items():
-            segs = geom.get("segs") or []
-            seg_meta = geom.get("meta") or []
-            do_widths = bool(geom.get("compute_widths", False))
-
-            geom["pruned_segs_after_dominance"] = []
-            geom["pruned_meta_after_dominance"] = []
-            geom["gt_pruned_segs_after_dominance"] = []
-            geom["gt_pruned_meta_after_dominance"] = []
-
-            if not segs:
-                continue
-
-            print(f"[WIDTH DEBUG] processing {geom_name} geometry for cid={cid}")
-
-            # Atomic path: derived-only width slicing on same samples, with finite clipping.
-            if mode == "atomic" or str(cid).startswith("atomic_"):
-                if not do_widths:
-                    continue
-
-                atomic_vs_combined_gt = _atomic_pred_matches_combined_gt(cid, gt_sup)
-                if predw_full_any is None or np.asarray(predw_full_any).size < 2:
-                    print(f"[WIDTH DEBUG] atomic cid={cid} has no usable pred width trace -> skip")
-                    continue
-
-                pred_trace = np.asarray(predw_full_any, float).reshape(-1)
-                off = 0
-                for S, m in zip(segs, seg_meta):
-                    if S is None or len(S) < 2:
-                        continue
-
-                    pts = np.asarray(S, float)
-                    take = min(len(pts), max(0, pred_trace.size - off))
-                    if take < 2:
-                        off += max(len(pts), 0)
-                        continue
-
-                    pts = pts[:take]
-                    predw = pred_trace[off : off + take].astype(float, copy=False)
-                    off += take
-
-                    finite_pred = np.isfinite(predw)
-                    if int(np.count_nonzero(finite_pred)) < 2:
-                        continue
-
-                    pts = pts[finite_pred]
-                    predw = predw[finite_pred]
-
-                    (_, _, _, _, gtw), _ = normals_from_mask_for_midline(
-                        pts, mask_bin, max_radius
-                    )
-                    gtw = np.asarray(gtw, float)
-                    n = min(len(pts), len(predw), len(gtw))
-                    if n < 2:
-                        continue
-
-                    pts = pts[:n]
-                    predw = predw[:n]
-                    gtw = gtw[:n]
-
-                    finite_gt = np.isfinite(gtw)
-                    if int(np.count_nonzero(finite_gt)) < 2:
-                        continue
-
-                    pts = pts[finite_gt]
-                    predw = predw[finite_gt]
-                    gtw = gtw[finite_gt]
-
-                    d = predw - gtw
-                    coords.append(pts)
-                    diffs.append(d)
-                    if crack.get("mask_bbox") is not None:
-                        bboxes.append(crack.get("mask_bbox"))
-
-                    mm = m if isinstance(m, dict) else {}
-                    width_pairs.append(
-                        {
-                            "image": base_name,
-                            "cid": str(cid),
-                            "crack_type": "atomic",
-                            "midline_type": midline_type,
-                            "geometry_type": geom_name,
-                            "member_id": None,
-                            "bbox": crack.get("mask_bbox"),
-                            "pts": pts,
-                            "predw": predw,
-                            "gruthw": gtw,
-                            "gt_source": "mask_same_samples",
-                            "branch_id": mm.get("branch_id"),
-                            "seg_idx": mm.get("seg_idx"),
-                            "gt_mismatch": atomic_vs_combined_gt,
-                            "gt_relation": (
-                                "atomic_vs_combined"
-                                if atomic_vs_combined_gt
-                                else "atomic_vs_atomic"
-                            ),
-                        }
-                    )
-
-                continue
-
-            # ---------------- combined Stage 1: prune by shared atomic IDs ----------------
-            pruned_segs = []
-            pruned_meta = []
-            for i, (S, m) in enumerate(zip(segs, seg_meta)):
-                if S is None or len(S) < 2:
-                    continue
-                mm = m if isinstance(m, dict) else {}
-                aid = mm.get("atomic_id")
-                if aid is not None and str(aid) not in shared:
-                    print(f"[WIDTH DEBUG] DROP seg#{i} atomic={aid} (not shared)")
-                    continue
-                pruned_segs.append(np.asarray(S, float))
-                pruned_meta.append(dict(mm))
-
-            if not pruned_segs:
-                print(f"[WIDTH DEBUG] cid={cid} {geom_name} -> NO SEGMENTS AFTER PRUNE")
-                continue
-
-            # ---------------- combined Stage 2: GT prune + branch matching ----------------
-            gt_pruned_segs = []
-            gt_pruned_meta = []
-            if gt_entry is not None:
-                gt_segs_all, gt_meta_all = _extract_gt_stream_segments_and_meta(gt_entry, geom_name)
-                for i, (Sg, mg) in enumerate(zip(gt_segs_all, gt_meta_all)):
-                    if Sg is None or len(Sg) < 2:
-                        continue
-                    mg = mg if isinstance(mg, dict) else {}
-                    aid = mg.get("atomic_id")
-
-                    if aid is not None and str(aid) not in pred_members:
-                        print(f"[STAGE2 DBG] SKIP GT seg#{i} atomic={aid} (out-of-scope)")
-                        continue
-                    if aid is not None and str(aid) not in shared:
-                        print(f"[STAGE2 DBG] DROP GT seg#{i} atomic={aid} (not shared)")
-                        continue
-
-                    gt_pruned_segs.append(np.asarray(Sg, float))
-                    gt_pruned_meta.append(dict(mg))
-
-            matched_pred_branch_ids = None
-            matched_gt_branch_ids = None
-
-            if gt_pruned_segs and pruned_segs:
-                gt_br = _build_branch_table_geom(gt_pruned_segs, gt_pruned_meta, scope_members=shared)
-                pr_br = _build_branch_table_geom(pruned_segs, pruned_meta, scope_members=shared)
-                if gt_br and pr_br:
-                    matches = _greedy_match_branches_geom(gt_br, pr_br, max_cost=250.0)
-                    if matches:
-                        matched_gt_branch_ids = {g for (g, _, _) in matches}
-                        matched_pred_branch_ids = {p for (_, p, _) in matches}
-
-            if matched_pred_branch_ids is not None:
-                seg2bid = _assign_synth_branch_ids(pruned_segs, pruned_meta, scope_members=shared)
-                keep_s, keep_m = [], []
-                for S, m in zip(pruned_segs, pruned_meta):
-                    S = np.asarray(S, float)
-                    if len(S) < 2:
-                        continue
-                    k = (tuple(np.round(S[0], 3)), tuple(np.round(S[-1], 3)), int(len(S)))
-                    bid = seg2bid.get(k, None)
-                    if bid in matched_pred_branch_ids:
-                        keep_s.append(S)
-                        keep_m.append(dict(m))
-                pruned_segs, pruned_meta = keep_s, keep_m
-
-            if matched_gt_branch_ids is not None:
-                seg2bid = _assign_synth_branch_ids(gt_pruned_segs, gt_pruned_meta, scope_members=shared)
-                keep_s, keep_m = [], []
-                for S, m in zip(gt_pruned_segs, gt_pruned_meta):
-                    S = np.asarray(S, float)
-                    if len(S) < 2:
-                        continue
-                    k = (tuple(np.round(S[0], 3)), tuple(np.round(S[-1], 3)), int(len(S)))
-                    bid = seg2bid.get(k, None)
-                    if bid in matched_gt_branch_ids:
-                        keep_s.append(S)
-                        keep_m.append(dict(m))
-                gt_pruned_segs, gt_pruned_meta = keep_s, keep_m
-
-            if not pruned_segs:
-                print(f"[WIDTH DEBUG] cid={cid} {geom_name} -> NO PRED SEGMENTS AFTER BRANCH MATCH")
-                continue
-
-            # MATCH PRUNED MIDLINE WITH DERIVED (strict 1:1 by (atomic_id, branch_id))
-            if geom_name == "midline":
-                pruned_derived_segs = []
-                pruned_derived_meta = []
-                for Smid, mmid in zip(pruned_segs, pruned_meta):
-                    aid = mmid.get("atomic_id")
-                    bid = _safe_int(mmid.get("branch_id"), -1)
-                    found = False
-                    for Sder, mder in zip(derived_segs, derived_meta):
-                        mder = mder if isinstance(mder, dict) else {}
-                        if (
-                            str(mder.get("atomic_id")) == str(aid)
-                            and int(_safe_int(mder.get("branch_id"), -1)) == int(bid)
-                        ):
-                            pruned_derived_segs.append(np.asarray(Sder, float))
-                            pruned_derived_meta.append(dict(mder))
-                            found = True
-                            break
-                    if not found:
-                        raise RuntimeError(
-                            f"[FATAL] Missing derived segment for atomic_id={aid}, "
-                            f"branch_id={bid} in cid={cid}"
-                        )
-                geom["pruned_derived_segs_stage2"] = pruned_derived_segs
-                geom["pruned_derived_meta_stage2"] = pruned_derived_meta
-
-            # ---------------- combined Stage 4.5: apply union dominance ----------------
-            pred_dom_segs, pred_dom_meta, bite_pruned_pred_segs = _apply_union_dominance(
-                pruned_segs,
-                pruned_meta,
-                loss_masks_pred_by_branch=loss_masks_pred_by_branch,
-                loss_masks_gt_by_branch=loss_masks_gt_by_branch,
-                H_full=H,
-                W_full=W,
-            )
-            gt_dom_segs, gt_dom_meta, bite_pruned_gt_segs = _apply_union_dominance(
-                gt_pruned_segs,
-                gt_pruned_meta,
-                loss_masks_pred_by_branch=loss_masks_pred_by_branch,
-                loss_masks_gt_by_branch=loss_masks_gt_by_branch,
-                H_full=H,
-                W_full=W,
-            )
-
-            geom["pruned_segs_after_dominance"] = pred_dom_segs
-            geom["pruned_meta_after_dominance"] = pred_dom_meta
-            geom["gt_pruned_segs_after_dominance"] = gt_dom_segs
-            geom["gt_pruned_meta_after_dominance"] = gt_dom_meta
-            geom["bite_pruned_pred_segs"] = bite_pruned_pred_segs
-            geom["bite_pruned_gt_segs"] = bite_pruned_gt_segs
-
-            # ---------------- combined Stage 5: width slicing (derived only) ----------------
-            if not do_widths:
-                continue
-            if geom_name != "derived":
-                continue
-
-            pred_source = predw_full_any
-            if pred_source is None or np.asarray(pred_source).size < 2:
-                pred_source = widths_geo
-            if pred_source is None or np.asarray(pred_source).size < 2:
-                print(f"[STAGE5] cid={cid} no usable predicted width source")
-                continue
-
-            pred_source = np.asarray(pred_source, float).reshape(-1)
-            orig_derived = [np.asarray(s, float) for s in derived_segs if s is not None and len(s) >= 2]
-            seg_start = {}
-            off0 = 0
-            for i0, S0 in enumerate(orig_derived):
-                seg_start[i0] = off0
-                off0 += len(S0)
-
-            have_valid_seg_idx = any(
-                isinstance(m.get("seg_idx"), int) and int(m.get("seg_idx")) in seg_start
-                for m in (pred_dom_meta or [])
-                if isinstance(m, dict)
-            )
-
-            off_fallback = 0
-            for S, m in zip(pred_dom_segs, pred_dom_meta):
-                if S is None or len(S) < 2:
-                    continue
-                mm = m if isinstance(m, dict) else {}
-
-                if (
-                    have_valid_seg_idx
-                    and isinstance(mm.get("seg_idx"), int)
-                    and int(mm.get("seg_idx")) in seg_start
-                ):
-                    s0 = seg_start[int(mm.get("seg_idx"))]
-                else:
-                    s0 = off_fallback
-
-                L = len(S)
-                s1 = min(s0 + L, len(pred_source))
-                predw = pred_source[s0:s1]
-                pts = np.asarray(S, float)[: len(predw)]
-                off_fallback += L
-
-                if len(pts) < 2 or len(predw) < 2:
-                    continue
-
-                predw = np.asarray(predw, float)
-                pts = np.asarray(pts, float)
-
-                finite_pred = np.isfinite(predw)
-                if int(np.count_nonzero(finite_pred)) < 2:
-                    continue
-                predw = predw[finite_pred]
-                pts = pts[finite_pred]
-
-                (_, _, _, _, gtw), _ = normals_from_mask_for_midline(
-                    pts, mask_bin, max_radius
-                )
-                gtw = np.asarray(gtw, float)
-                n = min(len(gtw), len(pts), len(predw))
-                if n < 2:
-                    continue
-                gtw = gtw[:n]
-                pts = pts[:n]
-                predw = predw[:n]
-
-                finite_gt = np.isfinite(gtw)
-                if int(np.count_nonzero(finite_gt)) < 2:
-                    continue
-                gtw = gtw[finite_gt]
-                pts = pts[finite_gt]
-                predw = predw[finite_gt]
-
-                d = predw - gtw
-                coords.append(pts)
-                diffs.append(d)
-                if crack.get("mask_bbox") is not None:
-                    bboxes.append(crack.get("mask_bbox"))
-
-                width_pairs.append(
-                    {
-                        "image": base_name,
-                        "cid": str(cid),
-                        "member_id": str(mm.get("atomic_id")) if isinstance(mm, dict) else None,
-                        "crack_type": "combined",
-                        "midline_type": midline_type,
-                        "geometry_type": geom_name,
-                        "bbox": crack.get("mask_bbox"),
-                        "pts": pts,
-                        "predw": predw,
-                        "gruthw": gtw,
-                        "gt_source": "mask_same_samples",
-                        "branch_id": mm.get("branch_id"),
-                        "seg_idx": mm.get("seg_idx"),
-                        "gt_mismatch": False,
-                        "gt_relation": "combined_vs_combined",
-                    }
-                )
-
-        # Midline metrics for BOTH streams (midline + derived) in combined mode.
-        if mode == "combined" and gt_entry is not None:
-            try:
-                from helpers.metrics import compute_midline_metrics
-                import math
-
-                for geom_name, geom in geometry_streams.items():
-                    if geom_name not in ("midline", "derived"):
-                        continue
-                    pred_keep = geom.get("pruned_segs_after_dominance") or []
-                    gt_keep = geom.get("gt_pruned_segs_after_dominance") or []
-                    if not pred_keep or not gt_keep:
-                        continue
-
-                    pred_mid = np.vstack(pred_keep)
-                    gt_mid = np.vstack(gt_keep)
-                    if len(pred_mid) < 2 or len(gt_mid) < 2:
-                        continue
-
-                    mm = compute_midline_metrics(pred_mid, gt_mid)
-                    ch = float(mm.get("nn_mean_bidirectional", np.inf))
-                    hd = float(mm.get("hausdorff_max", np.inf))
-                    cov = float(mm.get("coverage_min", 0.0))
-                    score_mid = (
-                        math.log1p(max(ch, 0.0))
-                        + 0.5 * math.log1p(max(hd, 0.0))
-                        + (1.0 - float(np.clip(cov, 0.0, 1.0)))
-                    )
-
-                    bbox0 = crack.get("mask_bbox")
-                    midline_metric_rows.append(
-                        {
-                            "image": base_name,
-                            "crack_id": str(cid),
-                            "geometry_type": geom_name,
-                            "variant_global_id": -1,
-                            "os_mode": "combined",
-                            "g11": np.nan,
-                            "g22": np.nan,
-                            "g33": np.nan,
-                            "length_px": _linestring_length(gt_mid),
-                            "bbox_area": float(bbox0[2] * bbox0[3]) if bbox0 else np.nan,
-                            "nn_mean_bidirectional": ch,
-                            "hausdorff_max": hd,
-                            "coverage_min": cov,
-                            "score_mid": score_mid,
-                            "frechet_discrete_ds": mm.get("frechet_discrete_ds"),
-                            "mean_tan_angle_error_deg": mm.get("mean_tan_angle_error_deg"),
-                            "relative_length_error": mm.get("relative_length_error"),
-                            "orth_mean": mm.get("orth_mean"),
-                            "orth_std": mm.get("orth_std"),
-                            "signed_bias_z": mm.get("signed_bias_z"),
-                            "curvature_rms_auto": mm.get("curvature_rms_auto"),
-                            "curvature_rms_manual": mm.get("curvature_rms_manual"),
-                            "curvature_rms_ratio": mm.get("curvature_rms_ratio"),
-                        }
-                    )
-            except Exception as e:
-                print(f"[MIDLINE METRICS] skipped cid={cid}: {e}")
-
-        # Legacy pipeline below is kept for reference; new geometry-stream path is authoritative.
-        continue
 
 
         ##############################################
@@ -4154,6 +3713,19 @@ def compare_widths_for_aligned_cracks(
             print(f"[WIDTH DEBUG] cid={cid} -> NO GT SEGMENTS AFTER BRANCH MATCH")
             # allowed; Stage-4 should just show GT empty
 
+        # ------------------------------------------------------------
+        # Stage 2.25: derive corresponding kept DERIVED segments
+        # ------------------------------------------------------------
+        pred_mid_stage2_segs = pruned_segs
+        pred_mid_stage2_meta = pruned_meta
+        pred_der_stage2_segs, pred_der_stage2_meta = _match_midline_to_derived(
+            pred_mid_stage2_segs,
+            pred_mid_stage2_meta,
+            dsegs,
+            dmeta,
+            cid=cid,
+        )
+
 
         # ============================================================
         # (D) compute GT-local bbox for Stage-4/5
@@ -4382,16 +3954,21 @@ def compare_widths_for_aligned_cracks(
 
             print(f"[STAGE2 OPSEC] wrote {out}")
 
+        # Stage-2 prediction plot stream:
+        # Use derived geometry so kept/dropped keying is internally consistent.
+        plot_pred_segs = pred_der_stage2_segs
+        plot_pred_meta = pred_der_stage2_meta
+
         plot_stage2_prune_opsec(
             cid=cid,
             crack=crack,
             H=H,
             W=W,
             mask_bin=mask_bin,
-            segs=segs,
-            seg_meta=seg_meta,
-            pruned_segs=pruned_segs,
-            pruned_meta=pruned_meta,
+            segs=dsegs,
+            seg_meta=dmeta,
+            pruned_segs=plot_pred_segs,
+            pruned_meta=plot_pred_meta,
             gt_entry=gt_entry,
             gt_pruned_segs=gt_pruned_segs,
             gt_pruned_meta=gt_pruned_meta,
@@ -4403,7 +3980,7 @@ def compare_widths_for_aligned_cracks(
         # --------------------------------------------
         # Stage 3: build ORIGINAL segment offsets
         # --------------------------------------------
-        orig_segs = [np.asarray(s, float) for s in crack.get("midline_segments", [])]
+        orig_segs = [np.asarray(s, float) for s in dsegs if s is not None and len(s) >= 2]
         seg_start = {}
         off = 0
         for i, S in enumerate(orig_segs):
@@ -4414,7 +3991,7 @@ def compare_widths_for_aligned_cracks(
 
         have_valid_seg_idx = any(
             isinstance(m.get("seg_idx"), int) and m["seg_idx"] in seg_start
-            for m in pruned_meta
+            for m in pred_der_stage2_meta
         )
 
         off_fallback = 0
@@ -5034,8 +4611,8 @@ def compare_widths_for_aligned_cracks(
                 )
                 seen.add(bid)
 
-        # Pred midlines (right)
-        for S, m in zip(pruned_segs or [], pruned_meta or []):
+        # Pred midlines (right) — derived stage-2 geometry
+        for S, m in zip(pred_der_stage2_segs or [], pred_der_stage2_meta or []):
             if S is None or len(S) < 2:
                 continue
             m = m if isinstance(m, dict) else {}
@@ -5077,12 +4654,10 @@ def compare_widths_for_aligned_cracks(
         # ------------------------------------------------------------
         # HARD FAILS — NO FALLBACKS
         # ------------------------------------------------------------
-        if "pruned_segs" not in locals() or not pruned_segs:
-            raise RuntimeError("[STAGE4.5 FATAL] pruned_segs missing — must start from Stage-4 geometry")
-
-        if "pruned_meta" not in locals() or pruned_meta is None:
-            raise RuntimeError("[STAGE4.5 FATAL] pruned_meta missing — must start from Stage-4 geometry")
-
+        if not pred_mid_stage2_segs:
+            raise RuntimeError("[STAGE4.5 FATAL] pred_mid_stage2_segs missing")
+        if not pred_der_stage2_segs:
+            raise RuntimeError("[STAGE4.5 FATAL] pred_der_stage2_segs missing")
         if "gt_pruned_segs" not in locals() or not gt_pruned_segs:
             raise RuntimeError("[STAGE4.5 FATAL] gt_pruned_segs missing — must start from Stage-2/4 GT geometry")
 
@@ -5093,7 +4668,8 @@ def compare_widths_for_aligned_cracks(
             else [{}] * len(gt_stage5_source_segs)
         )
 
-        print(f"[STAGE4.5] using Stage-4 PRED segs: {len(pruned_segs)}")
+        print(f"[STAGE4.5] using Stage-2 PRED mid segs: {len(pred_mid_stage2_segs)}")
+        print(f"[STAGE4.5] using Stage-2 PRED derived segs: {len(pred_der_stage2_segs)}")
         print(f"[STAGE4.5] using Stage-2/4 GT segs: {len(gt_stage5_source_segs)}")
 
         # ------------------------------------------------------------
@@ -5150,95 +4726,76 @@ def compare_widths_for_aligned_cracks(
         loss_masks_gt_by_branch   = _decode_bite_loss_masks_full(dom_gt,   H, W)
 
         # ------------------------------------------------------------
-        # Union-bite helper
-        # ------------------------------------------------------------
-        def _union_bite_for_branch(bid):
-            if bid is None:
-                return None
-            try:
-                bid = int(bid)
-            except Exception:
-                return None
-            mg = loss_masks_gt_by_branch.get(bid)
-            mp = loss_masks_pred_by_branch.get(bid)
-            if mg is None and mp is None:
-                return None
-            if mg is None:
-                return mp
-            if mp is None:
-                return mg
-            return (mg | mp)
-
-        # ------------------------------------------------------------
         # Snapshot BEFORE dominance
         # ------------------------------------------------------------
-        pred_pre45_segs = [np.asarray(S, float) for S in pruned_segs if S is not None and len(S) >= 2]
+        pred_pre45_segs = [np.asarray(S, float) for S in pred_der_stage2_segs if S is not None and len(S) >= 2]
 
         # ============================================================
-        # Stage 4.5 — APPLY UNION DOMINANCE (PRED)
+        # Stage 4.5 — APPLY UNION DOMINANCE (PRED MID + PRED DERIVED + GT)
         # ============================================================
-        pred_dom_segs = []
-        pred_dom_meta = []
-        bite_pruned_pred_segs = []
+        pred_mid_dom_segs, pred_mid_dom_meta, bite_pruned_pred_mid = _apply_union_dominance(
+            pred_mid_stage2_segs,
+            pred_mid_stage2_meta,
+            loss_masks_pred_by_branch=loss_masks_pred_by_branch,
+            loss_masks_gt_by_branch=loss_masks_gt_by_branch,
+            H_full=H,
+            W_full=W,
+        )
+        pred_der_dom_segs, pred_der_dom_meta, bite_pruned_pred_der = _apply_union_dominance(
+            pred_der_stage2_segs,
+            pred_der_stage2_meta,
+            loss_masks_pred_by_branch=loss_masks_pred_by_branch,
+            loss_masks_gt_by_branch=loss_masks_gt_by_branch,
+            H_full=H,
+            W_full=W,
+        )
+        gt_dom_segs, gt_dom_meta, bite_pruned_gt_segs = _apply_union_dominance(
+            gt_stage5_source_segs,
+            gt_stage5_source_meta,
+            loss_masks_pred_by_branch=loss_masks_pred_by_branch,
+            loss_masks_gt_by_branch=loss_masks_gt_by_branch,
+            H_full=H,
+            W_full=W,
+        )
 
-        for S, m in zip(pruned_segs, pruned_meta):
-            if S is None or len(S) < 2:
-                continue
-            m = m if isinstance(m, dict) else {}
-            bid = _safe_int(m.get("branch_id"), None)
-            rm = _union_bite_for_branch(bid)
-            if rm is None:
-                pred_dom_segs.append(np.asarray(S, float))
-                pred_dom_meta.append(m)
-                continue
-            kept, removed = _clip_polyline_into_runs(S, rm, H, W, min_pts=2)
-            bite_pruned_pred_segs.extend(removed)
-            for k in kept:
-                pred_dom_segs.append(np.asarray(k, float))
-                pred_dom_meta.append(m)
+        bite_pruned_pred_segs = bite_pruned_pred_der
+        gt_stage5_segs = gt_dom_segs
+        gt_stage5_meta = gt_dom_meta
 
-        pruned_segs = pred_dom_segs
-        pruned_meta = pred_dom_meta
+        pruned_segs = pred_mid_dom_segs
+        pruned_meta = pred_mid_dom_meta
 
-        print(f"[STAGE4.5] PRED kept {len(pruned_segs)} runs")
-
-        # ============================================================
-        # Stage 4.5 — APPLY UNION DOMINANCE (GT)
-        # ============================================================
-        gt_stage5_segs = []
-        gt_stage5_meta = []
-        bite_pruned_gt_segs = []
-
-        for Sg, mg in zip(gt_stage5_source_segs, gt_stage5_source_meta):
-            if Sg is None or len(Sg) < 2:
-                continue
-            mg = mg if isinstance(mg, dict) else {}
-            bid = _safe_int(mg.get("branch_id"), None)
-            rm = _union_bite_for_branch(bid)
-            if rm is None:
-                gt_stage5_segs.append(np.asarray(Sg, float))
-                gt_stage5_meta.append(mg)
-                continue
-            kept, removed = _clip_polyline_into_runs(Sg, rm, H, W, min_pts=2)
-            bite_pruned_gt_segs.extend(removed)
-            for k in kept:
-                gt_stage5_segs.append(np.asarray(k, float))
-                gt_stage5_meta.append(mg)
-
+        print(f"[STAGE4.5] PRED MID kept {len(pred_mid_dom_segs)} runs")
+        print(f"[STAGE4.5] PRED DERIVED kept {len(pred_der_dom_segs)} runs")
         print(f"[STAGE4.5] GT kept {len(gt_stage5_segs)} runs")
 
         # ============================================================
         # Stage 5 — WIDTH SLICING (STRICT)
         # ============================================================
-        if not pruned_segs:
-            raise RuntimeError("[STAGE5 FATAL] no prediction geometry after dominance")
+        if not pred_der_dom_segs:
+            raise RuntimeError("[STAGE5 FATAL] no derived prediction geometry after dominance")
         if not gt_stage5_segs:
             raise RuntimeError("[STAGE5 FATAL] no GT geometry after dominance")
 
         final_pred_segs = []
         stage4_pairs = []
 
-        for S, m in zip(pruned_segs, pruned_meta):
+        pred_source = predw_full_any
+        if pred_source is None or np.asarray(pred_source).size < 2:
+            pred_source = widths_geo
+        if pred_source is None or np.asarray(pred_source).size < 2:
+            print(f"[STAGE5] cid={cid} no usable predicted width source")
+            continue
+        pred_source = np.asarray(pred_source, float).reshape(-1)
+
+        have_valid_seg_idx = any(
+            isinstance(m.get("seg_idx"), int) and int(m.get("seg_idx")) in seg_start
+            for m in (pred_der_dom_meta or [])
+            if isinstance(m, dict)
+        )
+        off_fallback = 0
+
+        for S, m in zip(pred_der_dom_segs, pred_der_dom_meta):
             if S is None or len(S) < 2:
                 continue
 
@@ -5248,8 +4805,8 @@ def compare_widths_for_aligned_cracks(
                 s0 = off_fallback
 
             L = len(S)
-            s1 = min(s0 + L, len(widths_geo))
-            predw = widths_geo[s0:s1]
+            s1 = min(s0 + L, len(pred_source))
+            predw = pred_source[s0:s1]
             pts = S[:len(predw)]
             off_fallback += L
 
@@ -5274,6 +4831,7 @@ def compare_widths_for_aligned_cracks(
                 "member_id": str(m.get("atomic_id")) if isinstance(m, dict) else None,
                 "crack_type": "combined",
                 "midline_type": midline_type,
+                "geometry_type": "derived",
                 "bbox": crack.get("mask_bbox"),
                 "pts": pts,
                 "predw": predw,
@@ -5516,6 +5074,9 @@ def compare_widths_for_aligned_cracks(
                                             
         # ============================================================
         # MIDLINE METRICS (COMBINED + AUTO ONLY)
+        #   Compare BOTH:
+        #     - pred MIDLINE stream vs GT midline
+        #     - pred DERIVED stream vs GT midline
         # ============================================================
         if mode == "combined" and midline_type == "auto" and gt_entry is not None:
             try:
@@ -5523,74 +5084,77 @@ def compare_widths_for_aligned_cracks(
                 import math
                 import numpy as np
 
-                # ---- build GT midline (same pruning rules as pred) ----
-                gt_segs_all = gt_entry.get("midline_segments") or []
+                if pred_mid_dom_segs and gt_dom_segs:
+                    pred_mid = np.vstack([np.asarray(s, float) for s in pred_mid_dom_segs if s is not None and len(s) >= 2])
+                    gt_mid   = np.vstack([np.asarray(s, float) for s in gt_dom_segs if s is not None and len(s) >= 2])
 
-                # AUTHORITATIVE: GT segment metadata lives ONLY here
-                gt_meta_all = (
-                    gt_entry.get("dominance_meta", {}).get("segments_meta") or []
-                )
+                    if len(pred_mid) >= 2 and len(gt_mid) >= 2:
+                        mm = compute_midline_metrics(pred_mid, gt_mid)
+                        ch  = float(mm.get("nn_mean_bidirectional", np.inf))
+                        hd  = float(mm.get("hausdorff_max", np.inf))
+                        cov = float(mm.get("coverage_min", 0.0))
+                        score_mid = (math.log1p(max(ch, 0.0)) + 0.5 * math.log1p(max(hd, 0.0)) + (1.0 - float(np.clip(cov, 0.0, 1.0))))
 
+                        bbox0 = crack.get("mask_bbox")
+                        midline_metric_rows.append({
+                            "image": base_name,
+                            "crack_id": str(cid),
+                            "geometry_type": "midline",
+                            "variant_global_id": -1,
+                            "os_mode": "combined",
+                            "g11": np.nan, "g22": np.nan, "g33": np.nan,
+                            "length_px": _linestring_length(gt_mid),
+                            "bbox_area": float(bbox0[2] * bbox0[3]) if bbox0 else np.nan,
+                            "nn_mean_bidirectional": ch,
+                            "hausdorff_max": hd,
+                            "coverage_min": cov,
+                            "score_mid": score_mid,
+                            "frechet_discrete_ds": mm.get("frechet_discrete_ds"),
+                            "mean_tan_angle_error_deg": mm.get("mean_tan_angle_error_deg"),
+                            "relative_length_error": mm.get("relative_length_error"),
+                            "orth_mean": mm.get("orth_mean"),
+                            "orth_std": mm.get("orth_std"),
+                            "signed_bias_z": mm.get("signed_bias_z"),
+                            "curvature_rms_auto": mm.get("curvature_rms_auto"),
+                            "curvature_rms_manual": mm.get("curvature_rms_manual"),
+                            "curvature_rms_ratio": mm.get("curvature_rms_ratio"),
+                        })
 
-                gt_keep = []
-                for Sg, mg in zip(gt_segs_all, gt_meta_all):
-                    if Sg is None or len(Sg) < 2:
-                        continue
-                    aid = mg.get("atomic_id")
-                    if aid is not None and str(aid) not in shared:
-                        continue
-                    bid = int(mg.get("branch_id", -1))
-                    if matched_pred_branch_ids is not None and bid not in matched_pred_branch_ids:
-                        continue
-                    gt_keep.append(np.asarray(Sg, float))
+                if pred_der_dom_segs and gt_dom_segs:
+                    pred_der = np.vstack([np.asarray(s, float) for s in pred_der_dom_segs if s is not None and len(s) >= 2])
+                    gt_mid   = np.vstack([np.asarray(s, float) for s in gt_dom_segs if s is not None and len(s) >= 2])
 
-                if final_pred_segs and gt_keep:
-                    pred_mid = np.vstack(final_pred_segs)
-                    gt_mid   = np.vstack(gt_keep)
+                    if len(pred_der) >= 2 and len(gt_mid) >= 2:
+                        mm = compute_midline_metrics(pred_der, gt_mid)
+                        ch  = float(mm.get("nn_mean_bidirectional", np.inf))
+                        hd  = float(mm.get("hausdorff_max", np.inf))
+                        cov = float(mm.get("coverage_min", 0.0))
+                        score_mid = (math.log1p(max(ch, 0.0)) + 0.5 * math.log1p(max(hd, 0.0)) + (1.0 - float(np.clip(cov, 0.0, 1.0))))
 
-                    mm = compute_midline_metrics(pred_mid, gt_mid)
-
-                    ch  = float(mm.get("nn_mean_bidirectional", np.inf))
-                    hd  = float(mm.get("hausdorff_max", np.inf))
-                    cov = float(mm.get("coverage_min", 0.0))
-
-                    score_mid = (
-                        math.log1p(max(ch, 0.0)) +
-                        0.5 * math.log1p(max(hd, 0.0)) +
-                        (1.0 - float(np.clip(cov, 0.0, 1.0)))
-                    )
-
-                    bbox0 = crack.get("mask_bbox")
-
-                    midline_metric_rows.append({
-                        "image": base_name,
-                        "crack_id": str(cid),
-                        "variant_global_id": -1,
-                        "os_mode": "combined",
-                        "g11": np.nan,
-                        "g22": np.nan,
-                        "g33": np.nan,
-
-                        "length_px": _linestring_length(gt_mid),
-                        "bbox_area": float(bbox0[2] * bbox0[3]) if bbox0 else np.nan,
-
-                        # --- selection metrics ---
-                        "nn_mean_bidirectional": ch,
-                        "hausdorff_max": hd,
-                        "coverage_min": cov,
-                        "score_mid": score_mid,
-
-                        # --- diagnostics ---
-                        "frechet_discrete_ds": mm.get("frechet_discrete_ds"),
-                        "mean_tan_angle_error_deg": mm.get("mean_tan_angle_error_deg"),
-                        "relative_length_error": mm.get("relative_length_error"),
-                        "orth_mean": mm.get("orth_mean"),
-                        "orth_std": mm.get("orth_std"),
-                        "signed_bias_z": mm.get("signed_bias_z"),
-                        "curvature_rms_auto": mm.get("curvature_rms_auto"),
-                        "curvature_rms_manual": mm.get("curvature_rms_manual"),
-                        "curvature_rms_ratio": mm.get("curvature_rms_ratio"),
-                    })
+                        bbox0 = crack.get("mask_bbox")
+                        midline_metric_rows.append({
+                            "image": base_name,
+                            "crack_id": str(cid),
+                            "geometry_type": "derived",
+                            "variant_global_id": -1,
+                            "os_mode": "combined",
+                            "g11": np.nan, "g22": np.nan, "g33": np.nan,
+                            "length_px": _linestring_length(gt_mid),
+                            "bbox_area": float(bbox0[2] * bbox0[3]) if bbox0 else np.nan,
+                            "nn_mean_bidirectional": ch,
+                            "hausdorff_max": hd,
+                            "coverage_min": cov,
+                            "score_mid": score_mid,
+                            "frechet_discrete_ds": mm.get("frechet_discrete_ds"),
+                            "mean_tan_angle_error_deg": mm.get("mean_tan_angle_error_deg"),
+                            "relative_length_error": mm.get("relative_length_error"),
+                            "orth_mean": mm.get("orth_mean"),
+                            "orth_std": mm.get("orth_std"),
+                            "signed_bias_z": mm.get("signed_bias_z"),
+                            "curvature_rms_auto": mm.get("curvature_rms_auto"),
+                            "curvature_rms_manual": mm.get("curvature_rms_manual"),
+                            "curvature_rms_ratio": mm.get("curvature_rms_ratio"),
+                        })
 
             except Exception as e:
                 print(f"[MIDLINE METRICS] skipped cid={cid}: {e}")
