@@ -1339,6 +1339,7 @@ def plot_from_cached_geometry(
         plot_gt_normals_on_gtbw(
             gt_bin * 255,
             midline_xy_crop,
+            None,
             np.column_stack([e1x, e1y]),
             np.column_stack([e2x, e2y]),
             os.path.join(out_dir, "gt_normals.png"),

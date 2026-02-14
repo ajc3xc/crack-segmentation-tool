@@ -158,7 +158,7 @@ def plot_poly_before_after_to_file(
 def canonicalize_track_for_edges(
     track_yx,
     *,
-    ds_target=0.75,
+    ds_target=1.0,
     min_spacing_auto=0.8,
     min_spacing_manual=0.3,
     preserve_endpoints=True,

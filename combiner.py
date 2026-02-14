@@ -1931,6 +1931,222 @@ def debug_bbox_only(
     cv2.imwrite(out_path, vis)
 
 import numpy as np
+
+def _safe_float_xy(p):
+    p = np.asarray(p, float).reshape(2)
+    return np.array([float(p[0]), float(p[1])], dtype=float)
+
+def _pt_key(p, tol):
+    p = _safe_float_xy(p)
+    return (int(np.round(p[0] / tol)), int(np.round(p[1] / tol)))
+
+def _order_midline_branch_chain(segs, metas, *, tol=2.0):
+    """
+    Order + orient segs into a single chain using endpoint matching.
+    Returns ordered_segs, ordered_metas, chain_start_xy, chain_end_xy
+    """
+    segs2, metas2 = [], []
+    for S, m in zip(segs, metas):
+        if S is None:
+            continue
+        S = np.asarray(S, float)
+        if S.ndim != 2 or S.shape[1] != 2 or len(S) < 2:
+            continue
+        segs2.append(S)
+        metas2.append(m if isinstance(m, dict) else {})
+
+    if not segs2:
+        return [], [], None, None
+    if len(segs2) == 1:
+        S0 = segs2[0]
+        return segs2, metas2, _safe_float_xy(S0[0]), _safe_float_xy(S0[-1])
+
+    ends = [(_pt_key(S[0], tol), _pt_key(S[-1], tol)) for S in segs2]
+    ep_map = {}
+    for i, (ka, kb) in enumerate(ends):
+        ep_map.setdefault(ka, []).append((i, 0))
+        ep_map.setdefault(kb, []).append((i, 1))
+
+    degrees = {k: len(v) for k, v in ep_map.items()}
+    start_key = None
+    for k, deg in degrees.items():
+        if deg == 1:
+            start_key = k
+            break
+    if start_key is None:
+        start_key = ends[0][0]
+
+    used = set()
+    candidates = ep_map.get(start_key, [])
+    if not candidates:
+        S0 = segs2[0]
+        return segs2, metas2, _safe_float_xy(S0[0]), _safe_float_xy(S0[-1])
+
+    seg_idx, _side = candidates[0]
+    S0 = segs2[seg_idx]
+    if _pt_key(S0[0], tol) != start_key:
+        S0 = S0[::-1].copy()
+
+    chain_segs = [S0]
+    chain_metas = [metas2[seg_idx]]
+    used.add(seg_idx)
+    cur_key = _pt_key(chain_segs[-1][-1], tol)
+
+    while True:
+        nxt = None
+        for (j, _side_j) in ep_map.get(cur_key, []):
+            if j in used:
+                continue
+            nxt = j
+            break
+        if nxt is None:
+            break
+
+        Sj = segs2[nxt]
+        if _pt_key(Sj[0], tol) != cur_key:
+            Sj = Sj[::-1].copy()
+
+        chain_segs.append(Sj)
+        chain_metas.append(metas2[nxt])
+        used.add(nxt)
+        cur_key = _pt_key(chain_segs[-1][-1], tol)
+
+    chain_start = _safe_float_xy(chain_segs[0][0])
+    chain_end = _safe_float_xy(chain_segs[-1][-1])
+    return chain_segs, chain_metas, chain_start, chain_end
+
+def _nearest_index(poly_xy, q_xy):
+    poly = np.asarray(poly_xy, float)
+    q = _safe_float_xy(q_xy)
+    d2 = np.sum((poly - q[None, :]) ** 2, axis=1)
+    return int(np.argmin(d2))
+
+def _split_derived_by_atomic_junctions(
+    *,
+    branch_id: int,
+    derived_run_xy: np.ndarray,
+    mid_segs: list,
+    mid_meta: list,
+    tol_shared=2.5,
+):
+    """
+    Split ONE derived branch polyline into per-atomic segments.
+    """
+    if derived_run_xy is None:
+        raise ValueError(f"[DERIVED SPLIT] branch={branch_id} derived_run_xy is None")
+
+    D = np.asarray(derived_run_xy, float)
+    if D.ndim != 2 or D.shape[1] != 2 or len(D) < 2:
+        raise ValueError(f"[DERIVED SPLIT] branch={branch_id} derived_run invalid shape/len")
+
+    chain_segs, chain_metas, chain_start, chain_end = _order_midline_branch_chain(
+        mid_segs, mid_meta, tol=tol_shared
+    )
+    if not chain_segs:
+        return [D], [{
+            "branch_id": int(branch_id),
+            "atomic_id": None,
+            "seg_idx": 0,
+            "source": "derived_unsplit_no_midline",
+        }]
+
+    d0 = _safe_float_xy(D[0]); d1 = _safe_float_xy(D[-1])
+    cs = _safe_float_xy(chain_start); ce = _safe_float_xy(chain_end)
+    forward_score = float(np.linalg.norm(d0 - cs) + np.linalg.norm(d1 - ce))
+    reverse_score = float(np.linalg.norm(d0 - ce) + np.linalg.norm(d1 - cs))
+    if reverse_score + 1e-6 < forward_score:
+        D = D[::-1].copy()
+
+    atomic_seq = []
+    for m in chain_metas:
+        aid = m.get("atomic_id", None) if isinstance(m, dict) else None
+        atomic_seq.append(str(aid) if aid is not None else None)
+
+    unique_aids = [a for a in atomic_seq if a is not None]
+    if len(set(unique_aids)) <= 1:
+        aid0 = unique_aids[0] if unique_aids else None
+        return [D], [{
+            "branch_id": int(branch_id),
+            "atomic_id": aid0,
+            "seg_idx": 0,
+            "source": "derived_unsplit_single_atomic",
+        }]
+
+    cut_points = []
+    for i in range(len(chain_segs) - 1):
+        a_left = atomic_seq[i]
+        a_right = atomic_seq[i + 1]
+        if a_left is None or a_right is None:
+            continue
+        if a_left == a_right:
+            continue
+
+        end_left = _safe_float_xy(chain_segs[i][-1])
+        start_right = _safe_float_xy(chain_segs[i + 1][0])
+        if float(np.linalg.norm(end_left - start_right)) <= float(tol_shared):
+            cut_xy = 0.5 * (end_left + start_right)
+            cut_points.append((cut_xy, a_left, a_right))
+
+    if not cut_points:
+        aid0 = unique_aids[0] if unique_aids else None
+        return [D], [{
+            "branch_id": int(branch_id),
+            "atomic_id": aid0,
+            "seg_idx": 0,
+            "source": "derived_unsplit_no_junctions",
+        }]
+
+    cut_idx = []
+    for (p, aL, aR) in cut_points:
+        idx = _nearest_index(D, p)
+        cut_idx.append((idx, aL, aR))
+
+    cut_idx.sort(key=lambda t: t[0])
+    cleaned = []
+    last = -10**9
+    for (idx, aL, aR) in cut_idx:
+        if idx <= last + 1:
+            continue
+        cleaned.append((idx, aL, aR))
+        last = idx
+    cut_idx = cleaned
+
+    out_segs = []
+    out_meta = []
+    start_i = 0
+    current_atomic = cut_idx[0][1]
+    seg_counter = 0
+
+    for (idx, aL, aR) in cut_idx:
+        end_i = int(idx) + 1
+        if end_i - start_i >= 2:
+            piece = D[start_i:end_i]
+            out_segs.append(piece)
+            out_meta.append({
+                "branch_id": int(branch_id),
+                "atomic_id": str(aL),
+                "seg_idx": int(seg_counter),
+                "source": "derived_split_at_atomic_junction",
+            })
+            seg_counter += 1
+        start_i = int(idx)
+        current_atomic = str(aR)
+
+    if len(D) - start_i >= 2:
+        piece = D[start_i:]
+        out_segs.append(piece)
+        out_meta.append({
+            "branch_id": int(branch_id),
+            "atomic_id": str(current_atomic),
+            "seg_idx": int(seg_counter),
+            "source": "derived_split_at_atomic_junction",
+        })
+
+    if not out_segs:
+        raise RuntimeError(f"[DERIVED SPLIT] branch={branch_id} produced zero output segments")
+
+    return out_segs, out_meta
+
 def build_combined_crack_stateless(
     original_image: np.ndarray,
     authoring_atomic: dict,
@@ -2372,6 +2588,15 @@ def build_combined_crack_stateless(
                 out.append([None, None])
         return out
 
+    def _flatten_with_none(seg_list):
+        out = []
+        for i, arr in enumerate(seg_list):
+            for (xx, yy) in arr:
+                out.append([float(xx), float(yy)])
+            if i < len(seg_list) - 1:
+                out.append([None, None])
+        return out
+
     derived_midline_meta = recompute_dominance_geometry_from_derived(
         dominance_meta=dominance_meta,
         branch_to_derived_runs=branch_to_derived_runs,
@@ -2384,6 +2609,54 @@ def build_combined_crack_stateless(
         debug_dir=debug_dir,
         debug_tag="derived_geometry_dominance",
     )
+
+    # --------------------------------------------------------
+    # Split derived per-branch runs into per-atomic segments
+    # --------------------------------------------------------
+    derived_midline_segments = []
+    derived_midline_segments_meta = []
+
+    branch_to_mid = {}
+    for S, m in zip(segs, midline_segments_meta):
+        if S is None or len(S) < 2:
+            continue
+        mm = m if isinstance(m, dict) else {}
+        bid = int(mm.get("branch_id", -1))
+        branch_to_mid.setdefault(bid, {"segs": [], "meta": []})
+        branch_to_mid[bid]["segs"].append(np.asarray(S, float))
+        branch_to_mid[bid]["meta"].append(dict(mm))
+
+    for bi, runs in (branch_to_derived_runs or {}).items():
+        bi = int(bi)
+        runs = runs or []
+        if not runs:
+            continue
+
+        runs_np = [np.asarray(r, float) for r in runs if r is not None and len(r) >= 2]
+        if not runs_np:
+            continue
+        runs_np.sort(key=lambda a: int(len(a)), reverse=True)
+        D = runs_np[0]
+
+        mid_pack = branch_to_mid.get(bi, {"segs": [], "meta": []})
+        mid_segs_b = mid_pack["segs"]
+        mid_meta_b = mid_pack["meta"]
+
+        d_segs, d_meta = _split_derived_by_atomic_junctions(
+            branch_id=bi,
+            derived_run_xy=D,
+            mid_segs=mid_segs_b,
+            mid_meta=mid_meta_b,
+            tol_shared=2.5,
+        )
+        derived_midline_segments.extend(d_segs)
+        derived_midline_segments_meta.extend(d_meta)
+
+    if len(derived_midline_segments) != len(derived_midline_segments_meta):
+        raise RuntimeError(
+            f"[COMBINER] derived_midline_segments/meta mismatch: "
+            f"{len(derived_midline_segments)} segs vs {len(derived_midline_segments_meta)} meta"
+        )
 
     combined_length = float(sum(_linestring_length(s) for s in segs))
     if len(all_widths):
@@ -2412,7 +2685,7 @@ def build_combined_crack_stateless(
     
     semantic_id = "_".join(str(m) for m in member_ids)
 
-    return {
+    ret = {
         "source": "combined",
         "semantic_id": semantic_id,
         "mode": mode,
@@ -2421,6 +2694,11 @@ def build_combined_crack_stateless(
             [[float(xx), float(yy)] for (xx, yy) in s] for s in segs
         ],
         "midline": _flatten(segs),
+        "derived_midline_segments": [
+            [[float(xx), float(yy)] for (xx, yy) in s] for s in derived_midline_segments
+        ],
+        "derived_midline_segments_meta": derived_midline_segments_meta,
+        "derived_midline": _flatten_with_none(derived_midline_segments),
         "geodesic_edges": {"edge1": _flatten(edge1_segs),
                            "edge2": _flatten(edge2_segs)},
         "normal_edge_points": {"edge1": _flatten(norm1_segs),
@@ -2441,5 +2719,8 @@ def build_combined_crack_stateless(
         "dominance_meta": dominance_meta,
         "derived_midline_meta": derived_midline_meta,
     }
+    if isinstance(ret["derived_midline_meta"], dict):
+        ret["derived_midline_meta"].setdefault("segments_meta", ret["derived_midline_segments_meta"])
+    return ret
 
 

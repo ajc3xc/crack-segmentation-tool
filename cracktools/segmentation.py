@@ -507,30 +507,7 @@ from agd import Eikonal
 from agd.Metrics import Riemann
 from shapely.ops import nearest_points
 from shapely.geometry import LineString, Point, MultiPoint
-
-'''def _run_geodesic(metric_array, seeds, tips, sides, dims, strict=True):
-    """Run geodesic; retry with softened metric if path deviates."""
-    metric = Riemann(metric_array)
-    hfmIn = Eikonal.dictIn({
-        'model': 'Riemann2',
-        'seeds': np.expand_dims(seeds, axis=0),
-        'arrayOrdering': 'RowMajor',
-        'tips': np.expand_dims(tips, axis=0),
-        'metric': metric,
-        'verbosity': 0,
-    })
-    hfmIn.SetRect(sides=sides, dims=dims)
-    hfmOut = hfmIn.Run()
-    track = [g.T for g in hfmOut['geodesics']][0]  # (N,2) (y,x)
-
-    if strict:
-        d_tip = np.linalg.norm(track[-1] - tips[::-1])  # compare (y,x)
-        if d_tip > 10:   # pixels tolerance
-            print(f"[WARN] Geodesic missed tip by {d_tip:.1f}px → retry with softened metric")
-            softened = np.power(metric_array, 0.5)  # flatten penalties
-            return _run_geodesic(softened, seeds, tips, sides, dims, strict=False)
-    return track'''
-    
+   
 # --- add near the top of segmentation.py (after numpy imports) ---
 # --- Safe CuPy detection ---
 try:
@@ -697,6 +674,86 @@ def edges_tracking(
         nx = int(inds[1, yi, xi])
         return np.array([nx, ny], float)
 
+    def _save_stage5c_debug_plot(
+        e1,
+        e2,
+        orig_mid_xy,
+        derived_mid_xy,
+        debug_dir,
+        mode,
+        mu,
+        l,
+        p
+    ):
+        """
+        PURE visualization.
+        Black background.
+        Shows:
+            - e1 (cyan)
+            - e2 (lime)
+            - original midline (white dashed)
+            - derived midpoint midline (red)
+        """
+
+        import os
+        import numpy as np
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(6, 6))
+
+        # --- Black background ---
+        fig.patch.set_facecolor('black')
+        ax.set_facecolor('black')
+
+        # Plot Edge 1 (cyan)
+        if e1 is not None and len(e1) > 1:
+            e1 = np.asarray(e1)
+            ax.plot(e1[:,0], e1[:,1], color='cyan', linewidth=3, alpha=0.3)
+            ax.plot(e1[:,0], e1[:,1], color='cyan', linewidth=1.5, label='Edge 1')
+
+        # Plot Edge 2 (lime)
+        if e2 is not None and len(e2) > 1:
+            e2 = np.asarray(e2)
+            ax.plot(e2[:,0], e2[:,1], color='lime', linewidth=3, alpha=0.3)
+            ax.plot(e2[:,0], e2[:,1], color='lime', linewidth=1.5, label='Edge 2')
+
+        # Original midline (white dashed)
+        if orig_mid_xy is not None and len(orig_mid_xy) > 1:
+            o = np.asarray(orig_mid_xy)
+            ax.plot(o[:,0], o[:,1], 'w--', linewidth=2, label='Original midline')
+
+        # Derived midpoint centerline (red)
+        if derived_mid_xy is not None and len(derived_mid_xy) > 1:
+            d = np.asarray(derived_mid_xy)
+            ax.plot(d[:,0], d[:,1], color='red', linewidth=4, alpha=0.25)
+            ax.plot(d[:,0], d[:,1], color='red', linewidth=2, label='Midpoint centerline')
+
+        ax.set_aspect('equal', adjustable='box')
+        ax.invert_yaxis()
+        ax.set_axis_off()
+
+        # --- Clean legend styling ---
+        legend = ax.legend(
+            loc="lower right",
+            frameon=True,
+            facecolor='black',
+            edgecolor='white',
+            fontsize=9
+        )
+        for text in legend.get_texts():
+            text.set_color("white")
+
+        plt.tight_layout()
+
+        os.makedirs(debug_dir, exist_ok=True)
+        out_png = os.path.join(
+            debug_dir,
+            f"edges_tracking_5c_midpoint_mode-{mode}_mu{int(mu)}_l{int(l)}_p{int(p)}.png"
+        )
+
+        plt.savefig(out_png, dpi=200, facecolor=fig.get_facecolor())
+        plt.close(fig)
+
     # --------------------------------------------------
     # 1. Gradients
     # --------------------------------------------------
@@ -811,84 +868,71 @@ def edges_tracking(
         raise ValueError("[edges_tracking] extracted edges are degenerate (<2 pts); cannot derive midline")
 
     # --------------------------------------------------
-    # 5c. DERIVED MIDLINE from edges (DT corridor + Riemann2 geodesic)  [NO FALLBACK]
+    # 5c. DERIVED MIDLINE from edges (MIDPOINT METHOD)
     # --------------------------------------------------
     t0 = time.perf_counter()
 
-    # resample edges to a common N so fillPoly is well-behaved
-    Np = int(max(80, min(len(e1), len(e2))))
-    e1p = arclen_resample(e1, Np)
-    e2p = arclen_resample(e2, Np)
+    import numpy as np
 
-    poly = np.vstack([e1p, e2p[::-1]])
-    poly_i = np.round(poly).astype(np.int32)
-    poly_i[:, 0] = np.clip(poly_i[:, 0], 0, W - 1)
-    poly_i[:, 1] = np.clip(poly_i[:, 1], 0, H - 1)
+    # --- Ensure same direction ---
+    def _ensure_same_direction(e1, e2):
+        d_same = np.linalg.norm(e1[0] - e2[0]) + np.linalg.norm(e1[-1] - e2[-1])
+        d_flip = np.linalg.norm(e1[0] - e2[-1]) + np.linalg.norm(e1[-1] - e2[0])
+        return e2 if d_same <= d_flip else e2[::-1]
 
-    corridor = np.zeros((H, W), np.uint8)
-    cv2.fillPoly(corridor, [poly_i.reshape(-1, 1, 2)], 255)
-    corridor = (corridor > 0).astype(np.uint8)
+    # --- Arclength parameterization ---
+    def _arclen_param(xy):
+        xy = np.asarray(xy, float)
+        d = np.sqrt(((xy[1:] - xy[:-1])**2).sum(1))
+        s = np.concatenate([[0.0], np.cumsum(d)])
+        L = float(s[-1])
+        if L <= 1e-9:
+            return s, 0.0
+        return s / L, L
 
-    # keep corridor from collapsing on thin cracks
-    corridor = cv2.morphologyEx(
-        corridor, cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
-        iterations=1
-    )
+    def _sample_at_s(xy, s_norm, s_query):
+        x = np.interp(s_query, s_norm, xy[:,0])
+        y = np.interp(s_query, s_norm, xy[:,1])
+        return np.column_stack([x, y])
 
-    if not corridor.any():
-        raise ValueError("[edges_tracking] derived corridor mask is empty; cannot derive midline")
+    # --- Align edge directions ---
+    e2 = _ensure_same_direction(e1, e2)
 
-    # DT INSIDE corridor (distance to boundary)
-    dt_inside = cv2.distanceTransform(corridor, cv2.DIST_L2, 5).astype(np.float64)
-    if not np.isfinite(dt_inside).any() or float(np.nanmax(dt_inside)) <= 0.0:
-        raise ValueError("[edges_tracking] dt_inside invalid/zero; cannot derive midline")
+    # --- Parameterize both edges ---
+    s1, _ = _arclen_param(e1)
+    s2, _ = _arclen_param(e2)
 
-    # cost prefers ridge (center): cost = 1/(dt+eps) inside, huge outside
-    eps = 1e-6
-    cost = 1.0 / (dt_inside + eps)
-    cost[corridor == 0] = 1e6  # hard wall (should already be outside)
+    # --- Sample uniformly in normalized arclength ---
+    M = int(max(120, min(len(e1), len(e2))))
+    s = np.linspace(0.0, 1.0, M)
 
-    # light smoothing to reduce pixel staircases
-    cost = scipy.ndimage.gaussian_filter(cost, sigma=0.8)
+    p1 = _sample_at_s(e1, s1, s)
+    p2 = _sample_at_s(e2, s2, s)
 
-    # Metric for Riemann2: isotropic scalar field => diag(cost, cost)
-    metric_mid = np.array([[cost, np.zeros_like(cost)],
-                           [np.zeros_like(cost), cost]], dtype=np.float64)
+    # --- Midpoint centerline ---
+    derived_midline = 0.5 * (p1 + p2)
 
-    # snap endpoints into corridor before solving
-    p0_xy = _snap_xy_to_mask(np.array([pts_cropp[0][0], pts_cropp[0][1]], float), corridor)
-    p1_xy = _snap_xy_to_mask(np.array([pts_cropp[1][0], pts_cropp[1][1]], float), corridor)
-
-    seeds_mid_yx = np.array([p0_xy[1], p0_xy[0]], dtype=float)
-    tips_mid_yx  = np.array([p1_xy[1], p1_xy[0]], dtype=float)
-
-    gmid_yx = _run_geodesic(metric_mid, seeds_mid_yx, tips_mid_yx, sides, dims, prefer_gpu=prefer_gpu)
-    derived_midline = np.stack([gmid_yx[:, 1], gmid_yx[:, 0]], axis=1)
     derived_midline = finite_xy(derived_midline)
 
     if len(derived_midline) < 2:
-        raise ValueError("[edges_tracking] derived midline geodesic is degenerate (<2 pts)")
-
-    # Optional mild cleanup to make normals stable
-    if do_pp:
-        baseN = len(derived_midline)
-        targetN = max(int(resample_min_points), int(baseN * 1.10))
-        targetN = min(targetN, int(1.25 * baseN))
-        derived_midline = arclen_resample(derived_midline, targetN)
-
-        if smooth_k and int(smooth_k) > 1:
-            from scipy.signal import savgol_filter
-            k = int(smooth_k)
-            if k % 2 == 0:
-                k += 1
-            if len(derived_midline) >= k:
-                mx = savgol_filter(derived_midline[:, 0], window_length=k, polyorder=2, mode="interp")
-                my = savgol_filter(derived_midline[:, 1], window_length=k, polyorder=2, mode="interp")
-                derived_midline = np.column_stack([mx, my])
+        raise ValueError("[edges_tracking] derived midline degenerate")
 
     derived_midline[:, 0] = np.clip(derived_midline[:, 0], 0, W - 1)
     derived_midline[:, 1] = np.clip(derived_midline[:, 1], 0, H - 1)
+
+    # --- Debug plot ---
+    if debug_dir:
+        _save_stage5c_debug_plot(
+            e1=e1,
+            e2=e2,
+            orig_mid_xy=midline,
+            derived_mid_xy=derived_midline,
+            debug_dir=debug_dir,
+            mode=mode,
+            mu=mu,
+            l=l,
+            p=p,
+        )
 
     t_midline = time.perf_counter() - t0
 

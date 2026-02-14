@@ -944,6 +944,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             *,
             original_image,
             segs,
+            derived_midline_segs,
             edge1_segs,
             edge2_segs,
             norm1_segs,
@@ -958,6 +959,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             plot_edges_and_normals(
                 base_image=original_image,
                 midline_segs=segs,
+                derived_midline_segs=derived_midline_segs,
                 edge1_segs=edge1_segs,
                 edge2_segs=edge2_segs,
                 norm1_segs=norm1_segs,
@@ -994,6 +996,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                             norm1_segs=dbg.get("norm1_segs"),  # ✅ correct key
                             norm2_segs=dbg.get("norm2_segs"),  # ✅ correct key
                             mask_bbox=dbg.get("mask_bbox"),
+                            derived_midline_segs=dbg.get("derived_midline_segs"),
                             member_ids=members,
                             out_dir=mode_dir,
                         )
@@ -1149,6 +1152,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             pred_crop,
             x0, y0,
             mid_global,
+            derived_mid_global,
             e1_global,
             e2_global,
             out_normals_name="placeholder_normals.png",
@@ -1158,6 +1162,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             """
             Shared pretty plots: normals + width colormap on crop.
             Uses e1/e2 provided (authoritative) and only does visualization.
+            If derived_mid_global is provided, use it for width colormap and overlay.
             """
             try:
                 from helpers import plot_metrics
@@ -1193,14 +1198,19 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 print(f"[COMBINE_DBG] wrote → {out_iou}")
 
                 # plot normals on pred crop (same frame)
-                if mid_global is not None and e1_global is not None and e2_global is not None:
-                    mid_plot = np.asarray(mid_global, float).copy()
+                if (mid_global is not None or derived_mid_global is not None) and e1_global is not None and e2_global is not None:
+                    mid_plot = np.asarray(mid_global, float).copy() if mid_global is not None else None
+                    derived_plot = np.asarray(derived_mid_global, float).copy() if derived_mid_global is not None else None
                     e1 = np.asarray(e1_global, float).copy()
                     e2 = np.asarray(e2_global, float).copy()
 
                     # shift to crop frame
-                    mid_plot[:, 0] -= x0
-                    mid_plot[:, 1] -= y0
+                    if mid_plot is not None and mid_plot.ndim == 2 and len(mid_plot) > 0:
+                        mid_plot[:, 0] -= x0
+                        mid_plot[:, 1] -= y0
+                    if derived_plot is not None and derived_plot.ndim == 2 and len(derived_plot) > 0:
+                        derived_plot[:, 0] -= x0
+                        derived_plot[:, 1] -= y0
                     e1[:, 0] -= x0; e1[:, 1] -= y0
                     e2[:, 0] -= x0; e2[:, 1] -= y0
 
@@ -1208,6 +1218,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     plot_metrics.plot_gt_normals_on_gtbw(
                         (pred_crop * 255).astype(np.uint8),
                         mid_plot,
+                        None,
+                        derived_plot,
                         e1,
                         e2,
                         out_normals,
@@ -1220,7 +1232,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         gt_vs_manual_rgb = vis_large,
                         e1               = e1 * S,
                         e2               = e2 * S,
-                        midline_xy       = mid_plot * S,
+                        midline_xy       = (mid_plot * S) if mid_plot is not None else None,
+                        derived_midline_xy = (derived_plot * S) if derived_plot is not None else None,
                         track_e1         = None,
                         track_e2         = None,
                         out_png          = out_width,
@@ -1363,12 +1376,19 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     src = auto_combined_map.get(str(ccid), {}) if is_auto else cmb
                     ne  = src.get("normal_edge_points", {}) or {}
                     mid = np.asarray(src.get("midline", []), float)
+                    derived = np.asarray(src.get("derived_midline", []), float)
 
                     e1 = np.asarray(ne.get("edge1", []), float)
                     e2 = np.asarray(ne.get("edge2", []), float)
 
-                    if e1.size == 0 or e2.size == 0 or mid.size == 0:
-                        e1 = e2 = mid = None
+                    if e1.size == 0 or e2.size == 0:
+                        e1 = e2 = None
+                    if mid.size == 0:
+                        mid = None
+                    if derived.size == 0:
+                        derived = None
+                    if e1 is None or e2 is None or (mid is None and derived is None):
+                        e1 = e2 = mid = derived = None
 
                     _plot_normals_and_width_overlay_on_crop(
                         out_dir=mode_dir,
@@ -1377,6 +1397,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         x0=x0,
                         y0=y0,
                         mid_global=mid,
+                        derived_mid_global=derived,
                         e1_global=e1,
                         e2_global=e2,
                         out_normals_name="auto_normals.png" if is_auto else "manual_normals.png",
@@ -1509,28 +1530,47 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 #print(f"\n------------{cmb.keys()}-----------\n")
 
                 mid_segs = cmb.get("midline_segments", [])
+                derived  = cmb.get("derived_midline")
                 normals  = cmb.get("normal_edge_points", {}) or {}
                 bbox     = cmb.get("mask_bbox")      # ✅ required for zoom
                 crop     = cmb.get("mask_crop")      # ✅ REQUIRED for pred mask plotting
 
-                if not mid_segs or not normals:
+                # HARD REQUIREMENT: derived must exist
+                if not mid_segs or not derived or not normals:
+                    print(f"[WIDTH SKIP] combined {ccid} missing required geometry")
                     continue
 
                 if bbox is None or not (isinstance(bbox, (list, tuple)) and len(bbox) == 4):
                     print(f"[WIDTH WARN] combined {ccid} missing mask_bbox → will plot global")
+                    
+                #print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!{cmb.get('derived_midline_segments')}")
 
                 out[str(ccid)] = {
+                    # --- MIDLINE GEOMETRY (for alignment + midline metrics) ---
                     "midline_segments": mid_segs,
+                    "midline_segments_meta": cmb.get("midline_segments_meta"),
+
+                    # --- DERIVED GEOMETRY (REQUIRED for width slicing) ---
+                    "derived_midline_segments": cmb.get("derived_midline_segments"),
+                    "derived_midline_segments_meta": cmb.get("derived_midline_segments_meta"),
+                    "derived_midline": cmb.get("derived_midline"),
+                    "derived_midline_meta": cmb.get("derived_midline_meta"),
+
+                    # --- WIDTH NORMALS ---
                     "normal_edge_points": normals,
-                    "members": cmb.get("members", []),
+
+                    # --- MASK / ZOOM INFO ---
                     "mask_bbox": bbox,               # ✅ REQUIRED
                     "mask_crop": crop,               # ✅ ADDED (authoritative pred mask)
+
+                    # --- MEMBERSHIP ---
+                    "members": cmb.get("members", []),
+
+                    # --- DOMINANCE ---
+                    "dominance_meta": cmb.get("dominance_meta"),
+
                     "timing": cmb.get("timing", {}),
                 }
-
-                # pass through dominance + segment metadata verbatim
-                out[str(ccid)]["midline_segments_meta"] = cmb.get("midline_segments_meta")
-                out[str(ccid)]["dominance_meta"] = cmb.get("dominance_meta")
             return out
 
         # ------------------------------------------------------------------
@@ -3302,4 +3342,3 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         if rows:
             pd.DataFrame(rows).to_csv(os.path.join(out_dir, "combined_metrics.csv"), index=False)
             print(f"[combined] wrote → {os.path.join(out_dir, 'combined_metrics.csv')}")
-

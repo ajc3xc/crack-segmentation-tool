@@ -203,6 +203,7 @@ def plot_widths_colormap_on_crop(
     gt_vs_manual_rgb,
     e1, e2,
     midline_xy,
+    derived_midline_xy=None,
     track_e1=None,
     track_e2=None,
     out_png=None
@@ -217,7 +218,8 @@ def plot_widths_colormap_on_crop(
     # ---- convert arrays ----
     e1  = np.asarray(e1, float)
     e2  = np.asarray(e2, float)
-    mid = np.asarray(midline_xy, float)
+    mid_src = derived_midline_xy if derived_midline_xy is not None else midline_xy
+    mid = np.asarray(mid_src, float)
 
     if e1.ndim != 2 or e2.ndim != 2 or mid.ndim != 2:
         return
@@ -380,9 +382,10 @@ def plot_widths_colormap_on_crop(
         cb.set_ticklabels([f"{t:.1f}" for t in cleaned])
 
     # ---- legend ----
+    mid_label = "Derived midline (width color map)" if derived_midline_xy is not None else "Midline (width color map)"
     handles = [
         Line2D([], [], color="gray", lw=2.4,
-               label="Midline (width color map)"),
+               label=mid_label),
     ]
 
     if track_e1 is not None and len(track_e1) > 1:
@@ -799,6 +802,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 plot_gt_normals_on_gtbw(
                     pred_mask_u8,
                     derived_midline_crop,
+                    None,
                     pe1,
                     pe2,
                     pred_normals_path,
@@ -818,6 +822,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                     plot_gt_normals_on_gtbw(
                         gt_mask_u8,
                         derived_midline_crop,
+                        None,
                         ge1,
                         ge2,
                         gt_normals_path,

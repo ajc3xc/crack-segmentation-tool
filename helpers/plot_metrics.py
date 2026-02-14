@@ -118,12 +118,12 @@ def plot_edges_and_normals(
 
         if gt_plot:
             # GT mode → DO NOT SPLIT
-            ax.plot(seg[:,0]-shift_x, seg[:,1]-shift_y, "w-", lw=1.6)
+            ax.plot(seg[:,0]-shift_x, seg[:,1]-shift_y, "w--", lw=1.6)
             continue
 
         # Debug/auto mode → split long jumps
         for s in split(seg):
-            ax.plot(s[:,0]-shift_x, s[:,1]-shift_y, "w-", lw=1.2)
+            ax.plot(s[:,0]-shift_x, s[:,1]-shift_y, "w--", lw=1.2)
 
     # ------------------------------
     # Draw derived midline
@@ -137,7 +137,6 @@ def plot_edges_and_normals(
                 s[:,0]-shift_x, s[:,1]-shift_y,
                 color="darkorange",
                 lw=1.2,
-                linestyle="--",
             )
 
     # ------------------------------
@@ -170,14 +169,14 @@ def plot_edges_and_normals(
     # ------------------------------
     if gt_plot:
         handles = [
-            Line2D([], [], color='white', lw=1.4, label='Midline'),
-            Line2D([], [], color='yellow', lw=1.4, linestyle='--', label='Derived Midline'),
+            Line2D([], [], color='white', lw=1.4, linestyle='--', label='Midline'),
+            Line2D([], [], color='yellow', lw=1.4, label='Derived Midline'),
             Line2D([], [], color='cyan', lw=1.4, label='Normals'),
         ]    
     else:    
         handles = [
-            Line2D([], [], color='white', lw=1.4, label='Midline'),
-            Line2D([], [], color='darkorange', lw=1.4, linestyle='--', label='Derived Midline'),
+            Line2D([], [], color='white', lw=1.4, linestyle='--', label='Midline'),
+            Line2D([], [], color='darkorange', lw=1.4, label='Derived Midline'),
             Line2D([], [], color='red', lw=1.4, label='Edge 1 (Left)'),
             Line2D([], [], color='green', lw=1.4, label='Edge 2 (Right)'),
             Line2D([], [], color='cyan', lw=1.4, label='Normals'),
@@ -222,7 +221,7 @@ def bbox_from_mask(mask: np.ndarray):
     return [x0, y0, x1 - x0 + 1, y1 - y0 + 1]
 
 
-def plot_gt_normals_on_gtbw(gt_mask_u8, midline_xy, e1, e2, out_png, crop_bbox=None):
+def plot_gt_normals_on_gtbw(gt_mask_u8, derived_midline_xy, midline_xy, e1, e2, out_png, crop_bbox=None):
     import numpy as np
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
@@ -233,8 +232,12 @@ def plot_gt_normals_on_gtbw(gt_mask_u8, midline_xy, e1, e2, out_png, crop_bbox=N
 
     handles = []
 
+    if derived_midline_xy is not None and derived_midline_xy.ndim == 2 and len(derived_midline_xy) >= 2:
+        ax.plot(derived_midline_xy[:,0], derived_midline_xy[:,1], '-', lw=1.4, color='darkorange', alpha=0.95)
+        handles.append(Line2D([], [], color='darkorange', lw=1.8, label='Derived Midline'))
+    
     if midline_xy is not None and midline_xy.ndim == 2 and len(midline_xy) >= 2:
-        ax.plot(midline_xy[:,0], midline_xy[:,1], '-', lw=1.4, color='red', alpha=0.95)
+        ax.plot(midline_xy[:,0], midline_xy[:,1], '--', lw=1, color='red', alpha=0.95)
         handles.append(Line2D([], [], color='red', lw=1.8, label='Midline'))
 
     if e1 is not None and e2 is not None and len(e1) > 1 and len(e2) > 1:
@@ -288,7 +291,7 @@ def plot_gt_normals_for_crack(crack: dict, gt_full_u8: np.ndarray,
     (e1x, e1y, e2x, e2y, _w), _ = normals_from_mask_for_midline(mid, mask_bin, max_radius=50)
     e1 = np.column_stack([e1x, e1y]).astype(float)
     e2 = np.column_stack([e2x, e2y]).astype(float)
-    plot_gt_normals_on_gtbw(gt_full_u8, mid, e1, e2,
+    plot_gt_normals_on_gtbw(gt_full_u8, mid, None, e1, e2,
                              os.path.join(out_dir, fname), crop_bbox=bbox)
 
     
