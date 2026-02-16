@@ -2251,7 +2251,8 @@ def part2_plot_worst_and_all(
         *,
         worst_cid_runs,
         all_runs_global,
-        mask_bin,
+        pred_mask_worst,
+        pred_mask_all,
         crop_worst,
         crop_all,
         part2_resample_dir,
@@ -2266,7 +2267,7 @@ def part2_plot_worst_and_all(
     plot_sampling_consistency(
         pts_list=[r.get("pts") for r in worst_cid_runs if r.get("pts") is not None],
         ptsr_list=[r.get("pts_rs") for r in worst_cid_runs if r.get("pts_rs") is not None],
-        mask_bin=mask_bin,
+        mask_bin=pred_mask_worst,
         crop=crop_worst,
         title=f"Part 2 sampling consistency — WORST CID={worst_cid}",
         out_path=os.path.join(
@@ -2303,7 +2304,7 @@ def part2_plot_worst_and_all(
     plot_sampling_consistency(
         pts_list=[r.get("pts") for r in all_runs_global if r.get("pts") is not None],
         ptsr_list=[r.get("pts_rs") for r in all_runs_global if r.get("pts_rs") is not None],
-        mask_bin=mask_bin,
+        mask_bin=pred_mask_all,
         crop=crop_all,
         title="Part 2 sampling consistency — ALL CIDs",
         out_path=os.path.join(
@@ -3185,8 +3186,11 @@ def compare_widths_for_aligned_cracks(
                     "cid": str(cid),
                     "crack_type": "atomic",
                     "midline_type": midline_type,
+                    "geometry_type": "derived",
                     "member_id": None,
                     "bbox": crack.get("mask_bbox"),
+                    "pred_mask_bbox": crack.get("mask_bbox"),
+                    "pred_mask_crop": crack.get("mask_crop"),
                     "pts": pts,
                     "predw": predw,
                     "gruthw": gtw,
@@ -4833,6 +4837,8 @@ def compare_widths_for_aligned_cracks(
                 "midline_type": midline_type,
                 "geometry_type": "derived",
                 "bbox": crack.get("mask_bbox"),
+                "pred_mask_bbox": crack.get("mask_bbox"),
+                "pred_mask_crop": crack.get("mask_crop"),
                 "pts": pts,
                 "predw": predw,
                 "gruthw": gtw,
@@ -5202,25 +5208,29 @@ def compare_widths_for_aligned_cracks(
         os.makedirs(part2_metrics_dir, exist_ok=True)
         os.makedirs(part2_resample_dir, exist_ok=True)
 
-        # ------------------------------------------------------------
-        # If nothing pushed into width_pairs yet, fallback to Stage-5 plot inputs
-        # (Better: explicitly push width_pairs during Stage 5; this fallback is “do not crash”.)
-        # ------------------------------------------------------------
-        if (not width_pairs) and ("coords" in locals()) and ("diffs" in locals()) and coords and diffs:
-            for pts, d in zip(coords, diffs):
-                if pts is None or d is None:
-                    continue
-                width_pairs.append({
-                    "image": base_name if "base_name" in locals() else "",
-                    "cid": "",  # unknown in fallback
-                    "crack_type": mode,
-                    "midline_type": midline_type,
-                    "geometry_type": "derived",
-                    "bbox": None,
-                    "pts": np.asarray(pts, float),
-                    "d": np.asarray(d, float),
-                    # Optional (not available here): "predw", "gruthw"
-                })
+        if not width_pairs:
+            raise RuntimeError("[PART2 FATAL] width_pairs is empty. Stage-5 must populate derived width_pairs.")
+
+        def _rebuild_pred_mask_from_wp(wp_obj, H_full, W_full):
+            pm = np.zeros((H_full, W_full), np.uint8)
+            bb = wp_obj.get("pred_mask_bbox") or wp_obj.get("bbox")
+            crop = wp_obj.get("pred_mask_crop")
+            if bb is None or crop is None:
+                raise RuntimeError(
+                    f"[PART2 FATAL] missing pred mask info for plotting: cid={wp_obj.get('cid','')}"
+                )
+            x, y, w, h = map(int, bb)
+            crop = np.asarray(crop, np.uint8)
+            if crop.ndim != 2:
+                raise RuntimeError(
+                    f"[PART2 FATAL] pred_mask_crop invalid ndim={crop.ndim} for cid={wp_obj.get('cid','')}"
+                )
+            hh = min(h, crop.shape[0])
+            ww = min(w, crop.shape[1])
+            if hh <= 0 or ww <= 0:
+                return pm
+            pm[y:y + hh, x:x + ww] = (crop[:hh, :ww] > 0).astype(np.uint8)
+            return pm
 
         # ------------------------------------------------------------
         # Helpers (local, safe)
@@ -5302,7 +5312,13 @@ def compare_widths_for_aligned_cracks(
         for wp in (width_pairs or []):
             pts     = wp.get("pts", None)
             predw   = wp.get("predw", None)
-            gtruthw = wp.get("gruthw", None)  # optional (atomic supervision)
+            gtruthw = wp.get("gruthw", None)
+            image = str(wp.get("image", base_name if "base_name" in locals() else ""))
+            cid_s = str(wp.get("cid", ""))
+            ctype = str(wp.get("crack_type", mode))
+            mtype = str(wp.get("midline_type", midline_type))
+            gtype = str(wp.get("geometry_type", "derived"))
+            bbox  = wp.get("bbox", None)
 
             print(
                 f"[PART2 DEBUG] ▶ wp: "
@@ -5315,42 +5331,44 @@ def compare_widths_for_aligned_cracks(
                 f"gtw={'None' if gtruthw is None else len(gtruthw)}"
             )
 
+            if gtype != "derived":
+                raise RuntimeError(
+                    f"[PART2 FATAL] non-derived geometry slipped into Part2: "
+                    f"cid={cid_s} crack_type={ctype} midline_type={mtype} geometry_type={gtype}"
+                )
             if pts is None or predw is None:
-                print("[PART2 DEBUG]   ⛔ skipped: missing pts or predw")
-                continue
+                raise RuntimeError(
+                    f"[PART2 FATAL] missing pts/predw: cid={cid_s} "
+                    f"pts={None if pts is None else len(pts)} "
+                    f"predw={None if predw is None else len(predw)}"
+                )
+            if gtruthw is None:
+                raise RuntimeError(
+                    f"[PART2 FATAL] gtruthw is None (should be produced in Stage5): cid={cid_s}"
+                )
 
             pts   = np.asarray(pts, float)
             predw = np.asarray(predw, float)
-
-            n = min(len(pts), len(predw))
-            if gtruthw is not None:
-                gtruthw = np.asarray(gtruthw, float)
-                n = min(n, len(gtruthw))
+            gtruthw = np.asarray(gtruthw, float)
+            n = min(len(pts), len(predw), len(gtruthw))
 
             if n < 2:
-                print("[PART2 DEBUG]   ⛔ skipped: <2 samples after trim")
-                continue
+                raise RuntimeError(
+                    f"[PART2 FATAL] <2 samples after trim: cid={cid_s} n={n} "
+                    f"(pts={len(pts)}, predw={len(predw)}, gtw={len(gtruthw)})"
+                )
 
             pts     = pts[:n]
             predw   = predw[:n]
-            gtruthw = None if gtruthw is None else gtruthw[:n]
-
-            image = str(wp.get("image", base_name if "base_name" in locals() else ""))
-            cid_s = str(wp.get("cid", ""))
-            ctype = str(wp.get("crack_type", mode))
-            mtype = str(wp.get("midline_type", midline_type))
-            gtype = str(wp.get("geometry_type", "derived"))
-            bbox  = wp.get("bbox", None)
+            gtruthw = gtruthw[:n]
 
             s_full = arclen_s(pts)
             if len(s_full) < 2:
-                print("[PART2 DEBUG]   ⛔ skipped: invalid arclength")
-                continue
+                raise RuntimeError(f"[PART2 FATAL] invalid arclength for cid={cid_s}")
 
             total_len = float(s_full[-1] - s_full[0])
             if not np.isfinite(total_len) or total_len <= 0:
-                print("[PART2 DEBUG]   ⛔ skipped: non-finite total_len")
-                continue
+                raise RuntimeError(f"[PART2 FATAL] non-finite total_len for cid={cid_s}: {total_len}")
 
             # ------------------------------------------------------------
             # ORIGINAL DOMAIN (plot-only)
@@ -5358,17 +5376,11 @@ def compare_widths_for_aligned_cracks(
             s_orig = arclen_s(pts)
             predw_orig = np.asarray(predw, float)
 
-            if gtruthw is None:
-                (_, _, _, _, gtw_mask), _ = normals_from_mask_for_midline(
-                    pts, mask_bin, max_radius
-                )
-                gtruthw_orig = np.asarray(gtw_mask, float)
-            else:
-                gtruthw_orig = np.asarray(gtruthw, float)
+            gtruthw_orig = np.asarray(gtruthw, float)
 
             m0 = min(len(s_orig), len(predw_orig), len(gtruthw_orig))
             if m0 < 2:
-                continue
+                raise RuntimeError(f"[PART2 FATAL] too few aligned ORIGINAL samples for cid={cid_s}")
 
             s_orig       = np.asarray(s_orig[:m0], float)
             predw_orig   = np.asarray(predw_orig[:m0], float)
@@ -5425,12 +5437,11 @@ def compare_widths_for_aligned_cracks(
             )
 
             if pts_rs is None or len(pts_rs) < 2:
-                print("[PART2 DEBUG]   ⛔ skipped: resample failed")
-                continue
+                raise RuntimeError(f"[PART2 FATAL] resample failed for cid={cid_s}")
 
             mrs = min(len(pts_rs), len(predw_rs), len(gtruthw_rs))
             if mrs < 2:
-                continue
+                raise RuntimeError(f"[PART2 FATAL] resampled arrays too short for cid={cid_s}")
 
             pts_rs     = np.asarray(pts_rs[:mrs], float)
             predw_rs   = np.asarray(predw_rs[:mrs], float)
@@ -5440,6 +5451,57 @@ def compare_widths_for_aligned_cracks(
             # Width error ONLY defined here
             # ------------------------------------------------------------
             d_rs = predw_rs - gtruthw_rs
+
+            # ============================================================
+            # DEBUG: diagnose non-finite + clipping behavior
+            # ============================================================
+            def _count_invalid(arr):
+                arr = np.asarray(arr)
+                return {
+                    "nan": int(np.sum(np.isnan(arr))),
+                    "posinf": int(np.sum(arr == np.inf)),
+                    "neginf": int(np.sum(arr == -np.inf)),
+                    "finite": int(np.sum(np.isfinite(arr))),
+                    "total": int(arr.size),
+                }
+
+            pred_stats = _count_invalid(predw_rs)
+            gt_stats   = _count_invalid(gtruthw_rs)
+            d_stats    = _count_invalid(d_rs)
+
+            print(f"[PART2 VALIDITY] cid={cid_s}")
+            print(f"  predw_rs: {pred_stats}")
+            print(f"  gtruthw_rs: {gt_stats}")
+            print(f"  d_rs: {d_stats}")
+
+            if (
+                pred_stats["nan"] > 0 or pred_stats["posinf"] > 0 or pred_stats["neginf"] > 0 or
+                gt_stats["nan"] > 0 or gt_stats["posinf"] > 0 or gt_stats["neginf"] > 0
+            ):
+                invalid_mask = (
+                    ~np.isfinite(predw_rs) |
+                    ~np.isfinite(gtruthw_rs) |
+                    ~np.isfinite(d_rs)
+                )
+                bad_indices = np.where(invalid_mask)[0]
+
+                print(f"[PART2 VALIDITY]   -> invalid sample count = {len(bad_indices)}")
+
+                for idx in bad_indices[:10]:
+                    print(
+                        f"    idx={idx} | "
+                        f"xy={pts_rs[idx]} | "
+                        f"pred={predw_rs[idx]} | "
+                        f"gt={gtruthw_rs[idx]} | "
+                        f"d={d_rs[idx]}"
+                    )
+
+                try:
+                    s_dbg = arclen_s(pts_rs)
+                    for idx in bad_indices[:5]:
+                        print(f"    idx={idx} | s={s_dbg[idx]:.3f}px")
+                except Exception:
+                    pass
 
             finite_mask = (
                 np.isfinite(d_rs) &
@@ -5463,6 +5525,9 @@ def compare_widths_for_aligned_cracks(
                 "midline_type": mtype,
                 "geometry_type": gtype,
                 "bbox": bbox,
+                "pred_mask_bbox": wp.get("pred_mask_bbox") or wp.get("bbox"),
+                "pred_mask_crop": wp.get("pred_mask_crop"),
+                "pred_mask_full": _rebuild_pred_mask_from_wp(wp, H, W),
                 "runs": [],
             }
 
@@ -5910,13 +5975,44 @@ def compare_widths_for_aligned_cracks(
                 if not all_runs_global:
                     raise RuntimeError("[PART2] no global runs found")
 
+                worst_items = _cache_for_cid(worst_cid, worst_ct, worst_mt, worst_gt)
+                if not worst_items:
+                    raise RuntimeError(f"[PART2 FATAL] no cache items for worst cid={worst_cid}")
+
+                pred_mask_worst = None
+                for it in worst_items:
+                    pm = it.get("pred_mask_full", None)
+                    if pm is None:
+                        continue
+                    pm_u8 = (np.asarray(pm, np.uint8) > 0).astype(np.uint8)
+                    if pred_mask_worst is None:
+                        pred_mask_worst = pm_u8
+                    else:
+                        pred_mask_worst = ((pred_mask_worst > 0) | (pm_u8 > 0)).astype(np.uint8)
+                if pred_mask_worst is None:
+                    raise RuntimeError(f"[PART2 FATAL] missing predicted mask for worst cid={worst_cid}")
+
+                pred_mask_all = None
+                for it in part2_cache:
+                    pm = it.get("pred_mask_full", None)
+                    if pm is None:
+                        continue
+                    pm_u8 = (np.asarray(pm, np.uint8) > 0).astype(np.uint8)
+                    if pred_mask_all is None:
+                        pred_mask_all = pm_u8
+                    else:
+                        pred_mask_all = ((pred_mask_all > 0) | (pm_u8 > 0)).astype(np.uint8)
+                if pred_mask_all is None:
+                    raise RuntimeError("[PART2 FATAL] missing predicted mask for ALL CIDs plot")
+
                 # ------------------------------------------------------------
                 # (B2/B3) FINAL PLOTS
                 # ------------------------------------------------------------
                 part2_plot_worst_and_all(
                     worst_cid_runs=worst_cid_runs,
                     all_runs_global=all_runs_global,
-                    mask_bin=mask_bin,
+                    pred_mask_worst=pred_mask_worst,
+                    pred_mask_all=pred_mask_all,
                     crop_worst=crop_worst,
                     crop_all=crop_all,
                     part2_resample_dir=part2_resample_dir,
@@ -6269,7 +6365,7 @@ def write_width_diff_overlay(H, W, rows, out_png, vlim=8.0, radius=2):
     cv2.imwrite(out_png, canvas)
     print(f"[DEBUG WIDTH] wrote diff dot overlay → {out_png}")
     
-def compute_midline_metrics_for_image(app):
+'''def compute_midline_metrics_for_image(app):
     """
     Compute and save per-CID midline metrics into midline_metrics.csv.
     Always writes a file, even if empty, and logs skipped CIDs.
@@ -6316,7 +6412,7 @@ def compute_midline_metrics_for_image(app):
 
     df = pd.DataFrame(rows)
     df.to_csv(out_csv, index=False)
-    print(f"[DEBUG MIDLINE] wrote {len(df)} rows → {out_csv}")
+    print(f"[DEBUG MIDLINE] wrote {len(df)} rows → {out_csv}")'''
 
 # ---------- NEW helpers ----------
 def compute_midline_metrics_baseline(pred_xy, gt_xy, tau=3.0):

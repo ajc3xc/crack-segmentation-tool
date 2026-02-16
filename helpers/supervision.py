@@ -284,10 +284,18 @@ def _split_xy_none_seps(xs, ys):
 
 
 def _cropped_preview(entry, gt_mask_u8, original_image, out_dir):
+    """
+    Generates:
+        1) Canonical GT preview (manual only)
+        2) Comparison preview (manual vs centered) if available
+
+    Manual GT remains authoritative.
+    Centered GT is diagnostic only.
+    """
     import os
     import numpy as np
     import cv2
-    from edge_workers import plot_edges_and_normals
+    from helpers.plot_metrics import plot_edges_and_normals
     from combiner import bbox_xywh_to_xyxy
 
     os.makedirs(out_dir, exist_ok=True)
@@ -296,47 +304,33 @@ def _cropped_preview(entry, gt_mask_u8, original_image, out_dir):
     crack_id = entry.get("id", "UNKNOWN")
     kind = entry.get("kind", "UNKNOWN")
 
-    # -----------------------------
-    # 1) Midlines
-    # -----------------------------
+    # 1) Manual midline segments
     if entry.get("midline_segments"):
-        mid_segs = [
+        manual_mid_segs = [
             np.asarray(S, float)
             for S in entry["midline_segments"]
             if S is not None and len(S) >= 2
         ]
     else:
         mid = np.asarray(entry.get("midline", []), float)
-        mid_segs = [mid] if (mid.ndim == 2 and len(mid) >= 2) else []
+        manual_mid_segs = [mid] if (mid.ndim == 2 and len(mid) >= 2) else []
 
-    if not mid_segs:
+    if not manual_mid_segs:
         return
 
-    # -----------------------------
-    # 2) Normals
-    # -----------------------------
+    # 2) Manual normals
     normals = entry.get("gt_normals") or {}
-    e1_segs = _split_xy_none_seps(
-        normals.get("edge1_x", []),
-        normals.get("edge1_y", []),
-    )
-    e2_segs = _split_xy_none_seps(
-        normals.get("edge2_x", []),
-        normals.get("edge2_y", []),
-    )
+    e1_segs = _split_xy_none_seps(normals.get("edge1_x", []), normals.get("edge1_y", []))
+    e2_segs = _split_xy_none_seps(normals.get("edge2_x", []), normals.get("edge2_y", []))
 
-    # -----------------------------
-    # 3) Canonical bbox: xywh → xyxy
-    # -----------------------------
+    # 3) BBox
     bb = entry.get("mask_bbox")
     if bb is None:
         raise ValueError(f"[CROP_DBG] {kind}:{crack_id} missing mask_bbox")
 
     x0, y0, x1, y1 = bbox_xywh_to_xyxy(bb, H, W, pad=5)
 
-    # -----------------------------
-    # 4) Expand crop to include normals if needed (VISUAL ONLY)
-    # -----------------------------
+    # 4) Expand crop for normals (visual only)
     all_pts = []
     for S in e1_segs + e2_segs:
         if S is not None and len(S):
@@ -349,15 +343,7 @@ def _cropped_preview(entry, gt_mask_u8, original_image, out_dir):
         x1 = int(min(W - 1, max(x1, np.ceil(P[:, 0].max()) + 5)))
         y1 = int(min(H - 1, max(y1, np.ceil(P[:, 1].max()) + 5)))
 
-    print(
-        f"[CROP_DBG] {kind}:{crack_id} crop "
-        f"x[{x0}:{x1}] y[{y0}:{y1}] "
-        f"size={(y1 - y0, x1 - x0)}"
-    )
-
-    # -----------------------------
-    # 5) Overlay + crop
-    # -----------------------------
+    # 5) Build overlay image
     gray = cv2.cvtColor(original_image, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
     mask_f = (gt_mask_u8 > 0).astype(np.float32)
     overlay = np.clip(gray * 0.25 + mask_f * 0.75, 0, 1)
@@ -365,34 +351,20 @@ def _cropped_preview(entry, gt_mask_u8, original_image, out_dir):
 
     crop_img = overlay_rgb[y0:y1, x0:x1]
 
-    # -----------------------------
-    # 6) Shift geometry
-    # -----------------------------
     shift = np.array([x0, y0], float)
-    mid_crop = [S - shift for S in mid_segs]
+    manual_mid_crop = [S - shift for S in manual_mid_segs]
     e1_crop = [S - shift for S in e1_segs]
     e2_crop = [S - shift for S in e2_segs]
-    
-    # ------------------------------------------
-    # USER bbox → crop-local coords (VISUAL)
-    # ------------------------------------------
-    bx, by, bw, bh = bb  # original xywh (GLOBAL)
 
-    bbox_plot = [
-        int(bx - x0),   # shift into crop coords
-        int(by - y0),
-        int(bw),
-        int(bh),
-    ]
+    bx, by, bw, bh = bb
+    bbox_plot = [int(bx - x0), int(by - y0), int(bw), int(bh)]
 
-    # -----------------------------
-    # 7) Plot
-    # -----------------------------
-    out_png = os.path.join(out_dir, f"{kind}_{crack_id}_crop.png")
+    # A) Canonical GT preview (manual only)
+    out_gt = os.path.join(out_dir, f"{kind}_{crack_id}_crop_gt.png")
 
     plot_edges_and_normals(
         base_image=crop_img,
-        midline_segs=mid_crop,
+        midline_segs=manual_mid_crop,
         edge1_segs=[],
         edge2_segs=[],
         norm1_segs=e1_crop,
@@ -400,10 +372,60 @@ def _cropped_preview(entry, gt_mask_u8, original_image, out_dir):
         sparsity=5,
         gt_plot=True,
         bbox=bbox_plot,
-        out_png=out_png,
-        title=f"{kind} {crack_id}",
+        out_png=out_gt,
+        title=f"{kind} {crack_id} - Manual GT",
     )
 
+    # B) Comparison preview (manual + centered)
+    centered_mid_segs = []
+    if entry.get("midline_segments_auto_centered"):
+        centered_mid_segs = [
+            np.asarray(S, float)
+            for S in (entry.get("midline_segments_auto_centered") or [])
+            if S is not None and len(S) >= 2
+        ]
+    else:
+        cm = entry.get("midline_auto_centered")
+        if cm is not None:
+            arr = np.asarray(cm, float)
+            if arr.ndim == 2 and len(arr) >= 2:
+                centered_mid_segs = [arr]
+            else:
+                centered_mid_segs = _split_midline_packed(cm)
+
+    centered_normals = entry.get("gt_normals_auto_centered")
+
+    if centered_mid_segs and isinstance(centered_normals, dict):
+        centered_mid_crop = [S - shift for S in centered_mid_segs]
+
+        ce1 = _split_xy_none_seps(
+            centered_normals.get("edge1_x", []),
+            centered_normals.get("edge1_y", []),
+        )
+        ce2 = _split_xy_none_seps(
+            centered_normals.get("edge2_x", []),
+            centered_normals.get("edge2_y", []),
+        )
+
+        ce1_crop = [S - shift for S in ce1]
+        ce2_crop = [S - shift for S in ce2]
+
+        out_cmp = os.path.join(out_dir, f"{kind}_{crack_id}_crop_compare.png")
+
+        plot_edges_and_normals(
+            base_image=crop_img,
+            midline_segs=manual_mid_crop,
+            derived_midline_segs=centered_mid_crop,
+            edge1_segs=[],
+            edge2_segs=[],
+            norm1_segs=ce1_crop,
+            norm2_segs=ce2_crop,
+            sparsity=5,
+            gt_plot=False,
+            bbox=bbox_plot,
+            out_png=out_cmp,
+            title=f"{kind} {crack_id} - Manual vs Centered",
+        )
 # ============================================================
 # GLOBAL OVERVIEW (with legend + title)
 # ============================================================
@@ -521,6 +543,559 @@ def _pack_arrs_with_none_separators(arr_list):
             out.append(None)
         out.extend([float(v) if np.isfinite(v) else None for v in a])
     return out
+
+def _polyline_mask(mid_xy, H, W):
+    """Rasterize a polyline (Nx2 xy) into a uint8 mask."""
+    S = np.asarray(mid_xy, float)
+    out = np.zeros((H, W), np.uint8)
+    if S.ndim != 2 or S.shape[1] != 2 or len(S) < 2:
+        return out
+    pts = np.round(S).astype(np.int32)
+    pts[:, 0] = np.clip(pts[:, 0], 0, W - 1)
+    pts[:, 1] = np.clip(pts[:, 1], 0, H - 1)
+    cv2.polylines(out, [pts.reshape(-1, 1, 2)], isClosed=False, color=1, thickness=1)
+    return out
+
+def _shift_stats(manual_xy, centered_xy):
+    """Per-point displacement stats in px for equal-length polylines."""
+    m = np.asarray(manual_xy, float)
+    c = np.asarray(centered_xy, float)
+    n = min(len(m), len(c))
+    if n <= 0:
+        return {"mean_shift_px": 0.0, "p95_shift_px": 0.0, "max_shift_px": 0.0}
+    d = np.linalg.norm(c[:n] - m[:n], axis=1)
+    if d.size == 0:
+        return {"mean_shift_px": 0.0, "p95_shift_px": 0.0, "max_shift_px": 0.0}
+    return {
+        "mean_shift_px": float(np.mean(d)),
+        "p95_shift_px": float(np.percentile(d, 95)),
+        "max_shift_px": float(np.max(d)),
+    }
+
+def _width_stability_stats(manual_widths, centered_widths):
+    """
+    Compare width stability and invalid-rate between manual and centered traces.
+    """
+    wm = np.asarray(manual_widths, float).reshape(-1)
+    wc = np.asarray(centered_widths, float).reshape(-1)
+    if wm.size == 0:
+        wm = np.array([np.nan], float)
+    if wc.size == 0:
+        wc = np.array([np.nan], float)
+
+    vm = np.isfinite(wm)
+    vc = np.isfinite(wc)
+
+    return {
+        "manual_width_mean": float(np.nanmean(wm)),
+        "centered_width_mean": float(np.nanmean(wc)),
+        "manual_width_std": float(np.nanstd(wm)),
+        "centered_width_std": float(np.nanstd(wc)),
+        "manual_invalid_frac": float(1.0 - np.mean(vm)),
+        "centered_invalid_frac": float(1.0 - np.mean(vc)),
+    }
+
+def _geometry_disagreement_stats(manual_xy, centered_xy):
+    """
+    Sampling-agnostic geometric disagreement (bidirectional NN + robust Hausdorff).
+    """
+    from helpers.metrics import nn_mean_bidirectional, hausdorff_p95
+
+    m = np.asarray(manual_xy, float)
+    c = np.asarray(centered_xy, float)
+    if m.ndim != 2 or c.ndim != 2 or len(m) < 2 or len(c) < 2:
+        return {
+            "nn_mean_bidirectional_px": float("nan"),
+            "hausdorff95_px": float("nan"),
+        }
+
+    return {
+        "nn_mean_bidirectional_px": float(nn_mean_bidirectional(m, c)),
+        "hausdorff95_px": float(hausdorff_p95(m, c)),
+    }
+
+def _dt_radius_from_polyline(dt, S, *, window_half_size=50, min_r=3.0, fallback_frac=0.30):
+    """
+    Estimate representative crack radius by sampling DT along polyline S.
+    """
+    H, W = dt.shape[:2]
+    S = np.asarray(S, float)
+    if S.ndim != 2 or S.shape[1] != 2 or len(S) < 2:
+        return None
+
+    ys = np.clip(np.round(S[:, 1]).astype(int), 0, H - 1)
+    xs = np.clip(np.round(S[:, 0]).astype(int), 0, W - 1)
+    d = dt[ys, xs]
+    d = d[np.isfinite(d)]
+
+    if d.size:
+        r = float(np.median(d))
+    else:
+        r = float(fallback_frac * float(window_half_size))
+
+    r = max(float(min_r), min(r, float(window_half_size)))
+    return r
+
+def build_territory_mask_from_polyline(
+    *,
+    mid_xy,
+    crack_mask_u8,
+    window_half_size=50,
+    dt_domain_u8=None,
+    min_r=3.0,
+    fallback_frac=0.30,
+    rad_scale=1.20,
+    min_rad_px=4,
+):
+    """
+    Build territory corridor around one polyline.
+    DT is measured on dt_domain_u8 (if provided), always constrained to crack mask.
+    """
+    H, W = crack_mask_u8.shape[:2]
+    crack = (np.asarray(crack_mask_u8) > 0).astype(np.uint8)
+    if not np.any(crack):
+        return np.zeros((H, W), np.uint8)
+
+    S = np.asarray(mid_xy, float)
+    if S.ndim != 2 or S.shape[1] != 2 or len(S) < 2:
+        return np.zeros((H, W), np.uint8)
+
+    if dt_domain_u8 is None:
+        dt_domain = crack
+    else:
+        dt_domain = (np.asarray(dt_domain_u8) > 0).astype(np.uint8)
+        dt_domain = (dt_domain & crack).astype(np.uint8)
+        if not np.any(dt_domain):
+            dt_domain = crack
+
+    dt = cv2.distanceTransform(dt_domain, cv2.DIST_L2, 5).astype(np.float32)
+    r = _dt_radius_from_polyline(
+        dt, S,
+        window_half_size=window_half_size,
+        min_r=min_r,
+        fallback_frac=fallback_frac,
+    )
+    if r is None:
+        return np.zeros((H, W), np.uint8)
+
+    rad = int(max(int(min_rad_px), min(float(window_half_size), float(rad_scale) * r)))
+    line = _polyline_mask(S, H, W).astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1))
+    terr = cv2.dilate(line, kernel, iterations=1).astype(np.uint8)
+    # Keep territory strictly inside crack support.
+    terr = (terr & crack).astype(np.uint8)
+    return terr
+
+def build_territory_mask_for_segments(
+    *,
+    segs,
+    crack_mask_u8,
+    window_half_size=50,
+    dt_domain_u8=None,
+    **kwargs,
+):
+    """
+    Build union territory for multiple segments with shared DT policy.
+    """
+    H, W = crack_mask_u8.shape[:2]
+    terr = np.zeros((H, W), np.uint8)
+    for S in (segs or []):
+        S = np.asarray(S, float)
+        if S.ndim != 2 or S.shape[1] != 2 or len(S) < 2:
+            continue
+        terr |= build_territory_mask_from_polyline(
+            mid_xy=S,
+            crack_mask_u8=crack_mask_u8,
+            window_half_size=window_half_size,
+            dt_domain_u8=dt_domain_u8,
+            **kwargs,
+        )
+    return terr
+
+def build_centering_domain_mask(*, crack_mask_u8, territory_u8=None, mode="soft"):
+    """
+    Build allowed domain for center snapping.
+    mode:
+      - soft: crack mask only
+      - terr_or_mask: crack | territory
+      - terr_and_mask: crack & territory
+    """
+    m = (np.asarray(crack_mask_u8) > 0).astype(np.uint8)
+    if territory_u8 is None:
+        return m
+    t = (np.asarray(territory_u8) > 0).astype(np.uint8)
+
+    if mode == "terr_and_mask":
+        return (m & t).astype(np.uint8)
+    if mode == "terr_or_mask":
+        return (m | t).astype(np.uint8)
+    return m
+
+def snap_polyline_to_dt_ridge(
+    mid_xy,
+    domain_mask_u8,
+    *,
+    n_iters=25,
+    step_px=0.35,
+    grad_ksize=3,
+    keep_endpoints=True,
+    freeze_k=3,
+    debug=False,
+):
+    """
+    Nudge polyline points toward DT ridge by gradient ascent.
+    Includes light Savitzky-Golay smoothing after convergence.
+    """
+
+    import numpy as np
+    import cv2
+
+    S = np.asarray(mid_xy, float).copy()
+
+    if S.ndim != 2 or S.shape[1] != 2 or len(S) < 2:
+        return S
+
+    H, W = domain_mask_u8.shape[:2]
+    domain = (np.asarray(domain_mask_u8) > 0).astype(np.uint8)
+
+    if not np.any(domain):
+        return S
+
+    dt = cv2.distanceTransform(domain, cv2.DIST_L2, 5).astype(np.float32)
+    gx = cv2.Sobel(dt, cv2.CV_32F, 1, 0, ksize=int(grad_ksize))
+    gy = cv2.Sobel(dt, cv2.CV_32F, 0, 1, ksize=int(grad_ksize))
+
+    def _bilinear(img, x, y):
+        x0 = int(np.floor(x))
+        y0 = int(np.floor(y))
+        x0 = max(0, min(x0, W - 1))
+        y0 = max(0, min(y0, H - 1))
+        x1 = min(x0 + 1, W - 1)
+        y1 = min(y0 + 1, H - 1)
+        dx = float(x - x0)
+        dy = float(y - y0)
+        v00 = float(img[y0, x0]); v10 = float(img[y0, x1])
+        v01 = float(img[y1, x0]); v11 = float(img[y1, x1])
+        v0 = v00 * (1 - dx) + v10 * dx
+        v1 = v01 * (1 - dx) + v11 * dx
+        return v0 * (1 - dy) + v1 * dy
+
+    def _allowed(x, y):
+        xi = int(round(x))
+        yi = int(round(y))
+        if xi < 0 or xi >= W or yi < 0 or yi >= H:
+            return False
+        return bool(domain[yi, xi])
+
+    freeze_k = int(max(0, freeze_k))
+    idx_lo = freeze_k if keep_endpoints else 0
+    idx_hi = len(S) - 1 - freeze_k if keep_endpoints else len(S) - 1
+
+    if idx_hi <= idx_lo:
+        return S
+
+    for _ in range(int(max(1, n_iters))):
+        moved = 0
+
+        for i in range(idx_lo, idx_hi + 1):
+            x = float(S[i, 0])
+            y = float(S[i, 1])
+
+            if not _allowed(x, y):
+                continue
+
+            # tangent
+            if i == 0:
+                t = S[1] - S[0]
+            elif i == len(S) - 1:
+                t = S[-1] - S[-2]
+            else:
+                t = S[i + 1] - S[i - 1]
+
+            tn = float(np.hypot(t[0], t[1])) + 1e-12
+            t = t / tn
+            nx, ny = -t[1], t[0]
+
+            gxi = _bilinear(gx, x, y)
+            gyi = _bilinear(gy, x, y)
+            g_proj = gxi * nx + gyi * ny
+
+            if abs(g_proj) < 1e-12:
+                continue
+
+            sgn = 1.0 if g_proj >= 0.0 else -1.0
+            ux, uy = sgn * nx, sgn * ny
+
+            dt0 = _bilinear(dt, x, y)
+            xn = x + float(step_px) * ux
+            yn = y + float(step_px) * uy
+
+            if not _allowed(xn, yn):
+                continue
+
+            dt1 = _bilinear(dt, xn, yn)
+
+            if dt1 >= dt0 - 1e-6:
+                S[i, 0] = xn
+                S[i, 1] = yn
+                moved += 1
+
+        if moved == 0:
+            break
+
+    # ----------------------------------------------------
+    # Light Savitzky-Golay smoothing (no resampling)
+    # ----------------------------------------------------
+    try:
+        from scipy.signal import savgol_filter
+
+        n = len(S)
+        if n >= 5:
+            window = 5
+            if n >= 7:
+                window = 7
+            if window % 2 == 0:
+                window += 1
+
+            # preserve endpoints
+            S_smooth = S.copy()
+            xs = savgol_filter(S[:, 0], window, 2)
+            ys = savgol_filter(S[:, 1], window, 2)
+
+            S_smooth[:, 0] = xs
+            S_smooth[:, 1] = ys
+
+            if keep_endpoints:
+                S_smooth[:freeze_k] = S[:freeze_k]
+                S_smooth[-freeze_k:] = S[-freeze_k:]
+
+            S = S_smooth
+
+    except Exception:
+        pass
+
+    return S
+
+def compute_centered_midline_and_normals(
+    *,
+    mid_xy,
+    crack_mask_u8,
+    territory_u8=None,
+    max_radius=50,
+    domain_mode="terr_and_mask",
+    snap_kwargs=None,
+):
+    """
+    Center a polyline in DT domain and compute normals/widths on GT crack mask.
+    """
+    if snap_kwargs is None:
+        snap_kwargs = {}
+
+    # Hard rule for centering: domain = crack & territory.
+    territory = territory_u8
+    if territory is None:
+        territory = (np.asarray(crack_mask_u8) > 0).astype(np.uint8)
+
+    domain_u8 = build_centering_domain_mask(
+        crack_mask_u8=crack_mask_u8,
+        territory_u8=territory,
+        mode="terr_and_mask",
+    )
+
+    centered = snap_polyline_to_dt_ridge(
+        np.asarray(mid_xy, float),
+        domain_u8,
+        **snap_kwargs,
+    )
+
+    (e1x, e1y, e2x, e2y, widths), _ = normals_from_mask_for_midline(
+        centered,
+        (np.asarray(crack_mask_u8) > 0),
+        int(max_radius),
+    )
+
+    normals = {
+        "edge1_x": _arr_to_list(e1x),
+        "edge1_y": _arr_to_list(e1y),
+        "edge2_x": _arr_to_list(e2x),
+        "edge2_y": _arr_to_list(e2y),
+        "width_px": _arr_to_list(widths),
+    }
+    return centered, normals
+
+def plot_midline_centering_debug(
+    *,
+    out_path,
+    crack_mask_u8,
+    manual_segs,
+    centered_segs,
+    territory_u8=None,
+    bbox_xywh=None,
+    title="GT supervision auto-centering",
+    invalid_manual_masks=None,
+    invalid_center_masks=None,
+    show_dt_panel=True,
+    show_territory=True,
+    territory_alpha=0.25,
+):
+    """
+    Plot manual vs centered midlines over crack mask (crop around bbox).
+    """
+    import matplotlib.pyplot as plt
+
+    M = (np.asarray(crack_mask_u8) > 0).astype(np.uint8)
+    H, W = M.shape[:2]
+
+    if not centered_segs:
+        raise RuntimeError("No centered segments provided - cyan should exist but is empty.")
+    for i, S in enumerate(centered_segs or []):
+        S = np.asarray(S, float)
+        if S.ndim != 2 or len(S) < 2:
+            raise RuntimeError(f"Centered segment {i} is invalid shape {S.shape}")
+
+    # Geometry-debug: report overlap likelihood (centered hidden under manual).
+    pair_n = min(len(manual_segs or []), len(centered_segs or []))
+    for i in range(pair_n):
+        m = np.asarray((manual_segs or [])[i], float)
+        c = np.asarray((centered_segs or [])[i], float)
+        if m.shape == c.shape and m.ndim == 2 and len(m) >= 2:
+            max_diff = float(np.max(np.abs(m - c)))
+            print(f"[AUTO CENTER DEBUG] seg={i} max_shift_abs={max_diff:.6f}")
+
+    if bbox_xywh is not None and len(bbox_xywh) == 4:
+        x, y, w, h = map(int, bbox_xywh)
+        pad = 25
+        x0 = max(0, x - pad)
+        y0 = max(0, y - pad)
+        x1 = min(W, x + w + pad)
+        y1 = min(H, y + h + pad)
+    else:
+        ys, xs = np.where(M > 0)
+        if xs.size:
+            pad = 25
+            x0 = max(0, int(xs.min()) - pad)
+            y0 = max(0, int(ys.min()) - pad)
+            x1 = min(W, int(xs.max()) + 1 + pad)
+            y1 = min(H, int(ys.max()) + 1 + pad)
+        else:
+            x0, y0, x1, y1 = 0, 0, W, H
+
+    T = None
+    if territory_u8 is not None:
+        T = (np.asarray(territory_u8) > 0).astype(np.uint8)
+
+    if show_dt_panel:
+        fig, axes = plt.subplots(1, 2, figsize=(12.4, 6.0), dpi=220, sharex=True, sharey=True)
+        ax0, ax1 = axes
+    else:
+        fig, ax0 = plt.subplots(1, 1, figsize=(6.4, 6.4), dpi=220)
+        ax1 = ax0
+
+    # True RGB render (no colormap interpolation): black bg, white crack mask.
+    crop_mask = M[y0:y1, x0:x1]
+    rgb0 = np.zeros((crop_mask.shape[0], crop_mask.shape[1], 3), np.uint8)
+    rgb0[crop_mask > 0] = (255, 255, 255)
+    if show_territory and T is not None:
+        crop_T = (T[y0:y1, x0:x1] > 0)
+        # Explicit RGB blend for stable, artifact-free overlay.
+        overlay = rgb0.copy()
+        overlay[crop_T] = (120, 255, 120)
+        rgb0 = (0.75 * rgb0 + 0.25 * overlay).astype(np.uint8)
+    ax0.imshow(rgb0)
+    ax0.axis("off")
+    ax0.set_title(f"{title} (mask)", fontsize=10)
+
+    if show_dt_panel:
+        if T is not None:
+            dom = (M & T).astype(np.uint8)
+            if not np.any(dom):
+                dom = M
+        else:
+            dom = M
+
+        dt = cv2.distanceTransform(dom, cv2.DIST_L2, 5).astype(np.float32)
+        dt_crop = dt[y0:y1, x0:x1]
+
+        # Pure magma for DT
+        ax1.imshow(dt_crop, cmap="magma")
+        ax1.axis("off")
+        ax1.set_title("DT ridge view (domain)", fontsize=10)
+
+        # Territory overlay as pure white alpha mask (no colormap)
+        if show_territory and T is not None:
+            crop_T = (T[y0:y1, x0:x1] > 0)
+
+            overlay = np.zeros((*crop_T.shape, 4), dtype=np.float32)
+            overlay[..., 0] = 1.0  # R
+            overlay[..., 1] = 1.0  # G
+            overlay[..., 2] = 1.0  # B
+            overlay[..., 3] = crop_T.astype(np.float32) * 0.20  # alpha only where territory
+
+            ax1.imshow(overlay)
+
+    # -------------------------------------------------
+    # Plot CENTERED first (solid, underneath)
+    # -------------------------------------------------
+    for i, S in enumerate(centered_segs or []):
+        S = np.asarray(S, float)
+        if S.ndim == 2 and len(S) >= 2:
+            for ax in (ax0, ax1):
+                ax.plot(
+                    S[:, 0] - x0,
+                    S[:, 1] - y0,
+                    color="cyan",
+                    lw=2.5,
+                    alpha=0.95,
+                    zorder=2,
+                )
+            if invalid_center_masks and i < len(invalid_center_masks):
+                bad = np.asarray(invalid_center_masks[i], bool)
+                if bad.size == len(S) and np.any(bad):
+                    for ax in (ax0, ax1):
+                        ax.scatter(
+                            S[bad, 0] - x0,
+                            S[bad, 1] - y0,
+                            s=14,
+                            color="magenta",
+                            zorder=3,
+                        )
+
+    # -------------------------------------------------
+    # Plot MANUAL second (dashed, on top)
+    # -------------------------------------------------
+    for i, S in enumerate(manual_segs or []):
+        S = np.asarray(S, float)
+        if S.ndim == 2 and len(S) >= 2:
+            for ax in (ax0, ax1):
+                ax.plot(
+                    S[:, 0] - x0,
+                    S[:, 1] - y0,
+                    color="yellow",
+                    lw=2.0,
+                    linestyle="--",
+                    alpha=0.9,
+                    zorder=5,
+                )
+            if invalid_manual_masks and i < len(invalid_manual_masks):
+                bad = np.asarray(invalid_manual_masks[i], bool)
+                if bad.size == len(S) and np.any(bad):
+                    for ax in (ax0, ax1):
+                        ax.scatter(
+                            S[bad, 0] - x0,
+                            S[bad, 1] - y0,
+                            s=14,
+                            color="red",
+                            zorder=6,
+                        )
+
+    if bbox_xywh is not None and len(bbox_xywh) == 4:
+        x, y, w, h = map(int, bbox_xywh)
+        for ax in (ax0, ax1):
+            ax.add_patch(plt.Rectangle((x - x0, y - y0), w, h, fill=False, edgecolor="dodgerblue", linewidth=1.3))
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
 
 def _dom_mask_to_local_array(m, bw, bh):
     """
@@ -768,6 +1343,105 @@ def debug_plot_gt_sup_dominance_bite_packed(
 
     print(f"[GT_SUP DOMDBG] wrote {out}")
 
+
+def export_gt_centering_metrics(
+    *,
+    base_name: str,
+    save_root: str,
+    final_entries: list,
+):
+    """
+    Compute midline metrics comparing manual GT midline vs auto-centered GT midline.
+
+    Outputs:
+      supervision/<image>/analysis/gt_centering_metrics.csv
+      supervision/<image>/analysis/diagnostics/*.png
+    """
+    import os
+    import numpy as np
+    import pandas as pd
+    from helpers.metrics import compute_midline_metrics
+    from helpers.present_plots import plot_rs3_midline_diagnostics
+
+    analysis_dir = os.path.join(save_root, "supervision", base_name, "analysis")
+    os.makedirs(analysis_dir, exist_ok=True)
+
+    rows = []
+
+    for entry in (final_entries or []):
+        cid = str(entry.get("id", ""))
+        kind = str(entry.get("kind", "unknown"))
+
+        manual_mid = None
+        centered_mid = None
+
+        if kind == "atomic":
+            manual_mid = np.asarray(entry.get("midline", []), float)
+            centered_mid = np.asarray(entry.get("midline_auto_centered", []), float)
+
+        elif kind == "combined":
+            segs_manual = entry.get("midline_segments", []) or []
+            segs_center = entry.get("midline_segments_auto_centered", []) or []
+
+            manual_parts = [np.asarray(s, float) for s in segs_manual if s is not None and len(s) >= 2]
+            center_parts = [np.asarray(s, float) for s in segs_center if s is not None and len(s) >= 2]
+
+            if manual_parts:
+                manual_mid = np.vstack(manual_parts)
+            if center_parts:
+                centered_mid = np.vstack(center_parts)
+
+        if (
+            manual_mid is None or centered_mid is None
+            or len(manual_mid) < 2
+            or len(centered_mid) < 2
+        ):
+            continue
+
+        mm = compute_midline_metrics(
+            auto_xy=centered_mid,
+            man_xy=manual_mid,
+            tau=3.0,
+        )
+
+        nn = float(mm.get("nn_mean_bidirectional", np.nan))
+        hd = float(mm.get("hausdorff_max", np.nan))
+        cov = float(mm.get("coverage_min", np.nan))
+        score_mid = np.nan
+        if np.isfinite(nn) and np.isfinite(hd) and np.isfinite(cov):
+            score_mid = float(np.log1p(max(nn, 0.0)) + 0.5 * np.log1p(max(hd, 0.0)) + (1.0 - float(np.clip(cov, 0.0, 1.0))))
+
+        row = {
+            "image": base_name,
+            "crack_id": cid,
+            "crack_kind": kind,
+            "geometry_type": "gt_centering",
+            "length_px": float(np.sum(np.hypot(np.diff(manual_mid[:, 0]), np.diff(manual_mid[:, 1])))),
+            "os_mode": "gt_centering",
+            "g11": np.nan,
+            "g22": np.nan,
+            "g33": np.nan,
+            "score_mid": score_mid,
+            **mm,
+        }
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    out_csv = os.path.join(analysis_dir, "gt_centering_metrics.csv")
+    df.to_csv(out_csv, index=False)
+    print(f"[GT_SUP] wrote centering metrics -> {out_csv}")
+
+    if not df.empty:
+        plot_rs3_midline_diagnostics(
+            df_all=df,
+            out_dir=os.path.join(analysis_dir, "diagnostics"),
+            selected_family=None,
+            title_suffix="GT Centering Audit",
+        )
+
+    return df
+
+
 # ============================================================
 # MAIN EXPORT FUNCTION
 # ============================================================
@@ -781,14 +1455,24 @@ def export_gt_supervision_for_image(
     atomic: dict,
     combined_groups: dict | None,
     gt_mask: np.ndarray,
+    enable_auto_centering: bool = True,
+    auto_centering_debug: bool = True,
+    auto_centering_window_half_size: int = 50,
+    auto_centering_iters: int = 30,
+    auto_centering_step_px: float = 0.35,
+    auto_centering_domain_atomic: str = "terr_and_mask",
+    auto_centering_domain_combined: str = "terr_and_mask",
 ):
     sup_root = os.path.join(save_root, "supervision", base_name)
     #mask_root = os.path.join(sup_root, "masks")
     atomic_crop_root = os.path.join(sup_root, "atomic_crops")
     combined_crop_root = os.path.join(sup_root, "combined_crops")
+    auto_center_root = os.path.join(sup_root, "auto_center_debug")
     #os.makedirs(mask_root, exist_ok=True)
     os.makedirs(atomic_crop_root, exist_ok=True)
     os.makedirs(combined_crop_root, exist_ok=True)
+    if enable_auto_centering and auto_centering_debug:
+        os.makedirs(auto_center_root, exist_ok=True)
 
     gt_bin = (gt_mask > 0).astype(np.uint8)
     num_cc, cc_labels = cv2.connectedComponents(gt_bin, 8)
@@ -864,7 +1548,59 @@ def export_gt_supervision_for_image(
                 "edge2_y": _arr_to_list(e2y),
                 "width_px": _arr_to_list(widths),
             },
+            "gt_widths": _arr_to_list(widths),
         }
+
+        if enable_auto_centering:
+            terr = build_territory_mask_from_polyline(
+                mid_xy=mid_xy,
+                crack_mask_u8=crack_mask,
+                window_half_size=int(auto_centering_window_half_size),
+                dt_domain_u8=None,
+            )
+            centered_xy, centered_normals = compute_centered_midline_and_normals(
+                mid_xy=mid_xy,
+                crack_mask_u8=crack_mask,
+                territory_u8=terr,
+                max_radius=50,
+                domain_mode=auto_centering_domain_atomic,
+                snap_kwargs={
+                    "n_iters": int(auto_centering_iters),
+                    "step_px": float(auto_centering_step_px),
+                    "keep_endpoints": True,
+                },
+            )
+
+            atomic_entry["midline_auto_centered"] = np.asarray(centered_xy, float).tolist()
+            atomic_entry["gt_normals_auto_centered"] = centered_normals
+            atomic_entry["gt_widths_auto_centered"] = centered_normals.get("width_px", [])
+            atomic_entry["auto_centering_meta"] = {
+                "enabled": True,
+                "domain_mode": str(auto_centering_domain_atomic),
+                "snap": {
+                    "n_iters": int(auto_centering_iters),
+                    "step_px": float(auto_centering_step_px),
+                },
+                **_shift_stats(mid_xy, centered_xy),
+                **_geometry_disagreement_stats(mid_xy, centered_xy),
+                **_width_stability_stats(widths, centered_normals.get("width_px", [])),
+            }
+
+            if auto_centering_debug:
+                manual_invalid = [~np.isfinite(np.asarray(widths, float))]
+                center_invalid = [~np.isfinite(np.asarray(centered_normals.get("width_px", []), float))]
+                out_dbg = os.path.join(auto_center_root, f"atomic_{scid}_manual_vs_centered.png")
+                plot_midline_centering_debug(
+                    out_path=out_dbg,
+                    crack_mask_u8=crack_mask,
+                    manual_segs=[mid_xy],
+                    centered_segs=[np.asarray(centered_xy, float)],
+                    territory_u8=terr,
+                    bbox_xywh=atomic_entry.get("mask_bbox"),
+                    title=f"atomic {scid}: manual (yellow) vs centered (cyan)",
+                    invalid_manual_masks=manual_invalid,
+                    invalid_center_masks=center_invalid,
+                )
 
         final_entries.append(atomic_entry)
         _cropped_preview(atomic_entry, gt_mask, original_image, atomic_crop_root)
@@ -1004,9 +1740,114 @@ def export_gt_supervision_for_image(
                     [_arr_to_list(a) for a in w_list]
                 ),
             },
+            "gt_widths": [float(v) for arr in w_list for v in np.asarray(arr, float)],
             "midline_segments": [np.asarray(S, float).tolist() for S in segs],
             "dominance_meta": dom_meta,
         }
+
+        if enable_auto_centering:
+            centered_segs = []
+            ce1x_list, ce1y_list, ce2x_list, ce2y_list, cw_list = [], [], [], [], []
+            shift_all = []
+            invalid_manual_masks = []
+            invalid_center_masks = []
+
+            for S, w_manual in zip(segs, w_list):
+                S = np.asarray(S, float)
+                terr_i = build_territory_mask_from_polyline(
+                    mid_xy=S,
+                    crack_mask_u8=crack_mask,
+                    window_half_size=int(auto_centering_window_half_size),
+                    dt_domain_u8=None,
+                )
+                centered_S, centered_normals = compute_centered_midline_and_normals(
+                    mid_xy=S,
+                    crack_mask_u8=crack_mask,
+                    territory_u8=terr_i,
+                    max_radius=50,
+                    domain_mode="terr_and_mask",
+                    snap_kwargs={
+                        "n_iters": int(auto_centering_iters),
+                        "step_px": float(auto_centering_step_px),
+                        "keep_endpoints": True,
+                    },
+                )
+
+                centered_S = np.asarray(centered_S, float)
+                centered_segs.append(centered_S)
+                ce1x_list.append(np.asarray(centered_normals.get("edge1_x", []), float))
+                ce1y_list.append(np.asarray(centered_normals.get("edge1_y", []), float))
+                ce2x_list.append(np.asarray(centered_normals.get("edge2_x", []), float))
+                ce2y_list.append(np.asarray(centered_normals.get("edge2_y", []), float))
+                cw_list.append(np.asarray(centered_normals.get("width_px", []), float))
+
+                n = min(len(S), len(centered_S))
+                if n > 0:
+                    shift_all.append(np.linalg.norm(centered_S[:n] - S[:n], axis=1))
+
+                invalid_manual_masks.append(~np.isfinite(np.asarray(w_manual, float)))
+                invalid_center_masks.append(~np.isfinite(np.asarray(centered_normals.get("width_px", []), float)))
+
+            if shift_all:
+                d = np.concatenate(shift_all)
+                shift_meta = {
+                    "mean_shift_px": float(np.mean(d)),
+                    "p95_shift_px": float(np.percentile(d, 95)),
+                    "max_shift_px": float(np.max(d)),
+                }
+            else:
+                shift_meta = {"mean_shift_px": 0.0, "p95_shift_px": 0.0, "max_shift_px": 0.0}
+
+            combined_entry["midline_segments_auto_centered"] = [np.asarray(S, float).tolist() for S in centered_segs]
+            combined_entry["midline_auto_centered"] = _pack_segs_with_separators(centered_segs)
+            combined_entry["gt_normals_auto_centered"] = {
+                "edge1_x": _pack_arrs_with_none_separators([_arr_to_list(a) for a in ce1x_list]),
+                "edge1_y": _pack_arrs_with_none_separators([_arr_to_list(a) for a in ce1y_list]),
+                "edge2_x": _pack_arrs_with_none_separators([_arr_to_list(a) for a in ce2x_list]),
+                "edge2_y": _pack_arrs_with_none_separators([_arr_to_list(a) for a in ce2y_list]),
+                "width_px": _pack_arrs_with_none_separators([_arr_to_list(a) for a in cw_list]),
+            }
+            combined_entry["gt_widths_auto_centered"] = [
+                float(v) for arr in cw_list for v in np.asarray(arr, float)
+            ]
+            manual_geom_parts = [np.asarray(S, float) for S in segs if S is not None and len(S) >= 2]
+            center_geom_parts = [np.asarray(S, float) for S in centered_segs if S is not None and len(S) >= 2]
+            manual_geom_all = np.vstack(manual_geom_parts) if manual_geom_parts else np.empty((0, 2), float)
+            center_geom_all = np.vstack(center_geom_parts) if center_geom_parts else np.empty((0, 2), float)
+
+            combined_entry["auto_centering_meta"] = {
+                "enabled": True,
+                "domain_mode": "terr_and_mask",
+                "snap": {
+                    "n_iters": int(auto_centering_iters),
+                    "step_px": float(auto_centering_step_px),
+                },
+                **shift_meta,
+                **_geometry_disagreement_stats(manual_geom_all, center_geom_all),
+                **_width_stability_stats(
+                    np.concatenate([np.asarray(a, float).reshape(-1) for a in w_list]) if w_list else [],
+                    np.concatenate([np.asarray(a, float).reshape(-1) for a in cw_list]) if cw_list else [],
+                ),
+            }
+
+            if auto_centering_debug:
+                terr_vis = build_territory_mask_for_segments(
+                    segs=segs,
+                    crack_mask_u8=crack_mask,
+                    window_half_size=int(auto_centering_window_half_size),
+                )
+                out_dbg = os.path.join(auto_center_root, f"combined_{tag_name}_manual_vs_centered.png")
+                plot_midline_centering_debug(
+                    out_path=out_dbg,
+                    crack_mask_u8=crack_mask,
+                    manual_segs=[np.asarray(S, float) for S in segs],
+                    centered_segs=centered_segs,
+                    territory_u8=terr_vis,
+                    bbox_xywh=combined_entry.get("mask_bbox"),
+                    title=f"combined {tag_name}: manual (yellow) vs centered (cyan)",
+                    invalid_manual_masks=invalid_manual_masks,
+                    invalid_center_masks=invalid_center_masks,
+                )
 
         final_entries.append(combined_entry)
         _cropped_preview(combined_entry, gt_mask, original_image, combined_crop_root)
@@ -1023,6 +1864,16 @@ def export_gt_supervision_for_image(
     out_json = os.path.join(sup_root, "gt_supervision.json")
     with open(out_json, "w", encoding="utf-8") as f:
         json.dump({"cracks": final_entries}, f, indent=2)
+
+    # =====================================================
+    # 5) GT CENTERING METRICS (Supervision Audit)
+    # =====================================================
+    if enable_auto_centering:
+        export_gt_centering_metrics(
+            base_name=base_name,
+            save_root=save_root,
+            final_entries=final_entries,
+        )
 
     print(f"[GT_SUP] wrote JSON → {out_json}")
     print(f"[GT_SUP] global overview → {global_png}")

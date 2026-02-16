@@ -67,13 +67,13 @@ def plot_edges_and_normals(
 
     # convert to RGB for plotting
     if crop.ndim == 2:
-        crop_rgb = np.stack([crop]*3, axis=-1)
+        crop_rgb = np.stack([crop] * 3, axis=-1)
     else:
         crop_rgb = crop[:, :, ::-1]
 
     fig, ax = plt.subplots(figsize=(9, 9), dpi=320)
     ax.imshow(crop_rgb)
-    
+
     # ------------------------------
     # Draw bbox (visual reference)
     # ------------------------------
@@ -99,12 +99,13 @@ def plot_edges_and_normals(
         arr = np.asarray(arr)
         if len(arr) < 2:
             return []
-        d = np.sqrt(np.sum(np.diff(arr, axis=0)**2, axis=1))
+        d = np.sqrt(np.sum(np.diff(arr, axis=0) ** 2, axis=1))
         breaks = np.where(d > max_step)[0]
-        out = []; s = 0
+        out = []
+        s = 0
         for b in breaks:
             if b + 1 - s >= 2:
-                out.append(arr[s:b+1])
+                out.append(arr[s:b + 1])
             s = b + 1
         if len(arr) - s >= 2:
             out.append(arr[s:])
@@ -113,81 +114,95 @@ def plot_edges_and_normals(
     # ------------------------------
     # Draw midline
     # ------------------------------
-    for seg in midline_segs:
+    for seg in (midline_segs or []):
         seg = np.asarray(seg)
-
-        if gt_plot:
-            # GT mode → DO NOT SPLIT
-            ax.plot(seg[:,0]-shift_x, seg[:,1]-shift_y, "w--", lw=1.6)
+        if seg.ndim != 2 or len(seg) < 2:
             continue
 
-        # Debug/auto mode → split long jumps
+        if gt_plot:
+            # GT mode -> solid white only
+            ax.plot(
+                seg[:, 0] - shift_x,
+                seg[:, 1] - shift_y,
+                color="white",
+                lw=2.2,
+                linestyle="-",
+            )
+            continue
+
+        # Debug mode -> manual dashed yellow
         for s in split(seg):
-            ax.plot(s[:,0]-shift_x, s[:,1]-shift_y, "w--", lw=1.2)
+            ax.plot(
+                s[:, 0] - shift_x,
+                s[:, 1] - shift_y,
+                color="yellow",
+                lw=2.5,
+                linestyle="--",
+                alpha=0.75,
+                zorder=2,
+            )
 
     # ------------------------------
     # Draw derived midline
     # ------------------------------
-    for seg in (derived_midline_segs or []):
-        seg = np.asarray(seg)
-        if seg.ndim != 2 or len(seg) < 2:
-            continue
-        for s in split(seg):
-            ax.plot(
-                s[:,0]-shift_x, s[:,1]-shift_y,
-                color="darkorange",
-                lw=1.2,
-            )
+    if not gt_plot:
+        for seg in (derived_midline_segs or []):
+            seg = np.asarray(seg)
+            if seg.ndim != 2 or len(seg) < 2:
+                continue
+            for s in split(seg):
+                ax.plot(
+                    s[:, 0] - shift_x,
+                    s[:, 1] - shift_y,
+                    color="cyan",
+                    lw=2.2,
+                    alpha=0.95,
+                    zorder=5,
+                )
 
     # ------------------------------
     # Draw edges
     # ------------------------------
     if not gt_plot:
-        for seg in edge1_segs:
+        for seg in (edge1_segs or []):
             seg = np.asarray(seg)
             for s in split(seg):
-                ax.plot(s[:,0]-shift_x, s[:,1]-shift_y, "r-", lw=1.2)
+                ax.plot(s[:, 0] - shift_x, s[:, 1] - shift_y, "r-", lw=1.2)
 
-        for seg in edge2_segs:
+        for seg in (edge2_segs or []):
             seg = np.asarray(seg)
             for s in split(seg):
-                ax.plot(s[:,0]-shift_x, s[:,1]-shift_y, "g-", lw=1.2)
+                ax.plot(s[:, 0] - shift_x, s[:, 1] - shift_y, "g-", lw=1.2)
 
     # ------------------------------
     # Draw normals (sparse)
     # ------------------------------
-    for n1, n2 in zip(norm1_segs, norm2_segs):
+    for n1, n2 in zip((norm1_segs or []), (norm2_segs or [])):
         n = min(len(n1), len(n2))
         for i in range(0, n, sparsity):
             p1 = n1[i] - [shift_x, shift_y]
             p2 = n2[i] - [shift_x, shift_y]
-            ax.plot([p1[0], p2[0]], [p1[1], p2[1]],
-                    color="cyan", lw=1.0)
+            ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color="cyan", lw=1.0)
 
     # ------------------------------
-    # Legend — blue title + bold
+    # Legend
     # ------------------------------
     if gt_plot:
         handles = [
-            Line2D([], [], color='white', lw=1.4, linestyle='--', label='Midline'),
-            Line2D([], [], color='yellow', lw=1.4, label='Derived Midline'),
+            Line2D([], [], color='white', lw=2.0, linestyle='-', label='Midline'),
             Line2D([], [], color='cyan', lw=1.4, label='Normals'),
-        ]    
-    else:    
+        ]
+    else:
         handles = [
-            Line2D([], [], color='white', lw=1.4, linestyle='--', label='Midline'),
-            Line2D([], [], color='darkorange', lw=1.4, label='Derived Midline'),
+            Line2D([], [], color='yellow', lw=2.0, linestyle='--', label='Midline (Manual)'),
+            Line2D([], [], color='cyan', lw=2.0, label='Midline (Centered)'),
             Line2D([], [], color='red', lw=1.4, label='Edge 1 (Left)'),
             Line2D([], [], color='green', lw=1.4, label='Edge 2 (Right)'),
             Line2D([], [], color='cyan', lw=1.4, label='Normals'),
         ]
-        
+
     if bbox is not None:
-            handles.append(
-                Line2D(
-                    [], [], color='dodgerblue', lw=2.0, label='BBox'
-                )
-            )
+        handles.append(Line2D([], [], color='dodgerblue', lw=2.0, label='BBox'))
 
     leg = ax.legend(
         handles=handles,
