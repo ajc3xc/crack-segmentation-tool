@@ -1951,6 +1951,7 @@ def project_widths_to_support(
 def compute_projected_width_diffs(
     *,
     gt_payload,
+    gt_full,
     baseline_maps,
     base_name,
     midline_type,
@@ -1981,6 +1982,8 @@ def compute_projected_width_diffs(
 
     if not isinstance(cracks, dict):
         raise TypeError(f"[B1] cracks must be dict, got {type(cracks)}")
+    if gt_full is None:
+        raise ValueError("[B1] gt_full is required")
 
     width_rows = []
 
@@ -2059,7 +2062,6 @@ def compute_projected_width_diffs(
         dbg_m = dict(dbg)
         overlay_coords = []
         overlay_diffs = []
-        overlay_bboxes = []
 
         for cid, cr in cracks.items():
             dbg_m["cr_total"] += 1
@@ -2180,14 +2182,6 @@ def compute_projected_width_diffs(
                 overlay_coords.append(np.asarray(sseg[:mseg], float))
                 overlay_diffs.append(np.asarray(diff[off_seg:off_seg + mseg], float))
                 off_seg += len(sseg)
-            bb = cr.get("mask_bbox")
-            if isinstance(bb, (list, tuple)) and len(bb) == 4:
-                try:
-                    bx, by, bw, bh = map(float, bb)
-                    if np.isfinite([bx, by, bw, bh]).all() and bw > 0 and bh > 0:
-                        overlay_bboxes.append((bx, by, bw, bh))
-                except Exception:
-                    pass
 
             for i in range(n):
                 width_rows.append({
@@ -2214,50 +2208,55 @@ def compute_projected_width_diffs(
 
                 coords = overlay_coords
                 diffs = overlay_diffs
-                bboxes = overlay_bboxes
 
                 if not coords:
                     raise RuntimeError("No valid projected segments for overlay")
 
-                if bboxes:
-                    xs = [b[0] for b in bboxes]
-                    ys = [b[1] for b in bboxes]
-                    ws = [b[2] for b in bboxes]
-                    hs = [b[3] for b in bboxes]
+                # --------------------------------------------------
+                # Compute tight bounds from geometry (+ fixed 5px pad)
+                # --------------------------------------------------
+                all_pts = np.vstack(coords)
+                x0, y0 = np.min(all_pts, axis=0)
+                x1, y1 = np.max(all_pts, axis=0)
+                pad = 5.0
 
-                    x0 = min(xs)
-                    y0 = min(ys)
-                    x1 = max(x + w for x, w in zip(xs, ws))
-                    y1 = max(y + h for y, h in zip(ys, hs))
+                x0p = int(np.floor(x0 - pad))
+                y0p = int(np.floor(y0 - pad))
+                x1p = int(np.ceil(x1 + pad))
+                y1p = int(np.ceil(y1 + pad))
 
-                    pad = 0.15 * max(x1 - x0, y1 - y0)
+                # --------------------------------------------------
+                # Clip to GT image bounds and crop GT mask
+                # --------------------------------------------------
+                H, W = gt_full.shape[:2]
+                x0c = max(0, x0p)
+                y0c = max(0, y0p)
+                x1c = min(W, x1p)
+                y1c = min(H, y1p)
+                if x1c <= x0c or y1c <= y0c:
+                    raise RuntimeError("Invalid overlay crop bounds after clipping")
 
-                    x0p = x0 - pad
-                    x1p = x1 + pad
-                    y0p = y0 - pad
-                    y1p = y1 + pad
-                else:
-                    all_pts = np.vstack(coords)
-                    x0p, y0p = np.min(all_pts, axis=0)
-                    x1p, y1p = np.max(all_pts, axis=0)
+                mask_crop = gt_full[y0c:y1c, x0c:x1c]
 
                 fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
                 ax.set_facecolor("white")
-
+                ax.imshow(
+                    mask_crop,
+                    cmap="gray",
+                    extent=[x0c, x1c, y1c, y0c],
+                    interpolation="nearest",
+                )
                 for s in coords:
-                    ax.plot(s[:, 0], s[:, 1], color="black", lw=1.0)
+                    ax.plot(s[:, 0], s[:, 1], color="#333333", lw=1.0)
 
                 all_d = np.concatenate(diffs)
                 all_d = all_d[np.isfinite(all_d)]
 
                 if all_d.size > 0:
-                    vmin, vmax = np.percentile(all_d, [5, 95])
-                    vmin = min(vmin, 0.0)
-                    vmax = max(vmax, 0.0)
-                    if vmax <= vmin:
-                        vmax = vmin + 1e-6
-
-                    norm = TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
+                    absmax = float(np.percentile(np.abs(all_d), 95))
+                    if absmax < 1e-6:
+                        absmax = 1e-6
+                    norm = TwoSlopeNorm(vmin=-absmax, vcenter=0.0, vmax=absmax)
                     cmap = plt.get_cmap("coolwarm")
 
                     for s, d in zip(coords, diffs):
@@ -2278,8 +2277,8 @@ def compute_projected_width_diffs(
                     cb = plt.colorbar(sm, ax=ax, fraction=0.035, pad=0.02)
                     cb.set_label("Projected width - GT width (px)")
 
-                ax.set_xlim(x0p, x1p)
-                ax.set_ylim(y1p, y0p)
+                ax.set_xlim(x0c, x1c)
+                ax.set_ylim(y1c, y0c)
                 ax.set_aspect("equal")
                 ax.axis("off")
                 ax.set_title(f"{method} - Baseline projected widths")
@@ -5566,7 +5565,6 @@ def compare_widths_for_aligned_cracks(
         #   - NO dominance pruning logic here
         #   - Overlay can be categorical (GT-only / PRED-only / BOTH) like Stage 4
         # ============================================================
-        assert pred_pre45_segs, "pred_pre45_segs empty â€” snapshot timing broken"
         assert bite_pruned_pred_segs is not None, "bite_pruned_pred_segs lost"
         
         try:
@@ -5654,7 +5652,6 @@ def compare_widths_for_aligned_cracks(
             pred_kept_segs = []
             pred_undef_gt_segs = []
             pred_undef_other_segs = []
-            pred_stage5_support = []
 
             for wp in (width_pairs or []):
                 if str(wp.get("cid", "")) != str(cid):
@@ -5669,77 +5666,8 @@ def compare_widths_for_aligned_cracks(
                 pred_kept_segs.extend(k)
                 pred_undef_gt_segs.extend(ug)
                 pred_undef_other_segs.extend(uo)
-                pred_stage5_support.append(np.asarray(pts_ok, float))
-
-            # --------------------------------------------------
-            # TOPOLOGY-PRUNED geometry (compute against pre-4.5 snapshot)
-            # --------------------------------------------------
-            #keep_set = _polyline_points_keyset(pred_stage5_support)
-            #if bite_pruned_pred_segs:
-            #    keep_set |= _polyline_points_keyset(bite_pruned_pred_segs)
-            # Keep everything that truly survives into Stage-5 prediction geometry
-            keep_set = _polyline_points_keyset(final_pred_segs)
-
-            # Also keep explicit bite-pruned pieces (so they don't show as topology-pruned)
-            if bite_pruned_pred_segs:
-                keep_set |= _polyline_points_keyset(bite_pruned_pred_segs)
-
-            if DEBUG_TOPOLOGY_TRACE:
-                qpix = 0.25
-                keep_set_q = _qpts_keyset(final_pred_segs, q=qpix)
-                bite_set_q = _qpts_keyset(bite_pruned_pred_segs, q=qpix) if bite_pruned_pred_segs else set()
-                keep_union_q = set(keep_set_q) | set(bite_set_q)
-                pre_set_q = _qpts_keyset(pred_pre45_segs, q=qpix)
-
-                missing_q = pre_set_q - keep_union_q
-                kept_q = pre_set_q & keep_union_q
-
-                _dump_json(
-                    os.path.join(topo_dbg_dir, f"cid_{cid}_pointset_summary.json"),
-                    {
-                        "cid": str(cid),
-                        "q": float(qpix),
-                        "pre_pts": int(len(pre_set_q)),
-                        "kept_pts": int(len(kept_q)),
-                        "missing_pts": int(len(missing_q)),
-                        "missing_frac": float(len(missing_q) / max(1, len(pre_set_q))),
-                        "kept_frac": float(len(kept_q) / max(1, len(pre_set_q))),
-                    },
-                )
-
-                for i, Spre in enumerate(pred_pre45_segs or []):
-                    if Spre is None or len(Spre) < 2:
-                        continue
-
-                    mpre = pred_der_stage2_meta[i] if i < len(pred_der_stage2_meta or []) else {}
-                    keys = _qpts_keys_for_seg(Spre, q=qpix)
-                    keep_mask = np.array([(k in keep_union_q) for k in keys], bool)
-                    bite_mask = None
-                    if bite_pruned_pred_segs:
-                        bite_mask = np.array([(k in bite_set_q) for k in keys], bool)
-
-                    meta = _seg_key_meta(Spre, mpre)
-                    out_png = os.path.join(
-                        topo_dbg_dir,
-                        f"cid_{cid}_pre45_seg{i}_branch{meta['branch_id']}_segidx{meta['seg_idx']}.png",
-                    )
-                    _plot_seg_provenance(
-                        out_png=out_png,
-                        S_full=Spre,
-                        keep_mask_bool=keep_mask,
-                        bite_mask_bool=bite_mask,
-                        title=(
-                            f"cid={cid} pre45 seg{i} "
-                            f"branch={meta['branch_id']} seg_idx={meta['seg_idx']} "
-                            f"kept={int(np.sum(keep_mask))}/{len(keep_mask)}"
-                        ),
-                    )
-            
-            topology_pruned_pred_segs = subtract_segments_by_pointset(
-                pred_pre45_segs,
-                keep_set,
-                min_pts=2,
-            )
+            # NO topology pruning allowed:
+            # Stage 2 + Stage 4.5 fully define geometry survival.
 
             # --------------------------------------------------
             # prediction mask
@@ -5803,7 +5731,6 @@ def compare_widths_for_aligned_cracks(
                 ax.axis("off")
 
             col_keep  = (0.2, 0.4, 0.8)
-            col_topo  = (0.7, 0.1, 0.1)
             col_undef = (0.6, 0.6, 0.6)
             col_gtmiss = (0.35, 0.35, 0.35)
             col_bite  = (0.9, 0.6, 0.0)
@@ -5824,11 +5751,6 @@ def compare_widths_for_aligned_cracks(
             # --------------------------------------------------
             # PRED plot (RIGHT)
             # --------------------------------------------------
-            for S in topology_pruned_pred_segs:
-                if S is None or len(S) < 2:
-                    continue
-                axes[1].plot(S[:, 0] - x0, S[:, 1] - y0, color=col_topo, lw=1.4, zorder=2)
-
             for S in bite_pruned_pred_segs:
                 if S is None or len(S) < 2:
                     continue
@@ -5860,7 +5782,6 @@ def compare_widths_for_aligned_cracks(
                 Line2D([0],[0], color=col_gtmiss, lw=2.2, label="GT missing / padded (no comparable GT)"),
                 Line2D([0],[0], color=col_undef, lw=2.2, label="Pred undef / other nonfinite"),
                 Line2D([0],[0], color=col_bite,  lw=2.0, label="Dominance-bite (union)"),
-                Line2D([0],[0], color=col_topo,  lw=1.4, label="Topology-pruned"),
                 Line2D([0],[0], color="#e41a1c", lw=6, label="GT-only loss (overlay)"),
                 Line2D([0],[0], color="#377eb8", lw=6, label="Pred-only loss (overlay)"),
                 Line2D([0],[0], color="#984ea3", lw=6, label="GT âˆ© Pred (overlay)"),
@@ -6675,7 +6596,7 @@ def compare_widths_for_aligned_cracks(
                 print(f"[PART2] wrote: {out}")
 
                 # ------------------------------------------------------------
-                # (B) Resampling explainers â€” corrected semantics
+                # (B) Resampling explainers corrected semantics
                 # ------------------------------------------------------------
 
                 rows_here_sorted = sorted(
@@ -6762,7 +6683,7 @@ def compare_widths_for_aligned_cracks(
 
 
                 # ------------------------------------------------------------
-                # (B1) COMBINED â€” AGGREGATED DIAGNOSTIC (UNCHANGED)
+                # (B1) COMBINED AGGREGATED DIAGNOSTIC (UNCHANGED)
                 # ------------------------------------------------------------
                 if mode == "combined":
                     d_all = []
@@ -6953,7 +6874,7 @@ def compare_widths_for_aligned_cracks(
     sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
     sm.set_array([])
     cb = plt.colorbar(sm, ax=ax, fraction=0.035, pad=0.02)
-    cb.set_label("Estimated width âˆ’ GT width (px)", fontsize=10, fontweight="bold")
+    cb.set_label("Estimated width - GT width (px)", fontsize=10, fontweight="bold")
 
     ticks = list(cb.get_ticks())
     if len(ticks) >= 2:
@@ -7667,4 +7588,3 @@ def has_valid_mask(crack: dict) -> bool:
         return False
     except Exception:
         return False
-

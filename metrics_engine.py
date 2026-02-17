@@ -1815,6 +1815,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         # ============================================================
                         rows = compute_projected_width_diffs(
                             gt_payload={"combined_cracks": combined_gt},
+                            gt_full=gt_full,
                             baseline_maps={method: (wmap, supp)},
                             base_name=base_name,
                             midline_type=midline_type,
