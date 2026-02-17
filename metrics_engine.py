@@ -791,6 +791,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             safe_write_json,
             metric_atomic_path_for,
             compare_widths_for_aligned_cracks,
+            export_midline_metrics_all,
             write_width_diff_overlay,
             safe_read_json,
             merged_metric_atomic,
@@ -883,8 +884,14 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     "user_points": snap.get("user_points", []),
                     "user_connections": snap.get("user_connections", []),
                 }
-                auto_atomic[scid] = auto_cr
-
+                auto_cr["derived_midline"] = (
+                    ab.get("derived_midline")
+                    or ab.get("derived_midline_global")
+                    or snap.get("derived_midline")
+                    or snap.get("derived_midline_global")
+                )
+                if auto_cr["derived_midline"] is None:
+                    auto_cr["derived_midline"] = auto_cr["midline"]
                 auto_atomic[scid] = auto_cr
 
             print(f"[DEBUG METRICS] built {len(auto_atomic)} auto_best cracks for mask/width metrics")
@@ -1599,7 +1606,146 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             """
 
             import os
+            import json
             import numpy as np
+
+            def _flatten_numeric_1d(raw):
+                out = []
+
+                def _rec(x):
+                    if x is None:
+                        return
+                    if isinstance(x, np.ndarray):
+                        if x.ndim == 0:
+                            try:
+                                v = float(x.item())
+                                if np.isfinite(v):
+                                    out.append(v)
+                            except Exception:
+                                pass
+                            return
+                        for vv in x.reshape(-1):
+                            _rec(vv)
+                        return
+                    if isinstance(x, (list, tuple)):
+                        for vv in x:
+                            _rec(vv)
+                        return
+                    try:
+                        v = float(x)
+                    except Exception:
+                        return
+                    if np.isfinite(v):
+                        out.append(v)
+
+                _rec(raw)
+                return out
+
+            def _extract_gt_widths(entry):
+                if not isinstance(entry, dict):
+                    return None
+                for k in (
+                    "gt_widths",
+                    "gt_widths_auto_centered",
+                    "gt_width_px",
+                    "gt_width_px_auto_centered",
+                ):
+                    vals = _flatten_numeric_1d(entry.get(k))
+                    if len(vals) >= 2:
+                        return [float(v) for v in vals]
+                gtn = entry.get("gt_normals")
+                if isinstance(gtn, dict):
+                    vals = _flatten_numeric_1d(gtn.get("width_px"))
+                    if len(vals) >= 2:
+                        return [float(v) for v in vals]
+                return None
+
+            def _pick_gt_entry_for_combined(crack_obj, gt_comb_by_members, gt_atomic_by_id):
+                if not isinstance(crack_obj, dict):
+                    return None, "none"
+                members = set(map(str, (crack_obj or {}).get("members", []) or []))
+                if members:
+                    exact = gt_comb_by_members.get(frozenset(members))
+                    if exact is not None:
+                        return exact, "combined_exact"
+
+                    best = None
+                    for mk, e in gt_comb_by_members.items():
+                        gm = set(mk)
+                        inter = len(members & gm)
+                        denom = max(1, max(len(members), len(gm)))
+                        u = inter / denom
+                        if best is None or u > best[0]:
+                            best = (u, e)
+                    if best is not None and best[0] >= 0.60:
+                        return best[1], "combined_overlap"
+
+                if len(members) == 1:
+                    aid = next(iter(members))
+                    ae = gt_atomic_by_id.get(str(aid))
+                    if ae is not None:
+                        return ae, "atomic_singleton"
+
+                return None, "none"
+
+            def _enrich_combined_for_baseline(combined_in, gt_sup_root_local):
+                out = {}
+                for k, v in (combined_in or {}).items():
+                    out[str(k)] = dict(v) if isinstance(v, dict) else v
+                sup_json = os.path.join(gt_sup_root_local or "", "gt_supervision.json")
+                if not os.path.isfile(sup_json):
+                    print(f"[BASELINE GT SUP] missing: {sup_json}")
+                    return out
+
+                try:
+                    with open(sup_json, "r", encoding="utf-8") as f:
+                        sup = json.load(f)
+                except Exception as e:
+                    print(f"[BASELINE GT SUP] failed to read {sup_json}: {e}")
+                    return out
+
+                gt_comb_by_members = {}
+                gt_atomic_by_id = {}
+                for e in (sup.get("cracks") or []):
+                    if not isinstance(e, dict):
+                        continue
+                    kind = str(e.get("kind") or "").lower()
+                    if kind == "combined":
+                        ms = e.get("members") or []
+                        if ms:
+                            gt_comb_by_members[frozenset(map(str, ms))] = e
+                    elif kind == "atomic":
+                        aid = e.get("id")
+                        if aid is not None:
+                            gt_atomic_by_id[str(aid)] = e
+
+                n_matched = 0
+                n_enriched_widths = 0
+                for cid, cr in list(out.items()):
+                    if not isinstance(cr, dict):
+                        continue
+                    gt_entry, _ = _pick_gt_entry_for_combined(cr, gt_comb_by_members, gt_atomic_by_id)
+                    if gt_entry is None:
+                        continue
+                    n_matched += 1
+
+                    if cr.get("gt_widths") is None and cr.get("widths") is None and cr.get("gt_normals") is None:
+                        gtw = _extract_gt_widths(gt_entry)
+                        if gtw is not None and len(gtw) >= 2:
+                            cr["gt_widths"] = gtw
+                            n_enriched_widths += 1
+
+                    if not cr.get("midline"):
+                        if gt_entry.get("midline") is not None:
+                            cr["midline"] = gt_entry.get("midline")
+
+                    out[str(cid)] = cr
+
+                print(
+                    f"[BASELINE GT SUP] combined={len(gt_comb_by_members)} atomic={len(gt_atomic_by_id)} "
+                    f"matched={n_matched} enriched_gt_widths={n_enriched_widths}"
+                )
+                return out
 
             # ------------------------------------------------------------
             # Build variant payloads (main variant)
@@ -1636,6 +1782,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                             f"[BASELINE] combined_cracks must be dict, got {type(combined_gt)}"
                         )
 
+                    combined_gt = _enrich_combined_for_baseline(combined_gt, gt_sup_root)
                     print(f"[BASELINE DEBUG] combined_gt entries: {len(combined_gt)}")
 
                     for method, rec in baseline_maps_local.items():
@@ -1697,6 +1844,12 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                                 mid = np.asarray(cr.get("midline", []), float)
                                 if mid.ndim == 2 and len(mid) >= 2:
                                     gt_mid_all.append(mid)
+                                    continue
+
+                                for S in (cr.get("midline_segments") or []):
+                                    S = np.asarray(S, float)
+                                    if S.ndim == 2 and len(S) >= 2:
+                                        gt_mid_all.append(S)
 
                             if not gt_mid_all:
                                 print("[BASELINE MIDLINE] no valid GT combined midlines")
@@ -1714,6 +1867,10 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                             midline_metric_rows.append({
                                 "image": base_name,
                                 "crack_id": "baseline_combined",
+                                "crack_type": "combined",
+                                "midline_type": midline_type,
+                                "variant_id": method,
+                                "geometry_type": "baseline",
                                 "variant_global_id": -1,
                                 "os_mode": "baseline",
                                 "method": method,
@@ -1733,6 +1890,15 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                                 "orth_std": mm.get("orth_std"),
                                 "signed_bias_z": mm.get("signed_bias_z"),
                             })
+
+                            export_midline_metrics_all(
+                                metrics_dir_local,
+                                base_name,
+                                midline_metric_rows,
+                                midline_type,
+                                crack_type="combined",
+                                variant_id=method,
+                            )
 
                             print(f"[BASELINE MIDLINE] geometry metrics written for '{method}'")
 
@@ -1769,23 +1935,40 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     variant_id=variant_id,
                 )
 
-                if not ret or not ret[0]:
+                if not ret:
                     print(f"[WIDTH] no rows returned for {crack_type} / {variant_id}")
                     return
 
-                rows = ret[0]
+                width_rows = ret[0] or []
+                midline_rows = ret[1] if len(ret) > 1 and ret[1] is not None else []
+                if midline_rows:
+                    geom_counts = {}
+                    for r in midline_rows:
+                        g = str((r or {}).get("geometry_type", "unknown"))
+                        geom_counts[g] = int(geom_counts.get(g, 0)) + 1
+                    print(f"[MIDLINE ROWS] {crack_type}/{variant_id} geometry counts: {geom_counts}")
 
-                csv_root = os.path.join(metrics_dir_local, midline_type)
                 out_dir = os.path.join(metrics_dir_local, midline_type, crack_type, variant_id)
                 os.makedirs(out_dir, exist_ok=True)
 
-                export_width_metrics_all(
-                    metrics_dir_local,
-                    base_tag,
-                    rows,
-                    midline_type,
-                    crack_type=crack_type,
-                )
+                if width_rows:
+                    export_width_metrics_all(
+                        metrics_dir_local,
+                        base_tag,
+                        width_rows,
+                        midline_type,
+                        crack_type=crack_type,
+                    )
+
+                if midline_rows:
+                    export_midline_metrics_all(
+                        metrics_dir_local,
+                        base_tag,
+                        midline_rows,
+                        midline_type,
+                        crack_type=crack_type,
+                        variant_id=variant_id,
+                    )
 
                 '''from helpers.present_plots import plot_width_summary_bars
                 plot_width_summary_bars(
@@ -1793,6 +1976,10 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     base_tag,
                     os.path.join(out_dir, f"{base_tag}_width_summary_bars.png"),
                 )'''
+
+                if not width_rows and not midline_rows:
+                    print(f"[WIDTH] no width or midline rows for {crack_type} / {variant_id}")
+                    return
 
                 print(f"[WIDTH] finished summaries for {crack_type} / {variant_id}")
                 

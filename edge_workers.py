@@ -911,11 +911,41 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(subtiming, dict):
             timing_dict.update(subtiming)
 
+        normals_e1_arr = np.asarray(normals_e1, float)
+        normals_e2_arr = np.asarray(normals_e2, float)
+        if normals_e1_arr.ndim == 2 and normals_e1_arr.shape[1] == 2:
+            normals_e1_global = np.column_stack([
+                normals_e1_arr[:, 0] + x,
+                normals_e1_arr[:, 1] + y,
+            ])
+        else:
+            normals_e1_global = np.zeros((0, 2), float)
+
+        if normals_e2_arr.ndim == 2 and normals_e2_arr.shape[1] == 2:
+            normals_e2_global = np.column_stack([
+                normals_e2_arr[:, 0] + x,
+                normals_e2_arr[:, 1] + y,
+            ])
+        else:
+            normals_e2_global = np.zeros((0, 2), float)
+
+        n_w = min(len(track_e1_global), len(track_e2_global))
+        pred_widths = (
+            np.linalg.norm(
+                np.asarray(track_e1_global[:n_w], float) - np.asarray(track_e2_global[:n_w], float),
+                axis=1,
+            ).tolist()
+            if n_w >= 2 else []
+        )
+
         result: Dict[str, Any] = {
             "status": "ok",
             "bbox": [x, y, w, h],
             "mask_bbox": [x, y, w, h],
             "mask_crop": np.asarray(mask_crop).tolist(),
+            "midline": np.asarray(mid_xy_g, float).tolist(),
+            "midline_global": np.asarray(mid_xy_g, float).tolist(),
+            "derived_midline_crop": np.asarray(derived_midline_crop).tolist(),
             "derived_midline": np.column_stack([
                 np.asarray(derived_midline_crop)[:, 0] + x,
                 np.asarray(derived_midline_crop)[:, 1] + y,
@@ -925,9 +955,19 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "edge2": track_e2_global.tolist(),
             },
             "normal_edge_points_full": {
-                "edge1": np.asarray(normals_e1).tolist(),
-                "edge2": np.asarray(normals_e2).tolist(),
+                "edge1": normals_e1_global.tolist(),
+                "edge2": normals_e2_global.tolist(),
             },
+            # Backward-compat aliases used by older callers.
+            "normal_edge_points": {
+                "edge1": normals_e1_global.tolist(),
+                "edge2": normals_e2_global.tolist(),
+            },
+            "normal_edge_points_crop": {
+                "edge1": normals_e1_arr.tolist(),
+                "edge2": normals_e2_arr.tolist(),
+            },
+            "pred_widths": pred_widths,
             "timing": timing_dict,
         }
 

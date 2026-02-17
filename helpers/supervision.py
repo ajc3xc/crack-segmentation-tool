@@ -1,4 +1,4 @@
-import os, json
+import os, json, shutil
 import numpy as np
 import cv2
 from helpers.plot_metrics import plot_edges_and_normals
@@ -1464,6 +1464,11 @@ def export_gt_supervision_for_image(
     auto_centering_domain_combined: str = "terr_and_mask",
 ):
     sup_root = os.path.join(save_root, "supervision", base_name)
+    if os.path.isdir(sup_root):
+        print(f"[GT_SUP] wiping existing supervision folder: {sup_root}")
+        shutil.rmtree(sup_root)
+    os.makedirs(sup_root, exist_ok=True)
+
     #mask_root = os.path.join(sup_root, "masks")
     atomic_crop_root = os.path.join(sup_root, "atomic_crops")
     combined_crop_root = os.path.join(sup_root, "combined_crops")

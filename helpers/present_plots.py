@@ -1866,16 +1866,16 @@ def plot_rs3_midline_diagnostics(
     out_dir,
     selected_family=None,
     title_suffix=None,
+    compare_mode="all",
+    group_cols=("midline_type", "geometry_type"),
+    max_groups=10,
 ):
     """
-    Thesis-grade diagnostic plots for midline behavior.
-    NO selection influence.
+    Midline diagnostic plotting.
 
-    If selected_family is None:
-        → plots diagnostics across ALL rows (generic mode)
-
-    If selected_family is provided:
-        → filters to that RS3 family (legacy behavior)
+    Modes:
+      - compare_mode="all": legacy single-distribution plots across rows
+      - compare_mode="grouped": grouped bars (mean±std) split by group_cols
     """
     import os
     import numpy as np
@@ -1901,48 +1901,9 @@ def plot_rs3_midline_diagnostics(
     if df.empty:
         return
 
-    # ------------------------------------------------------------
-    # 1) PRIMARY METRICS (thesis-facing)
-    # ------------------------------------------------------------
-    primary_metrics = [
-        "coverage_min",
-        "nn_mean_bidirectional",
-        "hausdorff_max",
-        "score_mid",
-    ]
-
+    primary_metrics = ["coverage_min", "nn_mean_bidirectional", "hausdorff_max", "score_mid"]
     primary_metrics = [m for m in primary_metrics if m in df.columns]
 
-    if primary_metrics:
-        data, labels = [], []
-        for m in primary_metrics:
-            vals = pd.to_numeric(df[m], errors="coerce").dropna().values
-            if len(vals):
-                data.append(vals)
-                labels.append(m)
-
-        if data:
-            plt.figure(figsize=(1.6 * len(data), 4))
-            plt.boxplot(data, labels=labels, showfliers=False)
-            plt.ylabel("value")
-
-            title = "Midline Primary Metrics"
-            if selected_family is not None:
-                title = "RS3 Primary Midline Metrics (Selected Family)"
-            if title_suffix:
-                title += f" — {title_suffix}"
-
-            plt.title(title)
-            plt.tight_layout()
-            plt.savefig(
-                os.path.join(out_dir, "primary_midline_metrics.png"),
-                dpi=200,
-            )
-            plt.close()
-
-    # ------------------------------------------------------------
-    # 2) DIAGNOSTIC METRICS (summary bars)
-    # ------------------------------------------------------------
     diagnostic_metrics = [
         "relative_length_error",
         "orth_mean",
@@ -1951,48 +1912,125 @@ def plot_rs3_midline_diagnostics(
         "mean_tan_angle_error_deg",
         "frechet_discrete_ds",
     ]
+    diagnostic_metrics = [m for m in diagnostic_metrics if m in df.columns]
 
-    rows = []
-    for m in diagnostic_metrics:
-        if m not in df.columns:
-            continue
+    def _make_group_key(frame: pd.DataFrame) -> pd.Series:
+        parts = []
+        for c in group_cols:
+            if c in frame.columns:
+                parts.append(frame[c].astype(str).fillna(""))
+        if not parts:
+            return pd.Series(["all"] * len(frame), index=frame.index)
+        key = parts[0]
+        for p in parts[1:]:
+            key = key + "|" + p
+        return key
 
-        vals = pd.to_numeric(df[m], errors="coerce").dropna().values
-        if not len(vals):
-            continue
+    def _plot_grouped_bars(metrics, filename, plot_title):
+        if not metrics:
+            return
 
-        rows.append({
-            "metric": m,
-            "mean": float(np.mean(vals)),
-            "std":  float(np.std(vals)),
-        })
+        dfx = df.copy()
+        dfx["_group"] = _make_group_key(dfx)
+        grp_counts = dfx["_group"].value_counts()
+        keep_groups = list(grp_counts.index[:max_groups])
+        dfx = dfx[dfx["_group"].isin(keep_groups)].copy()
+        if dfx.empty:
+            return
 
-    if rows:
-        dfd = pd.DataFrame(rows)
+        groups = sorted(list(dfx["_group"].unique()))
+        means = np.zeros((len(groups), len(metrics)), float)
+        stds = np.zeros((len(groups), len(metrics)), float)
 
-        plt.figure(figsize=(1.6 * len(dfd), 4))
-        plt.bar(
-            dfd["metric"],
-            dfd["mean"],
-            yerr=dfd["std"],
-            capsize=5,
-        )
+        for gi, gname in enumerate(groups):
+            dfg = dfx[dfx["_group"] == gname]
+            for mi, m in enumerate(metrics):
+                vals = pd.to_numeric(dfg[m], errors="coerce").dropna().values
+                means[gi, mi] = float(np.mean(vals)) if len(vals) else np.nan
+                stds[gi, mi] = float(np.std(vals)) if len(vals) else np.nan
+
+        x = np.arange(len(metrics), dtype=float)
+        n_groups = len(groups)
+        width = 0.8 / max(1, n_groups)
+
+        plt.figure(figsize=(max(8, 1.7 * len(metrics)), 4.8))
+        for gi, gname in enumerate(groups):
+            xpos = x - 0.4 + (gi + 0.5) * width
+            plt.bar(xpos, means[gi], width=width, yerr=stds[gi], capsize=3, label=str(gname))
+
+        plt.xticks(x, metrics, rotation=25, ha="right")
         plt.ylabel("value")
 
-        title = "Midline Diagnostic Metrics (distribution summary)"
+        title = plot_title
+        if selected_family is not None:
+            title = "RS3 " + title
+        if title_suffix:
+            title += f" — {title_suffix}"
+        plt.title(title)
+        plt.legend(fontsize=8, framealpha=0.9)
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, filename), dpi=200)
+        plt.close()
+
+    def _plot_boxplots(metrics, filename, plot_title):
+        if not metrics:
+            return
+        data, labels = [], []
+        for m in metrics:
+            vals = pd.to_numeric(df[m], errors="coerce").dropna().values
+            if len(vals):
+                data.append(vals)
+                labels.append(m)
+        if not data:
+            return
+
+        plt.figure(figsize=(1.6 * len(data), 4))
+        plt.boxplot(data, labels=labels, showfliers=False)
+        plt.ylabel("value")
+
+        title = plot_title
         if selected_family is not None:
             title = "RS3 " + title
         if title_suffix:
             title += f" — {title_suffix}"
 
         plt.title(title)
-        plt.xticks(rotation=30, ha="right")
         plt.tight_layout()
-        plt.savefig(
-            os.path.join(out_dir, "diagnostic_bars.png"),
-            dpi=200,
-        )
+        plt.savefig(os.path.join(out_dir, filename), dpi=200)
         plt.close()
+
+    if compare_mode == "grouped":
+        _plot_grouped_bars(primary_metrics, "primary_midline_metrics_grouped.png", "Midline Primary Metrics (grouped)")
+    else:
+        _plot_boxplots(primary_metrics, "primary_midline_metrics.png", "Midline Primary Metrics")
+
+    if compare_mode == "grouped":
+        _plot_grouped_bars(diagnostic_metrics, "diagnostic_bars_grouped.png", "Midline Diagnostic Metrics (grouped)")
+    else:
+        rows = []
+        for m in diagnostic_metrics:
+            vals = pd.to_numeric(df[m], errors="coerce").dropna().values
+            if not len(vals):
+                continue
+            rows.append({"metric": m, "mean": float(np.mean(vals)), "std": float(np.std(vals))})
+
+        if rows:
+            dfd = pd.DataFrame(rows)
+            plt.figure(figsize=(1.6 * len(dfd), 4))
+            plt.bar(dfd["metric"], dfd["mean"], yerr=dfd["std"], capsize=5)
+            plt.ylabel("value")
+
+            title = "Midline Diagnostic Metrics (distribution summary)"
+            if selected_family is not None:
+                title = "RS3 " + title
+            if title_suffix:
+                title += f" — {title_suffix}"
+
+            plt.title(title)
+            plt.xticks(rotation=30, ha="right")
+            plt.tight_layout()
+            plt.savefig(os.path.join(out_dir, "diagnostic_bars.png"), dpi=200)
+            plt.close()
 
 
 
