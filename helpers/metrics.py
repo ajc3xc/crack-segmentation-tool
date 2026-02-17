@@ -1746,30 +1746,6 @@ def load_baseline_widthmaps_for_image(baseline_img_dir: str):
 
     return out
 
-def sample_widths_from_wmap(wmap, supp, mid_xy):
-    """
-    mid_xy: Nx2 float array in full-image coords
-    returns pred widths with NaN where unsupported/outside
-    """
-    import numpy as np
-
-    H, W = wmap.shape[:2]
-    xy = np.asarray(mid_xy, float)
-    if xy.ndim != 2 or xy.shape[1] != 2:
-        return np.array([], dtype=np.float32)
-
-    x = np.rint(xy[:, 0]).astype(int)
-    y = np.rint(xy[:, 1]).astype(int)
-
-    inside = (x >= 0) & (x < W) & (y >= 0) & (y < H)
-    out = np.full((len(x),), np.nan, dtype=np.float32)
-
-    if np.any(inside):
-        ok = inside & supp[y.clip(0, H-1), x.clip(0, W-1)]
-        out[ok] = wmap[y[ok], x[ok]].astype(np.float32)
-
-    return out
-
 def augment_combined_with_orphan_atomics(
     *,
     combined_src: dict,
@@ -1853,6 +1829,121 @@ def augment_combined_with_orphan_atomics(
         f"[COMBINED AUGMENT] final combined count = {len(out)} "
         f"(original={len(combined_src)}, injected={len(out) - len(combined_src)})"
     )
+
+    return out
+
+def project_widths_to_support(
+    wmap,
+    supp,
+    mid_xy,
+    *,
+    max_nn_dist_px=6.0,
+    use_support_mask=True,
+    debug=False,
+):
+    """
+    Strategy 1 (nearest-support projection):
+
+    For each GT midline point:
+        - Find nearest baseline support pixel (typically skeleton pixel)
+        - Take width_map value at that support pixel
+        - Reject if nearest distance > max_nn_dist_px
+
+    This respects how baseline methods define widths:
+        widths exist only at skeleton/support pixels.
+
+    Args:
+        wmap: HxW float width map
+        supp: HxW uint8/bool support mask (usually skeleton)
+        mid_xy: Nx2 float array of GT midline points (x, y)
+        max_nn_dist_px: maximum allowed projection distance
+        use_support_mask: if False, uses (wmap > 0) as support
+        debug: prints coverage diagnostics
+
+    Returns:
+        (N,) float32 array of projected widths (NaN where invalid)
+    """
+    import numpy as np
+
+    if wmap is None:
+        return np.array([], dtype=np.float32)
+
+    wmap = np.asarray(wmap)
+    H, W = wmap.shape[:2]
+
+    xy = np.asarray(mid_xy, float)
+    if xy.ndim != 2 or xy.shape[1] != 2:
+        return np.array([], dtype=np.float32)
+
+    finite = np.isfinite(xy).all(axis=1)
+    out = np.full((len(xy),), np.nan, dtype=np.float32)
+    if not np.any(finite):
+        return out
+
+    # --------------------------------------------
+    # Build support mask
+    # --------------------------------------------
+    if use_support_mask and supp is not None:
+        supp_m = np.asarray(supp).astype(bool)
+    else:
+        supp_m = np.isfinite(wmap) & (wmap > 0)
+
+    ys, xs = np.nonzero(supp_m)
+    if len(xs) == 0:
+        if debug:
+            print("[B1 PROJ] support empty")
+        return out
+
+    supp_xy = np.column_stack([
+        xs.astype(np.float32),
+        ys.astype(np.float32),
+    ])
+
+    # --------------------------------------------
+    # Nearest neighbor projection
+    # --------------------------------------------
+    try:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(supp_xy)
+        d, idx = tree.query(xy[finite], k=1)
+        d = np.asarray(d, float)
+        idx = np.asarray(idx, int)
+    except Exception:
+        # fallback (slow but safe)
+        d = np.full((np.sum(finite),), np.inf, float)
+        idx = np.full((np.sum(finite),), -1, int)
+        for i, p in enumerate(xy[finite]):
+            dd = np.sum((supp_xy - p) ** 2, axis=1)
+            j = int(np.argmin(dd))
+            idx[i] = j
+            d[i] = float(np.sqrt(dd[j]))
+
+    ok = d <= float(max_nn_dist_px)
+
+    if not np.any(ok):
+        if debug:
+            print(
+                f"[B1 PROJ] 0/{len(d)} within max_nn_dist_px={max_nn_dist_px}"
+            )
+        return out
+
+    nn_x = supp_xy[idx[ok], 0].astype(int)
+    nn_y = supp_xy[idx[ok], 1].astype(int)
+    nn_x = np.clip(nn_x, 0, W - 1)
+    nn_y = np.clip(nn_y, 0, H - 1)
+
+    vals = wmap[nn_y, nn_x].astype(np.float32)
+
+    out_idx = np.flatnonzero(finite)[ok]
+    out[out_idx] = vals
+
+    if debug:
+        print(
+            f"[B1 PROJ] total={len(xy)} "
+            f"finite={np.sum(finite)} "
+            f"valid_proj={np.sum(ok)} "
+            f"nan_out={np.sum(~np.isfinite(out))}"
+        )
 
     return out
 
@@ -2040,7 +2131,14 @@ def compute_projected_width_diffs(
             # --------------------------------------------------
             # Baseline widths sampled along GT geometry
             # --------------------------------------------------
-            pred_widths = sample_widths_from_wmap(wmap, supp, gt_mid)
+            pred_widths = project_widths_to_support(
+                wmap,
+                supp,
+                gt_mid,
+                max_nn_dist_px=6.0,   # adjust 4–8 depending on density
+                debug=False,
+            )
+
 
             if pred_widths is None:
                 dbg_m["pred_widths_too_short"] += 1
