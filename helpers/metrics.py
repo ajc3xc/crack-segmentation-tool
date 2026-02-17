@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 import cracktools as ct
 #from helpers.crackhelpers import *
 # helpers/metrics/metrics.py
@@ -143,7 +143,7 @@ def _nn_dists(A, B):
             dists, _ = tree.query(A_gpu, k=1)
             return cp.asnumpy(dists)
         except Exception as e:
-            print(f"[nn_dists][warn] GPU KDTree failed → falling back to CPU: {e}")
+            print(f"[nn_dists][warn] GPU KDTree failed â†’ falling back to CPU: {e}")
 
     # CPU fallback (SciPy)
     try:
@@ -188,7 +188,7 @@ def hausdorff_p95(A, B, q=95):
     Returns
     -------
     float
-        max( percentile_q(A→B), percentile_q(B→A) )
+        max( percentile_q(Aâ†’B), percentile_q(Bâ†’A) )
     """
     import numpy as np
 
@@ -218,7 +218,7 @@ def hausdorff_p95(A, B, q=95):
 
 def frechet_discrete_ds(A, B, max_points=800):
     """
-    Iterative Eiter–Mannila discrete Fréchet distance.
+    Iterative Eiterâ€“Mannila discrete FrÃ©chet distance.
     - No recursion (avoids RecursionError)
     - Resamples long polylines to <= max_points for robustness
     """
@@ -293,7 +293,7 @@ def orthogonal_deviation(manual_xy, auto_xy, N=400, robust='median'):
     norm = np.column_stack([-d[:,1], d[:,0]])
     nlen = np.maximum(1e-9, np.sqrt((norm**2).sum(1)))
     n = norm / nlen[:,None]
-    # nearest auto → signed projection
+    # nearest auto â†’ signed projection
     d2 = ((M[:,None,:] - A[None,:,:])**2).sum(2)
     idx = d2.argmin(1)
     v = A[idx] - M
@@ -513,7 +513,7 @@ def _reconstruct_full_mask(crack, H, W):
     """
     Strict version with detailed debug:
     Verifies crop size, bbox validity, and paste location before constructing full mask.
-    Does NOT silently repair or fallback — if data is inconsistent, returns zeros + message.
+    Does NOT silently repair or fallback â€” if data is inconsistent, returns zeros + message.
     """
     import numpy as np
 
@@ -533,38 +533,38 @@ def _reconstruct_full_mask(crack, H, W):
 
     # sanity
     if mc is None or bb is None:
-        print("[DEBUG MASK] ❌ missing mask_crop or mask_bbox")
+        print("[DEBUG MASK] âŒ missing mask_crop or mask_bbox")
         return np.zeros((H, W), dtype=np.uint8)
 
     crop = np.array(mc, dtype=np.uint8)
     if crop.ndim != 2:
-        print(f"[DEBUG MASK] ❌ mask_crop ndim={crop.ndim}, expected 2")
+        print(f"[DEBUG MASK] âŒ mask_crop ndim={crop.ndim}, expected 2")
         return np.zeros((H, W), dtype=np.uint8)
 
     if not isinstance(bb, (list, tuple)) or len(bb) != 4:
-        print("[DEBUG MASK] ❌ invalid bbox format")
+        print("[DEBUG MASK] âŒ invalid bbox format")
         return np.zeros((H, W), dtype=np.uint8)
 
     x, y, w, h = [int(v) for v in bb]
-    print(f"[DEBUG MASK] bbox parsed → x={x}, y={y}, w={w}, h={h}")
+    print(f"[DEBUG MASK] bbox parsed â†’ x={x}, y={y}, w={w}, h={h}")
 
     # check if bbox is within image
     if x < 0 or y < 0 or x >= W or y >= H:
-        print("[DEBUG MASK] ❌ bbox origin outside image bounds")
+        print("[DEBUG MASK] âŒ bbox origin outside image bounds")
         return np.zeros((H, W), dtype=np.uint8)
 
     # check crop consistency
     print(f"[DEBUG MASK] crop shape={crop.shape}, target area=({y}:{y+h}, {x}:{x+w})")
 
     if h <= 0 or w <= 0:
-        print("[DEBUG MASK] ❌ non-positive bbox dimensions")
+        print("[DEBUG MASK] âŒ non-positive bbox dimensions")
         return np.zeros((H, W), dtype=np.uint8)
 
     # safe paste within limits
     x2, y2 = min(x + w, W), min(y + h, H)
     w_eff, h_eff = max(0, x2 - x), max(0, y2 - y)
     if w_eff == 0 or h_eff == 0:
-        print("[DEBUG MASK] ❌ effective bbox has zero area after clipping")
+        print("[DEBUG MASK] âŒ effective bbox has zero area after clipping")
         return np.zeros((H, W), dtype=np.uint8)
 
     crop = (crop > 0).astype(np.uint8)
@@ -572,7 +572,7 @@ def _reconstruct_full_mask(crack, H, W):
 
     m = np.zeros((H, W), dtype=np.uint8)
     m[y:y+h_eff, x:x+w_eff] = crop
-    print(f"[DEBUG MASK] ✅ pasted crop ({crop.shape}) into full mask at ({x},{y})")
+    print(f"[DEBUG MASK] âœ… pasted crop ({crop.shape}) into full mask at ({x},{y})")
     return m
     
 # helpers/metrics.py
@@ -927,7 +927,7 @@ def bite_blob_to_fullmask(bite_blob, H, W, base_bbox=None, assume_local=None):
 def split_polyline_by_mask(xy, invalid_mask, min_pts=2):
     """
     xy: (N,2)
-    invalid_mask: (N,) bool — True = REMOVE
+    invalid_mask: (N,) bool â€” True = REMOVE
     returns: list of (M,2) arrays
     """
     out = []
@@ -1181,7 +1181,7 @@ def build_branch_bite_masks(dominance_meta, H, W):
 
     for bid, bmeta in branches.items():
         bid = int(bid)
-        lost = bmeta.get("lost_to", [])  # ← THIS is critical
+        lost = bmeta.get("lost_to", [])  # â† THIS is critical
 
         masks = []
         for cause in lost:
@@ -1347,7 +1347,7 @@ def arclen_s(xy):
 
 def local_step_sizes(xy):
     """
-    Local step sizes Δs_i = ||p_{i+1} - p_i||.
+    Local step sizes Î”s_i = ||p_{i+1} - p_i||.
     """
     xy = np.asarray(xy, float)
     if xy.ndim != 2 or len(xy) < 2:
@@ -1358,8 +1358,8 @@ def local_step_sizes(xy):
 def _already_uniform_enough(xy, ds_target=1.0, mean_tol=0.02, cv_tol=0.05):
     """
     Very strict fast-path: treat as already-uniform only if:
-      - mean(Δs) is close to ds_target
-      - coefficient of variation of Δs is small
+      - mean(Î”s) is close to ds_target
+      - coefficient of variation of Î”s is small
     """
     ds = local_step_sizes(xy)
     if ds.size == 0:
@@ -1832,7 +1832,7 @@ def augment_combined_with_orphan_atomics(
             "midline_segments": [seg],
             "midline_segments_meta": [dict(seg_meta)],
 
-            # ✅ REQUIRED by your combined extractor now
+            # âœ… REQUIRED by your combined extractor now
             "derived_midline_segments": [seg],
             "derived_midline_segments_meta": [dict(seg_meta)],
 
@@ -1864,6 +1864,7 @@ def compute_projected_width_diffs(
     base_name,
     midline_type,
     crack_type,
+    metrics_dir_local=None,
 ):
     """
     Regime B1: GT-conditioned width evaluation (projection-based).
@@ -1965,6 +1966,9 @@ def compute_projected_width_diffs(
 
     for method, (wmap, supp) in baseline_maps.items():
         dbg_m = dict(dbg)
+        overlay_coords = []
+        overlay_diffs = []
+        overlay_bboxes = []
 
         for cid, cr in cracks.items():
             dbg_m["cr_total"] += 1
@@ -2061,6 +2065,32 @@ def compute_projected_width_diffs(
             pred_widths = pred_widths[:n]
             diff        = pred_widths - gt_widths
 
+            # Keep method-local geometry + diffs for projected spatial overlay.
+            # IMPORTANT: preserve segment boundaries to avoid visual stitching
+            # lines between disjoint segments.
+            off_seg = 0
+            for sseg in gt_mid_parts:
+                sseg = np.asarray(sseg, float)
+                if sseg.ndim != 2 or len(sseg) < 2:
+                    continue
+                if off_seg >= n:
+                    break
+                mseg = min(len(sseg), n - off_seg)
+                if mseg < 2:
+                    off_seg += len(sseg)
+                    continue
+                overlay_coords.append(np.asarray(sseg[:mseg], float))
+                overlay_diffs.append(np.asarray(diff[off_seg:off_seg + mseg], float))
+                off_seg += len(sseg)
+            bb = cr.get("mask_bbox")
+            if isinstance(bb, (list, tuple)) and len(bb) == 4:
+                try:
+                    bx, by, bw, bh = map(float, bb)
+                    if np.isfinite([bx, by, bw, bh]).all() and bw > 0 and bh > 0:
+                        overlay_bboxes.append((bx, by, bw, bh))
+                except Exception:
+                    pass
+
             for i in range(n):
                 width_rows.append({
                     "image": base_name,
@@ -2073,6 +2103,108 @@ def compute_projected_width_diffs(
                 })
 
             dbg_m["rows_emitted"] += int(n)
+
+        # --------------------------------------------------
+        # Baseline projected-width spatial overlay (B1)
+        # --------------------------------------------------
+        if dbg_m["rows_emitted"] > 0 and metrics_dir_local is not None:
+            try:
+                import matplotlib.pyplot as plt
+                from matplotlib.colors import TwoSlopeNorm
+                import numpy as np
+                import os
+
+                coords = overlay_coords
+                diffs = overlay_diffs
+                bboxes = overlay_bboxes
+
+                if not coords:
+                    raise RuntimeError("No valid projected segments for overlay")
+
+                if bboxes:
+                    xs = [b[0] for b in bboxes]
+                    ys = [b[1] for b in bboxes]
+                    ws = [b[2] for b in bboxes]
+                    hs = [b[3] for b in bboxes]
+
+                    x0 = min(xs)
+                    y0 = min(ys)
+                    x1 = max(x + w for x, w in zip(xs, ws))
+                    y1 = max(y + h for y, h in zip(ys, hs))
+
+                    pad = 0.15 * max(x1 - x0, y1 - y0)
+
+                    x0p = x0 - pad
+                    x1p = x1 + pad
+                    y0p = y0 - pad
+                    y1p = y1 + pad
+                else:
+                    all_pts = np.vstack(coords)
+                    x0p, y0p = np.min(all_pts, axis=0)
+                    x1p, y1p = np.max(all_pts, axis=0)
+
+                fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
+                ax.set_facecolor("white")
+
+                for s in coords:
+                    ax.plot(s[:, 0], s[:, 1], color="black", lw=1.0)
+
+                all_d = np.concatenate(diffs)
+                all_d = all_d[np.isfinite(all_d)]
+
+                if all_d.size > 0:
+                    vmin, vmax = np.percentile(all_d, [5, 95])
+                    vmin = min(vmin, 0.0)
+                    vmax = max(vmax, 0.0)
+                    if vmax <= vmin:
+                        vmax = vmin + 1e-6
+
+                    norm = TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
+                    cmap = plt.get_cmap("coolwarm")
+
+                    for s, d in zip(coords, diffs):
+                        n = min(len(s), len(d))
+                        for i in range(n - 1):
+                            if not np.isfinite(d[i]):
+                                continue
+                            ax.plot(
+                                [s[i, 0], s[i + 1, 0]],
+                                [s[i, 1], s[i + 1, 1]],
+                                color=cmap(norm(d[i])),
+                                lw=2.5,
+                                solid_capstyle="round",
+                            )
+
+                    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+                    sm.set_array([])
+                    cb = plt.colorbar(sm, ax=ax, fraction=0.035, pad=0.02)
+                    cb.set_label("Projected width - GT width (px)")
+
+                ax.set_xlim(x0p, x1p)
+                ax.set_ylim(y1p, y0p)
+                ax.set_aspect("equal")
+                ax.axis("off")
+                ax.set_title(f"{method} - Baseline projected widths")
+
+                out_dir = os.path.join(
+                    metrics_dir_local,
+                    midline_type or "unknown",
+                    crack_type,
+                )
+                os.makedirs(out_dir, exist_ok=True)
+
+                out_path = os.path.join(
+                    out_dir,
+                    f"{base_name}_{method}_baseline_projected_overlay.png",
+                )
+
+                fig.savefig(out_path, dpi=200, bbox_inches="tight")
+                plt.close(fig)
+
+                print(f"[BASELINE B1] wrote overlay: {out_path}")
+
+            except Exception as e:
+                print(f"[BASELINE B1] overlay failed: {e}")
 
         # --------------------------------------------------
         # Debug if empty
@@ -2288,7 +2420,7 @@ def plot_width_error_distribution(*, runs, title, out_path, bins=25):
 
     ax.axvline(mean, lw=1.2, linestyle="--", alpha=0.8)
 
-    ax.set_xlabel("Width error (pred − gt) [px]", fontsize=9)
+    ax.set_xlabel("Width error (pred âˆ’ gt) [px]", fontsize=9)
     ax.set_ylabel("Density", fontsize=9)
     ax.grid(True, alpha=0.25)
     ax.legend(fontsize=8)
@@ -2476,14 +2608,14 @@ def part2_plot_worst_and_all(
     import numpy as np
 
     # ------------------------------------------------------------
-    # WORST CID — ALL segments
+    # WORST CID â€” ALL segments
     # ------------------------------------------------------------
     plot_sampling_consistency(
         pts_list=[r.get("pts") for r in worst_cid_runs if r.get("pts") is not None],
         ptsr_list=[r.get("pts_rs") for r in worst_cid_runs if r.get("pts_rs") is not None],
         mask_bin=pred_mask_worst,
         crop=crop_worst,
-        title=f"Part 2 sampling consistency — WORST CID={worst_cid}",
+        title=f"Part 2 sampling consistency â€” WORST CID={worst_cid}",
         out_path=os.path.join(
             part2_resample_dir,
             f"part2_sampling_WORST_cid{worst_cid}.png",
@@ -2492,7 +2624,7 @@ def part2_plot_worst_and_all(
 
     plot_width_error_distribution(
         runs=worst_cid_runs,
-        title=f"Part 2 width error distribution — WORST CID={worst_cid}",
+        title=f"Part 2 width error distribution â€” WORST CID={worst_cid}",
         out_path=os.path.join(part2_resample_dir, f"part2_width_dist_WORST_cid{worst_cid}.png"),
     )
 
@@ -2508,19 +2640,19 @@ def part2_plot_worst_and_all(
     if worst_run is not None:
         plot_part2_width_signals_preservation(
             run=worst_run,
-            title=f"Part 2 worst-run width signals — cid={worst_cid}",
+            title=f"Part 2 worst-run width signals â€” cid={worst_cid}",
             out_path=os.path.join(part2_resample_dir, f"part2_width_signals_WORST_cid{worst_cid}.png"),
         )
 
     # ------------------------------------------------------------
-    # GLOBAL — ALL CIDs
+    # GLOBAL â€” ALL CIDs
     # ------------------------------------------------------------
     plot_sampling_consistency(
         pts_list=[r.get("pts") for r in all_runs_global if r.get("pts") is not None],
         ptsr_list=[r.get("pts_rs") for r in all_runs_global if r.get("pts_rs") is not None],
         mask_bin=pred_mask_all,
         crop=crop_all,
-        title="Part 2 sampling consistency — ALL CIDs",
+        title="Part 2 sampling consistency â€” ALL CIDs",
         out_path=os.path.join(
             part2_resample_dir,
             "part2_sampling_ALL_CIDS.png",
@@ -2529,7 +2661,7 @@ def part2_plot_worst_and_all(
 
     plot_width_error_distribution(
         runs=all_runs_global,
-        title="Part 2 width error distribution — ALL CIDs",
+        title="Part 2 width error distribution â€” ALL CIDs",
         out_path=os.path.join(part2_resample_dir, "part2_width_dist_ALL_CIDS.png"),
     )
 
@@ -2545,7 +2677,7 @@ def part2_plot_worst_and_all(
     if global_run is not None:
         plot_part2_width_signals_preservation(
             run=global_run,
-            title="Part 2 width signals — ALL CIDs (representative)",
+            title="Part 2 width signals â€” ALL CIDs (representative)",
             out_path=os.path.join(part2_resample_dir, "part2_width_signals_ALL_CIDS.png"),
         )
 
@@ -2784,7 +2916,7 @@ def compare_widths_for_aligned_cracks(
     write_part2_tables=True,
 ):
     """
-    WIDTH COMPARISON — ALIGNED CRACKS ONLY (ATOMIC OR COMBINED)
+    WIDTH COMPARISON â€” ALIGNED CRACKS ONLY (ATOMIC OR COMBINED)
 
     Contract:
       - This function MUST be called with exactly one of:
@@ -3566,7 +3698,7 @@ def compare_widths_for_aligned_cracks(
         print(f"[WIDTH DEBUG] cid={cid} shared_members={sorted(shared)}")
         
         # ============================================================
-        # STAGE 0.5 — DECODE GT DOMINANCE BITE (AUTHORITATIVE)
+        # STAGE 0.5 â€” DECODE GT DOMINANCE BITE (AUTHORITATIVE)
         # ============================================================
 
         loss_masks_gt_by_branch = {}
@@ -3669,12 +3801,12 @@ def compare_widths_for_aligned_cracks(
                 return
 
             fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
-            ax.set_title(f"GT SUP — RAW DOMINANCE (cid={cid})")
+            ax.set_title(f"GT SUP â€” RAW DOMINANCE (cid={cid})")
             ax.axis("off")
 
             ax.imshow(union, cmap="hot", interpolation="nearest", alpha=0.9)
 
-            # Overlay stored midlines (GLOBAL → LOCAL)
+            # Overlay stored midlines (GLOBAL â†’ LOCAL)
             segs = gt_entry.get("midline_segments") or []
             for S in segs:
                 if S is None or len(S) < 2:
@@ -3897,7 +4029,7 @@ def compare_widths_for_aligned_cracks(
 
 
         # ============================================================
-        # (A) GT prune — IMPORTANT FIX:
+        # (A) GT prune â€” IMPORTANT FIX:
         #   1) scope to pred_members first
         #   2) then prune to shared
         # ============================================================
@@ -3930,7 +4062,7 @@ def compare_widths_for_aligned_cracks(
                     gt_pruned_segs.append(np.asarray(Sg, float))
                     gt_pruned_meta.append(dict(mg))
             else:
-                # meta mismatch → keep geometry but you lose ability to do atomic/shared gating reliably
+                # meta mismatch â†’ keep geometry but you lose ability to do atomic/shared gating reliably
                 for i, Sg in enumerate(gt_segs_all):
                     if Sg is None or len(Sg) < 2:
                         continue
@@ -4264,7 +4396,7 @@ def compare_widths_for_aligned_cracks(
 
             member_str = ", ".join(sorted(shared)) if shared else ", ".join(sorted(pred_members))
             fig.suptitle(
-                f"Stage-2 prune — cid={cid}\nAtomic members: [{member_str}]",
+                f"Stage-2 prune â€” cid={cid}\nAtomic members: [{member_str}]",
                 fontsize=11,
                 fontweight="bold",
             )
@@ -4370,7 +4502,7 @@ def compare_widths_for_aligned_cracks(
             return float(pts[:, 0].mean()), float(pts[:, 1].mean())
 
         # ============================================================
-        # Stage 4: DOMINANCE-AWARE BITE — READ-ONLY (STAGE0-STYLE)
+        # Stage 4: DOMINANCE-AWARE BITE â€” READ-ONLY (STAGE0-STYLE)
         #   - decode packbits in BITE-LOCAL frame
         #   - union in local frame
         #   - optional clip to (x0,y0,x1,y1) view window
@@ -4666,7 +4798,7 @@ def compare_widths_for_aligned_cracks(
         # PLOT 1: GT bite-local raw (like Stage 0)
         # ----------------------------
         '''_plot_bite_local_union(
-            title=f"Stage4 GT — RAW bite-local union (cid={cid})",
+            title=f"Stage4 GT â€” RAW bite-local union (cid={cid})",
             bbox_xywh=gt_bbox,
             union=gt_union_local,
             segs_global=gt_segs_for_plot,
@@ -4678,7 +4810,7 @@ def compare_widths_for_aligned_cracks(
         # PLOT 2: PRED bite-local raw
         # ----------------------------
         _plot_bite_local_union(
-            title=f"Stage4 PRED — RAW bite-local union (cid={cid})",
+            title=f"Stage4 PRED â€” RAW bite-local union (cid={cid})",
             bbox_xywh=pr_bbox,
             union=pr_union_local,
             segs_global=pr_segs_for_plot,
@@ -4703,7 +4835,7 @@ def compare_widths_for_aligned_cracks(
         # ----------------------------
 
         _plot_bite_local_union(
-            title=f"Stage4 GT — RAW bite-local union (CLIPPED view) (cid={cid})",
+            title=f"Stage4 GT â€” RAW bite-local union (CLIPPED view) (cid={cid})",
             bbox_xywh=gt_bbox,
             union=gt_union_local,
             segs_global=gt_segs_for_plot,
@@ -4712,7 +4844,7 @@ def compare_widths_for_aligned_cracks(
         )
 
         _plot_bite_local_union(
-            title=f"Stage4 PRED — RAW bite-local union (CLIPPED view) (cid={cid})",
+            title=f"Stage4 PRED â€” RAW bite-local union (CLIPPED view) (cid={cid})",
             bbox_xywh=pr_bbox,
             union=pr_union_local,
             segs_global=pr_segs_for_plot,
@@ -4730,7 +4862,7 @@ def compare_widths_for_aligned_cracks(
         )'''
         
         # ============================================================
-        # Stage 4 — PLOT B (crop-local visualization, Stage-0 truthful)
+        # Stage 4 â€” PLOT B (crop-local visualization, Stage-0 truthful)
         #   - dominance comes ONLY from bite-local packbits
         #   - rasterized into crop-local frame for plotting
         #   - NO shift, NO rebase, NO metric side effects
@@ -4822,7 +4954,7 @@ def compare_widths_for_aligned_cracks(
             "#000000",  # 0 background (masked)
             "#e41a1c",  # 1 GT-only
             "#377eb8",  # 2 Pred-only
-            "#984ea3",  # 3 GT ∩ Pred
+            "#984ea3",  # 3 GT âˆ© Pred
         ])
 
         # ----------------------------
@@ -4851,8 +4983,8 @@ def compare_widths_for_aligned_cracks(
             1, 2, figsize=(12, 6), dpi=240, sharex=True, sharey=True
         )
 
-        axes[0].set_title("Stage 4 — GT supervision", fontsize=10)
-        axes[1].set_title("Stage 4 — Prediction", fontsize=10)
+        axes[0].set_title("Stage 4 â€” GT supervision", fontsize=10)
+        axes[1].set_title("Stage 4 â€” Prediction", fontsize=10)
 
         for ax in axes:
             ax.axis("off")
@@ -4932,7 +5064,7 @@ def compare_widths_for_aligned_cracks(
                 )
                 seen.add(bid)
 
-        # Pred midlines (right) — derived stage-2 geometry
+        # Pred midlines (right) â€” derived stage-2 geometry
         for S, m in zip(pred_der_stage2_segs or [], pred_der_stage2_meta or []):
             if S is None or len(S) < 2:
                 continue
@@ -4946,7 +5078,7 @@ def compare_widths_for_aligned_cracks(
         legend_handles += [
             Line2D([0], [0], color="#e41a1c", lw=6, label="GT-only loss"),
             Line2D([0], [0], color="#377eb8", lw=6, label="Pred-only loss"),
-            Line2D([0], [0], color="#984ea3", lw=6, label="GT ∩ Pred"),
+            Line2D([0], [0], color="#984ea3", lw=6, label="GT âˆ© Pred"),
         ]
 
         axes[1].legend(
@@ -4966,24 +5098,24 @@ def compare_widths_for_aligned_cracks(
         print(f"[OPSEC] Stage-4 dominance plot written: {outB}")
             
         # ============================================================
-        # Stage 4.5 + Stage 5 — STRICT DOMINANCE APPLICATION
+        # Stage 4.5 + Stage 5 â€” STRICT DOMINANCE APPLICATION
         #   HARD RULES:
         #     - MUST start from Stage-4 pruned geometry
         #     - GT MUST come from Stage-2/4-scoped GT (gt_pruned_segs)
-        #     - If those do not exist → FAIL
+        #     - If those do not exist â†’ FAIL
         # ============================================================
 
         import numpy as np
 
         # ------------------------------------------------------------
-        # HARD FAILS — NO FALLBACKS
+        # HARD FAILS â€” NO FALLBACKS
         # ------------------------------------------------------------
         if not pred_mid_stage2_segs:
             raise RuntimeError("[STAGE4.5 FATAL] pred_mid_stage2_segs missing")
         if not pred_der_stage2_segs:
             raise RuntimeError("[STAGE4.5 FATAL] pred_der_stage2_segs missing")
         if "gt_pruned_segs" not in locals() or not gt_pruned_segs:
-            raise RuntimeError("[STAGE4.5 FATAL] gt_pruned_segs missing — must start from Stage-2/4 GT geometry")
+            raise RuntimeError("[STAGE4.5 FATAL] gt_pruned_segs missing â€” must start from Stage-2/4 GT geometry")
 
         gt_stage5_source_segs = gt_pruned_segs
         gt_stage5_source_meta = (
@@ -5055,7 +5187,7 @@ def compare_widths_for_aligned_cracks(
         pred_pre45_segs = [np.asarray(S, float) for S in pred_der_stage2_segs if S is not None and len(S) >= 2]
 
         # ============================================================
-        # Stage 4.5 — APPLY UNION DOMINANCE (PRED MID + PRED DERIVED + GT)
+        # Stage 4.5 â€” APPLY UNION DOMINANCE (PRED MID + PRED DERIVED + GT)
         # ============================================================
         pred_mid_dom_segs, pred_mid_dom_meta, bite_pruned_pred_mid = _apply_union_dominance(
             pred_mid_stage2_segs,
@@ -5137,7 +5269,7 @@ def compare_widths_for_aligned_cracks(
             print(f"[TRACE] seg{i} Stage2 pts={n2} -> Stage4.5 pts={n3}  Delta={n2 - n3}")
 
         # ============================================================
-        # Stage 5 — WIDTH SLICING (STRICT)
+        # Stage 5 - WIDTH ATTACHMENT (STRICT, NO GEOMETRY TRUNCATION)
         # ============================================================
         if not pred_der_dom_segs:
             raise RuntimeError("[STAGE5 FATAL] no derived prediction geometry after dominance")
@@ -5161,99 +5293,109 @@ def compare_widths_for_aligned_cracks(
             continue
         gtw_source = np.asarray(gtw_source, float).reshape(-1)
 
-        def _tot_pts(segs_in):
-            return int(sum(len(S) for S in (segs_in or []) if S is not None))
+        def _pad_to_len(arr, L, pad_value=np.nan):
+            arr = np.asarray(arr, float).reshape(-1)
+            if arr.size >= L:
+                return arr[:L]
+            out = np.empty((L,), dtype=float)
+            out[:] = pad_value
+            if arr.size > 0:
+                out[:arr.size] = arr
+            return out
 
-        print(
-            f"[STAGE5 PRECHECK] cid={cid} "
-            f"tot_pts_stage2_derived={_tot_pts(pred_der_stage2_segs)} "
-            f"tot_pts_dom_derived={_tot_pts(pred_der_dom_segs)} "
-            f"pred_width_len={len(pred_source)} "
-            f"gt_width_len={len(gtw_source)}"
-        )
-        print("\n[WIDTH VECTOR CHECK]")
-        print(f"Total predicted width vector length = {len(pred_source)}")
-        print(f"Total GT width vector length        = {len(gtw_source)}")
-        if len(pred_source) != len(gtw_source):
-            print("!!! WIDTH VECTOR LENGTH MISMATCH !!!")
+        def _safe_take(arr, s0, L, pad_value=np.nan):
+            """
+            Take arr[s0:s0+L], but if it runs out, pad with pad_value to length L.
+            Never returns shorter than L.
+            """
+            arr = np.asarray(arr, float).reshape(-1)
+            if L <= 0:
+                return np.asarray([], float)
+            s0 = int(max(0, s0))
+            s1 = int(s0 + L)
+            if s0 >= arr.size:
+                out = np.empty((L,), dtype=float)
+                out[:] = pad_value
+                return out
+            sl = arr[s0:min(s1, arr.size)]
+            return _pad_to_len(sl, L, pad_value=pad_value)
 
         have_valid_seg_idx = any(
             isinstance(m.get("seg_idx"), int) and int(m.get("seg_idx")) in seg_start
             for m in (pred_der_dom_meta or [])
             if isinstance(m, dict)
         )
-        dbg_segidx = [
-            m.get("seg_idx")
-            for m in (pred_der_dom_meta or [])
-            if isinstance(m, dict)
-        ]
-        dbg_segidx_unique = sorted(set(x for x in dbg_segidx if isinstance(x, int)))
-        print(
-            f"[STAGE5 SEGIDX] cid={cid} unique={dbg_segidx_unique} "
-            f"count={len(dbg_segidx)} have_valid_seg_idx={have_valid_seg_idx}"
-        )
         off_fallback = 0
         stage5_slice_csv = os.path.join(topo_dbg_dir, f"cid_{cid}_stage5_slices.csv")
-        print("\n----------------------------------")
-        print(f"[STAGE5 TRACE] CID={cid}")
-        print(f"pred_source_len = {len(pred_source)}")
-        print(f"gt_source_len   = {len(gtw_source)}")
+
+        print(
+            f"[STAGE5 PRECHECK] cid={cid} "
+            f"pred_width_len={len(pred_source)} gt_width_len={len(gtw_source)} "
+            f"geom_pts_total={int(sum(len(S) for S in (pred_der_dom_segs or []) if S is not None))}"
+        )
+        if len(pred_source) != len(gtw_source):
+            print(
+                f"[STAGE5 WARN] cid={cid} width vector length mismatch "
+                f"(pred={len(pred_source)} gt={len(gtw_source)}) -> will pad GT with NaN, NO GEOM TRUNC"
+            )
 
         for S, m in zip(pred_der_dom_segs, pred_der_dom_meta):
             if S is None or len(S) < 2:
-                print("[STAGE5 TRACE] skip short segment")
                 continue
+
+            pts = np.asarray(S, float)
+            L = int(len(pts))
 
             seg_idx_dbg = m.get("seg_idx") if isinstance(m, dict) else None
             branch_dbg = m.get("branch_id") if isinstance(m, dict) else None
             if have_valid_seg_idx and isinstance(m.get("seg_idx"), int) and m["seg_idx"] in seg_start:
-                s0 = seg_start[m["seg_idx"]]
+                s0 = int(seg_start[m["seg_idx"]])
                 source_mode = "seg_idx"
             else:
-                s0 = off_fallback
+                s0 = int(off_fallback)
                 source_mode = "fallback"
 
-            L = len(S)
-            s1_geom = s0 + L
-            s1 = min(s1_geom, len(pred_source), len(gtw_source))
-            predw = pred_source[s0:s1]
-            gtw = gtw_source[s0:s1]
-            pts = S[:len(predw)]
+            predw = _safe_take(pred_source, s0, L, pad_value=np.nan)
+            gtw = _safe_take(gtw_source, s0, L, pad_value=np.nan)
             off_fallback += L
 
-            slice_len = s1 - s0
-            tail_drop = max(0, L - slice_len)
+            # ----------------------------
+            # DEBUG: classify nonfinite causes (segment-local)
+            # ----------------------------
+            _idx = np.arange(L, dtype=int)
+            _gt_padded_mask = (s0 + _idx) >= int(len(gtw_source))  # True where GT is padded (expected NaN)
+            _gt_nonfinite_mask = ~np.isfinite(gtw)
+            _pred_nonfinite_mask = ~np.isfinite(predw)
 
-            print("\n[SEG TRACE]")
-            print(f" branch_id = {branch_dbg}")
-            print(f" seg_idx   = {seg_idx_dbg}")
-            print(f" source    = {source_mode}")
-            print(f" geom_len  = {L}")
-            print(f" s0        = {s0}")
-            print(f" s1_geom   = {s1_geom}")
-            print(f" s1_final  = {s1}")
-            print(f" slice_len = {slice_len}")
-            print(f" tail_drop = {tail_drop}")
-            if s1 == len(gtw_source):
-                print(" LIMITER   = GT WIDTH VECTOR LENGTH")
-            if s1 == len(pred_source):
-                print(" LIMITER   = PRED WIDTH VECTOR LENGTH")
-            if s1 == s1_geom:
-                print(" LIMITER   = NONE (geometry respected)")
+            _gt_padded_nonfinite = int(np.sum(_gt_padded_mask & _gt_nonfinite_mask))
+            _gt_real_nonfinite = int(np.sum((~_gt_padded_mask) & _gt_nonfinite_mask))
+            _pred_real_nonfinite = int(np.sum(_pred_nonfinite_mask))
+
+            if (_gt_real_nonfinite > 0) or (_pred_real_nonfinite > 0):
+                print(f"[STAGE5 NONFINITE DETAIL] cid={cid} seg_idx={seg_idx_dbg} branch_id={branch_dbg}")
+                if _gt_real_nonfinite > 0:
+                    bad = np.where((~_gt_padded_mask) & _gt_nonfinite_mask)[0][:10]
+                    print(f"  GT NONFINITE (NOT padding): count={_gt_real_nonfinite} first_idx={bad.tolist()}")
+                    for j in bad:
+                        print(f"    j={int(j)} global={int(s0 + j)} gtw={gtw[j]} predw={predw[j]}")
+                if _pred_real_nonfinite > 0:
+                    bad = np.where(_pred_nonfinite_mask)[0][:10]
+                    print(f"  PRED NONFINITE: count={_pred_real_nonfinite} first_idx={bad.tolist()}")
+                    for j in bad:
+                        print(
+                            f"    j={int(j)} global={int(s0 + j)} predw={predw[j]} "
+                            f"gtw={gtw[j]} padded_gt={bool(_gt_padded_mask[j])}"
+                        )
+
+            print(
+                f"[STAGE5 TRACE] cid={cid} branch_id={branch_dbg} seg_idx={seg_idx_dbg} "
+                f"source={source_mode} s0={s0} L={L} "
+                f"pred_nonfinite={_pred_real_nonfinite} "
+                f"gt_nonfinite={int(np.sum(_gt_nonfinite_mask))} "
+                f"(gt_padded={_gt_padded_nonfinite} gt_real={_gt_real_nonfinite})"
+            )
 
             if DEBUG_TOPOLOGY_TRACE:
-                gt_len = int(len(gtw_source))
-                pr_len = int(len(pred_source))
-                slice_len_i = int(len(predw))
-                tail_dropped = int(max(0, L - slice_len))
-                limiting = []
-                if s1 == gt_len:
-                    limiting.append("gt_len_limit")
-                if s1 == pr_len:
-                    limiting.append("pred_len_limit")
-                if s1 == (s0 + L):
-                    limiting.append("geom_len_ok")
-
                 _append_csv_row(
                     stage5_slice_csv,
                     [
@@ -5262,12 +5404,14 @@ def compare_widths_for_aligned_cracks(
                         str(seg_idx_dbg),
                         int(L),
                         int(s0),
-                        int(s1),
-                        int(slice_len_i),
-                        int(tail_dropped),
-                        int(pr_len),
-                        int(gt_len),
-                        "|".join(limiting),
+                        int(len(predw)),
+                        int(len(gtw)),
+                        int(_pred_real_nonfinite),
+                        int(np.sum(_gt_nonfinite_mask)),
+                        int(_gt_padded_nonfinite),
+                        int(_gt_real_nonfinite),
+                        int(len(pred_source)),
+                        int(len(gtw_source)),
                     ],
                     header=[
                         "cid",
@@ -5275,30 +5419,21 @@ def compare_widths_for_aligned_cracks(
                         "seg_idx",
                         "L_geom",
                         "s0",
-                        "s1",
-                        "slice_len",
-                        "tail_dropped",
+                        "predw_len",
+                        "gtw_len",
+                        "pred_nonfinite",
+                        "gt_nonfinite",
+                        "gt_padded_nonfinite",
+                        "gt_real_nonfinite",
                         "pred_len",
                         "gt_len",
-                        "limits",
                     ],
                 )
 
-            if s1 <= s0:
-                print(
-                    f"[STAGE5 TRACE] cid={cid} seg_idx={seg_idx_dbg} "
-                    f"invalid slice bounds (s1<=s0) -> drop"
-                )
+            if np.sum(np.isfinite(predw)) < 2:
+                print(f"[STAGE5 TRACE] cid={cid} seg_idx={seg_idx_dbg} drop: predw has <2 finite samples")
                 continue
 
-            if len(pts) < 2 or len(predw) < 2 or len(gtw) < 2:
-                print(
-                    f"[STAGE5 TRACE] cid={cid} seg_idx={seg_idx_dbg} dropped for short slice: "
-                    f"len_pts={len(pts)} len_predw={len(predw)} len_gtw={len(gtw)}"
-                )
-                continue
-
-            pts = np.asarray(pts, float)
             predw = np.asarray(predw, float)
             gtw = np.asarray(gtw, float)
 
@@ -5326,14 +5461,14 @@ def compare_widths_for_aligned_cracks(
                 "gt_relation": "combined_vs_combined",
             })
 
-        print(f"[STAGE5] width slicing complete — {len(stage4_pairs)} segments")
+        print(f"[STAGE5] width attachment complete - {len(stage4_pairs)} segments")
 
         # ============================================================
-        # OPSEC PLOT — STAGE 5 FINAL GEOMETRY (DOMINANCE-RESOLVED)
+        # OPSEC PLOT â€” STAGE 5 FINAL GEOMETRY (DOMINANCE-RESOLVED)
         #   - NO dominance pruning logic here
         #   - Overlay can be categorical (GT-only / PRED-only / BOTH) like Stage 4
         # ============================================================
-        assert pred_pre45_segs, "pred_pre45_segs empty — snapshot timing broken"
+        assert pred_pre45_segs, "pred_pre45_segs empty â€” snapshot timing broken"
         assert bite_pruned_pred_segs is not None, "bite_pruned_pred_segs lost"
         
         try:
@@ -5355,51 +5490,88 @@ def compare_widths_for_aligned_cracks(
                 x, y, w, h = 0, 0, W, H
                 x0, y0, x1, y1 = 0, 0, W, H
 
-            def _split_finite_undef(pts, d, min_pts=2):
+            def _split_finite_undef_reasoned(pts, predw, gtw, min_pts=2):
+                """
+                Split geometry into:
+                  kept        = finite pred & finite gt
+                  undef_gt    = gt nonfinite (including NaN padding) while pred finite
+                  undef_other = pred nonfinite (or both nonfinite)
+                """
                 pts = np.asarray(pts, float)
-                d = np.asarray(d, float)
-                n = min(len(pts), len(d))
+                predw = np.asarray(predw, float).reshape(-1)
+                gtw = np.asarray(gtw, float).reshape(-1)
+                n = min(len(pts), len(predw), len(gtw))
                 if n < 2:
-                    return [], []
+                    return [], [], []
 
-                kept, undef = [], []
-                buf_k, buf_u = [], []
+                pts = pts[:n]
+                predw = predw[:n]
+                gtw = gtw[:n]
+
+                kept, undef_gt, undef_other = [], [], []
+                bk, bg, bo = [], [], []
+
+                def _flush(buf, out):
+                    if len(buf) >= min_pts:
+                        out.append(np.asarray(buf, float))
 
                 for i in range(n - 1):
                     p0, p1 = pts[i], pts[i + 1]
-                    if np.isfinite(d[i]):
-                        if not buf_k:
-                            buf_k.append(p0)
-                        buf_k.append(p1)
-                        if len(buf_u) >= min_pts:
-                            undef.append(np.asarray(buf_u, float))
-                        buf_u = []
-                    else:
-                        if not buf_u:
-                            buf_u.append(p0)
-                        buf_u.append(p1)
-                        if len(buf_k) >= min_pts:
-                            kept.append(np.asarray(buf_k, float))
-                        buf_k = []
+                    pf = np.isfinite(predw[i])
+                    gf = np.isfinite(gtw[i])
 
-                if len(buf_k) >= min_pts:
-                    kept.append(np.asarray(buf_k, float))
-                if len(buf_u) >= min_pts:
-                    undef.append(np.asarray(buf_u, float))
-                return kept, undef
+                    if pf and gf:
+                        if not bk:
+                            bk.append(p0)
+                        bk.append(p1)
+                        _flush(bg, undef_gt)
+                        bg = []
+                        _flush(bo, undef_other)
+                        bo = []
+                    elif pf and (not gf):
+                        if not bg:
+                            bg.append(p0)
+                        bg.append(p1)
+                        _flush(bk, kept)
+                        bk = []
+                        _flush(bo, undef_other)
+                        bo = []
+                    else:
+                        if not bo:
+                            bo.append(p0)
+                        bo.append(p1)
+                        _flush(bk, kept)
+                        bk = []
+                        _flush(bg, undef_gt)
+                        bg = []
+
+                _flush(bk, kept)
+                _flush(bg, undef_gt)
+                _flush(bo, undef_other)
+                return kept, undef_gt, undef_other
 
             # --------------------------------------------------
             # Build prediction plot segments (kept vs undef)
             # --------------------------------------------------
             pred_kept_segs = []
-            pred_undef_segs = []
+            pred_undef_gt_segs = []
+            pred_undef_other_segs = []
             pred_stage5_support = []
 
-            for pts_ok, d_ok in stage4_pairs:
-                k, u = _split_finite_undef(pts_ok, d_ok, min_pts=2)
+            for wp in (width_pairs or []):
+                if str(wp.get("cid", "")) != str(cid):
+                    continue
+                pts_ok = wp.get("pts", None)
+                pw_ok = wp.get("predw", None)
+                gw_ok = wp.get("gruthw", None)
+                if pts_ok is None or pw_ok is None or gw_ok is None:
+                    continue
+
+                k, ug, uo = _split_finite_undef_reasoned(pts_ok, pw_ok, gw_ok, min_pts=2)
                 pred_kept_segs.extend(k)
-                pred_undef_segs.extend(u)
-                pred_stage5_support.append(pts_ok)
+                pred_undef_gt_segs.extend(ug)
+                pred_undef_other_segs.extend(uo)
+                pred_stage5_support.append(np.asarray(pts_ok, float))
 
             # --------------------------------------------------
             # TOPOLOGY-PRUNED geometry (compute against pre-4.5 snapshot)
@@ -5506,7 +5678,7 @@ def compare_widths_for_aligned_cracks(
                 "#000000",  # masked
                 "#e41a1c",  # GT-only
                 "#377eb8",  # Pred-only
-                "#984ea3",  # GT ∩ Pred
+                "#984ea3",  # GT âˆ© Pred
             ])
 
             # --------------------------------------------------
@@ -5535,6 +5707,7 @@ def compare_widths_for_aligned_cracks(
             col_keep  = (0.2, 0.4, 0.8)
             col_topo  = (0.7, 0.1, 0.1)
             col_undef = (0.6, 0.6, 0.6)
+            col_gtmiss = (0.35, 0.35, 0.35)
             col_bite  = (0.9, 0.6, 0.0)
 
             # --------------------------------------------------
@@ -5563,7 +5736,12 @@ def compare_widths_for_aligned_cracks(
                     continue
                 axes[1].plot(S[:, 0] - x0, S[:, 1] - y0, color=col_bite, lw=2.0, zorder=3)
 
-            for S in pred_undef_segs:
+            for S in pred_undef_gt_segs:
+                if S is None or len(S) < 2:
+                    continue
+                axes[1].plot(S[:, 0] - x0, S[:, 1] - y0, color=col_gtmiss, lw=2.2, zorder=4)
+
+            for S in pred_undef_other_segs:
                 if S is None or len(S) < 2:
                     continue
                 axes[1].plot(S[:, 0] - x0, S[:, 1] - y0, color=col_undef, lw=2.2, zorder=4)
@@ -5580,18 +5758,19 @@ def compare_widths_for_aligned_cracks(
                 )
 
             legend_items = [
-                Line2D([0],[0], color=col_keep,  lw=2.5, label="Finite dist (kept)"),
-                Line2D([0],[0], color=col_undef, lw=2.2, label="Infinite/undef"),
+                Line2D([0],[0], color=col_keep,  lw=2.5, label="Finite overlap (kept)"),
+                Line2D([0],[0], color=col_gtmiss, lw=2.2, label="GT missing / padded (no comparable GT)"),
+                Line2D([0],[0], color=col_undef, lw=2.2, label="Pred undef / other nonfinite"),
                 Line2D([0],[0], color=col_bite,  lw=2.0, label="Dominance-bite (union)"),
                 Line2D([0],[0], color=col_topo,  lw=1.4, label="Topology-pruned"),
                 Line2D([0],[0], color="#e41a1c", lw=6, label="GT-only loss (overlay)"),
                 Line2D([0],[0], color="#377eb8", lw=6, label="Pred-only loss (overlay)"),
-                Line2D([0],[0], color="#984ea3", lw=6, label="GT ∩ Pred (overlay)"),
+                Line2D([0],[0], color="#984ea3", lw=6, label="GT âˆ© Pred (overlay)"),
             ]
             axes[1].legend(handles=legend_items, loc="lower right", fontsize=7, framealpha=0.9)
 
             fig.suptitle(
-                f"Stage-5 Geometry Provenance (Dominance-resolved @ 4.5) — cid={cid}",
+                f"Stage-5 Geometry Provenance (Dominance-resolved @ 4.5) â€” cid={cid}",
                 fontsize=11,
                 fontweight="bold",
             )
@@ -5726,7 +5905,7 @@ def compare_widths_for_aligned_cracks(
     # NOTES:
     #   - Resampling is applied to the *measurement samples* (d(s)=pred-gt), not to GT geometry itself.
     #   - If you also pass per-sample pred/gt widths into width_pairs as "predw" and "gruthw", Part 2 will
-    #     resample and plot those too (so you can show “effect on GT vs pred” explicitly).
+    #     resample and plot those too (so you can show â€œeffect on GT vs predâ€ explicitly).
     # ============================================================
     
     try:
@@ -5871,7 +6050,7 @@ def compare_widths_for_aligned_cracks(
             bbox  = wp.get("bbox", None)
 
             print(
-                f"[PART2 DEBUG] ▶ wp: "
+                f"[PART2 DEBUG] â–¶ wp: "
                 f"cid={wp.get('cid','')}, "
                 f"type={wp.get('crack_type',mode)}, "
                 f"geom={wp.get('geometry_type','derived')}, "
@@ -5897,20 +6076,33 @@ def compare_widths_for_aligned_cracks(
                     f"[PART2 FATAL] gtruthw is None (should be produced in Stage5): cid={cid_s}"
                 )
 
-            pts   = np.asarray(pts, float)
+            pts = np.asarray(pts, float)
             predw = np.asarray(predw, float)
             gtruthw = np.asarray(gtruthw, float)
-            n = min(len(pts), len(predw), len(gtruthw))
 
-            if n < 2:
+            # Geometry + predw must align 1:1 (Stage5 ensures this)
+            n_geom = min(len(pts), len(predw))
+            if n_geom < 2:
                 raise RuntimeError(
-                    f"[PART2 FATAL] <2 samples after trim: cid={cid_s} n={n} "
+                    f"[PART2 FATAL] <2 samples after geom/pred trim: cid={cid_s} "
                     f"(pts={len(pts)}, predw={len(predw)}, gtw={len(gtruthw)})"
                 )
 
-            pts     = pts[:n]
-            predw   = predw[:n]
-            gtruthw = gtruthw[:n]
+            pts = pts[:n_geom]
+            predw = predw[:n_geom]
+
+            # GT stream does not control geometry length.
+            # If shorter, pad with NaN; if longer, clip to geometry.
+            if len(gtruthw) < n_geom:
+                gtmp = np.empty((n_geom,), float)
+                gtmp[:] = np.nan
+                if len(gtruthw) > 0:
+                    gtmp[:len(gtruthw)] = gtruthw
+                gtruthw = gtmp
+            else:
+                gtruthw = gtruthw[:n_geom]
+
+            n = n_geom
 
             s_full = arclen_s(pts)
             if len(s_full) < 2:
@@ -5979,7 +6171,7 @@ def compare_widths_for_aligned_cracks(
             # RESAMPLE GEOMETRY + WIDTHS (authoritative domain)
             # ------------------------------------------------------------
             pts_rs, predw_rs, gtruthw_rs = resample_by_arclength(
-                pts, predw, gtruthw_orig,
+                pts, predw, gtruthw,
                 ds_target=ds_target_px,
                 min_pts=2,
                 preserve_endpoints=True,
@@ -6058,6 +6250,11 @@ def compare_widths_for_aligned_cracks(
                 np.isfinite(predw_rs) &
                 np.isfinite(gtruthw_rs)
             )
+            if np.sum(finite_mask) < 2:
+                print(
+                    f"[PART2 WARN] cid={cid_s} no finite overlap after resample "
+                    f"(finite={int(np.sum(finite_mask))}/{len(finite_mask)})"
+                )
             runs = _contiguous_true_runs(finite_mask)
 
             print(
@@ -6355,7 +6552,7 @@ def compare_widths_for_aligned_cracks(
                 axes[2].axvline(0.0, lw=1.5, linestyle="-")
                 axes[2].axvline(global_bias, lw=2, linestyle="--")
                 axes[2].set_title("Width Bias (length-weighted)", fontsize=10, fontweight="bold")
-                axes[2].set_xlabel("px (pred − gt)", fontsize=9)
+                axes[2].set_xlabel("px (pred âˆ’ gt)", fontsize=9)
                 axes[2].grid(True, axis="x", alpha=0.25)
 
                 axes[3].barh(y, len_v)
@@ -6368,7 +6565,7 @@ def compare_widths_for_aligned_cracks(
                 axes[0].invert_yaxis()
 
                 fig.suptitle(
-                    f"Part 2 — Width error metrics (fair arclength sampling) — {mode} / {midline_type}\n"
+                    f"Part 2 â€” Width error metrics (fair arclength sampling) â€” {mode} / {midline_type}\n"
                     f"Global length-weighted means: RMSE={global_rmse:.3f}px, MAE={global_mae:.3f}px, Bias={global_bias:.3f}px",
                     fontsize=11,
                     fontweight="bold",
@@ -6380,7 +6577,7 @@ def compare_widths_for_aligned_cracks(
                 print(f"[PART2] wrote: {out}")
 
                 # ------------------------------------------------------------
-                # (B) Resampling explainers — corrected semantics
+                # (B) Resampling explainers â€” corrected semantics
                 # ------------------------------------------------------------
 
                 rows_here_sorted = sorted(
@@ -6467,7 +6664,7 @@ def compare_widths_for_aligned_cracks(
 
 
                 # ------------------------------------------------------------
-                # (B1) COMBINED — AGGREGATED DIAGNOSTIC (UNCHANGED)
+                # (B1) COMBINED â€” AGGREGATED DIAGNOSTIC (UNCHANGED)
                 # ------------------------------------------------------------
                 if mode == "combined":
                     d_all = []
@@ -6491,7 +6688,7 @@ def compare_widths_for_aligned_cracks(
                         axH.hist(d_all, bins=25, density=True, alpha=0.85)
                         axH.axvline(0.0, lw=1.4)
                         axH.set_title("Width error distribution after resampling", fontsize=10, fontweight="bold")
-                        axH.set_xlabel("d = pred − gt (px)")
+                        axH.set_xlabel("d = pred âˆ’ gt (px)")
                         axH.set_ylabel("density")
                         axH.grid(True, alpha=0.25)
 
@@ -6501,7 +6698,7 @@ def compare_widths_for_aligned_cracks(
                         axB.grid(True, alpha=0.25)
 
                         fig.suptitle(
-                            f"Part 2 aggregated diagnostic — WORST CID={worst_cid} — combined/{worst_mt}",
+                            f"Part 2 aggregated diagnostic â€” WORST CID={worst_cid} â€” combined/{worst_mt}",
                             fontsize=11,
                             fontweight="bold"
                         )
@@ -6658,7 +6855,7 @@ def compare_widths_for_aligned_cracks(
     sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
     sm.set_array([])
     cb = plt.colorbar(sm, ax=ax, fraction=0.035, pad=0.02)
-    cb.set_label("Estimated width − GT width (px)", fontsize=10, fontweight="bold")
+    cb.set_label("Estimated width âˆ’ GT width (px)", fontsize=10, fontweight="bold")
 
     ticks = list(cb.get_ticks())
     if len(ticks) >= 2:
@@ -6860,7 +7057,6 @@ def export_midline_metrics_all(
         midline_type,
         "midline_metrics",
         crack_type,
-        str(variant_id or "main"),
     )
     os.makedirs(out_dir, exist_ok=True)
 
@@ -6957,7 +7153,7 @@ def write_width_diff_overlay(H, W, rows, out_png, vlim=8.0, radius=2):
             cv2.circle(canvas, (xi, yi), radius, tuple(int(c) for c in col), thickness=-1)
 
     cv2.imwrite(out_png, canvas)
-    print(f"[DEBUG WIDTH] wrote diff dot overlay → {out_png}")
+    print(f"[DEBUG WIDTH] wrote diff dot overlay â†’ {out_png}")
     
 '''def compute_midline_metrics_for_image(app):
     """
@@ -6980,19 +7176,19 @@ def write_width_diff_overlay(H, W, rows, out_png, vlim=8.0, radius=2):
     for cid, crack in atomic.items():
         ge = crack.get("geodesic_edges", {}) or {}
         if not ("edge1" in ge and "edge2" in ge):
-            print(f"[DEBUG MIDLINE] cid{cid}: missing geodesic_edges → skip")
+            print(f"[DEBUG MIDLINE] cid{cid}: missing geodesic_edges â†’ skip")
             continue
 
         e1 = np.asarray(ge["edge1"], float)
         e2 = np.asarray(ge["edge2"], float)
         if len(e1) < 2 or len(e2) < 2:
-            print(f"[DEBUG MIDLINE] cid{cid}: invalid edge arrays ({len(e1)}, {len(e2)}) → skip")
+            print(f"[DEBUG MIDLINE] cid{cid}: invalid edge arrays ({len(e1)}, {len(e2)}) â†’ skip")
             continue
 
         auto_midline = 0.5 * (e1 + e2)
         man_midline = np.asarray(crack.get("midline", []), float)
         if man_midline.ndim != 2 or len(man_midline) < 2:
-            print(f"[DEBUG MIDLINE] cid{cid}: no valid manual midline → skip")
+            print(f"[DEBUG MIDLINE] cid{cid}: no valid manual midline â†’ skip")
             continue
 
         try:
@@ -7006,7 +7202,7 @@ def write_width_diff_overlay(H, W, rows, out_png, vlim=8.0, radius=2):
 
     df = pd.DataFrame(rows)
     df.to_csv(out_csv, index=False)
-    print(f"[DEBUG MIDLINE] wrote {len(df)} rows → {out_csv}")'''
+    print(f"[DEBUG MIDLINE] wrote {len(df)} rows â†’ {out_csv}")'''
 
 # ---------- NEW helpers ----------
 def compute_midline_metrics_baseline(pred_xy, gt_xy, tau=3.0):
@@ -7084,14 +7280,14 @@ def compute_midline_metrics_baseline(pred_xy, gt_xy, tau=3.0):
     mm["frechet_discrete_ds"] = np.nan
 
     # --------------------------------------------------
-    # Explicit τ-precision (spurious geometry penalty)
+    # Explicit Ï„-precision (spurious geometry penalty)
     # --------------------------------------------------
     try:
         from scipy.spatial import cKDTree
 
         gt_tree = cKDTree(gt_xy)
 
-        # distance from pred → nearest GT
+        # distance from pred â†’ nearest GT
         d_pred_to_gt, _ = gt_tree.query(pred_xy, k=1)
 
         precision_tau = float(np.mean(d_pred_to_gt <= tau))
@@ -7170,14 +7366,14 @@ def compute_midline_metrics(auto_xy, man_xy, tau=3.0):
     out["coverage_min"]    = float(min(cov["A_to_B"], cov["B_to_A"]))
     out["hausdorff_p95"] = hausdorff_p95(A, B)
 
-    # --- Fréchet (optional but standard) ---
+    # --- FrÃ©chet (optional but standard) ---
     try:
         if len(A_ds) >= 2 and len(B_ds) >= 2:
             out["frechet_discrete_ds"] = _unwrap(
                 frechet_discrete_ds(A_ds, B_ds, max_points=800)
             )
     except Exception as e:
-        print(f"[metrics][warn] Fréchet failed: {e}")
+        print(f"[metrics][warn] FrÃ©chet failed: {e}")
 
     # --- Orthogonal deviation stats ---
     orth = orthogonal_deviation(A, B, N=400)
@@ -7296,7 +7492,7 @@ def _mask_midline_cache_key(mask_bin, midline):
 def reconstruct_manual_mask_from_edges(crack: dict, H: int, W: int) -> "np.ndarray":
     """
     Strictly reconstruct a full-image binary mask (H,W) from geodesic_edges only.
-    If edges are missing or invalid → returns all zeros.
+    If edges are missing or invalid â†’ returns all zeros.
     """
     import numpy as np, cv2
 
@@ -7350,7 +7546,7 @@ def merged_metric_atomic(authoring_atomic: dict, save_folder: str, image_base: s
                     print(f"[merge] warning: failed reading {p}")
                 break
         else:
-            # nothing found — ensure canonical folder exists
+            # nothing found â€” ensure canonical folder exists
             try:
                 os.makedirs(canonical_dir, exist_ok=True)
             except Exception:
@@ -7373,3 +7569,4 @@ def has_valid_mask(crack: dict) -> bool:
         return False
     except Exception:
         return False
+

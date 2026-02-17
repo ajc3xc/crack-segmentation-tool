@@ -1819,6 +1819,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                             base_name=base_name,
                             midline_type=midline_type,
                             crack_type="combined",
+                            metrics_dir_local=metrics_dir_local,
                         )
 
                         if not rows:
