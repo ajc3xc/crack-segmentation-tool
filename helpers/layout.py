@@ -118,17 +118,31 @@ class Ui_MainWindow(object):
         self.label_38.setGeometry(QtCore.QRect(100, 770, 106, 20))
         self.label_38.setObjectName("label_38")
         self.BatchPipelineButton = QtWidgets.QPushButton(self.tab_5)
-        self.BatchPipelineButton.setGeometry(QtCore.QRect(40, 420, 120, 31))
+        self.BatchPipelineButton.setGeometry(QtCore.QRect(40, 415, 120, 31))
         self.BatchPipelineButton.setObjectName("batch_pipeline_button")
         self.combine_segments_button = QtWidgets.QPushButton(self.tab_5)
-        self.combine_segments_button.setGeometry(QtCore.QRect(55, 460, 90, 48))
+        self.combine_segments_button.setGeometry(QtCore.QRect(55, 450, 90, 48))
         self.combine_segments_button.setObjectName("combine_segments_button")
-        self.calculate_metrics_button = QtWidgets.QPushButton(self.tab_5)
-        self.calculate_metrics_button.setGeometry(QtCore.QRect(35, 520, 130, 31))
-        self.calculate_metrics_button.setObjectName("calculate_metrics_button")
-        self.batch_metrics_button = QtWidgets.QPushButton(self.tab_5)
-        self.batch_metrics_button.setGeometry(QtCore.QRect(35, 560, 130, 31))
-        self.batch_metrics_button.setObjectName("batch_metrics_button")
+        self.metrics_section_label = QtWidgets.QLabel(self.tab_5)
+        self.metrics_section_label.setGeometry(QtCore.QRect(0, 505, 210, 25))
+        font = QtGui.QFont()
+        font.setPointSize(9)
+        font.setBold(True)
+        self.metrics_section_label.setFont(font)
+        self.metrics_section_label.setStyleSheet("background-color: rgb(0, 0, 0);\n"
+"color: rgb(255, 255, 255);\n"
+"border: 1px solid rgb(0, 0, 0);")
+        self.metrics_section_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.metrics_section_label.setObjectName("metrics_section_label")
+        self.man_only_metrics_button = QtWidgets.QPushButton(self.tab_5)
+        self.man_only_metrics_button.setGeometry(QtCore.QRect(10, 535, 78, 31))
+        self.man_only_metrics_button.setObjectName("man_only_metrics_button")
+        self.man_auto_metrics_button = QtWidgets.QPushButton(self.tab_5)
+        self.man_auto_metrics_button.setGeometry(QtCore.QRect(100, 535, 86, 31))
+        self.man_auto_metrics_button.setObjectName("man_auto_metrics_button")
+        self.full_dataset_metrics_button = QtWidgets.QPushButton(self.tab_5)
+        self.full_dataset_metrics_button.setGeometry(QtCore.QRect(35, 575, 130, 24))
+        self.full_dataset_metrics_button.setObjectName("full_dataset_metrics_button")
         
         self.clear_boxes_button = QtWidgets.QPushButton(self.tab_5)
         self.clear_boxes_button.setGeometry(QtCore.QRect(50, 850, 121, 28))
@@ -142,13 +156,13 @@ class Ui_MainWindow(object):
         
         
         self.segment_width_box_2 = QtWidgets.QSpinBox(self.tab_5)
-        self.segment_width_box_2.setGeometry(QtCore.QRect(170, 430, 42, 22))
+        self.segment_width_box_2.setGeometry(QtCore.QRect(170, 425, 42, 22))
         self.segment_width_box_2.setProperty("value", 1)
         self.segment_width_box_2.setObjectName("segment_width_box_2")
         
            
         self.line_2 = QtWidgets.QFrame(self.tab_5)
-        self.line_2.setGeometry(QtCore.QRect(0, 400, 211, 21))
+        self.line_2.setGeometry(QtCore.QRect(0, 395, 211, 21))
         font = QtGui.QFont()
         font.setFamily("MS Gothic")
         self.line_2.setFont(font)
@@ -604,8 +618,10 @@ class Ui_MainWindow(object):
         self.y_size_show.raise_()
         #self.mask_pipeline_button.raise_()
         self.track_full_screen_button.raise_()
-        self.calculate_metrics_button.raise_()
-        self.batch_metrics_button.raise_()
+        self.metrics_section_label.raise_()
+        self.man_only_metrics_button.raise_()
+        self.man_auto_metrics_button.raise_()
+        self.full_dataset_metrics_button.raise_()
         
         
         #####################################
@@ -813,8 +829,10 @@ class Ui_MainWindow(object):
         
         self.BatchPipelineButton.setText(_translate("MainWindow","Batch Pipeline"))
         self.combine_segments_button.setText(_translate("MainWindow", "Combine\nSegments"))
-        self.batch_metrics_button.setText(_translate("MainWindow", "Batch Metrics"))
-        self.calculate_metrics_button.setText(_translate("MainWindow", "Calculate Metrics"))
+        self.metrics_section_label.setText(_translate("MainWindow", "Generate Metrics"))
+        self.man_only_metrics_button.setText(_translate("MainWindow", "Manual"))
+        self.man_auto_metrics_button.setText(_translate("MainWindow", "Manual+Auto"))
+        self.full_dataset_metrics_button.setText(_translate("MainWindow", "Full Dataset"))
         
         self.label_37.setText(_translate("MainWindow", "Image size:"))
         self.draw_box_button.setText(_translate("MainWindow", "Draw boxes"))
@@ -934,4 +952,3 @@ class Ui_MainWindow(object):
         self.reset_segment_button.setText(_translate("MainWindow", "Reset\nCanvas"))
         self.save_manuall_segment_button.setText(_translate("MainWindow", "Save\nSegment"))
         self.manual_segment_full_screen_button.setText(_translate("MainWindow", "Show Segment\nFull Screen"))
-

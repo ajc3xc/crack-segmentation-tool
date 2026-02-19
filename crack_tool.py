@@ -71,15 +71,25 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         self.files_list.itemSelectionChanged.connect(self.name_selected)
         
         self.combine_segments_button.clicked.connect(self.combine_segments)
-        #self.calculate_metrics_button.clicked.connect(lambda: self.run_mask_metrics(display=True))
-        self.calculate_metrics_button.clicked.connect(lambda: self.run_manual_metrics_current_image_quick(tau_px=3.0, crack_id=None))
-        #self.batch_metrics_button.clicked.connect(lambda: self.batch_run_metrics_global(sample_frac=.2,max_images=10,seed=0,cpu_max_workers=8,apply_to_sample=False,edges_only=False))
-        self.batch_metrics_button.clicked.connect(
+        #self.man_only_metrics_button.clicked.connect(lambda: self.run_mask_metrics(display=True))
+        self.man_only_metrics_button.clicked.connect(lambda: self.run_manual_metrics_current_image_quick(tau_px=3.0, crack_id=None))
+        #self.man_auto_metrics_button.clicked.connect(lambda: self.batch_run_metrics_global(sample_frac=.2,max_images=10,seed=0,cpu_max_workers=8,apply_to_sample=False,edges_only=False))
+        self.man_auto_metrics_button.clicked.connect(
             lambda: self.run_full_metrics_current_image(
                 edge_grid=None,
                 g_variants=None,
                 cpu_max_workers=8,
                 do_edge_calibrate=True
+            )
+        )
+        self.full_dataset_metrics_button.clicked.connect(
+            lambda: self.batch_run_metrics_global(
+                sample_frac=0.20,
+                max_images=10,
+                seed=0,
+                cpu_max_workers=8,
+                apply_to_sample=False,
+                edges_only=False,
             )
         )
 
