@@ -65,18 +65,22 @@ DEBUG_MANUAL_RESAMPLING = False
 def plot_poly_before_after_to_file(
     poly_raw,
     poly_rs,
+    poly_sg,
     image,
     out_path,
     overlay=None,
     pad=5,
-    title="Manual midline resampling sanity check",
+    annot_scale=None,
+    annot_fit_scale=None,
+    title="Manual midline resample/smooth sanity check",
 ):
     """
-    Debug-only visualization of manual midline resampling.
+    Debug-only visualization of manual midline canonicalization.
 
-    Saves a TWO-PANEL image to out_path:
-      Left  = raw (before)
-      Right = resampled (after)
+    Saves a THREE-PANEL image to out_path:
+      Left   = raw (before)
+      Middle = resampled
+      Right  = SavGol smoothed
 
     Uses overlay if provided, else original image.
     """
@@ -84,20 +88,21 @@ def plot_poly_before_after_to_file(
     import matplotlib.pyplot as plt
     import os
 
-    if poly_raw is None or poly_rs is None or image is None:
+    if poly_raw is None or poly_rs is None or poly_sg is None or image is None:
         return
 
     poly_raw = np.asarray(poly_raw, float)
     poly_rs  = np.asarray(poly_rs, float)
+    poly_sg  = np.asarray(poly_sg, float)
 
-    if len(poly_raw) < 2 or len(poly_rs) < 2:
+    if len(poly_raw) < 2 or len(poly_rs) < 2 or len(poly_sg) < 2:
         return
 
     bg = overlay if overlay is not None else image
     H, W = bg.shape[:2]
 
-    # ---- compute shared crop from BOTH polylines ----
-    all_xy = np.vstack([poly_raw, poly_rs])
+    # ---- compute shared crop from all canonicalization stages ----
+    all_xy = np.vstack([poly_raw, poly_rs, poly_sg])
     xmin = int(max(0, np.floor(all_xy[:, 0].min() - pad)))
     xmax = int(min(W, np.ceil (all_xy[:, 0].max() + pad)))
     ymin = int(max(0, np.floor(all_xy[:, 1].min() - pad)))
@@ -107,51 +112,133 @@ def plot_poly_before_after_to_file(
         return
 
     crop = bg[ymin:ymax, xmin:xmax]
+    # Dark debug backdrop so trajectory differences pop visually.
+    crop_dark = np.asarray(crop, float) * 0.18
+    crop_dark = np.clip(crop_dark, 0, 255).astype(np.uint8)
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
-    # ---- figure (NO gap between panels) ----
-    fig, (axL, axR) = plt.subplots(
-        1, 2,
-        figsize=(9.2, 4.8),
-        dpi=200,
-        sharex=True,
-        sharey=True,
-        gridspec_kw={"wspace": 0.0},
+    def _resample_poly_to_len(poly_xy, n):
+        poly_xy = np.asarray(poly_xy, float)
+        if poly_xy.ndim != 2 or poly_xy.shape[1] != 2 or len(poly_xy) < 2 or n < 2:
+            return np.asarray(poly_xy, float)
+        ds = np.linalg.norm(np.diff(poly_xy, axis=0), axis=1)
+        s = np.concatenate([[0.0], np.cumsum(ds)])
+        total = float(s[-1]) if len(s) else 0.0
+        if total <= 0:
+            return np.repeat(poly_xy[:1], n, axis=0)
+        t = np.linspace(0.0, total, int(n))
+        x = np.interp(t, s, poly_xy[:, 0])
+        y = np.interp(t, s, poly_xy[:, 1])
+        return np.column_stack([x, y])
+
+    # ---- adaptive figure geometry + bottom diagnostic axis ----
+    ch = max(1, int(ymax - ymin))
+    cw = max(1, int(xmax - xmin))
+    aspect = float(cw) / float(ch)
+    zoom_x = min(float(W) / float(cw), float(H) / float(ch))
+    panel_h = 4.8
+    panel_w = min(6.0, max(2.4, panel_h * aspect))
+    fig_w = panel_w * 3.0
+    fig_h = panel_h + 1.6
+
+    fig = plt.figure(figsize=(fig_w, fig_h), dpi=200)
+    gs = fig.add_gridspec(
+        2,
+        3,
+        height_ratios=[4.4, 1.2],
+        hspace=0.12,
+        wspace=0.0,
     )
+    axL = fig.add_subplot(gs[0, 0])
+    axM = fig.add_subplot(gs[0, 1], sharex=axL, sharey=axL)
+    axR = fig.add_subplot(gs[0, 2], sharex=axL, sharey=axL)
+    axD = fig.add_subplot(gs[1, :])
+    fig.subplots_adjust(left=0.01, right=0.995, bottom=0.04, top=0.88, wspace=0.0, hspace=0.12)
 
     # ======================
     # LEFT: raw (before)
     # ======================
-    axL.imshow(crop)
+    axL.imshow(crop_dark)
     axL.plot(
         poly_raw[:, 0] - xmin,
         poly_raw[:, 1] - ymin,
-        color="darkred",
-        lw=.8,          # thinner to expose jitter
+        color="#ff5a5a",
+        lw=1.2,
         alpha=0.9,
     )
-    axL.set_title("Raw (before)", fontsize=10, fontweight="bold")
+    axL.set_title("Raw (before)", fontsize=9, fontweight="bold", pad=4)
     axL.axis("off")
 
     # ======================
-    # RIGHT: resampled (after)
+    # MIDDLE: resampled
     # ======================
-    axR.imshow(crop)
-    axR.plot(
+    axM.imshow(crop_dark)
+    axM.plot(
         poly_rs[:, 0] - xmin,
         poly_rs[:, 1] - ymin,
-        color="dodgerblue",
-        lw=1.5,
+        color="#38b6ff",
+        lw=1.4,
         alpha=0.95,
     )
-    axR.set_title("Resampled (after)", fontsize=10, fontweight="bold")
+    axM.set_title("Resampled", fontsize=9, fontweight="bold", pad=4)
+    axM.axis("off")
+
+    # ======================
+    # RIGHT: smoothed
+    # ======================
+    axR.imshow(crop_dark)
+    axR.plot(
+        poly_sg[:, 0] - xmin,
+        poly_sg[:, 1] - ymin,
+        color="#2dff9a",
+        lw=1.8,
+        alpha=0.95,
+    )
+    axR.set_title("SavGol smoothed", fontsize=9, fontweight="bold", pad=4)
     axR.axis("off")
 
-    # ---- overall title ----
-    fig.suptitle(title, fontsize=11, fontweight="bold", y=0.98)
+    # ======================
+    # BOTTOM: local spacing diagnostics
+    # ======================
+    def _spacing_profile(poly_xy, n):
+        poly_xy = np.asarray(poly_xy, float)
+        if poly_xy.ndim != 2 or poly_xy.shape[1] != 2 or len(poly_xy) < 2:
+            return np.zeros((n,), float)
+        d = np.linalg.norm(np.diff(poly_xy, axis=0), axis=1)
+        if len(d) == 1:
+            return np.full((n,), float(d[0]), float)
+        x = np.linspace(0.0, 1.0, len(d))
+        xi = np.linspace(0.0, 1.0, n)
+        return np.interp(xi, x, d)
 
-    fig.savefig(out_path, bbox_inches="tight", pad_inches=0.02)
+    ncmp = max(32, len(poly_raw), len(poly_rs), len(poly_sg))
+    t = np.linspace(0.0, 1.0, ncmp)
+    sp_raw = _spacing_profile(poly_raw, ncmp)
+    sp_rs = _spacing_profile(poly_rs, ncmp)
+    sp_sg = _spacing_profile(poly_sg, ncmp)
+
+    axD.plot(t, sp_raw, color="#ff5a5a", lw=2.0, label="raw spacing")
+    axD.plot(t, sp_rs, color="#38b6ff", lw=2.0, label="resampled spacing")
+    axD.plot(t, sp_sg, color="#2dff9a", lw=2.0, label="smoothed spacing")
+    axD.set_xlim(0.0, 1.0)
+    axD.set_ylabel("Step distance (px)", fontsize=8)
+    axD.set_xlabel("Normalized arclength", fontsize=8)
+    axD.grid(alpha=0.25, lw=0.6)
+    axD.tick_params(labelsize=7)
+    axD.legend(loc="upper right", fontsize=7, framealpha=0.9)
+
+    # ---- overall title ----
+    if annot_scale is not None:
+        try:
+            scale_txt = f"scale={float(annot_scale):.3f}"
+        except Exception:
+            scale_txt = "scale=unknown"
+    else:
+        scale_txt = f"scale≈{zoom_x:.2f}"
+    fig.suptitle(f"{title} ({scale_txt})", fontsize=10, fontweight="bold", y=0.995)
+
+    fig.savefig(out_path, bbox_inches="tight", pad_inches=0.0)
     plt.close(fig)
 
 
@@ -163,12 +250,13 @@ def canonicalize_track_for_edges(
     min_spacing_manual=0.3,
     preserve_endpoints=True,
     source="auto",
-    smooth_k=5,   # <---- NEW (default very conservative)
+    smooth_k=7,   # <---- NEW (default very conservative)
 ):
     """
     Canonicalize a [y,x] track to stable spacing before edge extraction.
     Always resamples to ds_target (fastpath may early-return if already uniform).
     Applies very light SavGol smoothing to stabilize normals.
+    Returns final track plus info that includes both resampled and smoothed tracks.
     """
 
     import numpy as np
@@ -181,6 +269,8 @@ def canonicalize_track_for_edges(
             "did_resample": False,
             "n_before": 0,
             "n_after": 0,
+            "track_resampled_yx": None,
+            "track_smoothed_yx": tr,
         }
 
     pts_xy = np.column_stack([tr[1], tr[0]])
@@ -193,6 +283,8 @@ def canonicalize_track_for_edges(
             "did_resample": False,
             "n_before": n_before,
             "n_after": n_before,
+            "track_resampled_yx": tr,
+            "track_smoothed_yx": tr,
         }
 
     ds = local_step_sizes(pts_xy)
@@ -212,9 +304,12 @@ def canonicalize_track_for_edges(
             "did_resample": False,
             "n_before": n_before,
             "n_after": n_before,
+            "track_resampled_yx": tr,
+            "track_smoothed_yx": tr,
         }
 
     rs = np.asarray(rs, float)
+    rs_only = rs.copy()
     n_after = int(len(rs))
 
     # ---- VERY LIGHT smoothing ----
@@ -232,6 +327,7 @@ def canonicalize_track_for_edges(
             rs[0]  = pts_xy[0]
             rs[-1] = pts_xy[-1]
 
+    out_rs_only = np.vstack([rs_only[:, 1], rs_only[:, 0]])
     out = np.vstack([rs[:, 1], rs[:, 0]])
 
     return out, {
@@ -239,6 +335,8 @@ def canonicalize_track_for_edges(
         "did_resample": True,
         "n_before": n_before,
         "n_after": n_after,
+        "track_resampled_yx": out_rs_only,
+        "track_smoothed_yx": out,
     }
 
 #This class is basically is all of the utility / save and load or unimportant functions that aren't directly accessible via a ui button or aren't important
@@ -2997,7 +3095,7 @@ class CrackUtils:
                     continue
 
                 track_yx = np.vstack([poly[:, 1], poly[:, 0]])
-                track_rs, _ = canonicalize_track_for_edges(
+                track_rs, rs_info = canonicalize_track_for_edges(
                     track_yx,
                     ds_target=1.0,
                     preserve_endpoints=True,
@@ -3006,7 +3104,12 @@ class CrackUtils:
                 if track_rs is None or track_rs.ndim != 2 or track_rs.shape[0] != 2 or track_rs.shape[1] < 2:
                     continue
 
-                poly_rs = np.column_stack([track_rs[1], track_rs[0]])
+                track_rs_only = rs_info.get("track_resampled_yx") if isinstance(rs_info, dict) else None
+                if track_rs_only is None:
+                    track_rs_only = track_rs
+
+                poly_rs = np.column_stack([track_rs_only[1], track_rs_only[0]])
+                poly_sg = np.column_stack([track_rs[1], track_rs[0]])
 
                 if DEBUG_MANUAL_RESAMPLING:
                     # build debug output path
@@ -3024,15 +3127,18 @@ class CrackUtils:
                     plot_poly_before_after_to_file(
                         poly_raw=poly,
                         poly_rs=poly_rs,
+                        poly_sg=poly_sg,
                         image=self.original_image,
                         overlay=getattr(self, "overlay_image", None),
                         pad=5,
-                        title=f"Manual midline canonicalization (key={k})",
+                        annot_scale=getattr(annot, "scale", None),
+                        annot_fit_scale=getattr(annot, "_fit_scale", None),
+                        title="Manual midline canonicalization",
                         out_path=out_path,
                     )
 
-                self.manual_midlines_tmp[k] = poly_rs.tolist()
-                print(f"[CANONICAL] midline {k}: {len(poly)} → {len(poly_rs)} pts (ds_target=1.0)")
+                self.manual_midlines_tmp[k] = poly_sg.tolist()
+                print(f"[CANONICAL] midline {k}: {len(poly)} → {len(poly_sg)} pts (ds_target=1.0)")
 
 
             # DEBUG: inspect ONLY newly drawn midlines (not readonly)
