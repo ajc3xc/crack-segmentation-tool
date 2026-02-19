@@ -3708,24 +3708,51 @@ def compare_widths_for_aligned_cracks(
                 continue
             gtw_full_any = np.asarray(gtw_full_any, float).reshape(-1)
 
+            def _resample_1d_to_len_atomic(arr, L):
+                arr = np.asarray(arr, float).reshape(-1)
+                L = int(L)
+                if L <= 0:
+                    return np.asarray([], float)
+                if arr.size == 0:
+                    out = np.empty((L,), float)
+                    out[:] = np.nan
+                    return out
+                if arr.size == 1:
+                    out = np.empty((L,), float)
+                    out[:] = float(arr[0])
+                    return out
+                if arr.size == L:
+                    return arr.astype(float, copy=False)
+                x_old = np.linspace(0.0, 1.0, num=arr.size)
+                x_new = np.linspace(0.0, 1.0, num=L)
+                return np.interp(x_new, x_old, arr).astype(float, copy=False)
+
+            total_geom = int(sum(len(s) for s in segs if s is not None and len(s) >= 2))
+            if total_geom < 2:
+                print(f"[WIDTH DEBUG] atomic cid={cid} has <2 derived geometry samples -> skip")
+                continue
+
+            predw_full_aligned = _resample_1d_to_len_atomic(predw_full_any, total_geom)
+            gtw_full_aligned = _resample_1d_to_len_atomic(gtw_full_any, total_geom)
+
+            print(
+                f"[WIDTH DEBUG] atomic cid={cid} aligned streams: "
+                f"geom={total_geom} pred_raw={len(predw_full_any)} gt_raw={len(gtw_full_any)}"
+            )
+
             off = 0
             for s in segs:
                 if s is None or len(s) < 2:
                     continue
 
                 pts = np.asarray(s, float)
-                m = min(
-                    len(pts),
-                    max(0, predw_full_any.size - off),
-                    max(0, gtw_full_any.size - off),
-                )
-                if m < 2:
-                    off += max(len(pts), 0)
+                L = int(len(pts))
+                if L < 2:
+                    off += L
                     continue
 
-                pts = pts[:m]
-                predw = predw_full_any[off:off + m].astype(float, copy=False)
-                gtw = gtw_full_any[off:off + m].astype(float, copy=False)
+                predw = predw_full_aligned[off:off + L].astype(float, copy=False)
+                gtw = gtw_full_aligned[off:off + L].astype(float, copy=False)
 
                 width_pairs.append({
                     "image": base_name,
@@ -3751,7 +3778,7 @@ def compare_widths_for_aligned_cracks(
                     ),
                 })
 
-                off += m
+                off += L
 
             continue
 
@@ -6897,8 +6924,37 @@ def compare_widths_for_aligned_cracks(
     bbox = _union_bboxes(bboxes)
 
     fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
-    bg = np.stack([(crack_mask > 0) * 255] * 3, axis=-1)
+    gt_mask_u8 = (np.asarray(crack_mask) > 0).astype(np.uint8)
+    bg = np.stack([gt_mask_u8 * 255] * 3, axis=-1)
     ax.imshow(bg)
+
+    # ---- prediction mask overlay (semi-transparent green) ----
+    pred_mask_union = np.zeros((H, W), np.uint8)
+    for wp in (width_pairs or []):
+        bbm = wp.get("pred_mask_bbox") or wp.get("bbox")
+        cropm = wp.get("pred_mask_crop")
+        if bbm is None or cropm is None:
+            continue
+        try:
+            px, py, pw, ph = map(int, bbm)
+        except Exception:
+            continue
+        cm = np.asarray(cropm, np.uint8)
+        if cm.ndim != 2:
+            continue
+        hh = min(max(ph, 0), cm.shape[0], H - max(py, 0))
+        ww = min(max(pw, 0), cm.shape[1], W - max(px, 0))
+        if hh <= 0 or ww <= 0:
+            continue
+        y0 = max(py, 0)
+        x0 = max(px, 0)
+        pred_mask_union[y0:y0 + hh, x0:x0 + ww] |= (cm[:hh, :ww] > 0).astype(np.uint8)
+
+    if np.any(pred_mask_union):
+        pred_rgba = np.zeros((H, W, 4), float)
+        pred_rgba[..., 1] = pred_mask_union.astype(float)  # green channel
+        pred_rgba[..., 3] = pred_mask_union.astype(float) * 0.28  # alpha
+        ax.imshow(pred_rgba, zorder=0.5)
 
     all_d = np.concatenate([d for d in diffs if d is not None and len(d) > 0])
     all_d = all_d[np.isfinite(all_d)]
@@ -6978,6 +7034,14 @@ def compare_widths_for_aligned_cracks(
     # Variant-isolated output dir + filename
     out_dir = os.path.join(metrics_dir, midline_type or "unknown", crack_type)
     out = os.path.join(out_dir, f"{midline_type}_{crack_type}_width_diffs.png")
+
+    # ---- mask legend (GT vs Pred) ----
+    from matplotlib.patches import Patch
+    legend_handles = [
+        Patch(facecolor=(1, 1, 1, 0.95), edgecolor="black", label="GT mask"),
+        Patch(facecolor=(0, 1, 0, 0.35), edgecolor="black", label="Pred mask"),
+    ]
+    ax.legend(handles=legend_handles, loc="lower right", fontsize=6, framealpha=0.8)
 
     os.makedirs(out_dir, exist_ok=True)
 
