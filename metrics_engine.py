@@ -1589,14 +1589,14 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 atomic_src=None,
                 combined_src=None,
                 midline_type,
-                baseline_root=None,   # <- self.baseline_img_folder for manual
+                width_baseline_root=None,   # <- self.width_baseline_img_folder for manual
         ):
             """
             Runs width evaluation for atomic + combined cracks across variants.
 
             Variants:
             - "main" (the payloads you pass in)
-            - baseline variants discovered under baseline_root (optional; atomic only, per image)
+            - baseline variants discovered under width_baseline_root (optional; atomic only, per image)
 
             For EACH (variant, mode):
             - runs compare_widths_for_aligned_cracks(..., variant_id=...)
@@ -1752,18 +1752,18 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             # ------------------------------------------------------------
             #variants = {"main": {"atomic": atomic_src, "combined": combined_src}}
 
-            def _run_one_mode(*, variant_id, crack_type, payload, baseline_maps_local=None):
+            def _run_one_mode(*, variant_id, crack_type, payload, width_baseline_maps_local=None):
                 import os
                 import numpy as np
 
                 # ------------------------------------------------------------
                 # BASELINE MODE — Regime B1 + B2
                 # ------------------------------------------------------------
-                if baseline_maps_local:
+                if width_baseline_maps_local:
                     import numpy as np
                     import traceback
 
-                    print(f"[BASELINE DEBUG] methods: {list(baseline_maps_local.keys())}")
+                    print(f"[BASELINE DEBUG] methods: {list(width_baseline_maps_local.keys())}")
 
                     # --------------------------------------------------
                     # BASELINE MUST USE PAYLOAD + COMBINED CRACKS
@@ -1785,7 +1785,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     combined_gt = _enrich_combined_for_baseline(combined_gt, gt_sup_root)
                     print(f"[BASELINE DEBUG] combined_gt entries: {len(combined_gt)}")
 
-                    for method, rec in baseline_maps_local.items():
+                    for method, rec in width_baseline_maps_local.items():
                         print(f"[BASELINE] evaluating method='{method}'")
 
                         # ----------------------------
@@ -1816,7 +1816,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         rows = compute_projected_width_diffs(
                             gt_payload={"combined_cracks": combined_gt},
                             gt_full=gt_full,
-                            baseline_maps={method: (wmap, supp)},
+                            width_baseline_maps={method: (wmap, supp)},
                             base_name=base_name,
                             midline_type=midline_type,
                             crack_type="combined",
@@ -1868,7 +1868,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                             midline_metric_rows = []
                             midline_metric_rows.append({
                                 "image": base_name,
-                                "crack_id": "baseline_combined",
+                                "crack_id": "width_baseline_combined",
                                 "crack_type": "combined",
                                 "midline_type": midline_type,
                                 "variant_id": method,
@@ -2027,22 +2027,22 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             import traceback
 
             if (
-                baseline_root
-                and os.path.isdir(baseline_root)
+                width_baseline_root
+                and os.path.isdir(width_baseline_root)
                 and combined_aug is not None
                 and midline_type == "manual"
             ):
                 print("[WIDTH] running baselines")
                 try:
-                    baseline_maps = load_baseline_widthmaps_for_image(baseline_root)
-                    print("[BASELINE DEBUG] loaded methods:", list(baseline_maps.keys()))
+                    width_baseline_maps = load_width_baseline_widthmaps_for_image(width_baseline_root)
+                    print("[BASELINE DEBUG] loaded methods:", list(width_baseline_maps.keys()))
 
-                    if baseline_maps:
+                    if width_baseline_maps:
                         _run_one_mode(
                             variant_id="baseline",
                             crack_type="combined",
                             payload={"combined_cracks": combined_aug},
-                            baseline_maps_local=baseline_maps,
+                            width_baseline_maps_local=width_baseline_maps,
                         )
 
                 except Exception:
@@ -2063,7 +2063,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 atomic_src=atomic,
                 combined_src=combined_for_width,
                 midline_type="manual",
-                baseline_root=getattr(self, "baseline_img_folder", None),
+                width_baseline_root=getattr(self, "width_baseline_img_folder", None),
             )
 
             # AUTO

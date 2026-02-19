@@ -10,8 +10,8 @@ OUTPUT:
   --out_dir/<image_stem>/baselines_overview.png   (optional)
 
 Also writes:
-  --out_dir/baseline_timings.csv
-  --out_dir/baseline_timings_summary.csv
+  --out_dir/width_baseline_timings.csv
+  --out_dir/width_baseline_timings_summary.csv
 
 GPU:
   Uses cucim + cupy medial_axis, serialized by a lock so only one worker uses GPU at a time.
@@ -38,7 +38,7 @@ from sklearn.decomposition import PCA
 
 import matplotlib.pyplot as plt
 
-from baseline_plots import *
+from width_baseline_plots import *
 
 # ----------------------------
 # Optional GPU deps (cucim/cupy)
@@ -772,7 +772,7 @@ def main():
     paths = sorted(paths)
 
     if not paths:
-        print(f"[baseline_creator] No images found under: {IN_DIR}")
+        print(f"[width_baseline_creator] No images found under: {IN_DIR}")
         return 2
 
     df = pd.DataFrame({
@@ -796,15 +796,15 @@ def main():
     # ============================================================
     # Sanity info
     # ============================================================
-    print("[baseline_creator] images:", len(df))
-    print("[baseline_creator] workers:", NB_WORKERS)
-    print("[baseline_creator] methods:", METHODS)
-    print("[baseline_creator] GPU_OK:", GPU_OK, " DSE_OK:", DSE_OK)
-    print("[baseline_creator] IN_DIR :", IN_DIR)
-    print("[baseline_creator] OUT_DIR:", OUT_DIR)
+    print("[width_baseline_creator] images:", len(df))
+    print("[width_baseline_creator] workers:", NB_WORKERS)
+    print("[width_baseline_creator] methods:", METHODS)
+    print("[width_baseline_creator] GPU_OK:", GPU_OK, " DSE_OK:", DSE_OK)
+    print("[width_baseline_creator] IN_DIR :", IN_DIR)
+    print("[width_baseline_creator] OUT_DIR:", OUT_DIR)
 
     if "medial_dse" in METHODS and not GPU_OK:
-        print("[baseline_creator] WARNING: medial_dse requested but GPU deps unavailable.")
+        print("[width_baseline_creator] WARNING: medial_dse requested but GPU deps unavailable.")
 
     # ============================================================
     # Parallel processing
@@ -819,9 +819,9 @@ def main():
     # ============================================================
     # Timing CSVs
     # ============================================================
-    timings_csv = os.path.join(OUT_DIR, "baseline_timings.csv")
+    timings_csv = os.path.join(OUT_DIR, "width_baseline_timings.csv")
     res_df.to_csv(timings_csv, index=False)
-    print("[baseline_creator] wrote:", timings_csv)
+    print("[width_baseline_creator] wrote:", timings_csv)
 
     # ---- summary stats (committee-friendly) ----
     weight = res_df["crack_px"].fillna(0).astype(float)
@@ -852,16 +852,16 @@ def main():
         ])
 
     summary_df = pd.DataFrame(summary_rows)
-    summary_csv = os.path.join(OUT_DIR, "baseline_timings_summary.csv")
+    summary_csv = os.path.join(OUT_DIR, "width_baseline_timings_summary.csv")
     summary_df.to_csv(summary_csv, index=False)
-    print("[baseline_creator] wrote:", summary_csv)
+    print("[width_baseline_creator] wrote:", summary_csv)
     
     # ============================================================
     # Thesis committee plots
     # ============================================================
     if MAKE_PLOTS:
-        print("[baseline_creator] generating summary plots...")
-        plot_baseline_summary(res_df, summary_df, OUT_DIR)
+        print("[width_baseline_creator] generating summary plots...")
+        plot_width_baseline_summary(res_df, summary_df, OUT_DIR)
 
     return 0
 

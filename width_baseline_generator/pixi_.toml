@@ -30,4 +30,4 @@ pandarallel = "*"
 sknw = "*"
 
 [tasks]
-run = "python baseline_creator.py --help"
+run = "python width_baseline_creator.py --help"

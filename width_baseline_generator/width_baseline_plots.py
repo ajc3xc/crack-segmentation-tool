@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 def _safe_mkdir(p: str) -> None:
     os.makedirs(p, exist_ok=True)
 
-def plot_baseline_summary(res_df, summary_df, out_dir):
+def plot_width_baseline_summary(res_df, summary_df, out_dir):
     """
     Master entrypoint called from main().
     Generates all committee-facing plots.

@@ -1693,7 +1693,7 @@ def _sample_width_map_at_pts(width_map_2d, pts_xy, *, bbox=None):
     yi = np.clip(yi, 0, wm.shape[0] - 1)
     return wm[yi, xi].astype(float, copy=False)
 
-def load_baseline_widthmaps_for_image(baseline_img_dir: str):
+def load_width_baseline_widthmaps_for_image(width_baseline_img_dir: str):
     """
     Loads baseline NPZ artifacts.
 
@@ -1708,13 +1708,13 @@ def load_baseline_widthmaps_for_image(baseline_img_dir: str):
     import numpy as np
     import json
 
-    if not baseline_img_dir or not os.path.isdir(baseline_img_dir):
+    if not width_baseline_img_dir or not os.path.isdir(width_baseline_img_dir):
         return {}
 
     out = {}
 
-    for method in os.listdir(baseline_img_dir):
-        method_dir = os.path.join(baseline_img_dir, method)
+    for method in os.listdir(width_baseline_img_dir):
+        method_dir = os.path.join(width_baseline_img_dir, method)
         if not os.path.isdir(method_dir):
             continue
 
@@ -1952,7 +1952,7 @@ def compute_projected_width_diffs(
     *,
     gt_payload,
     gt_full,
-    baseline_maps,
+    width_baseline_maps,
     base_name,
     midline_type,
     crack_type,
@@ -2058,7 +2058,7 @@ def compute_projected_width_diffs(
     # Main evaluation
     # ============================================================
 
-    for method, (wmap, supp) in baseline_maps.items():
+    for method, (wmap, supp) in width_baseline_maps.items():
         dbg_m = dict(dbg)
         overlay_coords = []
         overlay_diffs = []
@@ -2292,7 +2292,7 @@ def compute_projected_width_diffs(
 
                 out_path = os.path.join(
                     out_dir,
-                    f"{base_name}_{method}_baseline_projected_overlay.png",
+                    f"{base_name}_{method}_width_baseline_projected_overlay.png",
                 )
 
                 fig.savefig(out_path, dpi=200, bbox_inches="tight")
@@ -3644,7 +3644,7 @@ def compare_widths_for_aligned_cracks(
 
         return out_segs, out_meta
 
-    # ---------------- iterate cracks (NO baseline_mode; baseline is injected via pred_widths) ----------------
+    # ---------------- iterate cracks (NO width_baseline_mode; baseline is injected via pred_widths) ----------------
     crack_iter = list(cracks.items())
     print(f"cracks iterating through: {len(crack_iter)}")
 
