@@ -548,15 +548,16 @@ class CrackUtils:
                             d.get("save_folder", ""),
                             d.get("mask_folder", ""),
                             d.get("width_baseline_folder", ""),
+                            d.get("mask_baseline_folder", ""),
                             d.get("use_masks", False),
                             d.get("use_baselines", False),
                         )
                 except Exception:
                     pass
-            return "", "", "", "", False, False
+            return "", "", "", "", "", False, False
 
         def save_last_folders(
-            img_folder, save_folder, mask_folder, width_baseline_folder,
+            img_folder, save_folder, mask_folder, width_baseline_folder, mask_baseline_folder,
             use_masks, use_baselines
         ):
             config_path = os.path.join(
@@ -570,6 +571,7 @@ class CrackUtils:
                         "save_folder": save_folder,
                         "mask_folder": mask_folder,
                         "width_baseline_folder": width_baseline_folder,
+                        "mask_baseline_folder": mask_baseline_folder,
                         "use_masks": use_masks,
                         "use_baselines": use_baselines,
                     }, f, indent=2)
@@ -584,6 +586,7 @@ class CrackUtils:
             default_save_folder,
             default_mask_folder,
             default_width_baseline_folder,
+            default_mask_baseline_folder,
             default_use_masks,
             default_use_baselines,
         ) = load_last_folders()
@@ -592,6 +595,7 @@ class CrackUtils:
         save_folder_init = getattr(self, "save_folder", default_save_folder)
         mask_folder_init = getattr(self, "mask_folder", default_mask_folder)
         width_baseline_folder_init = getattr(self, "width_baseline_folder", default_width_baseline_folder)
+        mask_baseline_folder_init = getattr(self, "mask_baseline_folder", default_mask_baseline_folder)
 
         use_masks_init = getattr(self, "use_masks", default_use_masks)
         use_baselines_init = getattr(self, "use_baselines", default_use_baselines)
@@ -662,10 +666,10 @@ class CrackUtils:
         layout.addWidget(use_baselines_checkbox)
 
         # ------------------------------------------------------------
-        # Baseline folder row (NEW)
+        # Width baseline folder row (NEW)
         # ------------------------------------------------------------
         width_baseline_row = QHBoxLayout()
-        width_baseline_label = QLabel("Baseline folder:")
+        width_baseline_label = QLabel("Width baseline folder:")
         width_baseline_folder_edit = QLineEdit(width_baseline_folder_init)
         width_baseline_browse_btn = QPushButton("Browse...")
         width_baseline_row.addWidget(width_baseline_label)
@@ -673,15 +677,31 @@ class CrackUtils:
         width_baseline_row.addWidget(width_baseline_browse_btn)
         layout.addLayout(width_baseline_row)
 
-        def update_width_baseline_row():
+        # ------------------------------------------------------------
+        # Segmentation/mask baseline folder row
+        # ------------------------------------------------------------
+        mask_baseline_row = QHBoxLayout()
+        mask_baseline_label = QLabel("Mask baseline folder:")
+        mask_baseline_folder_edit = QLineEdit(mask_baseline_folder_init)
+        mask_baseline_browse_btn = QPushButton("Browse...")
+        mask_baseline_row.addWidget(mask_baseline_label)
+        mask_baseline_row.addWidget(mask_baseline_folder_edit)
+        mask_baseline_row.addWidget(mask_baseline_browse_btn)
+        layout.addLayout(mask_baseline_row)
+
+        def update_baseline_rows():
             visible = use_baselines_checkbox.isChecked()
             for i in range(width_baseline_row.count()):
                 w = width_baseline_row.itemAt(i).widget()
                 if w:
                     w.setVisible(visible)
+            for i in range(mask_baseline_row.count()):
+                w = mask_baseline_row.itemAt(i).widget()
+                if w:
+                    w.setVisible(visible)
 
-        use_baselines_checkbox.toggled.connect(update_width_baseline_row)
-        update_width_baseline_row()
+        use_baselines_checkbox.toggled.connect(update_baseline_rows)
+        update_baseline_rows()
 
         # ------------------------------------------------------------
         # Buttons
@@ -720,6 +740,12 @@ class CrackUtils:
                 or width_baseline_folder_edit.text()
             )
         )
+        mask_baseline_browse_btn.clicked.connect(
+            lambda: mask_baseline_folder_edit.setText(
+                QFileDialog.getExistingDirectory(dlg, "Select Mask Baseline Folder")
+                or mask_baseline_folder_edit.text()
+            )
+        )
 
         ok_btn.clicked.connect(dlg.accept)
         cancel_btn.clicked.connect(dlg.reject)
@@ -742,6 +768,7 @@ class CrackUtils:
                 save_folder = strip_quotes(save_folder_edit.text().strip())
                 mask_folder = strip_quotes(mask_folder_edit.text().strip())
                 width_baseline_folder = strip_quotes(width_baseline_folder_edit.text().strip())
+                mask_baseline_folder = strip_quotes(mask_baseline_folder_edit.text().strip())
 
                 use_masks = use_mask_checkbox.isChecked()
                 use_baselines = use_baselines_checkbox.isChecked()
@@ -764,6 +791,12 @@ class CrackUtils:
                         "Please select a valid baseline folder or uncheck 'Use Baselines'."
                     )
                     continue
+                if use_baselines and not os.path.isdir(mask_baseline_folder):
+                    QMessageBox.critical(
+                        dlg, "Error",
+                        "Please select a valid mask baseline folder or uncheck 'Use Baselines'."
+                    )
+                    continue
                 break
             else:
                 print("Folder selection cancelled.")
@@ -776,12 +809,14 @@ class CrackUtils:
         self.save_folder = save_folder
         self.mask_folder = mask_folder if use_masks else ""
         self.width_baseline_folder = width_baseline_folder if use_baselines else ""
+        self.mask_baseline_folder = mask_baseline_folder if use_baselines else ""
+        self.mask_baseline_root = self.mask_baseline_folder
 
         self.use_masks = use_masks
         self.use_baselines = use_baselines
 
         save_last_folders(
-            img_folder, save_folder, mask_folder, width_baseline_folder,
+            img_folder, save_folder, mask_folder, width_baseline_folder, mask_baseline_folder,
             use_masks, use_baselines
         )
 
@@ -1568,13 +1603,50 @@ class CrackUtils:
         base_name = os.path.splitext(os.path.basename(self.name))[0]
         
         # ------------------------------------------------------------
-        # Baseline folder (per-image handle)
+        # Width baseline folder (per-image handle)
         # ------------------------------------------------------------
         if getattr(self, "use_baselines", False) and getattr(self, "width_baseline_folder", ""):
             # Root baseline folder (passed later to width eval)
             self.width_baseline_img_folder = os.path.join(self.width_baseline_folder, base_name) 
         else:
             self.width_baseline_img_folder = None
+
+        # ------------------------------------------------------------
+        # Mask baseline folders (superfolder + method subfolders)
+        # Expected layout: <mask_baseline_folder>/<method>/(...masks...)
+        # ------------------------------------------------------------
+        self.mask_baseline_superfolder = None
+        self.mask_baseline_method_folders = tuple()
+        self.mask_baseline_img_paths = {}
+        if getattr(self, "use_baselines", False) and getattr(self, "mask_baseline_folder", ""):
+            self.mask_baseline_superfolder = self.mask_baseline_folder
+            self.mask_baseline_root = self.mask_baseline_folder
+            try:
+                method_dirs = []
+                for d in os.listdir(self.mask_baseline_superfolder):
+                    p = os.path.join(self.mask_baseline_superfolder, d)
+                    if os.path.isdir(p):
+                        method_dirs.append(p)
+                self.mask_baseline_method_folders = tuple(sorted(method_dirs))
+            except Exception:
+                self.mask_baseline_method_folders = tuple()
+
+            # Convenience map for current image: method_name -> probable mask path.
+            # Supports both:
+            # 1) <root>/<method>/<base_name>.png
+            # 2) <root>/<method>/<base_name>/<base_name>.png (or .npy)
+            exts = (".png", ".npy", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+            for method_dir in self.mask_baseline_method_folders:
+                method_name = os.path.basename(method_dir)
+                candidates = [os.path.join(method_dir, base_name + ext) for ext in exts]
+                nested_dir = os.path.join(method_dir, base_name)
+                if os.path.isdir(nested_dir):
+                    candidates.extend([os.path.join(nested_dir, base_name + ext) for ext in exts])
+                found = next((c for c in candidates if os.path.isfile(c)), None)
+                if found:
+                    self.mask_baseline_img_paths[method_name] = found
+        else:
+            self.mask_baseline_root = None
 
         # ---- MASK LOADING (optional external masks) ----
         self.current_mask = None

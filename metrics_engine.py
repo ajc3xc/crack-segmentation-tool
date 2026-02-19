@@ -87,7 +87,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         os.makedirs(out_dir, exist_ok=True)
 
         # ------------------------------------------------------------
-        # MASK METRICS (manual vs auto, by crack_type)
+        # MASK METRICS (manual/auto/baseline, grouped dynamically)
         # ------------------------------------------------------------
         mask_csvs = glob.glob(os.path.join(root, "*", "mask_metrics.csv"))
 
@@ -98,22 +98,38 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             if "crack_type" not in dfm.columns:
                 print("[summarize] mask_metrics.csv has no 'crack_type' column; skipping mask breakdown plots.")
             else:
-                # ---- Per crack_type mean metrics ----
+                if "supervision" not in dfm.columns:
+                    dfm["supervision"] = "manual"
+                if "method" not in dfm.columns:
+                    dfm["method"] = "geodesic"
+
+                dfm["variant"] = (
+                    dfm["supervision"].astype(str).str.strip()
+                    + ":"
+                    + dfm["method"].astype(str).str.strip()
+                )
+
                 by_type = dfm.groupby("crack_type").mean(numeric_only=True).reset_index()
                 by_type.to_csv(os.path.join(out_dir, "mask_metrics_by_crack_type.csv"), index=False)
 
-                # Choose IoU column name
+                by_variant_type = (
+                    dfm.groupby(["variant", "crack_type"]).mean(numeric_only=True).reset_index()
+                )
+                by_variant_type.to_csv(
+                    os.path.join(out_dir, "mask_metrics_by_variant_and_crack_type.csv"),
+                    index=False,
+                )
+
                 iou_col = None
                 for cand in ["iou", "iou_manual_vs_gt", "iou_auto_vs_gt"]:
                     if cand in dfm.columns:
                         iou_col = cand
                         break
-
-                # Choose boundary metric if present
                 bf1_col = "boundary_f1" if "boundary_f1" in dfm.columns else None
 
-                # ---------- Plot 1: IoU by crack_type ----------
-                if iou_col is not None:
+                if iou_col is None:
+                    print("[summarize] no IoU column found in mask metrics.")
+                else:
                     plt.figure(figsize=(6, 4))
                     plt.bar(by_type["crack_type"], by_type[iou_col])
                     plt.ylim(0, 1)
@@ -123,56 +139,23 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     plt.tight_layout()
                     plt.savefig(os.path.join(out_dir, "mask_iou_by_crack_type.png"), dpi=160)
                     plt.close()
-                else:
-                    print("[summarize] no IoU column found in mask metrics.")
 
-                # ---------- Plot 2: TOTAL vs TOTAL_AUTO IoU bar ----------
-                if iou_col is not None:
-                    df_total = dfm[dfm["crack_type"].isin(["TOTAL", "TOTAL_AUTO"])]
+                    df_total = by_variant_type[
+                        by_variant_type["crack_type"].astype(str).str.upper() == "TOTAL"
+                    ].copy()
                     if not df_total.empty:
-                        mean_total = df_total.groupby("crack_type")[iou_col].mean()
-                        labels = []
-                        vals = []
-                        for ct in ["TOTAL", "TOTAL_AUTO"]:
-                            if ct in mean_total.index:
-                                labels.append(ct)
-                                vals.append(mean_total.loc[ct])
+                        labels = df_total["variant"].astype(str).tolist()
+                        vals = df_total[iou_col].astype(float).tolist()
+                        plt.figure(figsize=(max(5, 1.4 * len(labels)), 3.8))
+                        plt.bar(labels, vals)
+                        plt.ylim(0, 1)
+                        plt.ylabel("IoU")
+                        plt.xticks(rotation=28, ha="right")
+                        plt.title("Mean TOTAL IoU by variant")
+                        plt.tight_layout()
+                        plt.savefig(os.path.join(out_dir, "mask_total_iou_by_variant.png"), dpi=160)
+                        plt.close()
 
-                        if vals:
-                            plt.figure(figsize=(4, 3))
-                            plt.bar(labels, vals)
-                            plt.ylim(0, 1)
-                            plt.ylabel("IoU")
-                            plt.title(f"Mean {iou_col}: TOTAL vs TOTAL_AUTO")
-                            plt.tight_layout()
-                            plt.savefig(os.path.join(out_dir, "mask_iou_total_vs_auto.png"), dpi=160)
-                            plt.close()
-
-                # ---------- Plot 3: TOTAL vs TOTAL_AUTO IoU scatter ----------
-                if iou_col is not None:
-                    # pivot: image x crack_type
-                    pivot = dfm.pivot_table(
-                        index="image", columns="crack_type", values=iou_col, aggfunc="mean"
-                    )
-                    if "TOTAL" in pivot.columns and "TOTAL_AUTO" in pivot.columns:
-                        x = pivot["TOTAL"].values
-                        y = pivot["TOTAL_AUTO"].values
-                        mask = np.isfinite(x) & np.isfinite(y)
-                        if np.any(mask):
-                            x = x[mask]
-                            y = y[mask]
-                            plt.figure(figsize=(4, 4))
-                            plt.scatter(x, y, alpha=0.6)
-                            max_val = float(max(1e-6, x.max(), y.max()))
-                            plt.plot([0, max_val], [0, max_val], linestyle="--", linewidth=1)
-                            plt.xlabel("TOTAL IoU (manual)")
-                            plt.ylabel("TOTAL_AUTO IoU (auto_best)")
-                            plt.title("Per-image TOTAL IoU: manual vs auto_best")
-                            plt.tight_layout()
-                            plt.savefig(os.path.join(out_dir, "mask_iou_total_vs_auto_scatter.png"), dpi=160)
-                            plt.close()
-
-                # ---------- Plot 4: boundary F1 by crack_type ----------
                 if bf1_col is not None:
                     plt.figure(figsize=(6, 4))
                     plt.bar(by_type["crack_type"], by_type[bf1_col])
@@ -183,6 +166,22 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     plt.tight_layout()
                     plt.savefig(os.path.join(out_dir, "boundary_f1_by_crack_type.png"), dpi=160)
                     plt.close()
+
+                    df_total_b = by_variant_type[
+                        by_variant_type["crack_type"].astype(str).str.upper() == "TOTAL"
+                    ].copy()
+                    if not df_total_b.empty:
+                        labels = df_total_b["variant"].astype(str).tolist()
+                        vals = df_total_b[bf1_col].astype(float).tolist()
+                        plt.figure(figsize=(max(5, 1.4 * len(labels)), 3.8))
+                        plt.bar(labels, vals)
+                        plt.ylim(0, 1)
+                        plt.ylabel("Boundary F1")
+                        plt.xticks(rotation=28, ha="right")
+                        plt.title("Mean TOTAL boundary F1 by variant")
+                        plt.tight_layout()
+                        plt.savefig(os.path.join(out_dir, "mask_total_boundary_f1_by_variant.png"), dpi=160)
+                        plt.close()
 
         # ------------------------------------------------------------
         # WIDTH METRICS (manual vs auto, combined vs combined_auto)
@@ -774,11 +773,15 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         - metrics/<base>/combined{C}_{members}/auto/gt_vs_auto_mask_global.png
         - metrics/<base>/combined{C}_{members}/auto/auto_normals.png
         - metrics/<base>/mask_metrics.csv
-            * atomic, combined, TOTAL
-            * atomic_auto, combined_auto, TOTAL_AUTO (when include_auto=True)
+            * crack_type: atomic, combined, TOTAL
+            * supervision: manual, auto, baseline
+            * method: geodesic or external baseline method name
+            * baseline rows are TOTAL-only (segmentation masks only)
+        - metrics/<base>/mask_comparison_grid.png
+            * dynamic grid over available variants (manual/auto/baselines)
         - width diff overlays + per-type CSVs
             * manual: atomic + combined
-            * auto:   atomic + combined_auto
+            * auto:   atomic + combined
         """
         import os, json, numpy as np, pandas as pd, traceback, cv2
         from helpers.metrics import (
@@ -1045,18 +1048,165 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             bnd,
             surf,
             supervision,   # <-- NEW, REQUIRED
+            method="geodesic",
+            variant="main",
+            source_path="",
         ):
             row = {
                 "image": base_name,
                 "crack_type": crack_type,     # atomic / combined / TOTAL
                 "supervision": supervision,   # manual / auto
+                "method": str(method),
+                "variant": str(variant),
                 "crack_id": str(crack_id) if crack_id is not None else "",
                 "members": members or "",
+                "source_path": source_path or "",
             }
             row.update(base)
             row.update(bnd)
             row.update(surf)
             mask_rows.append(row)
+
+        def _load_baseline_masks_for_image(baseline_root, image_name):
+            """
+            baseline_root/
+                hrsegnet/<image>.png
+                deeplab/<image>.png
+            """
+            out = {}
+            if not baseline_root or not os.path.isdir(baseline_root):
+                return out
+
+            for method in sorted(os.listdir(baseline_root)):
+                method_dir = os.path.join(baseline_root, method)
+                if not os.path.isdir(method_dir):
+                    continue
+
+                mask_path = os.path.join(method_dir, image_name + ".png")
+                if not os.path.exists(mask_path):
+                    continue
+
+                mask = cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)
+                if mask is None:
+                    continue
+
+                if mask.ndim == 3:
+                    mask = mask[..., 0]
+
+                mask = (mask > 0).astype(np.uint8)
+                if mask.shape != (H, W):
+                    mask = cv2.resize(mask, (W, H), interpolation=cv2.INTER_NEAREST)
+                    mask = (mask > 0).astype(np.uint8)
+
+                out[str(method)] = mask
+
+            return out
+
+        def _save_total_overlay(pred_full, supervision, method):
+            try:
+                out_dir = os.path.join(metrics_dir, "mask_comparisons")
+                os.makedirs(out_dir, exist_ok=True)
+                out_png = os.path.join(
+                    out_dir,
+                    f"gt_vs_{str(supervision)}_{str(method)}_global.png",
+                )
+                save_gt_vs_manual_overlay(
+                    H, W,
+                    gt_full,
+                    pred_full,
+                    out_png,
+                    bbox=None,
+                    original_image=self.original_image,
+                )
+            except Exception as e:
+                print(f"[DEBUG MASK] total overlay failed ({supervision}/{method}): {e}")
+
+        def _plot_mask_comparison_grid(*, variant_masks, totals_lookup, out_png):
+            try:
+                import math
+                import matplotlib.pyplot as plt
+
+                if not variant_masks:
+                    return
+
+                n = len(variant_masks)
+                ncols = min(3, n)
+                nrows = int(math.ceil(float(n) / float(ncols)))
+                fig, axes = plt.subplots(nrows, ncols, figsize=(5.8 * ncols, 4.8 * nrows), dpi=150)
+                axes = np.atleast_1d(axes).reshape(nrows, ncols)
+
+                base = self.original_image.copy()
+                if base.ndim == 2:
+                    base = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
+                base = (base.astype(np.float32) / 255.0) * 0.35
+
+                for i, (label, pred_full) in enumerate(variant_masks):
+                    r = i // ncols
+                    c = i % ncols
+                    ax = axes[r, c]
+
+                    gt_bin = (gt_full > 0)
+                    pr_bin = (pred_full > 0)
+                    inter = np.logical_and(gt_bin, pr_bin)
+                    pred_only = np.logical_and(pr_bin, np.logical_not(gt_bin))
+                    gt_only = np.logical_and(gt_bin, np.logical_not(pr_bin))
+
+                    ov = base.copy()
+                    ov[gt_only] = (0.2, 0.20, 1.0)
+                    ov[pred_only] = (0.2, 1.00, 1.0)
+                    ov[inter] = (0.97, 0.97, 0.97)
+                    ov = np.clip(ov, 0.0, 1.0)
+                    ax.imshow(cv2.cvtColor((ov * 255.0).astype(np.uint8), cv2.COLOR_BGR2RGB))
+
+                    t = totals_lookup.get(label, {})
+                    iou = t.get("iou", np.nan)
+                    bf1 = t.get("boundary_f1", np.nan)
+                    hd95_val = t.get("HD95", t.get("hd95", np.nan))
+                    assd_val = t.get("ASSD", t.get("assd", np.nan))
+
+                    ax.set_title(
+                        f"{label}\nIoU={float(iou):.3f} bF1={float(bf1):.3f} "
+                        f"ASSD={float(assd_val):.2f} HD95={float(hd95_val):.2f}",
+                        fontsize=9,
+                    )
+                    ax.axis("off")
+
+                for j in range(n, nrows * ncols):
+                    rr = j // ncols
+                    cc = j % ncols
+                    axes[rr, cc].axis("off")
+
+                fig.tight_layout()
+                os.makedirs(os.path.dirname(out_png), exist_ok=True)
+                fig.savefig(out_png, bbox_inches="tight")
+                plt.close(fig)
+                print(f"[DEBUG MASK] wrote -> {out_png}")
+            except Exception as e:
+                print(f"[DEBUG MASK] comparison grid failed: {e}")
+
+        def _compute_and_record_baseline_total(method_name, pred_full):
+            base = compute_mask_metrics(gt_full, pred_full)
+            bnd = boundary_fscore(gt_full, pred_full, tau=2.0)
+            surf = assd_hd95(gt_full, pred_full)
+
+            _append_mask_row(
+                crack_type="TOTAL",
+                crack_id="",
+                members="",
+                base=base,
+                bnd=bnd,
+                surf=surf,
+                supervision="baseline",
+                method=method_name,
+                variant="external_mask",
+            )
+
+            _save_total_overlay(pred_full, supervision="baseline", method=method_name)
+            print(
+                f"[BASELINE] {method_name} "
+                f"IoU={base.get('iou', float('nan')):.4f} "
+                f"bF1={bnd.get('boundary_f1', float('nan')):.4f}"
+            )
 
         def _compute_and_record_atomic_metrics(
             *,
@@ -1064,6 +1214,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             combined_src,
             crack_type,
             supervision,
+            method="geodesic",
         ):
             """
             Atomic metrics:
@@ -1134,6 +1285,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         bnd=bnd,
                         surf=surf,
                         supervision=supervision, # manual / auto
+                        method=method,
                     )
 
                     # --------------------------------------------------
@@ -1223,13 +1375,12 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
                     out_normals = os.path.join(out_dir, out_normals_name)
                     plot_metrics.plot_gt_normals_on_gtbw(
-                        (pred_crop * 255).astype(np.uint8),
-                        mid_plot,
-                        None,
-                        derived_plot,
-                        e1,
-                        e2,
-                        out_normals,
+                        gt_mask_u8=(pred_crop * 255).astype(np.uint8),
+                        derived_midline_xy=derived_plot,
+                        midline_xy=mid_plot,
+                        e1=e1,
+                        e2=e2,
+                        out_png=out_normals,
                     )
 
                     # width colormap
@@ -1256,6 +1407,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             atomic_src_for_auto=None,
             crack_type,
             supervision,
+            method="geodesic",
         ):
             """
             Combined metrics (MANUAL + AUTO unified).
@@ -1428,6 +1580,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         bnd=bnd,
                         surf=surf,
                         supervision=supervision,
+                        method=method,
                     )
 
                     # --------------------------------------------------
@@ -1451,13 +1604,15 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             atomic_src=atomic,
             combined_src=combined_map,
             crack_type="atomic",
-            supervision="manual"
+            supervision="manual",
+            method="geodesic",
         )
         agg_manual |= _compute_and_record_combined_metrics(
             combined_src=combined_map,
             atomic_src_for_auto=None,
             crack_type="combined",
-            supervision="manual"
+            supervision="manual",
+            method="geodesic",
         )
 
         # TOTAL (manual)
@@ -1472,8 +1627,10 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 base=base_total,
                 bnd=bnd_total,
                 surf=surf_total,
-                supervision="manual"
+                supervision="manual",
+                method="geodesic",
             )
+        _save_total_overlay((agg_manual > 0).astype(np.uint8), supervision="manual", method="geodesic")
 
         # ---- AUTO masks (optional) ----
         agg_auto = np.zeros((H, W), np.uint8)
@@ -1488,14 +1645,16 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 atomic_src=auto_atomic,
                 combined_src=authoring_combined,   # membership info only
                 crack_type="atomic",
-                supervision="auto"
+                supervision="auto",
+                method="geodesic",
             )
 
             agg_auto |= _compute_and_record_combined_metrics(
                 combined_src=auto_combined_map,  # authoritative members list
                 atomic_src_for_auto=auto_atomic,
                 crack_type="combined",
-                supervision="auto"
+                supervision="auto",
+                method="geodesic",
             )
 
             print(f"[DEBUG MASK] AUTO aggregate pixels = {int(agg_auto.sum())}")
@@ -1513,21 +1672,57 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     base=base_total_auto,
                     bnd=bnd_total_auto,
                     surf=surf_total_auto,
-                    supervision="auto"
+                    supervision="auto",
+                    method="geodesic",
                 )
             else:
                 print("[DEBUG MASK] AUTO aggregate mask empty — skipping TOTAL AUTO.")
+            _save_total_overlay((agg_auto > 0).astype(np.uint8), supervision="auto", method="geodesic")
 
         # ------------------------------------------------------------------
-        # 7) SAVE MASK METRICS CSV (single file; contains manual + auto)
+        # 7) SAVE MASK METRICS CSV (single file; manual + auto + baselines)
         # ------------------------------------------------------------------
+        baseline_pred_masks = {}
+        baseline_root = (
+            getattr(self, "mask_baseline_root", None)
+            or getattr(self, "mask_baseline_folder", None)
+        )
+        if baseline_root:
+            print(f"[DEBUG MASK] loading baselines from: {baseline_root}")
+            baseline_pred_masks = _load_baseline_masks_for_image(baseline_root, base_name)
+            for method_name, pred_full in baseline_pred_masks.items():
+                _compute_and_record_baseline_total(method_name, pred_full)
+
+        variant_masks = [("manual:geodesic", (agg_manual > 0).astype(np.uint8))]
+        if include_auto and agg_auto.any():
+            variant_masks.append(("auto:geodesic", (agg_auto > 0).astype(np.uint8)))
+        for method_name, pred in baseline_pred_masks.items():
+            variant_masks.append((f"baseline:{method_name}", (pred > 0).astype(np.uint8)))
+
+        df_mask = pd.DataFrame(mask_rows)
         out_csv = os.path.join(metrics_dir, "mask_metrics.csv")
-        pd.DataFrame(mask_rows).to_csv(out_csv, index=False)
+        df_mask.to_csv(out_csv, index=False)
         print(f"[DEBUG MASK] wrote → {out_csv}")
 
         # ------------------------------------------------------------------
         # 8) WIDTH DIFF CHARTS (manual + optional auto) — unified prep
         # ------------------------------------------------------------------
+        try:
+            totals_lookup = {}
+            if not df_mask.empty:
+                df_total = df_mask[df_mask["crack_type"].astype(str).str.upper() == "TOTAL"].copy()
+                for _, rr in df_total.iterrows():
+                    k = f"{rr.get('supervision', '')}:{rr.get('method', 'geodesic')}"
+                    totals_lookup[k] = rr.to_dict()
+
+            _plot_mask_comparison_grid(
+                variant_masks=variant_masks,
+                totals_lookup=totals_lookup,
+                out_png=os.path.join(metrics_dir, "mask_comparison_grid.png"),
+            )
+        except Exception as e:
+            print(f"[DEBUG MASK] comparison grid failed: {e}")
+
         def _prep_combined_for_width(combined_src):
             """
             Critical: include mask_bbox so compare_widths_for_aligned_cracks can zoom.

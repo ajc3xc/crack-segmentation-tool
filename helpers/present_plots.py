@@ -288,9 +288,14 @@ def plot_surface_distance_histogram(metrics_csv, out_png, *, supervision=None):
     if supervision is not None and "supervision" in df.columns:
         df = df[df["supervision"].astype(str) == str(supervision)].copy()
 
-    # exclude TOTAL for per-crack distribution plots
+    # Prefer per-crack rows. If unavailable (e.g., baseline TOTAL-only),
+    # fall back to TOTAL rows so the plot is still informative.
     if "crack_type" in df.columns:
-        df = df[df["crack_type"].isin(["atomic", "combined"])].copy()
+        per = df[df["crack_type"].isin(["atomic", "combined"])].copy()
+        if not per.empty:
+            df = per
+        else:
+            df = df[df["crack_type"].astype(str).str.upper() == "TOTAL"].copy()
 
     assd_col = "ASSD" if "ASSD" in df.columns else ("assd" if "assd" in df.columns else None)
     hd95_col = "HD95" if "HD95" in df.columns else ("hd95" if "hd95" in df.columns else None)
@@ -299,10 +304,32 @@ def plot_surface_distance_histogram(metrics_csv, out_png, *, supervision=None):
 
     assd = df[assd_col].astype(float).values
     hd95 = df[hd95_col].astype(float).values
+    assd = assd[np.isfinite(assd)]
+    hd95 = hd95[np.isfinite(hd95)]
+    if assd.size == 0 and hd95.size == 0:
+        return
+
+    # TOTAL-only variants often have 1 sample; use bars instead of histogram.
+    if assd.size <= 1 and hd95.size <= 1:
+        plt.figure(figsize=(5, 4), dpi=160)
+        vals = [
+            float(assd[0]) if assd.size else np.nan,
+            float(hd95[0]) if hd95.size else np.nan,
+        ]
+        plt.bar(["ASSD", "HD95"], vals)
+        plt.ylabel("pixels")
+        plt.title("Surface distance (TOTAL)")
+        for i, v in enumerate(vals):
+            if np.isfinite(v):
+                plt.text(i, v, f"{v:.2f}", ha="center", va="bottom", fontsize=9)
+        plt.tight_layout()
+        plt.savefig(out_png)
+        plt.close()
+        return
 
     plt.figure(figsize=(8, 4), dpi=160)
-    plt.hist(assd[np.isfinite(assd)], bins=30, alpha=0.6, label="ASSD")
-    plt.hist(hd95[np.isfinite(hd95)], bins=30, alpha=0.6, label="HD95")
+    plt.hist(assd, bins=30, alpha=0.6, label="ASSD")
+    plt.hist(hd95, bins=30, alpha=0.6, label="HD95")
     plt.title("Surface distance histogram")
     plt.xlabel("pixels")
     plt.ylabel("count")
@@ -310,6 +337,65 @@ def plot_surface_distance_histogram(metrics_csv, out_png, *, supervision=None):
     plt.tight_layout()
     plt.savefig(out_png)
     plt.close()
+
+
+def plot_total_mask_metrics_card(metrics_csv, out_png):
+    """
+    TOTAL-row summary card, useful for baseline variants that have no
+    per-crack atomic/combined rows.
+    """
+    if not os.path.exists(metrics_csv):
+        return
+
+    df = pd.read_csv(metrics_csv)
+    if df.empty:
+        return
+
+    if "crack_type" in df.columns:
+        dft = df[df["crack_type"].astype(str).str.upper() == "TOTAL"].copy()
+    else:
+        dft = df.copy()
+    if dft.empty:
+        return
+
+    row = dft.iloc[0]
+
+    def _get(*names):
+        for n in names:
+            if n in row.index:
+                try:
+                    return float(row[n])
+                except Exception:
+                    return np.nan
+        return np.nan
+
+    region = {
+        "IoU": _get("iou"),
+        "F1": _get("f1"),
+        "bF1": _get("boundary_f1"),
+    }
+    surface = {
+        "ASSD": _get("ASSD", "assd"),
+        "HD95": _get("HD95", "hd95"),
+    }
+
+    fig, ax = plt.subplots(1, 2, figsize=(9, 4), dpi=160)
+    ax[0].bar(list(region.keys()), list(region.values()))
+    ax[0].set_ylim(0, 1)
+    ax[0].set_title("TOTAL region/boundary")
+    for i, v in enumerate(region.values()):
+        if np.isfinite(v):
+            ax[0].text(i, v, f"{v:.3f}", ha="center", va="bottom", fontsize=8)
+
+    ax[1].bar(list(surface.keys()), list(surface.values()))
+    ax[1].set_title("TOTAL surface distance")
+    for i, v in enumerate(surface.values()):
+        if np.isfinite(v):
+            ax[1].text(i, v, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+
+    plt.tight_layout()
+    plt.savefig(out_png)
+    plt.close(fig)
     
 def _add_mask_derived_cols(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -650,73 +736,99 @@ def build_deck_plots_for_image(metrics_dir: str, base_name: str):
         return
 
     # ---------------------------
-    # supervision-specific plots
+    # variant-specific plots (supervision:method)
     # ---------------------------
-    for supervision in ("manual", "auto"):
-        df = df_all[df_all["supervision"].astype(str) == supervision].copy()
+    if "method" not in df_all.columns:
+        df_all["method"] = "geodesic"
+
+    variants = (
+        df_all[["supervision", "method"]]
+        .dropna(how="all")
+        .drop_duplicates()
+        .to_dict("records")
+    )
+
+    for vm in variants:
+        supervision = str(vm.get("supervision", "unknown"))
+        method = str(vm.get("method", "geodesic"))
+        tag = f"{supervision}_{method}".replace(" ", "_").replace("/", "_").replace("\\", "_")
+
+        df = df_all[
+            (df_all["supervision"].astype(str) == supervision)
+            & (df_all["method"].astype(str) == method)
+        ].copy()
         if df.empty:
             continue
 
-        subdir = os.path.join(metrics_dir, supervision)
+        subdir = os.path.join(metrics_dir, tag)
         os.makedirs(subdir, exist_ok=True)
 
-        csv_sub = os.path.join(subdir, f"{supervision}_mask_metrics.csv")
+        csv_sub = os.path.join(subdir, f"{tag}_mask_metrics.csv")
         df.to_csv(csv_sub, index=False)
 
-        print(f"[DEBUG PLOT] building plots for {supervision}")
+        print(f"[DEBUG PLOT] building plots for {tag}")
 
         plot_iou_vs_bf1_scatter(
             csv_sub,
-            os.path.join(subdir, f"{supervision}_iou_vs_bf1_scatter.png"),
-            supervision=supervision,
+            os.path.join(subdir, f"{tag}_iou_vs_bf1_scatter.png"),
+            supervision=None,  # CSV is already filtered to one variant.
         )
 
         plot_assd_hd95_box(
             csv_sub,
-            os.path.join(subdir, f"{supervision}_assd_hd95_box.png"),
+            os.path.join(subdir, f"{tag}_assd_hd95_box.png"),
         )
 
         plot_mask_metrics_triplet(
             subdir, base_name,
-            supervision,
-            os.path.join(subdir, f"{supervision}_mask_metrics_triplet.png"),
+            tag,
+            os.path.join(subdir, f"{tag}_mask_metrics_triplet.png"),
+        )
+        plot_total_mask_metrics_card(
+            csv_sub,
+            os.path.join(subdir, f"{tag}_total_mask_metrics_card.png"),
         )
 
         plot_surface_distance_histogram(
             csv_sub,
-            os.path.join(subdir, f"{supervision}_surface_distance_histogram.png"),
-            supervision=supervision,
+            os.path.join(subdir, f"{tag}_surface_distance_histogram.png"),
+            supervision=None,
         )
 
-        # diagnostic: "why did TOTAL end up like this?"
-        plot_size_vs_iou_scatter(
-            csv_sub,
-            os.path.join(subdir, f"{supervision}_size_vs_iou_gt_area.png"),
-            supervision=supervision,
-            x_mode="gt_area_px",   # works immediately
-        )
+        # Diagnostic per-crack plots only make sense if atomic/combined rows exist.
+        has_per_crack = False
+        if "crack_type" in df.columns:
+            has_per_crack = df["crack_type"].isin(["atomic", "combined"]).any()
 
-        plot_under_overfill_scatter(
-            csv_sub,
-            os.path.join(subdir, f"{supervision}_underfill_vs_overfill.png"),
-            supervision=supervision,
-        )
+        if has_per_crack:
+            plot_size_vs_iou_scatter(
+                csv_sub,
+                os.path.join(subdir, f"{tag}_size_vs_iou_gt_area.png"),
+                supervision=None,
+                x_mode="gt_area_px",   # works immediately
+            )
 
-        plot_error_contribution_bars(
-            csv_sub,
-            os.path.join(subdir, f"{supervision}_fn_contribution.png"),
-            supervision=supervision,
-            which="fn",
-            topk=15,
-        )
+            plot_under_overfill_scatter(
+                csv_sub,
+                os.path.join(subdir, f"{tag}_underfill_vs_overfill.png"),
+                supervision=None,
+            )
 
-        plot_error_contribution_bars(
-            csv_sub,
-            os.path.join(subdir, f"{supervision}_fp_contribution.png"),
-            supervision=supervision,
-            which="fp",
-            topk=15,
-        )
+            plot_error_contribution_bars(
+                csv_sub,
+                os.path.join(subdir, f"{tag}_fn_contribution.png"),
+                supervision=None,
+                which="fn",
+                topk=15,
+            )
+
+            plot_error_contribution_bars(
+                csv_sub,
+                os.path.join(subdir, f"{tag}_fp_contribution.png"),
+                supervision=None,
+                which="fp",
+                topk=15,
+            )
 
     # ---------------------------
     # non-supervision plots
