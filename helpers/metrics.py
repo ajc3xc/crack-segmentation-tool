@@ -143,7 +143,7 @@ def _nn_dists(A, B):
             dists, _ = tree.query(A_gpu, k=1)
             return cp.asnumpy(dists)
         except Exception as e:
-            print(f"[nn_dists][warn] GPU KDTree failed â†’ falling back to CPU: {e}")
+            print(f"[nn_dists][warn] GPU KDTree failed → falling back to CPU: {e}")
 
     # CPU fallback (SciPy)
     try:
@@ -188,7 +188,7 @@ def hausdorff_p95(A, B, q=95):
     Returns
     -------
     float
-        max( percentile_q(Aâ†’B), percentile_q(Bâ†’A) )
+        max( percentile_q(A→B), percentile_q(B→A) )
     """
     import numpy as np
 
@@ -293,7 +293,7 @@ def orthogonal_deviation(manual_xy, auto_xy, N=400, robust='median'):
     norm = np.column_stack([-d[:,1], d[:,0]])
     nlen = np.maximum(1e-9, np.sqrt((norm**2).sum(1)))
     n = norm / nlen[:,None]
-    # nearest auto â†’ signed projection
+    # nearest auto → signed projection
     d2 = ((M[:,None,:] - A[None,:,:])**2).sum(2)
     idx = d2.argmin(1)
     v = A[idx] - M
@@ -513,7 +513,7 @@ def _reconstruct_full_mask(crack, H, W):
     """
     Strict version with detailed debug:
     Verifies crop size, bbox validity, and paste location before constructing full mask.
-    Does NOT silently repair or fallback â€” if data is inconsistent, returns zeros + message.
+    Does NOT silently repair or fallback — if data is inconsistent, returns zeros + message.
     """
     import numpy as np
 
@@ -546,7 +546,7 @@ def _reconstruct_full_mask(crack, H, W):
         return np.zeros((H, W), dtype=np.uint8)
 
     x, y, w, h = [int(v) for v in bb]
-    print(f"[DEBUG MASK] bbox parsed â†’ x={x}, y={y}, w={w}, h={h}")
+    print(f"[DEBUG MASK] bbox parsed → x={x}, y={y}, w={w}, h={h}")
 
     # check if bbox is within image
     if x < 0 or y < 0 or x >= W or y >= H:
@@ -927,7 +927,7 @@ def bite_blob_to_fullmask(bite_blob, H, W, base_bbox=None, assume_local=None):
 def split_polyline_by_mask(xy, invalid_mask, min_pts=2):
     """
     xy: (N,2)
-    invalid_mask: (N,) bool â€” True = REMOVE
+    invalid_mask: (N,) bool — True = REMOVE
     returns: list of (M,2) arrays
     """
     out = []
@@ -2705,14 +2705,14 @@ def part2_plot_worst_and_all(
     import numpy as np
 
     # ------------------------------------------------------------
-    # WORST CID â€” ALL segments
+    # WORST CID — ALL segments
     # ------------------------------------------------------------
     plot_sampling_consistency(
         pts_list=[r.get("pts") for r in worst_cid_runs if r.get("pts") is not None],
         ptsr_list=[r.get("pts_rs") for r in worst_cid_runs if r.get("pts_rs") is not None],
         mask_bin=pred_mask_worst,
         crop=crop_worst,
-        title=f"Part 2 sampling consistency â€” WORST CID={worst_cid}",
+        title=f"Part 2 sampling consistency — WORST CID={worst_cid}",
         out_path=os.path.join(
             part2_resample_dir,
             f"part2_sampling_WORST_cid{worst_cid}.png",
@@ -2721,7 +2721,7 @@ def part2_plot_worst_and_all(
 
     plot_width_error_distribution(
         runs=worst_cid_runs,
-        title=f"Part 2 width error distribution â€” WORST CID={worst_cid}",
+        title=f"Part 2 width error distribution — WORST CID={worst_cid}",
         out_path=os.path.join(part2_resample_dir, f"part2_width_dist_WORST_cid{worst_cid}.png"),
     )
 
@@ -2737,19 +2737,19 @@ def part2_plot_worst_and_all(
     if worst_run is not None:
         plot_part2_width_signals_preservation(
             run=worst_run,
-            title=f"Part 2 worst-run width signals â€” cid={worst_cid}",
+            title=f"Part 2 worst-run width signals — cid={worst_cid}",
             out_path=os.path.join(part2_resample_dir, f"part2_width_signals_WORST_cid{worst_cid}.png"),
         )
 
     # ------------------------------------------------------------
-    # GLOBAL â€” ALL CIDs
+    # GLOBAL — ALL CIDs
     # ------------------------------------------------------------
     plot_sampling_consistency(
         pts_list=[r.get("pts") for r in all_runs_global if r.get("pts") is not None],
         ptsr_list=[r.get("pts_rs") for r in all_runs_global if r.get("pts_rs") is not None],
         mask_bin=pred_mask_all,
         crop=crop_all,
-        title="Part 2 sampling consistency â€” ALL CIDs",
+        title="Part 2 sampling consistency — ALL CIDs",
         out_path=os.path.join(
             part2_resample_dir,
             "part2_sampling_ALL_CIDS.png",
@@ -2758,7 +2758,7 @@ def part2_plot_worst_and_all(
 
     plot_width_error_distribution(
         runs=all_runs_global,
-        title="Part 2 width error distribution â€” ALL CIDs",
+        title="Part 2 width error distribution — ALL CIDs",
         out_path=os.path.join(part2_resample_dir, "part2_width_dist_ALL_CIDS.png"),
     )
 
@@ -2774,7 +2774,7 @@ def part2_plot_worst_and_all(
     if global_run is not None:
         plot_part2_width_signals_preservation(
             run=global_run,
-            title="Part 2 width signals â€” ALL CIDs (representative)",
+            title="Part 2 width signals — ALL CIDs (representative)",
             out_path=os.path.join(part2_resample_dir, "part2_width_signals_ALL_CIDS.png"),
         )
 
@@ -3013,7 +3013,7 @@ def compare_widths_for_aligned_cracks(
     write_part2_tables=True,
 ):
     """
-    WIDTH COMPARISON â€” ALIGNED CRACKS ONLY (ATOMIC OR COMBINED)
+    WIDTH COMPARISON — ALIGNED CRACKS ONLY (ATOMIC OR COMBINED)
 
     Contract:
       - This function MUST be called with exactly one of:
@@ -3795,7 +3795,7 @@ def compare_widths_for_aligned_cracks(
         print(f"[WIDTH DEBUG] cid={cid} shared_members={sorted(shared)}")
         
         # ============================================================
-        # STAGE 0.5 â€” DECODE GT DOMINANCE BITE (AUTHORITATIVE)
+        # STAGE 0.5 — DECODE GT DOMINANCE BITE (AUTHORITATIVE)
         # ============================================================
 
         loss_masks_gt_by_branch = {}
@@ -3898,12 +3898,12 @@ def compare_widths_for_aligned_cracks(
                 return
 
             fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
-            ax.set_title(f"GT SUP â€” RAW DOMINANCE (cid={cid})")
+            ax.set_title(f"GT SUP — RAW DOMINANCE (cid={cid})")
             ax.axis("off")
 
             ax.imshow(union, cmap="hot", interpolation="nearest", alpha=0.9)
 
-            # Overlay stored midlines (GLOBAL â†’ LOCAL)
+            # Overlay stored midlines (GLOBAL → LOCAL)
             segs = gt_entry.get("midline_segments") or []
             for S in segs:
                 if S is None or len(S) < 2:
@@ -4126,7 +4126,7 @@ def compare_widths_for_aligned_cracks(
 
 
         # ============================================================
-        # (A) GT prune â€” IMPORTANT FIX:
+        # (A) GT prune — IMPORTANT FIX:
         #   1) scope to pred_members first
         #   2) then prune to shared
         # ============================================================
@@ -4159,7 +4159,7 @@ def compare_widths_for_aligned_cracks(
                     gt_pruned_segs.append(np.asarray(Sg, float))
                     gt_pruned_meta.append(dict(mg))
             else:
-                # meta mismatch â†’ keep geometry but you lose ability to do atomic/shared gating reliably
+                # meta mismatch → keep geometry but you lose ability to do atomic/shared gating reliably
                 for i, Sg in enumerate(gt_segs_all):
                     if Sg is None or len(Sg) < 2:
                         continue
@@ -4493,7 +4493,7 @@ def compare_widths_for_aligned_cracks(
 
             member_str = ", ".join(sorted(shared)) if shared else ", ".join(sorted(pred_members))
             fig.suptitle(
-                f"Stage-2 prune â€” cid={cid}\nAtomic members: [{member_str}]",
+                f"Stage-2 prune — cid={cid}\nAtomic members: [{member_str}]",
                 fontsize=11,
                 fontweight="bold",
             )
@@ -4599,7 +4599,7 @@ def compare_widths_for_aligned_cracks(
             return float(pts[:, 0].mean()), float(pts[:, 1].mean())
 
         # ============================================================
-        # Stage 4: DOMINANCE-AWARE BITE â€” READ-ONLY (STAGE0-STYLE)
+        # Stage 4: DOMINANCE-AWARE BITE — READ-ONLY (STAGE0-STYLE)
         #   - decode packbits in BITE-LOCAL frame
         #   - union in local frame
         #   - optional clip to (x0,y0,x1,y1) view window
@@ -4895,7 +4895,7 @@ def compare_widths_for_aligned_cracks(
         # PLOT 1: GT bite-local raw (like Stage 0)
         # ----------------------------
         '''_plot_bite_local_union(
-            title=f"Stage4 GT â€” RAW bite-local union (cid={cid})",
+            title=f"Stage4 GT — RAW bite-local union (cid={cid})",
             bbox_xywh=gt_bbox,
             union=gt_union_local,
             segs_global=gt_segs_for_plot,
@@ -4907,7 +4907,7 @@ def compare_widths_for_aligned_cracks(
         # PLOT 2: PRED bite-local raw
         # ----------------------------
         _plot_bite_local_union(
-            title=f"Stage4 PRED â€” RAW bite-local union (cid={cid})",
+            title=f"Stage4 PRED — RAW bite-local union (cid={cid})",
             bbox_xywh=pr_bbox,
             union=pr_union_local,
             segs_global=pr_segs_for_plot,
@@ -4932,7 +4932,7 @@ def compare_widths_for_aligned_cracks(
         # ----------------------------
 
         _plot_bite_local_union(
-            title=f"Stage4 GT â€” RAW bite-local union (CLIPPED view) (cid={cid})",
+            title=f"Stage4 GT — RAW bite-local union (CLIPPED view) (cid={cid})",
             bbox_xywh=gt_bbox,
             union=gt_union_local,
             segs_global=gt_segs_for_plot,
@@ -4941,7 +4941,7 @@ def compare_widths_for_aligned_cracks(
         )
 
         _plot_bite_local_union(
-            title=f"Stage4 PRED â€” RAW bite-local union (CLIPPED view) (cid={cid})",
+            title=f"Stage4 PRED — RAW bite-local union (CLIPPED view) (cid={cid})",
             bbox_xywh=pr_bbox,
             union=pr_union_local,
             segs_global=pr_segs_for_plot,
@@ -4959,7 +4959,7 @@ def compare_widths_for_aligned_cracks(
         )'''
         
         # ============================================================
-        # Stage 4 â€” PLOT B (crop-local visualization, Stage-0 truthful)
+        # Stage 4 — PLOT B (crop-local visualization, Stage-0 truthful)
         #   - dominance comes ONLY from bite-local packbits
         #   - rasterized into crop-local frame for plotting
         #   - NO shift, NO rebase, NO metric side effects
@@ -5051,7 +5051,7 @@ def compare_widths_for_aligned_cracks(
             "#000000",  # 0 background (masked)
             "#e41a1c",  # 1 GT-only
             "#377eb8",  # 2 Pred-only
-            "#984ea3",  # 3 GT âˆ© Pred
+            "#984ea3",  # 3 GT ∩ Pred
         ])
 
         # ----------------------------
@@ -5080,8 +5080,8 @@ def compare_widths_for_aligned_cracks(
             1, 2, figsize=(12, 6), dpi=240, sharex=True, sharey=True
         )
 
-        axes[0].set_title("Stage 4 â€” GT supervision", fontsize=10)
-        axes[1].set_title("Stage 4 â€” Prediction", fontsize=10)
+        axes[0].set_title("Stage 4 — GT supervision", fontsize=10)
+        axes[1].set_title("Stage 4 — Prediction", fontsize=10)
 
         for ax in axes:
             ax.axis("off")
@@ -5161,7 +5161,7 @@ def compare_widths_for_aligned_cracks(
                 )
                 seen.add(bid)
 
-        # Pred midlines (right) â€” derived stage-2 geometry
+        # Pred midlines (right) — derived stage-2 geometry
         for S, m in zip(pred_der_stage2_segs or [], pred_der_stage2_meta or []):
             if S is None or len(S) < 2:
                 continue
@@ -5175,7 +5175,7 @@ def compare_widths_for_aligned_cracks(
         legend_handles += [
             Line2D([0], [0], color="#e41a1c", lw=6, label="GT-only loss"),
             Line2D([0], [0], color="#377eb8", lw=6, label="Pred-only loss"),
-            Line2D([0], [0], color="#984ea3", lw=6, label="GT âˆ© Pred"),
+            Line2D([0], [0], color="#984ea3", lw=6, label="GT ∩ Pred"),
         ]
 
         axes[1].legend(
@@ -5195,24 +5195,24 @@ def compare_widths_for_aligned_cracks(
         print(f"[OPSEC] Stage-4 dominance plot written: {outB}")
             
         # ============================================================
-        # Stage 4.5 + Stage 5 â€” STRICT DOMINANCE APPLICATION
+        # Stage 4.5 + Stage 5 — STRICT DOMINANCE APPLICATION
         #   HARD RULES:
         #     - MUST start from Stage-4 pruned geometry
         #     - GT MUST come from Stage-2/4-scoped GT (gt_pruned_segs)
-        #     - If those do not exist â†’ FAIL
+        #     - If those do not exist → FAIL
         # ============================================================
 
         import numpy as np
 
         # ------------------------------------------------------------
-        # HARD FAILS â€” NO FALLBACKS
+        # HARD FAILS — NO FALLBACKS
         # ------------------------------------------------------------
         if not pred_mid_stage2_segs:
             raise RuntimeError("[STAGE4.5 FATAL] pred_mid_stage2_segs missing")
         if not pred_der_stage2_segs:
             raise RuntimeError("[STAGE4.5 FATAL] pred_der_stage2_segs missing")
         if "gt_pruned_segs" not in locals() or not gt_pruned_segs:
-            raise RuntimeError("[STAGE4.5 FATAL] gt_pruned_segs missing â€” must start from Stage-2/4 GT geometry")
+            raise RuntimeError("[STAGE4.5 FATAL] gt_pruned_segs missing — must start from Stage-2/4 GT geometry")
 
         gt_stage5_source_segs = gt_pruned_segs
         gt_stage5_source_meta = (
@@ -5284,7 +5284,7 @@ def compare_widths_for_aligned_cracks(
         pred_pre45_segs = [np.asarray(S, float) for S in pred_der_stage2_segs if S is not None and len(S) >= 2]
 
         # ============================================================
-        # Stage 4.5 â€” APPLY UNION DOMINANCE (PRED MID + PRED DERIVED + GT)
+        # Stage 4.5 — APPLY UNION DOMINANCE (PRED MID + PRED DERIVED + GT)
         # ============================================================
         pred_mid_dom_segs, pred_mid_dom_meta, bite_pruned_pred_mid = _apply_union_dominance(
             pred_mid_stage2_segs,
@@ -5417,12 +5417,25 @@ def compare_widths_for_aligned_cracks(
             sl = arr[s0:min(s1, arr.size)]
             return _pad_to_len(sl, L, pad_value=pad_value)
 
-        have_valid_seg_idx = any(
-            isinstance(m.get("seg_idx"), int) and int(m.get("seg_idx")) in seg_start
-            for m in (pred_der_dom_meta or [])
-            if isinstance(m, dict)
-        )
-        off_fallback = 0
+        def _resample_1d_to_len(arr, L):
+            """
+            Resample 1D signal to length L using linear interpolation.
+            Falls back to NaN padding for degenerate/empty inputs.
+            """
+            arr = np.asarray(arr, float).reshape(-1)
+            L = int(L)
+            if L <= 0:
+                return np.asarray([], float)
+            if arr.size == 0:
+                return _pad_to_len(arr, L, pad_value=np.nan)
+            if arr.size == 1:
+                return _pad_to_len(arr, L, pad_value=np.nan)
+            if arr.size == L:
+                return arr.astype(float, copy=False)
+            x_old = np.linspace(0.0, 1.0, num=arr.size)
+            x_new = np.linspace(0.0, 1.0, num=L)
+            return np.interp(x_new, x_old, arr).astype(float, copy=False)
+
         stage5_slice_csv = os.path.join(topo_dbg_dir, f"cid_{cid}_stage5_slices.csv")
 
         print(
@@ -5433,9 +5446,64 @@ def compare_widths_for_aligned_cracks(
         if len(pred_source) != len(gtw_source):
             print(
                 f"[STAGE5 WARN] cid={cid} width vector length mismatch "
-                f"(pred={len(pred_source)} gt={len(gtw_source)}) -> will pad GT with NaN, NO GEOM TRUNC"
+                f"(pred={len(pred_source)} gt={len(gtw_source)})"
             )
 
+        # Build GT per-(branch_id, seg_idx) buckets in GT-local concatenation order.
+        # This avoids using prediction-side global offsets to read GT width streams.
+        def _norm_stage5_key(meta_obj):
+            if not isinstance(meta_obj, dict):
+                return None
+            b = _safe_int(meta_obj.get("branch_id"), None)
+            s = _safe_int(meta_obj.get("seg_idx"), None)
+            if b is None or s is None:
+                return None
+            return (int(b), int(s))
+
+        gt_bucket = {}
+        gt_bucket_by_branch = {}
+        gt_branch_seq = {}
+        gt_off = 0
+        for S_gt, m_gt in zip(gt_stage5_segs or [], gt_stage5_meta or []):
+            if S_gt is None or len(S_gt) < 2:
+                continue
+            mm_gt = m_gt if isinstance(m_gt, dict) else {}
+            key = _norm_stage5_key(mm_gt)
+            b_only = _safe_int(mm_gt.get("branch_id"), None)
+            if key is None and b_only is not None:
+                kseq = int(gt_branch_seq.get(int(b_only), 0))
+                key = (int(b_only), kseq)
+                gt_branch_seq[int(b_only)] = kseq + 1
+            Lgt = int(len(S_gt))
+            gtw_local = _safe_take(gtw_source, gt_off, Lgt, pad_value=np.nan)
+            gt_off += Lgt
+            rec = (
+                np.asarray(S_gt, float),
+                np.asarray(gtw_local, float),
+                int(Lgt),
+                dict(mm_gt),
+            )
+            if key is not None:
+                gt_bucket.setdefault(key, []).append(rec)
+            if b_only is not None:
+                gt_bucket_by_branch.setdefault(int(b_only), []).append(rec)
+
+        print("\n[DEBUG KEY INSPECTION]")
+        print("GT KEYS:")
+        for k in gt_bucket.keys():
+            print("   ", k, type(k[0]), type(k[1]))
+        print("GT BRANCH KEYS:")
+        for bk, arr in gt_bucket_by_branch.items():
+            print("   ", bk, "count=", len(arr))
+        print("PRED KEYS:")
+        for m in (pred_der_dom_meta or []):
+            if isinstance(m, dict):
+                kb = m.get("branch_id")
+                ks = m.get("seg_idx")
+                print("   ", (kb, ks), type(kb), type(ks))
+        print("[END DEBUG]\n")
+
+        pred_off = 0
         for S, m in zip(pred_der_dom_segs, pred_der_dom_meta):
             if S is None or len(S) < 2:
                 continue
@@ -5443,24 +5511,55 @@ def compare_widths_for_aligned_cracks(
             pts = np.asarray(S, float)
             L = int(len(pts))
 
-            seg_idx_dbg = m.get("seg_idx") if isinstance(m, dict) else None
-            branch_dbg = m.get("branch_id") if isinstance(m, dict) else None
-            if have_valid_seg_idx and isinstance(m.get("seg_idx"), int) and m["seg_idx"] in seg_start:
-                s0 = int(seg_start[m["seg_idx"]])
-                source_mode = "seg_idx"
-            else:
-                s0 = int(off_fallback)
-                source_mode = "fallback"
+            mm_pred = m if isinstance(m, dict) else {}
+            seg_idx_dbg = mm_pred.get("seg_idx")
+            branch_dbg = mm_pred.get("branch_id")
+            key = _norm_stage5_key(mm_pred)
+            if key is None:
+                raise RuntimeError(
+                    f"[STAGE5 FATAL] invalid pred key metadata for cid={cid}: "
+                    f"branch_id={branch_dbg}, seg_idx={seg_idx_dbg}"
+                )
 
-            predw = _safe_take(pred_source, s0, L, pad_value=np.nan)
-            gtw = _safe_take(gtw_source, s0, L, pad_value=np.nan)
-            off_fallback += L
+            # Pred width stream: local sequential attachment over surviving pred segments.
+            predw = _safe_take(pred_source, pred_off, L, pad_value=np.nan)
+            pred_off += L
+
+            # GT width stream: local by (branch_id, seg_idx), no pred-global indexing.
+            gt_list = gt_bucket.get(key, [])
+            if gt_list:
+                gt_match_seg, gtw_local, gt_seg_len, _ = gt_list.pop(0)
+                gtw = _resample_1d_to_len(gtw_local, L)
+                gt_match_mode = "segment_local_match_strict"
+            else:
+                # Fallback: branch-only match if GT seg_idx is missing/inconsistent.
+                b_only = key[0]
+                cand = gt_bucket_by_branch.get(int(b_only), [])
+                if cand:
+                    # Pick length-closest remaining segment in this branch.
+                    j_best = min(range(len(cand)), key=lambda j: abs(int(cand[j][2]) - int(L)))
+                    gt_match_seg, gtw_local, gt_seg_len, _ = cand.pop(j_best)
+                    # Keep strict bucket consistent: remove this chosen record if present there.
+                    k_strict = _norm_stage5_key({"branch_id": b_only, "seg_idx": seg_idx_dbg})
+                    if k_strict in gt_bucket and gt_bucket[k_strict]:
+                        # best-effort pop one; strict set may be empty anyway
+                        pass
+                    gtw = _resample_1d_to_len(gtw_local, L)
+                    gt_match_mode = "segment_local_match_branch_fallback"
+                    print(
+                        f"[STAGE5 WARN] strict key miss for {key}, "
+                        f"used branch fallback branch={b_only} len_pred={L} len_gt={gt_seg_len}"
+                    )
+                else:
+                    raise RuntimeError(
+                        f"[STAGE5 FATAL] no GT match for normalized key={key} "
+                        f"(raw branch={branch_dbg}, seg_idx={seg_idx_dbg}) cid={cid}"
+                    )
 
             # ----------------------------
             # DEBUG: classify nonfinite causes (segment-local)
             # ----------------------------
-            _idx = np.arange(L, dtype=int)
-            _gt_padded_mask = (s0 + _idx) >= int(len(gtw_source))  # True where GT is padded (expected NaN)
+            _gt_padded_mask = np.zeros_like(np.asarray(gtw, float), dtype=bool)
             _gt_nonfinite_mask = ~np.isfinite(gtw)
             _pred_nonfinite_mask = ~np.isfinite(predw)
 
@@ -5474,19 +5573,20 @@ def compare_widths_for_aligned_cracks(
                     bad = np.where((~_gt_padded_mask) & _gt_nonfinite_mask)[0][:10]
                     print(f"  GT NONFINITE (NOT padding): count={_gt_real_nonfinite} first_idx={bad.tolist()}")
                     for j in bad:
-                        print(f"    j={int(j)} global={int(s0 + j)} gtw={gtw[j]} predw={predw[j]}")
+                        print(f"    j={int(j)} pred_global={int(max(0, pred_off - L) + j)} gtw={gtw[j]} predw={predw[j]}")
                 if _pred_real_nonfinite > 0:
                     bad = np.where(_pred_nonfinite_mask)[0][:10]
                     print(f"  PRED NONFINITE: count={_pred_real_nonfinite} first_idx={bad.tolist()}")
                     for j in bad:
                         print(
-                            f"    j={int(j)} global={int(s0 + j)} predw={predw[j]} "
+                            f"    j={int(j)} pred_global={int(max(0, pred_off - L) + j)} predw={predw[j]} "
                             f"gtw={gtw[j]} padded_gt={bool(_gt_padded_mask[j])}"
                         )
 
             print(
                 f"[STAGE5 TRACE] cid={cid} branch_id={branch_dbg} seg_idx={seg_idx_dbg} "
-                f"source={source_mode} s0={s0} L={L} "
+                f"source=local_segmatch pred_s0={int(max(0, pred_off - L))} L={L} "
+                f"gt_match={gt_match_mode} gt_seg_len={gt_seg_len} "
                 f"pred_nonfinite={_pred_real_nonfinite} "
                 f"gt_nonfinite={int(np.sum(_gt_nonfinite_mask))} "
                 f"(gt_padded={_gt_padded_nonfinite} gt_real={_gt_real_nonfinite})"
@@ -5500,7 +5600,7 @@ def compare_widths_for_aligned_cracks(
                         str(branch_dbg),
                         str(seg_idx_dbg),
                         int(L),
-                        int(s0),
+                        int(max(0, pred_off - L)),
                         int(len(predw)),
                         int(len(gtw)),
                         int(_pred_real_nonfinite),
@@ -5509,13 +5609,15 @@ def compare_widths_for_aligned_cracks(
                         int(_gt_real_nonfinite),
                         int(len(pred_source)),
                         int(len(gtw_source)),
+                        str(gt_match_mode),
+                        int(gt_seg_len),
                     ],
                     header=[
                         "cid",
                         "branch_id",
                         "seg_idx",
                         "L_geom",
-                        "s0",
+                        "pred_s0",
                         "predw_len",
                         "gtw_len",
                         "pred_nonfinite",
@@ -5524,6 +5626,8 @@ def compare_widths_for_aligned_cracks(
                         "gt_real_nonfinite",
                         "pred_len",
                         "gt_len",
+                        "gt_match_mode",
+                        "gt_seg_len",
                     ],
                 )
 
@@ -5551,7 +5655,7 @@ def compare_widths_for_aligned_cracks(
                 "pts": pts,
                 "predw": predw,
                 "gruthw": gtw,
-                "gt_source": "payload_precomputed",
+                "gt_source": gt_match_mode,
                 "branch_id": m.get("branch_id"),
                 "seg_idx": m.get("seg_idx"),
                 "gt_mismatch": False,
@@ -5561,7 +5665,7 @@ def compare_widths_for_aligned_cracks(
         print(f"[STAGE5] width attachment complete - {len(stage4_pairs)} segments")
 
         # ============================================================
-        # OPSEC PLOT â€” STAGE 5 FINAL GEOMETRY (DOMINANCE-RESOLVED)
+        # OPSEC PLOT — STAGE 5 FINAL GEOMETRY (DOMINANCE-RESOLVED)
         #   - NO dominance pruning logic here
         #   - Overlay can be categorical (GT-only / PRED-only / BOTH) like Stage 4
         # ============================================================
@@ -5586,26 +5690,22 @@ def compare_widths_for_aligned_cracks(
                 x, y, w, h = 0, 0, W, H
                 x0, y0, x1, y1 = 0, 0, W, H
 
-            def _split_finite_undef_reasoned(pts, predw, gtw, min_pts=2):
+            def _split_pred_nonfinite(pts, predw, min_pts=2):
                 """
-                Split geometry into:
-                  kept        = finite pred & finite gt
-                  undef_gt    = gt nonfinite (including NaN padding) while pred finite
-                  undef_other = pred nonfinite (or both nonfinite)
+                Split by predicted-width validity only.
+                Geometry provenance must not depend on GT availability.
                 """
                 pts = np.asarray(pts, float)
                 predw = np.asarray(predw, float).reshape(-1)
-                gtw = np.asarray(gtw, float).reshape(-1)
-                n = min(len(pts), len(predw), len(gtw))
+                n = min(len(pts), len(predw))
                 if n < 2:
-                    return [], [], []
+                    return [], []
 
                 pts = pts[:n]
                 predw = predw[:n]
-                gtw = gtw[:n]
 
-                kept, undef_gt, undef_other = [], [], []
-                bk, bg, bo = [], [], []
+                kept, undef_other = [], []
+                bk, bo = [], []
 
                 def _flush(buf, out):
                     if len(buf) >= min_pts:
@@ -5614,22 +5714,11 @@ def compare_widths_for_aligned_cracks(
                 for i in range(n - 1):
                     p0, p1 = pts[i], pts[i + 1]
                     pf = np.isfinite(predw[i])
-                    gf = np.isfinite(gtw[i])
 
-                    if pf and gf:
+                    if pf:
                         if not bk:
                             bk.append(p0)
                         bk.append(p1)
-                        _flush(bg, undef_gt)
-                        bg = []
-                        _flush(bo, undef_other)
-                        bo = []
-                    elif pf and (not gf):
-                        if not bg:
-                            bg.append(p0)
-                        bg.append(p1)
-                        _flush(bk, kept)
-                        bk = []
                         _flush(bo, undef_other)
                         bo = []
                     else:
@@ -5638,34 +5727,30 @@ def compare_widths_for_aligned_cracks(
                         bo.append(p1)
                         _flush(bk, kept)
                         bk = []
-                        _flush(bg, undef_gt)
-                        bg = []
 
                 _flush(bk, kept)
-                _flush(bg, undef_gt)
                 _flush(bo, undef_other)
-                return kept, undef_gt, undef_other
+                return kept, undef_other
 
             # --------------------------------------------------
             # Build prediction plot segments (kept vs undef)
             # --------------------------------------------------
             pred_kept_segs = []
-            pred_undef_gt_segs = []
             pred_undef_other_segs = []
+            pred_full_segs = []
 
             for wp in (width_pairs or []):
                 if str(wp.get("cid", "")) != str(cid):
                     continue
                 pts_ok = wp.get("pts", None)
                 pw_ok = wp.get("predw", None)
-                gw_ok = wp.get("gruthw", None)
-                if pts_ok is None or pw_ok is None or gw_ok is None:
+                if pts_ok is None or pw_ok is None:
                     continue
 
-                k, ug, uo = _split_finite_undef_reasoned(pts_ok, pw_ok, gw_ok, min_pts=2)
+                k, uo = _split_pred_nonfinite(pts_ok, pw_ok, min_pts=2)
                 pred_kept_segs.extend(k)
-                pred_undef_gt_segs.extend(ug)
                 pred_undef_other_segs.extend(uo)
+                pred_full_segs.append(np.asarray(pts_ok, float))
             # NO topology pruning allowed:
             # Stage 2 + Stage 4.5 fully define geometry survival.
 
@@ -5704,7 +5789,7 @@ def compare_widths_for_aligned_cracks(
                 "#000000",  # masked
                 "#e41a1c",  # GT-only
                 "#377eb8",  # Pred-only
-                "#984ea3",  # GT âˆ© Pred
+                "#984ea3",  # GT ∩ Pred
             ])
 
             # --------------------------------------------------
@@ -5732,7 +5817,6 @@ def compare_widths_for_aligned_cracks(
 
             col_keep  = (0.2, 0.4, 0.8)
             col_undef = (0.6, 0.6, 0.6)
-            col_gtmiss = (0.35, 0.35, 0.35)
             col_bite  = (0.9, 0.6, 0.0)
 
             # --------------------------------------------------
@@ -5751,15 +5835,16 @@ def compare_widths_for_aligned_cracks(
             # --------------------------------------------------
             # PRED plot (RIGHT)
             # --------------------------------------------------
+            # Geometry provenance baseline: draw full surviving Stage-5 geometry first.
+            for S in pred_full_segs:
+                if S is None or len(S) < 2:
+                    continue
+                axes[1].plot(S[:, 0] - x0, S[:, 1] - y0, color=col_keep, lw=2.5, zorder=4)
+
             for S in bite_pruned_pred_segs:
                 if S is None or len(S) < 2:
                     continue
                 axes[1].plot(S[:, 0] - x0, S[:, 1] - y0, color=col_bite, lw=2.0, zorder=3)
-
-            for S in pred_undef_gt_segs:
-                if S is None or len(S) < 2:
-                    continue
-                axes[1].plot(S[:, 0] - x0, S[:, 1] - y0, color=col_gtmiss, lw=2.2, zorder=4)
 
             for S in pred_undef_other_segs:
                 if S is None or len(S) < 2:
@@ -5769,7 +5854,7 @@ def compare_widths_for_aligned_cracks(
             for S in pred_kept_segs:
                 if S is None or len(S) < 2:
                     continue
-                axes[1].plot(S[:, 0] - x0, S[:, 1] - y0, color=col_keep, lw=2.5, zorder=5)
+                axes[1].plot(S[:, 0] - x0, S[:, 1] - y0, color=col_keep, lw=1.0, alpha=0.35, zorder=5)
 
             for ax in axes:
                 ax.add_patch(
@@ -5778,18 +5863,17 @@ def compare_widths_for_aligned_cracks(
                 )
 
             legend_items = [
-                Line2D([0],[0], color=col_keep,  lw=2.5, label="Finite overlap (kept)"),
-                Line2D([0],[0], color=col_gtmiss, lw=2.2, label="GT missing / padded (no comparable GT)"),
+                Line2D([0],[0], color=col_keep,  lw=2.5, label="Stage-5 geometry (kept)"),
                 Line2D([0],[0], color=col_undef, lw=2.2, label="Pred undef / other nonfinite"),
                 Line2D([0],[0], color=col_bite,  lw=2.0, label="Dominance-bite (union)"),
                 Line2D([0],[0], color="#e41a1c", lw=6, label="GT-only loss (overlay)"),
                 Line2D([0],[0], color="#377eb8", lw=6, label="Pred-only loss (overlay)"),
-                Line2D([0],[0], color="#984ea3", lw=6, label="GT âˆ© Pred (overlay)"),
+                Line2D([0],[0], color="#984ea3", lw=6, label="GT ∩ Pred (overlay)"),
             ]
             axes[1].legend(handles=legend_items, loc="lower right", fontsize=7, framealpha=0.9)
 
             fig.suptitle(
-                f"Stage-5 Geometry Provenance (Dominance-resolved @ 4.5) â€” cid={cid}",
+                f"Stage-5 Geometry Provenance (Dominance-resolved @ 4.5) — cid={cid}",
                 fontsize=11,
                 fontweight="bold",
             )
@@ -6584,7 +6668,7 @@ def compare_widths_for_aligned_cracks(
                 axes[0].invert_yaxis()
 
                 fig.suptitle(
-                    f"Part 2 â€” Width error metrics (fair arclength sampling) â€” {mode} / {midline_type}\n"
+                    f"Part 2 — Width error metrics (fair arclength sampling) — {mode} / {midline_type}\n"
                     f"Global length-weighted means: RMSE={global_rmse:.3f}px, MAE={global_mae:.3f}px, Bias={global_bias:.3f}px",
                     fontsize=11,
                     fontweight="bold",
@@ -6717,7 +6801,7 @@ def compare_widths_for_aligned_cracks(
                         axB.grid(True, alpha=0.25)
 
                         fig.suptitle(
-                            f"Part 2 aggregated diagnostic â€” WORST CID={worst_cid} â€” combined/{worst_mt}",
+                            f"Part 2 aggregated diagnostic — WORST CID={worst_cid} — combined/{worst_mt}",
                             fontsize=11,
                             fontweight="bold"
                         )
@@ -7172,7 +7256,7 @@ def write_width_diff_overlay(H, W, rows, out_png, vlim=8.0, radius=2):
             cv2.circle(canvas, (xi, yi), radius, tuple(int(c) for c in col), thickness=-1)
 
     cv2.imwrite(out_png, canvas)
-    print(f"[DEBUG WIDTH] wrote diff dot overlay â†’ {out_png}")
+    print(f"[DEBUG WIDTH] wrote diff dot overlay → {out_png}")
     
 '''def compute_midline_metrics_for_image(app):
     """
@@ -7195,19 +7279,19 @@ def write_width_diff_overlay(H, W, rows, out_png, vlim=8.0, radius=2):
     for cid, crack in atomic.items():
         ge = crack.get("geodesic_edges", {}) or {}
         if not ("edge1" in ge and "edge2" in ge):
-            print(f"[DEBUG MIDLINE] cid{cid}: missing geodesic_edges â†’ skip")
+            print(f"[DEBUG MIDLINE] cid{cid}: missing geodesic_edges → skip")
             continue
 
         e1 = np.asarray(ge["edge1"], float)
         e2 = np.asarray(ge["edge2"], float)
         if len(e1) < 2 or len(e2) < 2:
-            print(f"[DEBUG MIDLINE] cid{cid}: invalid edge arrays ({len(e1)}, {len(e2)}) â†’ skip")
+            print(f"[DEBUG MIDLINE] cid{cid}: invalid edge arrays ({len(e1)}, {len(e2)}) → skip")
             continue
 
         auto_midline = 0.5 * (e1 + e2)
         man_midline = np.asarray(crack.get("midline", []), float)
         if man_midline.ndim != 2 or len(man_midline) < 2:
-            print(f"[DEBUG MIDLINE] cid{cid}: no valid manual midline â†’ skip")
+            print(f"[DEBUG MIDLINE] cid{cid}: no valid manual midline → skip")
             continue
 
         try:
@@ -7221,7 +7305,7 @@ def write_width_diff_overlay(H, W, rows, out_png, vlim=8.0, radius=2):
 
     df = pd.DataFrame(rows)
     df.to_csv(out_csv, index=False)
-    print(f"[DEBUG MIDLINE] wrote {len(df)} rows â†’ {out_csv}")'''
+    print(f"[DEBUG MIDLINE] wrote {len(df)} rows → {out_csv}")'''
 
 # ---------- NEW helpers ----------
 def compute_midline_metrics_baseline(pred_xy, gt_xy, tau=3.0):
@@ -7306,7 +7390,7 @@ def compute_midline_metrics_baseline(pred_xy, gt_xy, tau=3.0):
 
         gt_tree = cKDTree(gt_xy)
 
-        # distance from pred â†’ nearest GT
+        # distance from pred → nearest GT
         d_pred_to_gt, _ = gt_tree.query(pred_xy, k=1)
 
         precision_tau = float(np.mean(d_pred_to_gt <= tau))
@@ -7511,7 +7595,7 @@ def _mask_midline_cache_key(mask_bin, midline):
 def reconstruct_manual_mask_from_edges(crack: dict, H: int, W: int) -> "np.ndarray":
     """
     Strictly reconstruct a full-image binary mask (H,W) from geodesic_edges only.
-    If edges are missing or invalid â†’ returns all zeros.
+    If edges are missing or invalid → returns all zeros.
     """
     import numpy as np, cv2
 
@@ -7565,7 +7649,7 @@ def merged_metric_atomic(authoring_atomic: dict, save_folder: str, image_base: s
                     print(f"[merge] warning: failed reading {p}")
                 break
         else:
-            # nothing found â€” ensure canonical folder exists
+            # nothing found — ensure canonical folder exists
             try:
                 os.makedirs(canonical_dir, exist_ok=True)
             except Exception:
