@@ -2379,7 +2379,7 @@ def _debug_plot_correspondence_single(
     branch_id,
     seg_idx,
     out_dir,
-    stride=15,
+    stride=10,
     gt_pts=None,
 ):
     def _to_pts_segments(x):
@@ -2447,10 +2447,17 @@ def _debug_plot_correspondence_single(
     ax_w = fig.add_subplot(gs[0, 1])
     ax_diff = fig.add_subplot(gs[1, 1])
 
+    def _valid_gt_geom(xy):
+        xy = np.asarray(xy, float)
+        if xy.ndim != 2 or xy.shape[1] != 2 or len(xy) < 2:
+            return False
+        return bool(np.isfinite(xy).all())
+
     # Geometry plot: pred + gt + explicit correspondence links
     ax_geom.set_title("Geometry + Correspondence Links")
     first_pred = True
     first_gt = True
+    gt_geom_present_any = False
     step = max(1, int(stride))
     for i_seg in range(nseg):
         p = np.asarray(pts_segs[i_seg], float)
@@ -2468,23 +2475,29 @@ def _debug_plot_correspondence_single(
             color="blue", lw=2,
             label="Pred midline" if first_pred else None
         )
+        # Segment start/end markers (orange) to visualize local direction.
+        ax_geom.scatter([p[0, 0]], [p[0, 1]], s=30, c="orange", edgecolors="black", linewidths=0.5, zorder=6)
+        ax_geom.scatter([p[-1, 0]], [p[-1, 1]], s=30, c="orange", marker="s", edgecolors="black", linewidths=0.5, zorder=6)
         first_pred = False
 
         if gt_pts_segs:
             gxy = np.asarray(gt_pts_segs[i_seg], float)
-            if gxy.ndim == 2 and gxy.shape[1] == 2 and len(gxy) >= 2:
+            if _valid_gt_geom(gxy):
                 ng = min(n, len(gxy))
                 p2 = p[:ng]
                 g2 = gxy[:ng]
                 gw2 = gw[:ng]
+                gt_geom_present_any = True
                 ax_geom.plot(
                     g2[:, 0], g2[:, 1],
                     color="green", lw=1.6, alpha=0.9,
                     label="GT matched geometry" if first_gt else None
                 )
+                ax_geom.scatter([g2[0, 0]], [g2[0, 1]], s=26, c="orange", edgecolors="black", linewidths=0.5, zorder=6)
+                ax_geom.scatter([g2[-1, 0]], [g2[-1, 1]], s=26, c="orange", marker="s", edgecolors="black", linewidths=0.5, zorder=6)
                 first_gt = False
                 for j in range(0, ng, step):
-                    if np.isfinite(gw2[j]):
+                    if np.isfinite(gw2[j]) and np.isfinite(p2[j]).all() and np.isfinite(g2[j]).all():
                         ax_geom.plot([p2[j, 0], g2[j, 0]], [p2[j, 1], g2[j, 1]],
                                      color="red", lw=0.9, alpha=0.8)
                 ax_geom.scatter(p2[::step, 0], p2[::step, 1], s=8, c="blue", alpha=0.9)
@@ -2500,6 +2513,17 @@ def _debug_plot_correspondence_single(
 
     ax_geom.set_aspect("equal")
     ax_geom.invert_yaxis()
+    if gt_pts is not None and not gt_geom_present_any:
+        ax_geom.text(
+            0.02, 0.98,
+            "GT geometry unavailable (width-only stream)",
+            transform=ax_geom.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8,
+            color="darkred",
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="darkred", alpha=0.8),
+        )
     ax_geom.legend()
 
     # Width vs arclength (concatenated by segment, gapless)
@@ -3613,6 +3637,89 @@ def compare_widths_for_aligned_cracks(
 
         return None
 
+    def _polyline_length(xy):
+        xy = np.asarray(xy, float)
+        if xy.ndim != 2 or xy.shape[1] != 2 or len(xy) < 2:
+            return 0.0
+        d = np.sqrt(((xy[1:] - xy[:-1]) ** 2).sum(axis=1))
+        if d.size == 0:
+            return 0.0
+        d = d[np.isfinite(d)]
+        if d.size == 0:
+            return 0.0
+        return float(np.sum(d))
+
+    def _get_gt_geom_full_atomic(gt_entry_obj):
+        """
+        Atomic GT geometry stream (single polyline).
+        Preference:
+          1) midline_auto_centered
+          2) midline
+        """
+        if not isinstance(gt_entry_obj, dict):
+            return None
+
+        for k in ("midline_auto_centered", "midline"):
+            xy = _coerce_polyline_xy(gt_entry_obj.get(k, None))
+            if xy is not None and len(xy) >= 2:
+                return np.asarray(xy, float)
+        return None
+
+    def _align_atomic_gt_geom_to_pred(gt_xy_raw, pred_concat_xy, cid_dbg):
+        """
+        Align atomic GT geometry to the authoritative pred geometry domain.
+        Returns (gt_aligned_xy, strategy_label) or (None, reason).
+        """
+        gt = np.asarray(gt_xy_raw, float)
+        pr = np.asarray(pred_concat_xy, float)
+
+        if gt.ndim != 2 or gt.shape[1] != 2 or len(gt) < 2:
+            return None, "invalid_gt_polyline"
+        if pr.ndim != 2 or pr.shape[1] != 2 or len(pr) < 2:
+            return None, "invalid_pred_polyline"
+
+        gt = gt[np.isfinite(gt).all(axis=1)]
+        pr = pr[np.isfinite(pr).all(axis=1)]
+        if len(gt) < 2:
+            return None, "gt_nonfinite_after_filter"
+        if len(pr) < 2:
+            return None, "pred_nonfinite_after_filter"
+
+        pr_len = _polyline_length(pr)
+        gt_len = _polyline_length(gt)
+        if pr_len <= 1e-9 or gt_len <= 1e-9:
+            return None, "degenerate_length"
+
+        # Enforce direction relative to pred endpoints.
+        d_fwd = float(np.linalg.norm(pr[0] - gt[0]) + np.linalg.norm(pr[-1] - gt[-1]))
+        d_rev = float(np.linalg.norm(pr[0] - gt[-1]) + np.linalg.norm(pr[-1] - gt[0]))
+        flipped = bool(d_rev < d_fwd)
+        if flipped:
+            gt = gt[::-1].copy()
+            d_fwd, d_rev = d_rev, d_fwd
+
+        # Map GT to pred domain length (safe parametric alignment).
+        gt_aligned = _resample_polyline_to_len(gt, len(pr))
+
+        end_err = float(np.linalg.norm(pr[0] - gt_aligned[0]) + np.linalg.norm(pr[-1] - gt_aligned[-1]))
+        len_ratio = float(gt_len / max(pr_len, 1e-9))
+        len_mismatch = abs(len_ratio - 1.0)
+
+        # Conservative acceptance guardrail.
+        end_tol = max(20.0, 0.35 * pr_len)
+        len_tol = 0.85
+        if (not np.isfinite(end_err)) or end_err > end_tol:
+            return None, f"endpoint_error_too_high({end_err:.3f}>{end_tol:.3f})"
+        if (not np.isfinite(len_ratio)) or len_mismatch > len_tol:
+            return None, f"length_ratio_out_of_range({len_ratio:.3f})"
+
+        strategy = "parametric_resample_flip" if flipped else "parametric_resample"
+        print(
+            f"[ATOMIC GT ALIGN] cid={cid_dbg} pred_total={len(pr)} gt_raw={len(gt_xy_raw)} "
+            f"strategy={strategy} endpoint_error={end_err:.3f} len_ratio={len_ratio:.3f}"
+        )
+        return gt_aligned, strategy
+
     def _lookup_atomic_gt_entry(cid_val):
         cid_s = str(cid_val)
         cands = [cid_s]
@@ -3622,6 +3729,59 @@ def compare_widths_for_aligned_cracks(
             if c in gt_sup_atomic:
                 return gt_sup_atomic[c]
         return None
+
+    def _coerce_polyline_xy(raw):
+        if raw is None:
+            return None
+        try:
+            arr = np.asarray(raw, float)
+        except Exception:
+            return None
+
+        if arr.ndim == 2 and arr.shape[1] == 2 and len(arr) >= 2:
+            arr = arr[np.isfinite(arr).all(axis=1)]
+            return arr if len(arr) >= 2 else None
+
+        # Handle flattened [ [x,y], [None,None], ... ] style by taking first valid segment.
+        try:
+            segs = _split_on_nans(raw)
+        except Exception:
+            segs = []
+        for s in segs:
+            s = np.asarray(s, float)
+            if s.ndim == 2 and s.shape[1] == 2 and len(s) >= 2:
+                s = s[np.isfinite(s).all(axis=1)]
+                if len(s) >= 2:
+                    return s
+        return None
+
+    def _resample_polyline_to_len(xy, L):
+        xy = np.asarray(xy, float)
+        L = int(L)
+        if L <= 0:
+            return np.empty((0, 2), float)
+        if xy.ndim != 2 or xy.shape[1] != 2:
+            out = np.empty((L, 2), float)
+            out[:] = np.nan
+            return out
+        m = np.isfinite(xy).all(axis=1)
+        xy = xy[m]
+        if len(xy) == 0:
+            out = np.empty((L, 2), float)
+            out[:] = np.nan
+            return out
+        if len(xy) == 1:
+            return np.repeat(xy[:1], L, axis=0)
+        if len(xy) == L:
+            return xy.astype(float, copy=False)
+        d = np.sqrt(((xy[1:] - xy[:-1]) ** 2).sum(axis=1))
+        s = np.concatenate([[0.0], np.cumsum(d)])
+        if not np.isfinite(s[-1]) or s[-1] <= 1e-12:
+            return np.repeat(xy[:1], L, axis=0)
+        t = np.linspace(0.0, s[-1], num=L)
+        x = np.interp(t, s, xy[:, 0])
+        y = np.interp(t, s, xy[:, 1])
+        return np.column_stack([x, y]).astype(float, copy=False)
 
     def _seg_endpoints(S):
         S = np.asarray(S, float)
@@ -4020,6 +4180,22 @@ def compare_widths_for_aligned_cracks(
             predw_full_aligned = _resample_1d_to_len_atomic(predw_full_any, total_geom)
             gtw_full_aligned = _resample_1d_to_len_atomic(gtw_full_any, total_geom)
 
+            pred_concat_xy = np.vstack([np.asarray(s, float) for s in segs if s is not None and len(s) >= 2])
+            gt_geom_aligned = None
+            gt_geom_strategy = "not_attempted"
+            gt_geom_raw = _get_gt_geom_full_atomic(gt_entry_atomic)
+            if gt_geom_raw is None:
+                gt_geom_strategy = "missing_gt_geometry_stream"
+                print(f"[ATOMIC GT WARN] cid={cid} reason={gt_geom_strategy} GT geometry not attached")
+            else:
+                gt_geom_aligned, gt_geom_strategy = _align_atomic_gt_geom_to_pred(
+                    gt_geom_raw,
+                    pred_concat_xy,
+                    str(cid),
+                )
+                if gt_geom_aligned is None:
+                    print(f"[ATOMIC GT WARN] cid={cid} reason={gt_geom_strategy} GT geometry not attached")
+
             print(
                 f"[WIDTH DEBUG] atomic cid={cid} aligned streams: "
                 f"geom={total_geom} pred_raw={len(predw_full_any)} gt_raw={len(gtw_full_any)}"
@@ -4038,6 +4214,15 @@ def compare_widths_for_aligned_cracks(
 
                 predw = predw_full_aligned[off:off + L].astype(float, copy=False)
                 gtw = gtw_full_aligned[off:off + L].astype(float, copy=False)
+                gt_match_seg = None
+                if gt_geom_aligned is not None:
+                    gt_match_seg = np.asarray(gt_geom_aligned[off:off + L], float)
+                    if gt_match_seg.ndim != 2 or gt_match_seg.shape[1] != 2 or len(gt_match_seg) < 2:
+                        print(
+                            f"[ATOMIC GT WARN] cid={cid} reason=invalid_segment_slice(off={off},L={L}) "
+                            f"GT geometry not attached for this segment"
+                        )
+                        gt_match_seg = None
 
                 width_pairs.append({
                     "image": base_name,
@@ -4053,6 +4238,8 @@ def compare_widths_for_aligned_cracks(
                     "predw": predw,
                     "gruthw": gtw,
                     "gt_source": "payload_precomputed",
+                    "gt_match_seg": gt_match_seg,
+                    "gt_geom_strategy": gt_geom_strategy,
 
                     # -------- NEW FLAGS --------
                     "gt_mismatch": atomic_vs_combined_gt,
