@@ -30,6 +30,12 @@ import time
 
 ROUNDING_DIGITS=6
 
+# ============================================
+# SINGLE CID CORRESPONDENCE DEBUG CONFIG
+# ============================================
+DEBUG_CORRESPONDENCE_CID = "0"   # set to worst CID
+DEBUG_CORRESPONDENCE_ON  = True
+
 #################################################################################
 #Basic Utilities
 import matplotlib.pyplot as plt
@@ -2359,6 +2365,199 @@ def draw_colored_polyline(ax, pts, vals, x0, y0, lw, cmap, norm, alpha=1.0):
     )
     ax.add_collection(lc)
 
+def _arclen_param(xy):
+    xy = np.asarray(xy, float)
+    d = np.sqrt(((xy[1:] - xy[:-1])**2).sum(1))
+    s = np.concatenate([[0.0], np.cumsum(d)])
+    return s
+
+def _debug_plot_correspondence_single(
+    pts,
+    predw,
+    gtw,
+    cid,
+    branch_id,
+    seg_idx,
+    out_dir,
+    stride=15,
+    gt_pts=None,
+):
+    def _to_pts_segments(x):
+        if isinstance(x, (list, tuple)) and len(x) > 0:
+            segs = []
+            for a in x:
+                aa = np.asarray(a, float)
+                if aa.ndim == 2 and aa.shape[1] == 2 and len(aa) >= 2:
+                    segs.append(aa)
+            if segs:
+                return segs
+        aa = np.asarray(x, float)
+        if aa.ndim == 2 and aa.shape[1] == 2 and len(aa) >= 2:
+            return [aa]
+        return []
+
+    def _to_w_segments(x):
+        if isinstance(x, (list, tuple)) and len(x) > 0:
+            segs = []
+            for a in x:
+                aa = np.asarray(a, float).reshape(-1)
+                if aa.size >= 2:
+                    segs.append(aa)
+            if segs:
+                return segs
+        aa = np.asarray(x, float).reshape(-1)
+        if aa.size >= 2:
+            return [aa]
+        return []
+
+    pts_segs = _to_pts_segments(pts)
+    predw_segs = _to_w_segments(predw)
+    gtw_segs = _to_w_segments(gtw)
+    gt_pts_segs = _to_pts_segments(gt_pts) if gt_pts is not None else []
+
+    nseg = min(len(pts_segs), len(predw_segs), len(gtw_segs))
+    if nseg <= 0:
+        print("[CORRESP DEBUG] skipped - no valid segments")
+        return
+    if gt_pts is not None and gt_pts_segs:
+        nseg = min(nseg, len(gt_pts_segs))
+
+    pts_segs = pts_segs[:nseg]
+    predw_segs = predw_segs[:nseg]
+    gtw_segs = gtw_segs[:nseg]
+    if gt_pts_segs:
+        gt_pts_segs = gt_pts_segs[:nseg]
+
+    finite_pred = int(np.sum([np.sum(np.isfinite(w)) for w in predw_segs]))
+    finite_gt = int(np.sum([np.sum(np.isfinite(w)) for w in gtw_segs]))
+    total_samples = int(np.sum([min(len(a), len(b), len(c)) for a, b, c in zip(pts_segs, predw_segs, gtw_segs)]))
+
+    print("\n==============================")
+    print(f"[CORRESP DEBUG] CID={cid} branch={branch_id} seg={seg_idx}")
+    print(f"Segments: {nseg}")
+    print(f"Total samples: {total_samples}")
+    print(f"Finite pred: {finite_pred}")
+    print(f"Finite gt  : {finite_gt}")
+    print("==============================\n")
+
+    fig = plt.figure(figsize=(12, 8))
+    gs = fig.add_gridspec(2, 2)
+
+    ax_geom = fig.add_subplot(gs[:, 0])
+    ax_w = fig.add_subplot(gs[0, 1])
+    ax_diff = fig.add_subplot(gs[1, 1])
+
+    # Geometry plot: pred + gt + explicit correspondence links
+    ax_geom.set_title("Geometry + Correspondence Links")
+    first_pred = True
+    first_gt = True
+    step = max(1, int(stride))
+    for i_seg in range(nseg):
+        p = np.asarray(pts_segs[i_seg], float)
+        pw = np.asarray(predw_segs[i_seg], float).reshape(-1)
+        gw = np.asarray(gtw_segs[i_seg], float).reshape(-1)
+        n = min(len(p), len(pw), len(gw))
+        if n < 2:
+            continue
+        p = p[:n]
+        pw = pw[:n]
+        gw = gw[:n]
+
+        ax_geom.plot(
+            p[:, 0], p[:, 1],
+            color="blue", lw=2,
+            label="Pred midline" if first_pred else None
+        )
+        first_pred = False
+
+        if gt_pts_segs:
+            gxy = np.asarray(gt_pts_segs[i_seg], float)
+            if gxy.ndim == 2 and gxy.shape[1] == 2 and len(gxy) >= 2:
+                ng = min(n, len(gxy))
+                p2 = p[:ng]
+                g2 = gxy[:ng]
+                gw2 = gw[:ng]
+                ax_geom.plot(
+                    g2[:, 0], g2[:, 1],
+                    color="green", lw=1.6, alpha=0.9,
+                    label="GT matched geometry" if first_gt else None
+                )
+                first_gt = False
+                for j in range(0, ng, step):
+                    if np.isfinite(gw2[j]):
+                        ax_geom.plot([p2[j, 0], g2[j, 0]], [p2[j, 1], g2[j, 1]],
+                                     color="red", lw=0.9, alpha=0.8)
+                ax_geom.scatter(p2[::step, 0], p2[::step, 1], s=8, c="blue", alpha=0.9)
+                ax_geom.scatter(g2[::step, 0], g2[::step, 1], s=8, c="green", alpha=0.9)
+            else:
+                for j in range(0, n, step):
+                    c = "red" if np.isfinite(gw[j]) else "black"
+                    ax_geom.plot(p[j, 0], p[j, 1], "o", color=c, markersize=3)
+        else:
+            for j in range(0, n, step):
+                c = "red" if np.isfinite(gw[j]) else "black"
+                ax_geom.plot(p[j, 0], p[j, 1], "o", color=c, markersize=3)
+
+    ax_geom.set_aspect("equal")
+    ax_geom.invert_yaxis()
+    ax_geom.legend()
+
+    # Width vs arclength (concatenated by segment, gapless)
+    ax_w.set_title("Width vs Arc-Length")
+    s_off = 0.0
+    first_pw = True
+    first_gw = True
+    for i_seg in range(nseg):
+        p = np.asarray(pts_segs[i_seg], float)
+        pw = np.asarray(predw_segs[i_seg], float).reshape(-1)
+        gw = np.asarray(gtw_segs[i_seg], float).reshape(-1)
+        n = min(len(p), len(pw), len(gw))
+        if n < 2:
+            continue
+        p = p[:n]
+        pw = pw[:n]
+        gw = gw[:n]
+        s = _arclen_param(p)
+        s = s + s_off
+        s_off = float(s[-1])
+        ax_w.plot(s, pw, color="blue", label="Pred width" if first_pw else None)
+        ax_w.plot(s, gw, color="red", alpha=0.75, label="GT width" if first_gw else None)
+        first_pw = False
+        first_gw = False
+    ax_w.legend()
+    ax_w.grid(True)
+
+    # Width difference
+    ax_diff.set_title("Width Difference (Pred - GT)")
+    s_off = 0.0
+    for i_seg in range(nseg):
+        p = np.asarray(pts_segs[i_seg], float)
+        pw = np.asarray(predw_segs[i_seg], float).reshape(-1)
+        gw = np.asarray(gtw_segs[i_seg], float).reshape(-1)
+        n = min(len(p), len(pw), len(gw))
+        if n < 2:
+            continue
+        p = p[:n]
+        d = pw[:n] - gw[:n]
+        s = _arclen_param(p)
+        s = s + s_off
+        s_off = float(s[-1])
+        ax_diff.plot(s, d, color="purple")
+    ax_diff.axhline(0, color="black", lw=1)
+    ax_diff.grid(True)
+
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(
+        out_dir,
+        f"correspondence_single_cid{cid}_b{branch_id}_s{seg_idx}.png",
+    )
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+    print(f"[CORRESP DEBUG] wrote {out_path}")
+
 def plot_sampling_consistency(
     *,
     pts_list,
@@ -2470,7 +2669,8 @@ def plot_sampling_consistency(
     # ------------------------------------------------------------
     sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
     sm.set_array([])
-    plt.colorbar(sm, ax=[axO, axR], fraction=0.03, pad=0.03)
+    cbar = plt.colorbar(sm, ax=[axO, axR], fraction=0.03, pad=0.03)
+    cbar.set_label("Segment Length (px)")
 
     fig.text(
         0.5, 0.985, title,
@@ -2517,14 +2717,14 @@ def plot_width_error_distribution(*, runs, title, out_path, bins=25):
 
     ax.axvline(mean, lw=1.2, linestyle="--", alpha=0.8)
 
-    ax.set_xlabel("Width error (pred âˆ’ gt) [px]", fontsize=9)
+    ax.set_xlabel("Width error (pred − gt) [px]", fontsize=9)
     ax.set_ylabel("Density", fontsize=9)
     ax.grid(True, alpha=0.25)
-    ax.legend(fontsize=8)
+    #ax.legend(fontsize=8)
 
     ax.text(
         0.02, 0.96,
-        f"RMSE (resampled) = {rmse:.3f}px",
+        f"RMSE={rmse:.3f}px",
         transform=ax.transAxes,
         va="top",
         fontsize=8,
@@ -3062,7 +3262,7 @@ def compare_widths_for_aligned_cracks(
     combined = ann.get("combined_cracks")
 
     print(
-        f"!!!!!!!!!!![WIDTH DEBUG] ann keys: "
+        f"[WIDTH DEBUG] ann keys: "
         f"atomic={None if atomic is None else list(atomic.keys())[:5]}, "
         f"combined={None if combined is None else list(combined.keys())[:5]}"
     )
@@ -3108,8 +3308,85 @@ def compare_widths_for_aligned_cracks(
     else:
         print("[GT SUP] WARNING: no atomic GT entries found. Atomic width eval will skip.")
 
+    ORIENT_DEBUG = True
+    from helpers.geometry_canonical import assert_direction_consistency as _assert_direction_consistency
 
-    def _extract_segments_and_meta(crack):
+    def _orient_cost(A, B):
+        A = np.asarray(A, float)
+        B = np.asarray(B, float)
+        if A.ndim != 2 or B.ndim != 2 or len(A) < 2 or len(B) < 2:
+            return np.nan, np.nan, "invalid"
+        a0, a1 = A[0], A[-1]
+        b0, b1 = B[0], B[-1]
+        d_fwd = float(np.linalg.norm(a0 - b0) + np.linalg.norm(a1 - b1))
+        d_rev = float(np.linalg.norm(a0 - b1) + np.linalg.norm(a1 - b0))
+        return d_fwd, d_rev, ("reversed_candidate" if d_rev < d_fwd else "forward_candidate")
+
+    def _log_branch_orientation(segs, meta, *, tag, cid_dbg):
+        if not ORIENT_DEBUG:
+            return
+        if not segs:
+            return
+
+        by_branch = {}
+        for i, (S, m) in enumerate(zip(segs, meta)):
+            if S is None or len(S) < 2:
+                continue
+            mm = m if isinstance(m, dict) else {}
+            bid = _safe_int(mm.get("branch_id"), -1)
+            sid = _safe_int(mm.get("seg_idx"), i)
+            by_branch.setdefault(int(bid), []).append((int(sid), i, np.asarray(S, float), mm))
+
+        for bid, items in by_branch.items():
+            items = sorted(items, key=lambda t: (t[0], t[1]))
+            if len(items) < 2:
+                continue
+            for j in range(1, len(items)):
+                sid0, i0, s0, _ = items[j - 1]
+                sid1, i1, s1, _ = items[j]
+                d_fwd, d_rev, flag = _orient_cost(s0, s1)
+                print(
+                    f"[ORIENT DBG] cid={cid_dbg} tag={tag} branch={bid} "
+                    f"prev(seg_idx={sid0},i={i0},n={len(s0)}) -> "
+                    f"curr(seg_idx={sid1},i={i1},n={len(s1)}) "
+                    f"d_fwd={d_fwd:.4f} d_rev={d_rev:.4f} flag={flag}"
+                )
+
+        # Duplicate metadata keys are a common source of ambiguous matching.
+        key_counts = {}
+        for i, m in enumerate(meta):
+            mm = m if isinstance(m, dict) else {}
+            k = (str(mm.get("atomic_id", "None")), _safe_int(mm.get("branch_id"), -1), _safe_int(mm.get("seg_idx"), -1))
+            key_counts[k] = key_counts.get(k, 0) + 1
+        dup = [(k, c) for (k, c) in key_counts.items() if c > 1]
+        for k, c in dup[:20]:
+            print(f"[ORIENT DBG] cid={cid_dbg} tag={tag} duplicate_key={k} count={c}")
+
+    def _check_branch_direction_consistency(segs, meta, *, tag, cid_dbg):
+        if not ORIENT_DEBUG:
+            return
+        by_branch = {}
+        for i, (S, m) in enumerate(zip(segs or [], meta or [])):
+            if S is None or len(S) < 2:
+                continue
+            mm = m if isinstance(m, dict) else {}
+            bid = _safe_int(mm.get("branch_id"), -1)
+            sid = _safe_int(mm.get("seg_idx"), i)
+            by_branch.setdefault(int(bid), []).append((int(sid), i, np.asarray(S, float)))
+
+        for bid, items in by_branch.items():
+            items = sorted(items, key=lambda t: (t[0], t[1]))
+            if len(items) < 2:
+                continue
+            segs_b = [it[2] for it in items]
+            try:
+                _assert_direction_consistency(segs_b)
+                print(f"[ORIENT CHECK] cid={cid_dbg} tag={tag} branch={bid} status=PASS")
+            except Exception as e:
+                print(f"[ORIENT CHECK] cid={cid_dbg} tag={tag} branch={bid} status=FAIL err={e}")
+
+
+    def _extract_segments_and_meta(crack, cid_dbg=None):
         """
         Returns:
             mid_segs
@@ -3168,6 +3445,7 @@ def compare_widths_for_aligned_cracks(
             if not isinstance(mid_meta[i], dict):
                 mid_meta[i] = {}
             mid_meta[i].setdefault("branch_id", int(_safe_int(mid_meta[i].get("branch_id"), i)))
+            mid_meta[i].setdefault("seg_idx", int(i))
 
         # --- Derived geometry (explicit per-segment representation only) ---
         derived_segs_raw = crack.get("derived_midline_segments")
@@ -3192,6 +3470,12 @@ def compare_widths_for_aligned_cracks(
             if not isinstance(derived_meta[i], dict):
                 derived_meta[i] = {}
             derived_meta[i].setdefault("branch_id", int(_safe_int(derived_meta[i].get("branch_id"), i)))
+            derived_meta[i].setdefault("seg_idx", int(i))
+
+        _log_branch_orientation(mid_segs, mid_meta, tag="combined_mid_extract", cid_dbg=cid_dbg)
+        _log_branch_orientation(derived_segs, derived_meta, tag="combined_derived_extract", cid_dbg=cid_dbg)
+        _check_branch_direction_consistency(mid_segs, mid_meta, tag="combined_mid_extract", cid_dbg=cid_dbg)
+        _check_branch_direction_consistency(derived_segs, derived_meta, tag="combined_derived_extract", cid_dbg=cid_dbg)
 
         # --- Dominance bite stays dict-shaped ---
         bite_obj = None
@@ -3238,6 +3522,7 @@ def compare_widths_for_aligned_cracks(
     # Debug-only forensic trace for Stage 4.5 -> Stage 5 provenance.
     DEBUG_TOPOLOGY_TRACE = True
     topo_dbg_dir = os.path.join(opsec_dir, "topology_trace")
+    print(topo_dbg_dir)
     if DEBUG_TOPOLOGY_TRACE:
         os.makedirs(topo_dbg_dir, exist_ok=True)
 
@@ -3651,7 +3936,7 @@ def compare_widths_for_aligned_cracks(
     for cid, crack in crack_iter:
         print(f"\n[WIDTH DEBUG] {mode.upper()} cid={cid}")
 
-        mid_segs, mid_meta, derived_segs, derived_meta, bite_pred, pred_members = _extract_segments_and_meta(crack)
+        mid_segs, mid_meta, derived_segs, derived_meta, bite_pred, pred_members = _extract_segments_and_meta(crack, cid_dbg=cid)
         if not derived_segs:
             raise RuntimeError(f"Missing derived geometry (no fallback allowed) for cid={cid}")
 
@@ -4302,6 +4587,56 @@ def compare_widths_for_aligned_cracks(
             dmeta,
             cid=cid,
         )
+
+        # ------------------------------------------------------------
+        # ORIENTATION ROOT DEBUG:
+        # Compare Stage-2 PRED derived segments vs Stage-2/4 GT segments
+        # by strict (branch_id, seg_idx) key before Stage 4.5/5 processing.
+        # ------------------------------------------------------------
+        if ORIENT_DEBUG and mode == "combined":
+            def _norm_keys_with_branch_seq(segs_in, meta_in):
+                out = []
+                seq = {}
+                for i, (Sx, mx) in enumerate(zip(segs_in or [], meta_in or [])):
+                    if Sx is None or len(Sx) < 2:
+                        continue
+                    mm = mx if isinstance(mx, dict) else {}
+                    b = _safe_int(mm.get("branch_id"), None)
+                    s = _safe_int(mm.get("seg_idx"), None)
+                    if b is None:
+                        b = -1
+                    if s is None:
+                        s = int(seq.get(int(b), 0))
+                        seq[int(b)] = int(s) + 1
+                    out.append(((int(b), int(s)), np.asarray(Sx, float)))
+                return out
+
+            gt_by_key = {}
+            for k, Sg in _norm_keys_with_branch_seq(gt_pruned_segs, gt_pruned_meta):
+                gt_by_key.setdefault(k, []).append(Sg)
+
+            pred_by_key = {}
+            for k, Sp in _norm_keys_with_branch_seq(pred_der_stage2_segs, pred_der_stage2_meta):
+                pred_by_key.setdefault(k, []).append(Sp)
+
+            all_keys = sorted(set(gt_by_key.keys()) | set(pred_by_key.keys()))
+            if not all_keys:
+                print(f"[ORIENT ROOT DBG] cid={cid} no strict (branch_id, seg_idx) keys available")
+            for k in all_keys:
+                g_list = gt_by_key.get(k, [])
+                p_list = pred_by_key.get(k, [])
+                print(
+                    f"[ORIENT ROOT DBG] cid={cid} key={k} "
+                    f"pred_count={len(p_list)} gt_count={len(g_list)}"
+                )
+                n = min(len(p_list), len(g_list))
+                for j in range(n):
+                    d_fwd, d_rev, flag = _orient_cost(p_list[j], g_list[j])
+                    print(
+                        f"[ORIENT ROOT DBG] cid={cid} key={k} pair_idx={j} "
+                        f"n_pred={len(p_list[j])} n_gt={len(g_list[j])} "
+                        f"d_fwd={d_fwd:.4f} d_rev={d_rev:.4f} flag={flag}"
+                    )
 
 
         # ============================================================
@@ -5392,6 +5727,13 @@ def compare_widths_for_aligned_cracks(
             n3 = len(S3) if S3 is not None else 0
             print(f"[TRACE] seg{i} Stage2 pts={n2} -> Stage4.5 pts={n3}  Delta={n2 - n3}")
 
+        _log_branch_orientation(pred_der_stage2_segs, pred_der_stage2_meta, tag="stage2_pred_derived", cid_dbg=cid)
+        _log_branch_orientation(pred_der_dom_segs, pred_der_dom_meta, tag="stage45_pred_derived", cid_dbg=cid)
+        _log_branch_orientation(gt_stage5_segs, gt_stage5_meta, tag="stage45_gt", cid_dbg=cid)
+        _check_branch_direction_consistency(pred_der_stage2_segs, pred_der_stage2_meta, tag="stage2_pred_derived", cid_dbg=cid)
+        _check_branch_direction_consistency(pred_der_dom_segs, pred_der_dom_meta, tag="stage45_pred_derived", cid_dbg=cid)
+        _check_branch_direction_consistency(gt_stage5_segs, gt_stage5_meta, tag="stage45_gt", cid_dbg=cid)
+
         # ============================================================
         # Stage 5 - WIDTH ATTACHMENT (STRICT, NO GEOMETRY TRUNCATION)
         # ============================================================
@@ -5556,7 +5898,6 @@ def compare_widths_for_aligned_cracks(
             gt_list = gt_bucket.get(key, [])
             if gt_list:
                 gt_match_seg, gtw_local, gt_seg_len, _ = gt_list.pop(0)
-                gtw = _resample_1d_to_len(gtw_local, L)
                 gt_match_mode = "segment_local_match_strict"
             else:
                 # Fallback: branch-only match if GT seg_idx is missing/inconsistent.
@@ -5571,7 +5912,6 @@ def compare_widths_for_aligned_cracks(
                     if k_strict in gt_bucket and gt_bucket[k_strict]:
                         # best-effort pop one; strict set may be empty anyway
                         pass
-                    gtw = _resample_1d_to_len(gtw_local, L)
                     gt_match_mode = "segment_local_match_branch_fallback"
                     print(
                         f"[STAGE5 WARN] strict key miss for {key}, "
@@ -5582,6 +5922,29 @@ def compare_widths_for_aligned_cracks(
                         f"[STAGE5 FATAL] no GT match for normalized key={key} "
                         f"(raw branch={branch_dbg}, seg_idx={seg_idx_dbg}) cid={cid}"
                     )
+
+            # Orientation diagnostic (debug-only): detect local segment reversal.
+            orient_flag = "unknown"
+            d_forward = np.nan
+            d_reverse = np.nan
+            try:
+                p0 = np.asarray(pts[0], float)
+                p1 = np.asarray(pts[-1], float)
+                g0 = np.asarray(gt_match_seg[0], float)
+                g1 = np.asarray(gt_match_seg[-1], float)
+                d_forward = float(np.linalg.norm(p0 - g0) + np.linalg.norm(p1 - g1))
+                d_reverse = float(np.linalg.norm(p0 - g1) + np.linalg.norm(p1 - g0))
+                orient_flag = "reversed_candidate" if d_reverse < d_forward else "forward_candidate"
+            except Exception:
+                orient_flag = "orientation_check_failed"
+
+            print(
+                f"[STAGE5 ORIENT] cid={cid} branch_id={branch_dbg} seg_idx={seg_idx_dbg} "
+                f"mode={gt_match_mode} d_forward={d_forward:.4f} d_reverse={d_reverse:.4f} "
+                f"flag={orient_flag}"
+            )
+
+            gtw = _resample_1d_to_len(gtw_local, L)
 
             # ----------------------------
             # DEBUG: classify nonfinite causes (segment-local)
@@ -5683,6 +6046,7 @@ def compare_widths_for_aligned_cracks(
                 "predw": predw,
                 "gruthw": gtw,
                 "gt_source": gt_match_mode,
+                "gt_match_seg": np.asarray(gt_match_seg, float) if gt_match_seg is not None else None,
                 "branch_id": m.get("branch_id"),
                 "seg_idx": m.get("seg_idx"),
                 "gt_mismatch": False,
@@ -6161,6 +6525,36 @@ def compare_widths_for_aligned_cracks(
         print(f"[PART2 DEBUG] ds_target_px = {ds_target_px}")
         print("[PART2 DEBUG] ===============================")
 
+        part2_branch_debug = {}
+
+        def _resample_polyline_to_len_part2(xy, L):
+            xy = np.asarray(xy, float)
+            L = int(L)
+            if L <= 0:
+                return np.empty((0, 2), float)
+            if xy.ndim != 2 or xy.shape[1] != 2:
+                out = np.empty((L, 2), float)
+                out[:] = np.nan
+                return out
+            m = np.isfinite(xy).all(axis=1)
+            xy = xy[m]
+            if len(xy) == 0:
+                out = np.empty((L, 2), float)
+                out[:] = np.nan
+                return out
+            if len(xy) == 1:
+                return np.repeat(xy[:1], L, axis=0)
+            if len(xy) == L:
+                return xy.astype(float, copy=False)
+            d = np.sqrt(((xy[1:] - xy[:-1]) ** 2).sum(axis=1))
+            s = np.concatenate([[0.0], np.cumsum(d)])
+            if not np.isfinite(s[-1]) or s[-1] <= 1e-12:
+                return np.repeat(xy[:1], L, axis=0)
+            t = np.linspace(0.0, s[-1], num=L)
+            x = np.interp(t, s, xy[:, 0])
+            y = np.interp(t, s, xy[:, 1])
+            return np.column_stack([x, y]).astype(float, copy=False)
+
         # ============================================================
         # Part 2: per-width-pair processing
         #   - Build ORIGINAL-domain signals (plot-only)
@@ -6180,7 +6574,7 @@ def compare_widths_for_aligned_cracks(
             bbox  = wp.get("bbox", None)
 
             print(
-                f"[PART2 DEBUG] â–¶ wp: "
+                f"[PART2 DEBUG] ▶ wp: "
                 f"cid={wp.get('cid','')}, "
                 f"type={wp.get('crack_type',mode)}, "
                 f"geom={wp.get('geometry_type','derived')}, "
@@ -6318,6 +6712,33 @@ def compare_widths_for_aligned_cracks(
             pts_rs     = np.asarray(pts_rs[:mrs], float)
             predw_rs   = np.asarray(predw_rs[:mrs], float)
             gtruthw_rs = np.asarray(gtruthw_rs[:mrs], float)
+
+            if (
+                DEBUG_CORRESPONDENCE_ON
+                and str(cid_s) == str(DEBUG_CORRESPONDENCE_CID)
+            ):
+                bkey = str(wp.get("branch_id", "NA"))
+                bd = part2_branch_debug.setdefault(
+                    bkey,
+                    {
+                        "pts_list": [],
+                        "gt_pts_list": [],
+                        "predw_list": [],
+                        "gtw_list": [],
+                    },
+                )
+                bd["pts_list"].append(np.asarray(pts_rs, float))
+                bd["predw_list"].append(np.asarray(predw_rs, float))
+                bd["gtw_list"].append(np.asarray(gtruthw_rs, float))
+                gt_match_seg = wp.get("gt_match_seg", None)
+                gt_pts_rs = _resample_polyline_to_len_part2(gt_match_seg, mrs)
+                bd["gt_pts_list"].append(gt_pts_rs)
+                d_fwd, d_rev, flag = _orient_cost(np.asarray(pts_rs, float), np.asarray(gt_pts_rs, float))
+                print(
+                    f"[ORIENT DBG] cid={cid_s} tag=part2_resampled branch={wp.get('branch_id', 'NA')} "
+                    f"seg_idx={wp.get('seg_idx', 'NA')} n={mrs} "
+                    f"d_fwd={d_fwd:.4f} d_rev={d_rev:.4f} flag={flag}"
+                )
 
             # ------------------------------------------------------------
             # Width error ONLY defined here
@@ -6545,6 +6966,20 @@ def compare_widths_for_aligned_cracks(
                 bin_["sum_mae_L"]  += st["mae"]  * L
                 bin_["sum_mse_L"]  += (st["rmse"] ** 2) * L
 
+        if DEBUG_CORRESPONDENCE_ON and part2_branch_debug:
+            for bkey, bd in part2_branch_debug.items():
+                _debug_plot_correspondence_single(
+                    bd["pts_list"],
+                    bd["predw_list"],
+                    bd["gtw_list"],
+                    cid=DEBUG_CORRESPONDENCE_CID,
+                    branch_id=bkey,
+                    seg_idx="part2_resampled",
+                    out_dir=part2_resample_dir,
+                    stride=20,
+                    gt_pts=bd["gt_pts_list"],
+                )
+
         # ------------------------------------------------------------
         # Emit per-crack metric rows
         # ------------------------------------------------------------
@@ -6682,7 +7117,7 @@ def compare_widths_for_aligned_cracks(
                 axes[2].axvline(0.0, lw=1.5, linestyle="-")
                 axes[2].axvline(global_bias, lw=2, linestyle="--")
                 axes[2].set_title("Width Bias (length-weighted)", fontsize=10, fontweight="bold")
-                axes[2].set_xlabel("px (pred âˆ’ gt)", fontsize=9)
+                axes[2].set_xlabel("px (pred − gt)", fontsize=9)
                 axes[2].grid(True, axis="x", alpha=0.25)
 
                 axes[3].barh(y, len_v)
@@ -6818,7 +7253,7 @@ def compare_widths_for_aligned_cracks(
                         axH.hist(d_all, bins=25, density=True, alpha=0.85)
                         axH.axvline(0.0, lw=1.4)
                         axH.set_title("Width error distribution after resampling", fontsize=10, fontweight="bold")
-                        axH.set_xlabel("d = pred âˆ’ gt (px)")
+                        axH.set_xlabel("d = pred − gt (px)")
                         axH.set_ylabel("density")
                         axH.grid(True, alpha=0.25)
 
@@ -6952,8 +7387,8 @@ def compare_widths_for_aligned_cracks(
 
     if np.any(pred_mask_union):
         pred_rgba = np.zeros((H, W, 4), float)
-        pred_rgba[..., 1] = pred_mask_union.astype(float)  # green channel
-        pred_rgba[..., 3] = pred_mask_union.astype(float) * 0.28  # alpha
+        pred_rgba[..., 1] = pred_mask_union.astype(float) * 0.55  # darker green channel
+        pred_rgba[..., 3] = pred_mask_union.astype(float) * 0.35  # alpha
         ax.imshow(pred_rgba, zorder=0.5)
 
     all_d = np.concatenate([d for d in diffs if d is not None and len(d) > 0])

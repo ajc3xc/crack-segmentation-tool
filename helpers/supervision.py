@@ -178,6 +178,12 @@ import os, json
 import numpy as np
 import cv2
 from matplotlib import pyplot as plt
+from helpers.geometry_canonical import (
+    canonicalize_segment_direction,
+    enforce_branch_continuity,
+    canonicalize_branch_direction,
+    assert_direction_consistency,
+)
 
 from helpers.metrics import normals_from_mask_for_midline
 #from combiner import _stitch_lines_by_user
@@ -1488,6 +1494,53 @@ def export_gt_supervision_for_image(
 
     final_entries = []
 
+    def _canonicalize_segments_with_meta(segs_in, meta_in, *, label):
+        segs_valid = [np.asarray(s, float) for s in (segs_in or []) if s is not None and len(s) >= 2]
+        if not segs_valid:
+            return [], []
+
+        meta = list(meta_in or [])
+        if len(meta) != len(segs_valid):
+            mm = []
+            for i in range(len(segs_valid)):
+                d = meta[i] if i < len(meta) and isinstance(meta[i], dict) else {}
+                mm.append(d)
+            meta = mm
+        for i in range(len(meta)):
+            if not isinstance(meta[i], dict):
+                meta[i] = {}
+            meta[i].setdefault("branch_id", int(meta[i].get("branch_id", 0)))
+            meta[i].setdefault("seg_idx", int(meta[i].get("seg_idx", i)))
+
+        out_segs, out_meta = [], []
+        branch_ids = sorted({int(m.get("branch_id", 0)) for m in meta})
+        for bid in branch_ids:
+            pairs = [
+                (int((m if isinstance(m, dict) else {}).get("seg_idx", i)), i, np.asarray(S, float), dict(m if isinstance(m, dict) else {}))
+                for i, (S, m) in enumerate(zip(segs_valid, meta))
+                if int((m if isinstance(m, dict) else {}).get("branch_id", 0)) == bid
+            ]
+            if not pairs:
+                continue
+            pairs.sort(key=lambda t: (t[0], t[1]))
+            segs_b = [p[2] for p in pairs]
+            meta_b = [p[3] for p in pairs]
+
+            segs_b, meta_b = enforce_branch_continuity(segs_b, associated_data=meta_b)
+            segs_b, meta_b, flipped_branch = canonicalize_branch_direction(segs_b, associated_data=meta_b)
+            if flipped_branch:
+                print(f"[CANON][GT_SUP] {label} branch={bid} flipped whole branch orientation")
+            assert_direction_consistency(segs_b)
+
+            for j, (S, m) in enumerate(zip(segs_b, meta_b)):
+                m2 = dict(m if isinstance(m, dict) else {})
+                m2["branch_id"] = int(bid)
+                m2["seg_idx"] = int(j)
+                out_segs.append(np.asarray(S, float))
+                out_meta.append(m2)
+
+        return out_segs, out_meta
+
     # =====================================================
     # 1) ATOMIC BEFORE MERGE  (USE USER mask_bbox ONLY)
     # =====================================================
@@ -1497,6 +1550,9 @@ def export_gt_supervision_for_image(
         mid_xy = np.asarray(cr.get("midline", []), float)
         if mid_xy.ndim != 2 or len(mid_xy) < 2:
             continue
+        mid_xy, _n, _w, _e1, _e2, cinfo = canonicalize_segment_direction(mid_xy)
+        if cinfo.get("flipped", False):
+            print(f"[CANON][GT_SUP] atomic {scid} midline flipped to canonical direction")
 
         # -------------------------------------------------
         # REQUIRED: user-authored mask_bbox (xywh)
@@ -1685,6 +1741,13 @@ def export_gt_supervision_for_image(
 
         if not segs:
             continue
+
+        dom_meta = dom_meta if isinstance(dom_meta, dict) else {}
+        seg_meta = dom_meta.get("segments_meta", [])
+        segs, seg_meta = _canonicalize_segments_with_meta(segs, seg_meta, label=f"combined {ccid}")
+        if not segs:
+            continue
+        dom_meta["segments_meta"] = seg_meta
         
         # -------------------------------------------------
         # DEBUG: dominance bite as-written (RAW, no decode)

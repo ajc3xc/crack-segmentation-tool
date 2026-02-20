@@ -334,23 +334,34 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             return pd.DataFrame()
 
         if grid is None:
-            grid = {
-                "window_half_size": [35, 45, 55],
-                "mu": [0, 5],
-                "l":  [2, 5],
-                "p":  [6, 14],
-            }
+            grid = [
+                {"window_half_size": 45, "mu": 0, "l": 5, "p": 14, "seg_mode": "old"},
+                {"window_half_size": 45, "mu": 0, "l": 5, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 0, "l": 2, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 0, "l": 8, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 2, "l": 5, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 5, "l": 5, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 2, "l": 5, "p": 2, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 2, "l": 5, "p": 20, "seg_mode": "new"},
+            ]
 
-        keys = list(grid.keys())
-        combos = list(itertools.product(*[grid[k] for k in keys]))
+        if isinstance(grid, dict):
+            keys = list(grid.keys())
+            combos = [
+                dict(zip(keys, combo))
+                for combo in itertools.product(*[grid[k] for k in keys])
+            ]
+        elif isinstance(grid, list):
+            combos = [dict(p) for p in grid]
+        else:
+            raise ValueError("grid must be dict or list of param dicts")
 
         rows = []
         with ProcessPoolExecutor(max_workers=max_workers) as ex:
             futs = {}
-            for combo in combos:
-                params = dict(zip(keys, combo))
+            for params in combos:
                 payload = dict(base)
-                payload["params"] = params
+                payload["params"] = dict(params)
                 payload["calibration_only"] = True
                 futs[ex.submit(edge_param_worker, payload)] = params
 
@@ -3124,9 +3135,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         if g_variants is None:
             # shared 8-variant grid (used when NOT smoke_test)
             g_variants_shared = [
-                {"g11": 1.0, "g22": 15.0,  "g33": 15.0},   # local refinement near 25
+                {"g11": 1.0, "g22": 10.0,  "g33": 10.0},   # local refinement near 25
                 {"g11": 1.0, "g22": 25.0,  "g33": 25.0},   # current baseline
-                {"g11": 1.0, "g22": 35.0,  "g33": 35.0},   # local refinement near 25
                 {"g11": 1.0, "g22": 50.0,  "g33": 50.0},   # moderate curvature
                 {"g11": 1.0, "g22": 100.0, "g33": 100.0},  # LEGACY reference (old default)
             ]

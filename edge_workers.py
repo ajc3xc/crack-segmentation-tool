@@ -26,6 +26,7 @@ from cracktools.segmentation import edge_masks, edges_tracking
 from helpers import *
 from helpers import plot_metrics
 from helpers.plot_metrics import *
+from helpers.geometry_canonical import orient_segment_to_reference
 
 # ---------------------------------------------------------------------
 # Helper: mini diagnostic plot for failed or weird edge cases
@@ -533,6 +534,8 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     print(f"[SUPER DEBUG] Payload type {str(payload.get('midline_type', '')).lower()} | plot_only={plot_only}")
 
     try:
+        ORIENT_DEBUG = True
+
         # -------------------------------------------------------
         # Normalize crop to 8-bit (still needed for plotting)
         # -------------------------------------------------------
@@ -611,10 +614,6 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
 
             x, y, w, h = map(int, bbox_arr.tolist())
 
-            # Global coords
-            track_e1_global = np.column_stack([track_e1[:, 0] + x, track_e1[:, 1] + y])
-            track_e2_global = np.column_stack([track_e2[:, 0] + x, track_e2[:, 1] + y])
-
             t_edge_masks = 0.0
             t_edges_tracking = 0.0
             subtiming = {}
@@ -670,10 +669,60 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             normals_e1, normals_e2 = extract_normals_from_res(res)
             subtiming = res.get("subtiming", {}) or {}
 
-            # global coords
-            track_e1_global = np.column_stack([track_e1[:, 0] + x, track_e1[:, 1] + y])
-            track_e2_global = np.column_stack([track_e2[:, 0] + x, track_e2[:, 1] + y])
+            t_load = 0.0
 
+        try:
+            p0 = np.asarray(pts_crop[0], float)
+            p1 = np.asarray(pts_crop[1], float)
+            d0 = np.asarray(derived_midline_crop[0], float)
+            d1 = np.asarray(derived_midline_crop[-1], float)
+            ddf = float(np.linalg.norm(d0 - p0) + np.linalg.norm(d1 - p1))
+            ddr = float(np.linalg.norm(d0 - p1) + np.linalg.norm(d1 - p0))
+            dflag = "reversed_candidate" if ddr < ddf else "forward_candidate"
+
+            (
+                derived_midline_crop,
+                _n_unused,
+                _w_unused,
+                track_e1,
+                track_e2,
+                orient_info,
+            ) = orient_segment_to_reference(
+                derived_midline_crop,
+                ref_start=p0,
+                ref_end=p1,
+                normals=None,
+                widths=None,
+                edge1=track_e1,
+                edge2=track_e2,
+                normals_are_vectors=False,
+            )
+            if orient_info.get("flipped", False):
+                normals_e1 = np.asarray(normals_e1, float)[::-1].copy()
+                normals_e2 = np.asarray(normals_e2, float)[::-1].copy()
+
+            if ORIENT_DEBUG:
+                m0 = np.asarray(midline_xy_crop[0], float)
+                m1 = np.asarray(midline_xy_crop[-1], float)
+                dmf = float(np.linalg.norm(m0 - p0) + np.linalg.norm(m1 - p1))
+                dmr = float(np.linalg.norm(m0 - p1) + np.linalg.norm(m1 - p0))
+                mflag = "reversed_candidate" if dmr < dmf else "forward_candidate"
+                d0c = np.asarray(derived_midline_crop[0], float)
+                d1c = np.asarray(derived_midline_crop[-1], float)
+                dcf = float(np.linalg.norm(d0c - p0) + np.linalg.norm(d1c - p1))
+                dcr = float(np.linalg.norm(d0c - p1) + np.linalg.norm(d1c - p0))
+                dcflag = "reversed_candidate" if dcr < dcf else "forward_candidate"
+                print(
+                    f"[ORIENT DBG][edge_worker] cid={cid} mode={seg_mode} plot_only={plot_only} "
+                    f"manual_vs_pts fwd={dmf:.4f} rev={dmr:.4f} flag={mflag} "
+                    f"derived_pre fwd={ddf:.4f} rev={ddr:.4f} flag={dflag} "
+                    f"derived_post fwd={dcf:.4f} rev={dcr:.4f} flag={dcflag} "
+                    f"flipped={bool(orient_info.get('flipped', False))}"
+                )
+        except Exception as e:
+            print(f"[ORIENT DBG][edge_worker] cid={cid} orientation check failed: {e}")
+
+        if not plot_only:
             from cracktools.segmentation import generate_mask_from_edges  # adjust import path
             mask_crop = generate_mask_from_edges(
                 img_gray=img_norm,
@@ -686,7 +735,9 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 do_morph=True,
             )
 
-            t_load = 0.0
+        # Global coords (after orientation canonicalization).
+        track_e1_global = np.column_stack([track_e1[:, 0] + x, track_e1[:, 1] + y])
+        track_e2_global = np.column_stack([track_e2[:, 0] + x, track_e2[:, 1] + y])
 
         # =======================================================
         # 1) Pretty edges + normals (crop-level)

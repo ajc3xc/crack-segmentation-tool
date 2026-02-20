@@ -831,12 +831,16 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             f"(from {len(eligible_idxs)} eligible / {len(all_idxs)} total)")
 
         if edge_grid is None:
-            edge_grid = {
-                "window_half_size": [35, 45, 55],
-                "mu": [0, 5],
-                "l": [2, 5],
-                "p": [6, 14],
-            }
+            edge_grid = [
+                {"window_half_size": 45, "mu": 0, "l": 5, "p": 14, "seg_mode": "old"},
+                {"window_half_size": 45, "mu": 0, "l": 5, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 0, "l": 2, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 0, "l": 8, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 2, "l": 5, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 5, "l": 5, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 2, "l": 5, "p": 2, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 2, "l": 5, "p": 20, "seg_mode": "new"},
+            ]
 
         sweep_rows = []
         orig_n = self.n
@@ -1258,12 +1262,16 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         print(f"[global-metrics] calibration on {len(idxs_sample)} images")
 
         if edge_grid is None:
-            edge_grid = {
-                "window_half_size": [35, 45, 55],
-                "mu": [0, 5],
-                "l": [2, 5],
-                "p": [6, 14],
-            }
+            edge_grid = [
+                {"window_half_size": 45, "mu": 0, "l": 5, "p": 14, "seg_mode": "old"},
+                {"window_half_size": 45, "mu": 0, "l": 5, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 0, "l": 2, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 0, "l": 8, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 2, "l": 5, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 5, "l": 5, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 2, "l": 5, "p": 2, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 2, "l": 5, "p": 20, "seg_mode": "new"},
+            ]
 
         orig_n = self.n
         summ_dir = os.path.join(self.save_folder, "metrics", "_summary")
@@ -1387,6 +1395,8 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                             edge_params_fixed=global_best_edge,
                             cpu_max_workers=cpu_max_workers,
                             force_recompute=True,
+                            os_ablation=True,
+                            smoke_test=False
                         )
                         if pack:
                             packs_for_img[cid] = pack
@@ -1533,6 +1543,8 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                                     edge_params_fixed=global_best_edge,
                                     cpu_max_workers=cpu_max_workers,
                                     force_recompute=True,
+                                    os_ablation=True,
+                                    smoke_test=False
                                 )
                                 if pack:
                                     auto_packs[cid] = pack
@@ -1927,7 +1939,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         """
         
         #stopgap measure
-        do_edge_calibrate=False
+        #do_edge_calibrate=False
 
         import os, time, numpy as np, pandas as pd
         from helpers import metrics
@@ -1998,13 +2010,16 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         # (OPTIONAL) EDGE PARAM CALIBRATION
         # ------------------------------------------------------------
         if edge_grid is None:
-            edge_grid = {
-                "window_half_size": [45],
-                "mu": [0],
-                "l": [5],
-                "p": [14],
-                "seg_mode": ["new"],
-            }
+            edge_grid = [
+                {"window_half_size": 45, "mu": 0, "l": 5, "p": 14, "seg_mode": "old"},
+                {"window_half_size": 45, "mu": 0, "l": 5, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 0, "l": 2, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 0, "l": 8, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 2, "l": 5, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 5, "l": 5, "p": 14, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 2, "l": 5, "p": 2, "seg_mode": "new"},
+                {"window_half_size": 45, "mu": 2, "l": 5, "p": 20, "seg_mode": "new"},
+            ]
 
         # default params (always valid)
         best_edge = {"window_half_size": 45, "mu": 0.0, "l": 5, "p": 14, "seg_mode": "new"}
@@ -2192,7 +2207,8 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                 edge_params_fixed=best_edge,
                 cpu_max_workers=cpu_max_workers,
                 force_recompute=True,
-                os_ablation=False
+                os_ablation=True,
+                smoke_test=False
             )
             if pack:
                 auto_packs[cid] = pack

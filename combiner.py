@@ -10,6 +10,12 @@ from cracktools.segmentation import edge_masks, edges_tracking
 
 
 from helpers.metrics import bbox_from_mask
+from helpers.geometry_canonical import (
+    orient_segment_to_reference,
+    enforce_branch_continuity,
+    canonicalize_branch_direction,
+    assert_direction_consistency,
+)
 
 from shapely.geometry import LineString, MultiLineString
 from shapely.ops import unary_union
@@ -924,13 +930,49 @@ def dominant_segments_from_group(
     # -----------------------------
     # Pack outputs + meta
     # -----------------------------
-    kept = [S for (_, _, S, _) in kept_meta]
+    branch_to_items = {}
+    for (bi, atomic_id, S, is_primary) in kept_meta:
+        if S is None or len(S) < 2:
+            continue
+        branch_to_items.setdefault(int(bi), []).append(
+            {
+                "atomic_id": str(atomic_id),
+                "is_primary": bool(is_primary),
+                "seg": np.asarray(S, float),
+            }
+        )
+
+    canonical_kept = []
+    ordered_branch_ids = [int(b) for b in order]
+    ordered_branch_ids += [b for b in sorted(branch_to_items.keys()) if b not in ordered_branch_ids]
+
+    for bi in ordered_branch_ids:
+        items = branch_to_items.get(int(bi), [])
+        if not items:
+            continue
+
+        segs_b = [it["seg"] for it in items]
+        assoc_b = [{"atomic_id": it["atomic_id"], "is_primary": it["is_primary"]} for it in items]
+
+        segs_b, assoc_b = enforce_branch_continuity(segs_b, associated_data=assoc_b)
+        segs_b, assoc_b, flipped_branch = canonicalize_branch_direction(segs_b, associated_data=assoc_b)
+        if flipped_branch:
+            print(f"[CANON] dominant_segments branch={bi} flipped whole branch orientation")
+        assert_direction_consistency(segs_b)
+
+        for seg_idx, (S, a) in enumerate(zip(segs_b, assoc_b)):
+            canonical_kept.append(
+                (int(bi), str(a.get("atomic_id")), np.asarray(S, float), bool(a.get("is_primary", False)), int(seg_idx))
+            )
+
+    kept = [S for (_, _, S, _, _) in canonical_kept]
 
     segments_meta = []
-    for (bi, atomic_id, S, is_primary) in kept_meta:
+    for (bi, atomic_id, S, is_primary, seg_idx) in canonical_kept:
         segments_meta.append({
             "branch_id": int(bi),
             "atomic_id": str(atomic_id),
+            "seg_idx": int(seg_idx),
             "is_primary": bool(is_primary),
             "branch_rank": int(order.index(bi)) if bi in order else -1,
             "length": float(_linestring_length(S)),
@@ -2234,6 +2276,10 @@ def build_combined_crack_stateless(
             bid = int(midline_segments_meta[i].get("branch_id", -1))
         branch_to_segs[bid].append(np.asarray(S, float))
 
+    for bid, seg_list in branch_to_segs.items():
+        if len(seg_list) >= 2:
+            assert_direction_consistency(seg_list)
+
     # --------------------------------------------------------
     # Helper: split on discontinuities (CRITICAL)
     # --------------------------------------------------------
@@ -2542,9 +2588,6 @@ def build_combined_crack_stateless(
             )
             if len(derived_mid_full) < 2:
                 raise ValueError("[COMBINER] derived midline collapsed after full-image mapping")
-            derived_midline_segs.append(derived_mid_full)
-            branch_to_derived_runs[int(branch_id)].append(derived_mid_full)
-
 
             # ---- normals ----
             normals = res.get("normal_edge_points")
@@ -2560,6 +2603,35 @@ def build_combined_crack_stateless(
                         all_widths.append(d[np.isfinite(d)])
             else:
                 raise ValueError("[COMBINER] edges_tracking returned no normal_edge_points")
+
+            # Canonicalize this run direction against stitched branch direction.
+            (
+                derived_mid_full,
+                _n_unused,
+                _w_unused,
+                e1_full,
+                e2_full,
+                orient_info,
+            ) = orient_segment_to_reference(
+                derived_mid_full,
+                ref_start=np.asarray(S_run[0], float),
+                ref_end=np.asarray(S_run[-1], float),
+                normals=None,
+                widths=None,
+                edge1=e1_full,
+                edge2=e2_full,
+                normals_are_vectors=False,
+            )
+            if orient_info.get("flipped", False):
+                n1_full = _finite_xy(np.asarray(n1_full, float)[::-1].copy())
+                n2_full = _finite_xy(np.asarray(n2_full, float)[::-1].copy())
+                print(
+                    f"[CANON] combine branch={branch_id} run={run_id} "
+                    f"flipped derived run (d_fwd={orient_info['d_forward']:.4f}, d_rev={orient_info['d_reverse']:.4f})"
+                )
+
+            derived_midline_segs.append(derived_mid_full)
+            branch_to_derived_runs[int(branch_id)].append(derived_mid_full)
 
             # ---- store geometry ----
             edge1_segs.append(e1_full)
@@ -2669,6 +2741,18 @@ def build_combined_crack_stateless(
             mid_meta=mid_meta_b,
             tol_shared=2.5,
         )
+        # Enforce continuity + deterministic branch direction on split derived segments.
+        if d_segs:
+            d_assoc = [dict(mm if isinstance(mm, dict) else {}) for mm in d_meta]
+            d_segs, d_assoc = enforce_branch_continuity(d_segs, associated_data=d_assoc)
+            d_segs, d_assoc, flipped_branch = canonicalize_branch_direction(d_segs, associated_data=d_assoc)
+            if flipped_branch:
+                print(f"[CANON] combine branch={bi} flipped split-derived branch orientation")
+            assert_direction_consistency(d_segs)
+            for j in range(len(d_assoc)):
+                d_assoc[j]["branch_id"] = int(bi)
+                d_assoc[j]["seg_idx"] = int(j)
+            d_meta = d_assoc
         derived_midline_segments.extend(d_segs)
         derived_midline_segments_meta.extend(d_meta)
 
@@ -2677,6 +2761,21 @@ def build_combined_crack_stateless(
             f"[COMBINER] derived_midline_segments/meta mismatch: "
             f"{len(derived_midline_segments)} segs vs {len(derived_midline_segments_meta)} meta"
         )
+
+    # Final check: branch-level continuity for user and derived outputs.
+    for bi in sorted({int(m.get("branch_id", -1)) for m in (midline_segments_meta or []) if isinstance(m, dict)}):
+        bsegs = [np.asarray(S, float) for S, m in zip(segs, midline_segments_meta) if isinstance(m, dict) and int(m.get("branch_id", -1)) == bi and S is not None and len(S) >= 2]
+        if len(bsegs) >= 2:
+            assert_direction_consistency(bsegs)
+    for bi in sorted({int(m.get("branch_id", -1)) for m in (derived_midline_segments_meta or []) if isinstance(m, dict)}):
+        pairs = [
+            (int((m if isinstance(m, dict) else {}).get("seg_idx", i)), np.asarray(S, float))
+            for i, (S, m) in enumerate(zip(derived_midline_segments, derived_midline_segments_meta))
+            if isinstance(m, dict) and int(m.get("branch_id", -1)) == bi and S is not None and len(S) >= 2
+        ]
+        if len(pairs) >= 2:
+            pairs.sort(key=lambda t: t[0])
+            assert_direction_consistency([p[1] for p in pairs])
 
     combined_length = float(sum(_linestring_length(s) for s in segs))
     if len(all_widths):
@@ -2742,5 +2841,3 @@ def build_combined_crack_stateless(
     if isinstance(ret["derived_midline_meta"], dict):
         ret["derived_midline_meta"].setdefault("segments_meta", ret["derived_midline_segments_meta"])
     return ret
-
-
