@@ -2967,16 +2967,15 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         # 1) G-variants (midline curvature params)
         # -----------------------------------
         # NOTE:
-        # - For real runs: we use the SAME 8 variants for BOTH old/new OS (apples-to-apples).
-        # - For smoke_test: we use DIFFERENT single-variant baselines:
-        #       new -> (1,25,25)
-        #       old -> (1,100,100)
+        # - old OS is always forced to legacy baseline (1,100,100).
+        # - shared/user variants are used for new OS.
+        # - smoke_test (when no user grid) keeps new at (1,25,25).
         if g_variants is None:
             # shared 8-variant grid (used when NOT smoke_test)
             g_variants_shared = [
-                {"g11": 1.0, "g22": 10.0,  "g33": 10.0},   # local refinement near 25
+                #{"g11": 1.0, "g22": 10.0,  "g33": 10.0},   # local refinement near 25
                 {"g11": 1.0, "g22": 25.0,  "g33": 25.0},   # current baseline
-                {"g11": 1.0, "g22": 50.0,  "g33": 50.0},   # moderate curvature
+                #{"g11": 1.0, "g22": 50.0,  "g33": 50.0},   # moderate curvature
                 {"g11": 1.0, "g22": 100.0, "g33": 100.0},  # LEGACY reference (old default)
             ]
         else:
@@ -3014,10 +3013,12 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             return cost, timing
 
         if not os_ablation:
-            m = getattr(ct.os, "OS_MODE", "new")
+            m = str(getattr(ct.os, "OS_MODE", "new")).lower()
+            if m not in ("old", "new"):
+                m = "new"
             cost, timing = _run_os_cost_inline(m)
-            os_cost_map["default"] = cost
-            os_cost_timings["default"] = timing
+            os_cost_map[m] = cost
+            os_cost_timings[m] = timing
         else:
             for m in os_modes:
                 cost, timing = _run_os_cost_inline(m)
@@ -3040,21 +3041,22 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         global_vid = 0
 
         for os_mode_name, os_cost in os_cost_map.items():
+            mode = str(os_mode_name).lower()
 
             # --------------------------------------------------------
             # Choose variants PER OS MODE
             # --------------------------------------------------------
-            if smoke_test and g_variants is None:
-                # faithful smoke baselines
-                if str(os_mode_name).lower() == "old":
-                    g_variants_run = [{"g11": 1.0, "g22": 100.0, "g33": 100.0}]
-                else:
-                    g_variants_run = [{"g11": 1.0, "g22": 25.0, "g33": 25.0}]
+            if mode == "old":
+                # old OS: always single legacy baseline
+                g_variants_run = [{"g11": 1.0, "g22": 100.0, "g33": 100.0}]
+            elif smoke_test and g_variants is None:
+                # new OS smoke baseline
+                g_variants_run = [{"g11": 1.0, "g22": 25.0, "g33": 25.0}]
             else:
-                # normal run: shared balanced set
-                g_variants_run = g_variants if g_variants is not None else g_variants_shared
+                # new OS normal run: shared balanced set (or user-provided grid)
+                g_variants_run = list(g_variants_shared)
 
-            print(f"[AUTO {crack_id}] === RS3 (mode={os_mode_name}) ===")
+            print(f"[AUTO {crack_id}] === RS3 (mode={mode}) ===")
             print(
                 f"[AUTO {crack_id}] g_variants_run (n={len(g_variants_run)}): "
                 f"{[(v['g11'], v['g22'], v['g33']) for v in g_variants_run]}"
@@ -3128,7 +3130,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     "image": base_name,
                     "crack_id": crack_id,
                     "variant_global_id": vid,
-                    "os_mode": os_mode_name,
+                    "os_mode": mode,
                     "g11": float(g_used["g11"]),
                     "g22": float(g_used["g22"]),
                     "g33": float(g_used["g33"]),
@@ -3163,12 +3165,12 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     "image": base_name,
                     "crack_id": crack_id,
                     "variant_global_id": vid,
-                    "os_mode": os_mode_name,
+                    "os_mode": mode,
                     "g11": float(g_used["g11"]),
                     "g22": float(g_used["g22"]),
                     "g33": float(g_used["g33"]),
                 }
-                timing_row.update(os_cost_timings.get(os_mode_name, {}))
+                timing_row.update(os_cost_timings.get(mode, {}))
                 timing_row.update(r.get("timing", {}))
                 timing_rows[vid] = timing_row
 
@@ -3176,7 +3178,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 # VARIANT REGISTRATION
                 # --------------------------------------------------
                 desc = _variant_desc(vid, g_used, edge_params_fixed or {})
-                desc["os_mode"] = os_mode_name
+                desc["os_mode"] = mode
 
                 # --------------------------------------------------
                 # TOPOLOGY INHERITANCE (FROM MANUAL CRACK)
@@ -3202,7 +3204,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 )
 
                 variant_labels_by_id[vid] = (
-                    f"{os_mode_name}: g11={g_used['g11']} "
+                    f"{mode}: g11={g_used['g11']} "
                     f"g22={g_used['g22']} g33={g_used['g33']}"
                 )
 
