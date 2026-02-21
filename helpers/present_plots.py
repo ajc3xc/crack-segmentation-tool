@@ -1486,6 +1486,8 @@ def plot_rs3_sweep_summary(
     *,
     weight_col="global_weight",
     selected_family=None,
+    save_folder=None,
+    image_base=None,
 ):
     """
     Thesis-grade RS3 auto-variant calibration summary.
@@ -1650,37 +1652,143 @@ def plot_rs3_sweep_summary(
     plt.close()
 
     # ==================================================
-    # 3) PER-CRACK FAMILY COMPARISON
+    # 3) PER-CRACK GEOMETRY COMPARISON
     # ==================================================
+    if save_folder is None or image_base is None:
+        print("[plot_rs3] geometry plots skipped (missing save_folder/image_base)")
+    else:
+        from helpers.metrics import metric_atomic_path_for, safe_read_json
+
+        for cid in sorted(D["crack_id"].unique()):
+            crack_rows = D[D["crack_id"] == cid].copy()
+            if crack_rows.empty:
+                continue
+
+            def _exists(mode, g22):
+                return not crack_rows[
+                    (crack_rows["os_mode"] == mode) &
+                    (crack_rows["g11"] == 1.0) &
+                    (crack_rows["g22"] == g22) &
+                    (crack_rows["g33"] == g22)
+                ].empty
+
+            if not _exists("old", 100.0):
+                raise RuntimeError(f"[plot_rs3] Missing old,1,100,100 for crack {cid}")
+            if not _exists("new", 100.0):
+                raise RuntimeError(f"[plot_rs3] Missing new,1,100,100 for crack {cid}")
+
+            p_cr = metric_atomic_path_for(save_folder, image_base, cid)
+            crack_json = safe_read_json(p_cr, None)
+            if not crack_json:
+                continue
+
+            manual_xy = np.asarray(crack_json.get("midline", []), float)
+            if manual_xy.ndim != 2 or len(manual_xy) < 2:
+                continue
+
+            auto_dir = os.path.join(
+                save_folder,
+                "metrics",
+                image_base,
+                f"cid{cid}",
+                "auto"
+            )
+
+            def load_variant(mode, g22):
+                row = crack_rows[
+                    (crack_rows["os_mode"] == mode) &
+                    (crack_rows["g11"] == 1.0) &
+                    (crack_rows["g22"] == g22) &
+                    (crack_rows["g33"] == g22)
+                ]
+                if row.empty:
+                    return None
+
+                vid = int(row.iloc[0]["variant_global_id"])
+                vfile = os.path.join(auto_dir, f"v{vid}.json")
+                if not os.path.exists(vfile):
+                    return None
+
+                vjson = safe_read_json(vfile, None)
+                if not vjson:
+                    return None
+
+                return np.asarray(vjson.get("midline", []), float)
+
+            old_xy = load_variant("old", 100.0)
+            new_xy = load_variant("new", 100.0)
+
+            if old_xy is not None and new_xy is not None:
+                plt.figure(figsize=(6, 6), dpi=150)
+                plt.plot(
+                    manual_xy[:, 0], manual_xy[:, 1],
+                    color="black", linewidth=2.2, label="Manual"
+                )
+                plt.plot(
+                    old_xy[:, 0], old_xy[:, 1],
+                    color="red", linestyle="--", linewidth=1.8,
+                    label="old,1,100,100"
+                )
+                plt.plot(
+                    new_xy[:, 0], new_xy[:, 1],
+                    color="blue", linewidth=1.8,
+                    label="new,1,100,100"
+                )
+                plt.gca().invert_yaxis()
+                plt.title(f"Baseline comparison — crack {cid}")
+                plt.legend(loc="lower right")
+                plt.tight_layout()
+                plt.savefig(
+                    os.path.join(out_dir, f"rs3_geometry_crack_{cid}_baseline.png"),
+                    bbox_inches="tight"
+                )
+                plt.close()
+
+            flex_rows = crack_rows[
+                (crack_rows["os_mode"] == "new") &
+                (crack_rows["g22"] != 100.0)
+            ].sort_values("g22")
+
+            if not flex_rows.empty:
+                n = len(flex_rows)
+                fig, axes = plt.subplots(1, n, figsize=(4 * n, 4), dpi=150)
+                if n == 1:
+                    axes = [axes]
+
+                for ax, (_, row) in zip(axes, flex_rows.iterrows()):
+                    g22 = float(row["g22"])
+                    var_xy = load_variant("new", g22)
+                    if var_xy is None:
+                        continue
+
+                    ax.plot(
+                        manual_xy[:, 0], manual_xy[:, 1],
+                        color="black", linewidth=2.0
+                    )
+                    ax.plot(
+                        var_xy[:, 0], var_xy[:, 1],
+                        color="blue", linewidth=1.8
+                    )
+                    ax.invert_yaxis()
+                    ax.set_title(
+                        f"new,1,{int(g22)},{int(g22)}\n"
+                        f"score={row['score_mid']:.3f}"
+                    )
+
+                fig.suptitle(f"Curvature sensitivity — crack {cid}")
+                plt.tight_layout()
+                plt.savefig(
+                    os.path.join(out_dir, f"rs3_geometry_crack_{cid}_flex.png"),
+                    bbox_inches="tight"
+                )
+                plt.close()
+
     best_per_crack = (
         D.groupby(["crack_id", "family"])["score_mid"]
         .min()
         .reset_index()
     )
     best_per_crack["family_id"] = best_per_crack["family"].map(family_id)
-
-    for cid, g in best_per_crack.groupby("crack_id"):
-        g = g.sort_values("score_mid")
-
-        plt.figure(figsize=(3.8, 2.8), dpi=160)
-        plt.bar(
-            g["family_id"],
-            g["score_mid"],
-            color=[fam_color[f] for f in g["family"]],
-        )
-
-        plt.ylabel("score_mid (lower is better)")
-        plt.xlabel("RS3 family")
-        plt.title(f"RS3 family comparison — crack {cid}")
-        plt.grid(axis="y", alpha=0.25)
-        plt.legend(handles=legend_handles, fontsize=7, frameon=True)
-
-        plt.tight_layout()
-        plt.savefig(
-            os.path.join(out_dir, f"rs3_family_crack_{cid}.png"),
-            bbox_inches="tight",
-        )
-        plt.close()
 
     # ==================================================
     # 4) FAMILY SELECTION FREQUENCY

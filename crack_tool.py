@@ -184,7 +184,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         if os.path.isdir(image_dir):
             try:
                 shutil.rmtree(image_dir)
-                print(f"[METRICS] ðŸ§¹ Purged metrics for image '{base}'")
+                print(f"[METRICS] 🧠¹ Purged metrics for image '{base}'")
             except Exception as e:
                 print(f"[METRICS] âš  Failed to purge metrics for '{base}': {e}")
     
@@ -524,7 +524,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                         print(f"   manual_midlines_tmp keys: {list(getattr(self, 'manual_midlines_tmp', {}).keys())}")
                         print(f"   total atomic before save: {len(self.annotation['annotations']['atomic_cracks'])}")
 
-                        # ðŸ§   For now, bail early to inspect whatâ€™s going on â€” no file write, no mutation
+                        # 🧠   For now, bail early to inspect what’s going on — no file write, no mutation
                         #return
 
                         # Save segment (midline + edges + mask + per-crack endpoints)
@@ -817,7 +817,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         all_idxs = list(range(len(self.image_names)))
         eligible_idxs = [i for i in all_idxs if _has_manual_midlines_for_index(i)]
         if not eligible_idxs:
-            print("[global-metrics] âŒ No images with manual midlines found â€” aborting.")
+            print("[global-metrics] âŒ No images with manual midlines found — aborting.")
             # try to restore a reasonable state
             if all_idxs:
                 self.n = 0
@@ -909,7 +909,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                     "p":  int(best["param_p"]),
                 }
             else:
-                print("[global-metrics] âš  no sweep rows gathered â€” using default edge params")
+                print("[global-metrics] âš  no sweep rows gathered — using default edge params")
                 global_best_edge = {"window_half_size": 45, "mu": 0.0, "l": 5, "p": 14}
 
             with open(os.path.join(summ_dir, "global_best_edge_params.json"), "w") as f:
@@ -926,7 +926,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             # --- PHASE B: Apply timer ---
         tB_start = time.perf_counter()
 
-        print("[global-metrics] applying global params to imagesâ€¦")
+        print("[global-metrics] applying global params to images...")
         apply_idxs = idxs_sample if apply_to_sample else list(range(len(self.image_names)))
 
         per_image_times = []
@@ -938,19 +938,19 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                 base_name = os.path.splitext(os.path.basename(self.image_names[i]))[0]
                 ann_path  = os.path.join(self.save_folder, f"{base_name}.json")
                 if not os.path.exists(ann_path):
-                    print(f"[apply] âš  Skipping {base_name} â€” no JSON found.")
+                    print(f"[apply] âš  Skipping {base_name} — no JSON found.")
                     continue
 
                 # 2) Skip if JSON exists but has no manual midlines with â‰¥2 points
                 if not metrics._json_has_manual_midlines(ann_path):
-                    print(f"[apply] âš  Skipping {base_name} â€” JSON has no manual midlines.")
+                    print(f"[apply] âš  Skipping {base_name} — JSON has no manual midlines.")
                     continue
 
                 # 3) Skip if already completed earlier
                 image_dir = os.path.join(self.save_folder, "metrics", base_name)
                 done_flag = os.path.join(image_dir, "DONE.ok")
                 if os.path.exists(done_flag):
-                    print(f"[apply] âœ… Already complete â€” {base_name} (found DONE.ok)")
+                    print(f"[apply] âœ… Already complete — {base_name} (found DONE.ok)")
                     continue
 
                 # -------------------------------------------
@@ -1186,9 +1186,9 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         PHASE B: Apply to all images
 
         NEW BEHAVIOR:
-        â€¢ No per-image RS3 fallback.
-        â€¢ If global RS3 fails â†’ RS3 completely disabled for batch.
-        â€¢ Pipeline continues safely using only edge tracking + manual midlines.
+        • No per-image RS3 fallback.
+        • If global RS3 fails â†’ RS3 completely disabled for batch.
+        • Pipeline continues safely using only edge tracking + manual midlines.
         """
         import os, json, random, time
         import numpy as np, pandas as pd
@@ -1566,9 +1566,9 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                     if global_best_rs3:
                         print(f"[global-metrics] âœ… global RS3 family: {global_best_rs3}")
                     else:
-                        print("[global-metrics] âš  RS3 calibration failed â€” RS3 disabled.")
+                        print("[global-metrics] âš  RS3 calibration failed — RS3 disabled.")
                 else:
-                    print("[global-metrics] âš  No RS3 packs â€” RS3 disabled.")
+                    print("[global-metrics] âš  No RS3 packs — RS3 disabled.")
 
             finally:
                 self.n = orig_n
@@ -1597,10 +1597,10 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
 
                 # ---- Skip invalid images ----
                 if not os.path.exists(ann_path):
-                    print(f"[apply] âš  Skipping {base} â€” no JSON.")
+                    print(f"[apply] âš  Skipping {base} — no JSON.")
                     continue
                 if not _json_has_manual_midlines(ann_path):
-                    print(f"[apply] âš  Skipping {base} â€” no manual midlines.")
+                    print(f"[apply] âš  Skipping {base} — no manual midlines.")
                     continue
 
                 img_dir = os.path.join(self.save_folder, "metrics", base)
@@ -1648,7 +1648,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                         manual_ids.append(cid)
 
                 # ====================================================
-                # MODE 1 â€” EDGE-ONLY
+                # MODE 1 — EDGE-ONLY
                 # ====================================================
                 if edges_only:
                     t_edge_parallel_start = time.perf_counter()
@@ -1677,7 +1677,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                     t_metrics = time.perf_counter() - t_metrics_start
 
                 # ====================================================
-                # MODE 2 â€” FULL RS3 (requires global_best_rs3)
+                # MODE 2 — FULL RS3 (requires global_best_rs3)
                 # ====================================================
                 else:
                     rs3_available = (global_best_rs3 is not None)
@@ -1739,7 +1739,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                             include_auto_metrics = False
 
                     else:
-                        print(f"[apply] âš  No global RS3 family â€” skipping auto midlines for {base}")
+                        print(f"[apply] âš  No global RS3 family — skipping auto midlines for {base}")
                         auto_packs = {}
                         include_auto_metrics = False
 
@@ -1937,7 +1937,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         from helpers.metrics import reconstruct_manual_mask_from_edges
 
         if not getattr(self, "name", None):
-            print("[metrics] âš  no image loaded â€” aborting smoke test.")
+            print("[metrics] âš  no image loaded — aborting smoke test.")
             return
 
         base_name = os.path.splitext(os.path.basename(self.name))[0]
@@ -2125,7 +2125,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         print(f"\n[quick] metrics for current image: {base_name}")
 
         # ------------------------------------------------------------
-        # SAFETY CHECK â€” must have â‰¥2-pt manual midlines in AUTHORING
+        # SAFETY CHECK — must have â‰¥2-pt manual midlines in AUTHORING
         # ------------------------------------------------------------
         ann = (getattr(self, "annotation", {}) or {}).get("annotations", {}) or {}
         atomic_authoring = ann.get("atomic_cracks", {}) or {}
@@ -2141,7 +2141,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             return False
 
         if not atomic_authoring or not _has_valid_manual_midlines(atomic_authoring):
-            print(f"[DEBUG QUICK] ðŸ§¹ No valid manual midlines â€” purging snapshot for {base_name}")
+            print(f"[DEBUG QUICK] 🧠¹ No valid manual midlines — purging snapshot for {base_name}")
 
             metrics_dir = os.path.join(self.save_folder, "metrics")
             snap_path = os.path.join(metrics_dir, f"{base_name}.json")
@@ -2234,7 +2234,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             #   - new selector: returns {"params": {...}, "per_crack_geom": {...}}
             # --------------------------------------------------------
             if sel is None:
-                print("[quick] âš  edge family selection returned None â€” fallback to defaults")
+                print("[quick] âš  edge family selection returned None — fallback to defaults")
                 sel = {
                     "params": dict(window_half_size=45, mu=0.0, l=5, p=14, seg_mode="new"),
                     "per_crack_geom": {},
@@ -2309,7 +2309,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             print(f"[quick] cached edges applied to {n_applied} cracks")
         else:
             if do_edge_calibrate:
-                print("[quick] no cache map present â€” will recompute edges in Phase 1")
+                print("[quick] no cache map present — will recompute edges in Phase 1")
 
         t_edge_calib = time.perf_counter() - t_edge_calib_start
         print(f"[quick] â± edge calibration total: {t_edge_calib:.2f}s")

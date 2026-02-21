@@ -224,7 +224,7 @@ def hausdorff_p95(A, B, q=95):
 
 def frechet_discrete_ds(A, B, max_points=800):
     """
-    Iterative Eiterâ€“Mannila discrete FrÃ©chet distance.
+    Iterative EiterMannila discrete FrÃ©chet distance.
     - No recursion (avoids RecursionError)
     - Resamples long polylines to <= max_points for robustness
     """
@@ -6899,7 +6899,7 @@ def compare_widths_for_aligned_cracks(
     # NOTES:
     #   - Resampling is applied to the *measurement samples* (d(s)=pred-gt), not to GT geometry itself.
     #   - If you also pass per-sample pred/gt widths into width_pairs as "predw" and "gruthw", Part 2 will
-    #     resample and plot those too (so you can show â€œeffect on GT vs predâ€ explicitly).
+    #     resample and plot those too (so you can show effect on GT vs pred" explicitly).
     # ============================================================
     
     try:

@@ -44,6 +44,8 @@ def edge_masks(
     """
     import numpy as np
     import scipy.ndimage as ndi
+    
+    #NOTE: new on here sucks. Using old only for baselines.
 
     # ------------------------------------------------------------------
     # =============== MODE: NEW (YOUR GPU HYBRID) ======================
