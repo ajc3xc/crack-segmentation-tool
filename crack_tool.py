@@ -2398,7 +2398,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                 print(f"[quick] âš  RS3 family selection failed: {e}")
         else:
             print("[quick] âš  no auto_packs; skipping RS3 family selection.")
-        #return
+        return
 
         # ------------------------------------------------------------
         # PHASE 2: GEODESIC EDGES FOR AUTO BEST MIDLINES

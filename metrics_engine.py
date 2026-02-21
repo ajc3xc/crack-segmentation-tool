@@ -2976,7 +2976,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 #{"g11": 1.0, "g22": 10.0,  "g33": 10.0},   # local refinement near 25
                 {"g11": 1.0, "g22": 25.0,  "g33": 25.0},   # current baseline
                 #{"g11": 1.0, "g22": 50.0,  "g33": 50.0},   # moderate curvature
-                {"g11": 1.0, "g22": 100.0, "g33": 100.0},  # LEGACY reference (old default)
+                #{"g11": 1.0, "g22": 100.0, "g33": 100.0},  # LEGACY reference (old default)
             ]
         else:
             # user-supplied grid takes precedence

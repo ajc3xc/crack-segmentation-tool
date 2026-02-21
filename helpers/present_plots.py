@@ -1542,15 +1542,28 @@ def plot_rs3_sweep_summary(
     # --------------------------------------------------
     # Human-readable family label
     # --------------------------------------------------
-    def format_family(row):
+    def _fmt_intish(x):
+        try:
+            xf = float(x)
+            if abs(xf - round(xf)) < 1e-9:
+                return str(int(round(xf)))
+            return f"{xf:g}"
+        except Exception:
+            return str(x)
+
+    def format_family_raw(row):
         return (
-            f"{row['os_mode']}, "
-            f"g11={int(row['g11'])}, "
-            f"g22={int(row['g22'])}, "
-            f"g33={int(row['g33'])}"
+            f"{str(row['os_mode']).lower()},"
+            f"{_fmt_intish(row['g11'])},"
+            f"{_fmt_intish(row['g22'])},"
+            f"{_fmt_intish(row['g33'])}"
         )
 
-    D["family"] = D.apply(format_family, axis=1)
+    def _pretty_xtick(fam):
+        parts = str(fam).split(",", 1)
+        return parts[0] + "\n" + parts[1] if len(parts) == 2 else str(fam)
+
+    D["family"] = D.apply(format_family_raw, axis=1)
 
     # --------------------------------------------------
     # Stable family IDs + infinite color palette
@@ -1566,10 +1579,7 @@ def plot_rs3_sweep_summary(
     # --------------------------------------------------
     # Proper legend handles (CRITICAL FIX)
     # --------------------------------------------------
-    legend_handles = [
-        Patch(color=fam_color[f], label=f"{family_id[f]}: {f}")
-        for f in families
-    ]
+    legend_handles = [Patch(color=fam_color[f], label=f"{f}") for f in families]
 
     # ==================================================
     # 1) RAW PARETO SCATTER
@@ -1606,7 +1616,14 @@ def plot_rs3_sweep_summary(
     plt.ylabel("Hausdorff ↓")
     plt.title("RS3 Pareto space (raw variants)")
     plt.grid(True, alpha=0.25)
-    plt.legend(handles=legend_handles, fontsize=7, frameon=True)
+    plt.legend(
+        handles=legend_handles,
+        fontsize=7,
+        frameon=True,
+        title="os_mode,g11,g22,g33",
+        title_fontsize=8,
+        loc="lower right",
+    )
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, "rs3_pareto.png"), bbox_inches="tight")
     plt.close()
@@ -1642,7 +1659,7 @@ def plot_rs3_sweep_summary(
         label="1 − coverage_min",
     )
 
-    plt.xticks(x, [family_id[f] for f in P["family"]], fontsize=8)
+    plt.xticks(x, [_pretty_xtick(f) for f in P["family"]], fontsize=8)
     plt.ylabel("Weighted mean score components")
     plt.title("RS3 score decomposition by family")
     plt.legend(fontsize=8)
@@ -1803,7 +1820,7 @@ def plot_rs3_sweep_summary(
 
     plt.figure(figsize=(3.8, 2.8), dpi=160)
     plt.bar(
-        [family_id[f] for f in wins.index],
+        [_pretty_xtick(f) for f in wins.index],
         wins.values,
         color=[fam_color[f] for f in wins.index],
     )
@@ -1812,7 +1829,15 @@ def plot_rs3_sweep_summary(
     plt.xlabel("RS3 family")
     plt.title("RS3 family selection frequency")
     plt.grid(axis="y", alpha=0.25)
-    plt.legend(handles=legend_handles, fontsize=7, frameon=True)
+    plt.legend(
+        #handles=legend_handles,
+        fontsize=7,
+        frameon=True,
+        title="os_mode,g11,g22,g33",
+        title_fontsize=8,
+        loc="lower right",
+    )
+    plt.xticks(rotation=0)
 
     plt.tight_layout()
     plt.savefig(
