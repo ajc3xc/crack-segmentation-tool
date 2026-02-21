@@ -2096,8 +2096,18 @@ def plot_rs3_midline_diagnostics(
         if not data:
             return
 
-        plt.figure(figsize=(1.6 * len(data), 4))
-        plt.boxplot(data, labels=labels, showfliers=False)
+        plt.figure(figsize=(1.8 * len(data), 4.4))
+        # For tiny-N, boxplots collapse into short line glyphs; use scatter+mean instead.
+        if max(len(v) for v in data) < 4:
+            means = [float(np.mean(v)) for v in data]
+            x = np.arange(1, len(labels) + 1, dtype=float)
+            plt.bar(x, means, width=0.52, color="#4c78a8", alpha=0.75, edgecolor="black", linewidth=0.8)
+            for i, vals in enumerate(data, start=1):
+                xx = np.full(len(vals), float(i))
+                plt.scatter(xx, vals, s=22, color="black", alpha=0.85, zorder=3)
+            plt.xticks(x, labels, rotation=15, ha="right")
+        else:
+            plt.boxplot(data, labels=labels, showfliers=False)
         plt.ylabel("value")
 
         title = plot_title

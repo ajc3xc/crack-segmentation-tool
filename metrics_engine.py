@@ -65,193 +65,32 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
     ###################################################################   
     def summarize_dataset_metrics(self):
         """
-        Walk metrics/*/* CSVs and produce overall means + richer manual-vs-auto plots.
-        Expects per-image files:
-        - mask_metrics.csv with columns including:
-            image, crack_type ∈ {atomic, combined, TOTAL, atomic_auto, combined_auto, TOTAL_AUTO, ...}
-            iou, boundary_f1, ...
-        - width_metrics.csv written via width_summary_to_csv(..., label)
-            with some column that identifies subset (e.g. 'subset', 'tag', 'group', or 'crack_type').
+        Dataset-level aggregation wrapper.
+
+        Uses helpers/summarize_metrics.py as the canonical summarizer and keeps
+        baseline roots wired in when available.
         """
-        import os, glob
-        import pandas as pd
-        import numpy as np
-        import matplotlib.pyplot as plt
+        import os
+        from helpers.summarize_metrics import summarize_dataset_metrics as _summarize_dataset_metrics
 
-        root = os.path.join(self.save_folder, "metrics")
-        if not os.path.isdir(root):
-            print("[summarize] no metrics directory yet")
-            return
+        baseline_roots = []
+        for p in (
+            getattr(self, "width_baseline_folder", None),
+            getattr(self, "mask_baseline_folder", None),
+        ):
+            if p and isinstance(p, str):
+                baseline_roots.append(p)
 
-        out_dir = os.path.join(root, "_summary")
-        os.makedirs(out_dir, exist_ok=True)
+        report = _summarize_dataset_metrics(
+            save_folder=self.save_folder,
+            out_dir=os.path.join(self.save_folder, "metrics", "_summary"),
+            baseline_roots=baseline_roots,
+            verbose=True,
+        )
 
-        # ------------------------------------------------------------
-        # MASK METRICS (manual/auto/baseline, grouped dynamically)
-        # ------------------------------------------------------------
-        mask_csvs = glob.glob(os.path.join(root, "*", "mask_metrics.csv"))
-
-        if mask_csvs:
-            dfm = pd.concat([pd.read_csv(p) for p in mask_csvs], ignore_index=True)
-            dfm.to_csv(os.path.join(out_dir, "mask_metrics_all.csv"), index=False)
-
-            if "crack_type" not in dfm.columns:
-                print("[summarize] mask_metrics.csv has no 'crack_type' column; skipping mask breakdown plots.")
-            else:
-                if "supervision" not in dfm.columns:
-                    dfm["supervision"] = "manual"
-                if "method" not in dfm.columns:
-                    dfm["method"] = "geodesic"
-
-                dfm["variant"] = (
-                    dfm["supervision"].astype(str).str.strip()
-                    + ":"
-                    + dfm["method"].astype(str).str.strip()
-                )
-
-                by_type = dfm.groupby("crack_type").mean(numeric_only=True).reset_index()
-                by_type.to_csv(os.path.join(out_dir, "mask_metrics_by_crack_type.csv"), index=False)
-
-                by_variant_type = (
-                    dfm.groupby(["variant", "crack_type"]).mean(numeric_only=True).reset_index()
-                )
-                by_variant_type.to_csv(
-                    os.path.join(out_dir, "mask_metrics_by_variant_and_crack_type.csv"),
-                    index=False,
-                )
-
-                iou_col = None
-                for cand in ["iou", "iou_manual_vs_gt", "iou_auto_vs_gt"]:
-                    if cand in dfm.columns:
-                        iou_col = cand
-                        break
-                bf1_col = "boundary_f1" if "boundary_f1" in dfm.columns else None
-
-                if iou_col is None:
-                    print("[summarize] no IoU column found in mask metrics.")
-                else:
-                    plt.figure(figsize=(6, 4))
-                    plt.bar(by_type["crack_type"], by_type[iou_col])
-                    plt.ylim(0, 1)
-                    plt.xticks(rotation=30, ha="right")
-                    plt.ylabel("IoU")
-                    plt.title(f"Mean {iou_col} by crack_type (dataset)")
-                    plt.tight_layout()
-                    plt.savefig(os.path.join(out_dir, "mask_iou_by_crack_type.png"), dpi=160)
-                    plt.close()
-
-                    df_total = by_variant_type[
-                        by_variant_type["crack_type"].astype(str).str.upper() == "TOTAL"
-                    ].copy()
-                    if not df_total.empty:
-                        labels = df_total["variant"].astype(str).tolist()
-                        vals = df_total[iou_col].astype(float).tolist()
-                        plt.figure(figsize=(max(5, 1.4 * len(labels)), 3.8))
-                        plt.bar(labels, vals)
-                        plt.ylim(0, 1)
-                        plt.ylabel("IoU")
-                        plt.xticks(rotation=28, ha="right")
-                        plt.title("Mean TOTAL IoU by variant")
-                        plt.tight_layout()
-                        plt.savefig(os.path.join(out_dir, "mask_total_iou_by_variant.png"), dpi=160)
-                        plt.close()
-
-                if bf1_col is not None:
-                    plt.figure(figsize=(6, 4))
-                    plt.bar(by_type["crack_type"], by_type[bf1_col])
-                    plt.ylim(0, 1)
-                    plt.xticks(rotation=30, ha="right")
-                    plt.ylabel("Boundary F1")
-                    plt.title("Mean boundary F1 by crack_type (dataset)")
-                    plt.tight_layout()
-                    plt.savefig(os.path.join(out_dir, "boundary_f1_by_crack_type.png"), dpi=160)
-                    plt.close()
-
-                    df_total_b = by_variant_type[
-                        by_variant_type["crack_type"].astype(str).str.upper() == "TOTAL"
-                    ].copy()
-                    if not df_total_b.empty:
-                        labels = df_total_b["variant"].astype(str).tolist()
-                        vals = df_total_b[bf1_col].astype(float).tolist()
-                        plt.figure(figsize=(max(5, 1.4 * len(labels)), 3.8))
-                        plt.bar(labels, vals)
-                        plt.ylim(0, 1)
-                        plt.ylabel("Boundary F1")
-                        plt.xticks(rotation=28, ha="right")
-                        plt.title("Mean TOTAL boundary F1 by variant")
-                        plt.tight_layout()
-                        plt.savefig(os.path.join(out_dir, "mask_total_boundary_f1_by_variant.png"), dpi=160)
-                        plt.close()
-
-        # ------------------------------------------------------------
-        # WIDTH METRICS (manual vs auto, combined vs combined_auto)
-        # ------------------------------------------------------------
-        width_csvs = glob.glob(os.path.join(root, "*", "width_metrics.csv"))
-
-        if width_csvs:
-            dfw = pd.concat([pd.read_csv(p) for p in width_csvs], ignore_index=True)
-            dfw.to_csv(os.path.join(out_dir, "width_metrics_all.csv"), index=False)
-
-            # detect subset column (manual/auto/combined/combined_auto)
-            subset_col = None
-            for cand in ["subset", "tag", "group", "crack_type", "mode"]:
-                if cand in dfw.columns:
-                    subset_col = cand
-                    break
-
-            if subset_col is None:
-                print("[summarize] width_metrics.csv has no subset/tag/group column; using global summary only.")
-                m = dfw.mean(numeric_only=True)
-                keep = [c for c in ["width_diff_mae", "width_diff_rmse", "width_diff_mean", "width_diff_std"]
-                        if c in dfw.columns]
-                if keep:
-                    plt.figure(figsize=(5, 3))
-                    plt.bar(keep, [m[c] for c in keep])
-                    plt.xticks(rotation=20)
-                    plt.title("Mean width differences (global)")
-                    plt.tight_layout()
-                    plt.savefig(os.path.join(out_dir, "width_means_global.png"), dpi=160)
-                    plt.close()
-            else:
-                by_subset = dfw.groupby(subset_col).mean(numeric_only=True).reset_index()
-                by_subset.to_csv(os.path.join(out_dir, "width_metrics_by_subset.csv"), index=False)
-
-                # candidate metric columns
-                mae_col  = None
-                rmse_col = None
-                for cand in ["width_diff_mae", "mae", "abs_diff_mae"]:
-                    if cand in dfw.columns:
-                        mae_col = cand
-                        break
-                for cand in ["width_diff_rmse", "rmse"]:
-                    if cand in dfw.columns:
-                        rmse_col = cand
-                        break
-
-                # ---------- Plot: width MAE / RMSE by subset ----------
-                if mae_col or rmse_col:
-                    subsets = by_subset[subset_col].astype(str).tolist()
-                    mae_vals  = [by_subset[mae_col][i]  if mae_col  else np.nan for i in range(len(by_subset))]
-                    rmse_vals = [by_subset[rmse_col][i] if rmse_col else np.nan for i in range(len(by_subset))]
-
-                    x = np.arange(len(subsets))
-                    width = 0.35
-
-                    plt.figure(figsize=(6, 4))
-                    if mae_col:
-                        plt.bar(x - width/2, mae_vals, width, label=mae_col)
-                    if rmse_col:
-                        plt.bar(x + width/2, rmse_vals, width, label=rmse_col)
-
-                    plt.xticks(x, subsets, rotation=20, ha="right")
-                    plt.ylabel("Pixels")
-                    plt.title("Mean crack width errors by subset (manual/auto/combined/combined_auto)")
-                    plt.legend()
-                    plt.tight_layout()
-                    plt.savefig(os.path.join(out_dir, "width_errors_by_subset.png"), dpi=160)
-                    plt.close()
-
-        print(f"[summarize] wrote summaries → {out_dir}")
+        n_out = len((report or {}).get("outputs", {}) or {})
+        print(f"[summarize] dataset aggregation complete ({n_out} artifacts tracked)")
+        return report
     
     def _flatten_edge_worker_result(self, crack_id, params, ew):
         """
