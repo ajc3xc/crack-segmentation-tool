@@ -368,7 +368,7 @@ def plot_midlines_overlay_all(image_crop_rgb, man_local_xy, var_local_xy_by_id, 
                               save_overlay_png, save_legend_png):
     import matplotlib.pyplot as plt
     import numpy as np
-    from itertools import cycle
+    import re
 
     # safe defaults
     im = image_crop_rgb
@@ -376,61 +376,158 @@ def plot_midlines_overlay_all(image_crop_rgb, man_local_xy, var_local_xy_by_id, 
         import cv2
         im = cv2.cvtColor(im.astype(np.uint8), cv2.COLOR_GRAY2BGR)
 
-    # line styles & colors (repeat as needed)
-    styles = cycle(["-", "--", "-.", ":"])
-    # 10 distinct-ish colors
-    palette = [
-        (31/255,119/255,180/255),
-        (255/255,127/255,14/255),
-        (44/255,160/255,44/255),
-        (214/255,39/255,40/255),
-        (148/255,103/255,189/255),
-        (140/255,86/255,75/255),
-        (227/255,119/255,194/255),
-        (127/255,127/255,127/255),
-        (188/255,189/255,34/255),
-        (23/255,190/255,207/255),
-    ]
-    colors = cycle(palette)
+    def _fmt_intish(v):
+        try:
+            vf = float(v)
+            if abs(vf - round(vf)) < 1e-9:
+                return str(int(round(vf)))
+            return f"{vf:g}"
+        except Exception:
+            return str(v)
 
-    # -------- overlay ----------
-    plt.figure(figsize=(8, 8), dpi=150)
-    plt.imshow(im, origin="upper")
-    # manual with white outline + black core
-    if len(man_local_xy) > 1:
-        x, y = man_local_xy[:, 0], man_local_xy[:, 1]
-        plt.plot(x, y, '-', lw=4, color='white', alpha=0.9)
-        plt.plot(x, y, '-', lw=2, color='black', label='manual')
+    def _parse_label(lbl):
+        s = str(lbl or "")
+        m = re.search(
+            r"^\s*([A-Za-z0-9_]+)\s*:\s*g11=([^\s]+)\s+g22=([^\s]+)\s+g33=([^\s]+)",
+            s,
+        )
+        if not m:
+            return None
+        mode = str(m.group(1)).lower()
+        try:
+            g11 = float(m.group(2))
+            g22 = float(m.group(3))
+            g33 = float(m.group(4))
+        except Exception:
+            return None
+        return {
+            "mode": mode,
+            "g11": g11,
+            "g22": g22,
+            "g33": g33,
+            "short": f"{mode},{_fmt_intish(g11)},{_fmt_intish(g22)},{_fmt_intish(g33)}",
+        }
 
-    # autos
-    handles = []
-    for vid, xy in sorted(var_local_xy_by_id.items()):
-        if xy is None or len(xy) < 2:
+    records = []
+    for vid, xy in sorted((var_local_xy_by_id or {}).items()):
+        if xy is None:
             continue
-        col = next(colors); ls = next(styles)
-        h, = plt.plot(
-            xy[:, 0], xy[:, 1],
-            ls, lw=2, color=col,
-            label=variant_labels_by_id.get(vid, f"v{vid}")
-        )
-        handles.append(h)
+        arr = np.asarray(xy, float)
+        if arr.ndim != 2 or arr.shape[1] != 2 or len(arr) < 2:
+            continue
+        info = _parse_label((variant_labels_by_id or {}).get(vid, f"v{vid}"))
+        if info is None:
+            continue
+        info["vid"] = int(vid)
+        info["xy"] = arr
+        records.append(info)
 
-    plt.title("auto vs manual (crop)")
-    plt.axis("equal")
+    def _match(mode, g22, g33=None, g11=1.0):
+        if g33 is None:
+            g33 = g22
+        for r in records:
+            if r["mode"] != str(mode).lower():
+                continue
+            if abs(float(r["g11"]) - float(g11)) > 1e-9:
+                continue
+            if abs(float(r["g22"]) - float(g22)) > 1e-9:
+                continue
+            if abs(float(r["g33"]) - float(g33)) > 1e-9:
+                continue
+            return r
+        return None
+
+    old_100 = _match("old", 100.0)
+    new_100 = _match("new", 100.0)
+
+    flex_new = []
+    for r in records:
+        if r["mode"] != "new":
+            continue
+        if abs(float(r["g11"]) - 1.0) > 1e-9:
+            continue
+        if abs(float(r["g22"]) - float(r["g33"])) > 1e-9:
+            continue
+        if abs(float(r["g22"]) - 100.0) <= 1e-9:
+            continue
+        flex_new.append(r)
+    flex_new = sorted(flex_new, key=lambda r: (float(r["g22"]), float(r["g33"]), int(r["vid"])))
+
+    panels = []
+    panels.append({
+        "title": "new,1,100,100",
+        "curves": [("manual", np.asarray(man_local_xy, float))],
+    })
+    if old_100 is not None:
+        panels[0]["curves"].append((old_100["short"], old_100["xy"]))
+    if new_100 is not None:
+        panels[0]["curves"].append((new_100["short"], new_100["xy"]))
+
+    for r in flex_new:
+        curves = [("manual", np.asarray(man_local_xy, float))]
+        if old_100 is not None:
+            curves.append((old_100["short"], old_100["xy"]))
+        curves.append((r["short"], r["xy"]))
+        panels.append({
+            "title": r["short"],
+            "curves": curves,
+        })
+
+    if not panels:
+        panels = [{"title": "Manual", "curves": [("manual", np.asarray(man_local_xy, float))]}]
+
+    n = len(panels)
+    fig, axes = plt.subplots(1, n, figsize=(max(6, 4.5 * n), 5.0), dpi=180)
+    if n == 1:
+        axes = [axes]
+
+    # Consistent colors/styles across panels
+    color_map = {
+        "manual": ("black", "-", 2.4),
+    }
+    if old_100 is not None:
+        color_map[old_100["short"]] = ("red", "--", 1.8)
+    if new_100 is not None:
+        color_map[new_100["short"]] = ("dodgerblue", "-", 1.8)
+    flex_palette = ["limegreen", "orange", "magenta", "cyan", "gold", "deepskyblue", "violet"]
+    for i, r in enumerate(flex_new):
+        color_map.setdefault(r["short"], (flex_palette[i % len(flex_palette)], "-", 1.6))
+
+    for ax, panel in zip(axes, panels):
+        ax.imshow(im, origin="upper")
+
+        for lbl, xy in panel["curves"]:
+            arr = np.asarray(xy, float)
+            if arr.ndim != 2 or arr.shape[1] != 2 or len(arr) < 2:
+                continue
+            key = str(lbl).lower()
+            if key == "manual":
+                # white halo for readability
+                ax.plot(arr[:, 0], arr[:, 1], "-", lw=4.2, color="white", alpha=0.9, zorder=2)
+                c, ls, lw = color_map["manual"]
+                ax.plot(arr[:, 0], arr[:, 1], ls, lw=lw, color=c, label="manual", zorder=3)
+            else:
+                c, ls, lw = color_map.get(lbl, ("tab:gray", "-", 1.6))
+                ax.plot(arr[:, 0], arr[:, 1], ls, lw=lw, color=c, label=lbl, zorder=3)
+
+        ax.set_title(panel["title"], fontsize=9)
+        ax.set_aspect("equal")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.legend(loc="lower right", fontsize=6, framealpha=0.9)
+
+    fig.suptitle("manual vs baseline vs variants (os_ablation, g11, g22, g33)", fontsize=11)
     plt.tight_layout()
-    plt.savefig(save_overlay_png, dpi=200)
-    plt.close()
+    plt.savefig(save_overlay_png, dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
-    # -------- legend-only tile ----------
-    if handles:
-        fig_leg = plt.figure(figsize=(6, 2 + 0.2 * len(handles)), dpi=200)
-        fig_leg.legend(
-            handles=handles,
-            labels=[h.get_label() for h in handles],
-            loc="center",
-            frameon=False,
-            ncol=1,
-        )
-        fig_leg.canvas.draw()
-        fig_leg.savefig(save_legend_png, dpi=200, bbox_inches="tight")
-        plt.close(fig_leg)
+    # Legend is embedded in each subplot; skip separate legend tile.
+    if save_legend_png:
+        try:
+            # Keep downstream tooling from failing on missing file by writing a tiny note.
+            fig_leg = plt.figure(figsize=(3.5, 1.0), dpi=160)
+            fig_leg.text(0.5, 0.5, "Legend embedded in overlay", ha="center", va="center", fontsize=8)
+            fig_leg.savefig(save_legend_png, dpi=160, bbox_inches="tight")
+            plt.close(fig_leg)
+        except Exception:
+            pass

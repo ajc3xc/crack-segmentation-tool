@@ -1480,6 +1480,233 @@ def plot_from_cached_geometry(
 ##################################################################
 # Auto variants plots
 ##################################################################
+def _generate_rs3_geometry_panels(
+    D,
+    save_folder,
+    image_base,
+    out_dir,
+):
+    """
+    Generates:
+        rs3_geometry_representative.png
+        rs3_geometry_decisive.png
+    """
+    import pandas as pd
+
+    if D is None or getattr(D, "empty", True):
+        return
+
+    if "crack_id" not in D.columns:
+        return
+
+    if "length_px" in D.columns:
+        cid_rep = (
+            D.groupby("crack_id")["length_px"]
+            .mean()
+            .sort_values(ascending=False)
+            .index[0]
+        )
+    else:
+        cid_rep = sorted(D["crack_id"].unique())[0]
+
+    best_per_crack = (
+        D.groupby(["crack_id", "family"])["score_mid"]
+        .min()
+        .reset_index()
+    )
+
+    margins = []
+    for cid, g in best_per_crack.groupby("crack_id"):
+        g = g.sort_values("score_mid")
+        if len(g) >= 2:
+            margin = float(g.iloc[1]["score_mid"] - g.iloc[0]["score_mid"])
+            margins.append((cid, margin))
+
+    if margins:
+        cid_dec = sorted(margins, key=lambda x: -x[1])[0][0]
+    else:
+        cid_dec = cid_rep
+
+    try:
+        _plot_single_crack_geometry(
+            cid_rep,
+            D,
+            save_folder,
+            image_base,
+            out_dir,
+            filename="rs3_geometry_representative.png",
+        )
+    except Exception as e:
+        print(f"[plot_rs3] representative geometry skipped: {e}")
+
+    try:
+        _plot_single_crack_geometry(
+            cid_dec,
+            D,
+            save_folder,
+            image_base,
+            out_dir,
+            filename="rs3_geometry_decisive.png",
+        )
+    except Exception as e:
+        print(f"[plot_rs3] decisive geometry skipped: {e}")
+
+
+def _plot_single_crack_geometry(
+    cid,
+    D,
+    save_folder,
+    image_base,
+    out_dir,
+    filename,
+):
+    import os
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from helpers.metrics import metric_atomic_path_for, safe_read_json
+
+    crack_rows = D[D["crack_id"] == cid].copy()
+    if crack_rows.empty:
+        return
+
+    def _exists(mode, g22):
+        return not crack_rows[
+            (crack_rows["os_mode"] == mode) &
+            (crack_rows["g11"] == 1.0) &
+            (crack_rows["g22"] == g22) &
+            (crack_rows["g33"] == g22)
+        ].empty
+
+    has_old_100 = _exists("old", 100.0)
+    has_new_100 = _exists("new", 100.0)
+    if not has_old_100:
+        print(f"[plot_rs3] debug mode: missing old,1,100,100 for crack {cid}")
+    if not has_new_100:
+        print(f"[plot_rs3] debug mode: missing new,1,100,100 for crack {cid}")
+
+    p_cr = metric_atomic_path_for(save_folder, image_base, cid)
+    crack_json = safe_read_json(p_cr, None)
+    if not crack_json:
+        raise RuntimeError(f"Missing crack json for crack {cid}: {p_cr}")
+
+    manual_xy = np.asarray(crack_json.get("midline", []), float)
+    if manual_xy.ndim != 2 or manual_xy.shape[1] != 2 or len(manual_xy) < 2:
+        raise RuntimeError(f"Invalid manual midline for crack {cid}")
+
+    metrics_root = os.path.join(save_folder, "metrics", image_base)
+    auto_dir = os.path.join(metrics_root, f"cid{cid}", "auto")
+
+    print("---- GEOMETRY DEBUG ----")
+    print("CID:", cid)
+    print("save_folder:", save_folder)
+    print("image_base:", image_base)
+    print("metrics_root:", metrics_root)
+    print("auto_dir:", auto_dir)
+    print("auto_dir exists:", os.path.isdir(auto_dir))
+    if os.path.isdir(auto_dir):
+        try:
+            print("files in auto_dir:", sorted(os.listdir(auto_dir)))
+        except Exception as e:
+            print("files in auto_dir: <error>", e)
+    print("Available variant_global_id in D:")
+    try:
+        print(crack_rows["variant_global_id"].tolist())
+    except Exception:
+        print("<missing variant_global_id column>")
+    print("------------------------")
+
+    def load_variant(mode, g22):
+        row = crack_rows[
+            (crack_rows["os_mode"] == mode) &
+            (crack_rows["g11"] == 1.0) &
+            (crack_rows["g22"] == g22) &
+            (crack_rows["g33"] == g22)
+        ]
+        if row.empty:
+            return None, None
+
+        row0 = row.sort_values("score_mid", ascending=True).iloc[0]
+        vid = int(row0["variant_global_id"])
+        print("Attempting to load:", f"v{vid}.json")
+        vfile = os.path.join(auto_dir, f"v{vid}.json")
+        if not os.path.exists(vfile):
+            print(f"[DEBUG] Missing variant file: {vfile}")
+            return None, None
+
+        vjson = safe_read_json(vfile, {})
+        if "midline" in vjson:
+            xy = np.asarray(vjson.get("midline", []), float)
+        elif isinstance(vjson.get("auto_best"), dict) and ("midline" in vjson["auto_best"]):
+            xy = np.asarray(vjson["auto_best"].get("midline", []), float)
+        else:
+            print(f"[DEBUG] No midline key in variant JSON: {vfile}")
+            return None, None
+        if xy.ndim != 2 or xy.shape[1] != 2 or len(xy) < 2:
+            print(f"[DEBUG] Invalid/empty midline in variant JSON: {vfile}")
+            return None, None
+        return xy, row0
+
+    plt.figure(figsize=(6, 6), dpi=220)
+
+    plt.plot(
+        manual_xy[:, 0], manual_xy[:, 1],
+        color="black", linewidth=2.8,
+        label="Manual",
+    )
+
+    n_plotted_auto = 0
+
+    for mode in ["old", "new"]:
+        xy, row = load_variant(mode, 100.0)
+        if xy is None:
+            continue
+
+        label = f"{mode},1,100,100"
+
+        plt.plot(
+            xy[:, 0], xy[:, 1],
+            linestyle="--" if mode == "old" else "-",
+            linewidth=1.8,
+            label=label,
+        )
+        n_plotted_auto += 1
+
+    flex_rows = crack_rows[
+        (crack_rows["os_mode"] == "new") &
+        (crack_rows["g22"] != 100.0)
+    ].sort_values("g22")
+
+    for _, row in flex_rows.iterrows():
+        g22 = float(row["g22"])
+        xy, _ = load_variant("new", g22)
+        if xy is None:
+            continue
+
+        label = f"new,1,{int(g22)},{int(g22)}"
+
+        plt.plot(
+            xy[:, 0], xy[:, 1],
+            linewidth=1.4,
+            alpha=0.85,
+            label=label,
+        )
+        n_plotted_auto += 1
+
+    if n_plotted_auto <= 0:
+        raise RuntimeError(f"No auto variants available to plot for crack {cid}")
+
+    plt.gca().invert_yaxis()
+    plt.title(f"RS3 sweep — crack {cid}")
+    plt.legend(loc="lower right", fontsize=7, framealpha=0.9, title="mode,g11,g22,g33")
+    plt.tight_layout()
+
+    plt.savefig(
+        os.path.join(out_dir, filename),
+        bbox_inches="tight",
+    )
+    plt.close()
+
+
 def plot_rs3_sweep_summary(
     df_all,
     out_dir,
@@ -1669,136 +1896,17 @@ def plot_rs3_sweep_summary(
     plt.close()
 
     # ==================================================
-    # 3) PER-CRACK GEOMETRY COMPARISON
+    # 3) GEOMETRY PANELS (REPRESENTATIVE + DECISIVE)
     # ==================================================
     if save_folder is None or image_base is None:
-        print("[plot_rs3] geometry plots skipped (missing save_folder/image_base)")
+        print("[plot_rs3] geometry skipped — missing explicit save_folder/image_base")
     else:
-        from helpers.metrics import metric_atomic_path_for, safe_read_json
-
-        for cid in sorted(D["crack_id"].unique()):
-            crack_rows = D[D["crack_id"] == cid].copy()
-            if crack_rows.empty:
-                continue
-
-            def _exists(mode, g22):
-                return not crack_rows[
-                    (crack_rows["os_mode"] == mode) &
-                    (crack_rows["g11"] == 1.0) &
-                    (crack_rows["g22"] == g22) &
-                    (crack_rows["g33"] == g22)
-                ].empty
-
-            if not _exists("old", 100.0):
-                raise RuntimeError(f"[plot_rs3] Missing old,1,100,100 for crack {cid}")
-            if not _exists("new", 100.0):
-                raise RuntimeError(f"[plot_rs3] Missing new,1,100,100 for crack {cid}")
-
-            p_cr = metric_atomic_path_for(save_folder, image_base, cid)
-            crack_json = safe_read_json(p_cr, None)
-            if not crack_json:
-                continue
-
-            manual_xy = np.asarray(crack_json.get("midline", []), float)
-            if manual_xy.ndim != 2 or len(manual_xy) < 2:
-                continue
-
-            auto_dir = os.path.join(
-                save_folder,
-                "metrics",
-                image_base,
-                f"cid{cid}",
-                "auto"
-            )
-
-            def load_variant(mode, g22):
-                row = crack_rows[
-                    (crack_rows["os_mode"] == mode) &
-                    (crack_rows["g11"] == 1.0) &
-                    (crack_rows["g22"] == g22) &
-                    (crack_rows["g33"] == g22)
-                ]
-                if row.empty:
-                    return None
-
-                vid = int(row.iloc[0]["variant_global_id"])
-                vfile = os.path.join(auto_dir, f"v{vid}.json")
-                if not os.path.exists(vfile):
-                    return None
-
-                vjson = safe_read_json(vfile, None)
-                if not vjson:
-                    return None
-
-                return np.asarray(vjson.get("midline", []), float)
-
-            old_xy = load_variant("old", 100.0)
-            new_xy = load_variant("new", 100.0)
-
-            if old_xy is not None and new_xy is not None:
-                plt.figure(figsize=(6, 6), dpi=150)
-                plt.plot(
-                    manual_xy[:, 0], manual_xy[:, 1],
-                    color="black", linewidth=2.2, label="Manual"
-                )
-                plt.plot(
-                    old_xy[:, 0], old_xy[:, 1],
-                    color="red", linestyle="--", linewidth=1.8,
-                    label="old,1,100,100"
-                )
-                plt.plot(
-                    new_xy[:, 0], new_xy[:, 1],
-                    color="blue", linewidth=1.8,
-                    label="new,1,100,100"
-                )
-                plt.gca().invert_yaxis()
-                plt.title(f"Baseline comparison — crack {cid}")
-                plt.legend(loc="lower right")
-                plt.tight_layout()
-                plt.savefig(
-                    os.path.join(out_dir, f"rs3_geometry_crack_{cid}_baseline.png"),
-                    bbox_inches="tight"
-                )
-                plt.close()
-
-            flex_rows = crack_rows[
-                (crack_rows["os_mode"] == "new") &
-                (crack_rows["g22"] != 100.0)
-            ].sort_values("g22")
-
-            if not flex_rows.empty:
-                n = len(flex_rows)
-                fig, axes = plt.subplots(1, n, figsize=(4 * n, 4), dpi=150)
-                if n == 1:
-                    axes = [axes]
-
-                for ax, (_, row) in zip(axes, flex_rows.iterrows()):
-                    g22 = float(row["g22"])
-                    var_xy = load_variant("new", g22)
-                    if var_xy is None:
-                        continue
-
-                    ax.plot(
-                        manual_xy[:, 0], manual_xy[:, 1],
-                        color="black", linewidth=2.0
-                    )
-                    ax.plot(
-                        var_xy[:, 0], var_xy[:, 1],
-                        color="blue", linewidth=1.8
-                    )
-                    ax.invert_yaxis()
-                    ax.set_title(
-                        f"new,1,{int(g22)},{int(g22)}\n"
-                        f"score={row['score_mid']:.3f}"
-                    )
-
-                fig.suptitle(f"Curvature sensitivity — crack {cid}")
-                plt.tight_layout()
-                plt.savefig(
-                    os.path.join(out_dir, f"rs3_geometry_crack_{cid}_flex.png"),
-                    bbox_inches="tight"
-                )
-                plt.close()
+        _generate_rs3_geometry_panels(
+            D,
+            save_folder,
+            image_base,
+            out_dir,
+        )
 
     best_per_crack = (
         D.groupby(["crack_id", "family"])["score_mid"]

@@ -927,7 +927,7 @@ class CrackUtils:
             'mask', 'crack_tracks', 'cracks_stored_endpoints',
             'track_crop', 'track',
             'image', 'original_image', 'image_crop', 'image_crop_down', 'image_down',
-            'osGFCost', 'multiscalecostLIFExtReg', 'costFunction',
+            'osGFCost', 'costFunction',
             'bb_pts_list', 'mid_pt', 'end_points', 'points_pairs_list', 'annotation'
         ]:
             if hasattr(self, attr):

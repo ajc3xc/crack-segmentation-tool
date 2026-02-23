@@ -11,6 +11,9 @@ from cracktools.os import set_os_mode, OS_MODE
 from helpers.layout import Ui_MainWindow
 from time import time
 from helpers.crackhelpers import *
+
+# Prevent accidental giant ndarray dumps in terminal logs.
+np.set_printoptions(threshold=32, edgeitems=2, linewidth=120)
 from helpers import metrics, save_load_files
 
 #This class is for the main tracking / segmentation pipeline for generating the automatic midline and edge tracking submodules
@@ -77,7 +80,7 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
 
             # ---- MultiScaleVesselness ----
             t0 = time.time()
-            self.multiscalecostLIFExtReg = ct.os.MultiScaleVesselness(
+            multiscalecostLIFExtReg = ct.os.MultiScaleVesselness(
                 self.osGFCost.real, ksi, 1, sigmas, "LIF",
                 sigmas_ext=sigmas_ext
             )
@@ -86,7 +89,8 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
 
             # ---- MultiScaleVesselnessFilter ----
             t0 = time.time()
-            costmultiscale = ct.os.MultiScaleVesselnessFilter(self.multiscalecostLIFExtReg)
+            costmultiscale = ct.os.MultiScaleVesselnessFilter(multiscalecostLIFExtReg)
+            del multiscalecostLIFExtReg
             timing["t_ms_filter"] = time.time() - t0
             print(f"[update_cost] MultiScaleVesselnessFilter={timing['t_ms_filter']:.3f}s")
 
@@ -94,6 +98,7 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
             t0 = time.time()
             self.costFunction = ct.os.CostFunction(costmultiscale,
                                                 lambdaa=lambdaa, p=p)
+            del costmultiscale
             timing["t_cost_fun"] = time.time() - t0
             print(f"[update_cost] CostFunction={timing['t_cost_fun']:.3f}s")
 
@@ -162,12 +167,16 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
             print(f"[TRACK_DBG] self.pts_crop_down[0]={self.pts_crop_down[0]}, self.pts_crop_down[1]={self.pts_crop_down[1]}")
 
             # 2) Fast marching in crop-down space
-            fm_out = ct.tracking.fast_marching(
+            ct.tracking._mem_point("Before fast_marching call")
+            fm_out = ct.tracking.fast_marching_with_fallback(
                 self.costFunction,
                 self.pts_crop_down[0],
                 self.pts_crop_down[1],
-                g11=g11, g22=g22, g33=g33
+                g11=g11, g22=g22, g33=g33,
+                mode="new_optimized",
+                solver_dtype="float64",
             )
+            ct.tracking._mem_point("After fast_marching call")
             track_crop_down = np.array(fm_out, dtype=float)  # handle list/tuple
             print(f"[TRACK_DBG] fast_marching output shape={track_crop_down.shape}, "
                 f"start={track_crop_down[:,0]}, end={track_crop_down[:,-1]}")

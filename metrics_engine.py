@@ -661,7 +661,12 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             print("[DEBUG METRICS] ⚠ no GT mask loaded")
             return {}
 
-        base_name   = self._image_base()
+        base_name = self._image_base()
+        if not base_name:
+            try:
+                base_name = os.path.splitext(os.path.basename(str(getattr(self, "name", ""))))[0]
+            except Exception:
+                base_name = None
         metrics_dir = self._metrics_dir()
         os.makedirs(metrics_dir, exist_ok=True)
 
@@ -2876,7 +2881,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         If not found, this function now auto-syncs once and retries.
         """
 
-        import os, math, numpy as np, pandas as pd, cv2
+        import os, json, math, numpy as np, pandas as pd, cv2
         import cracktools as ct
         from rs3_split import run_rs3_variants_split, _variant_desc, plot_midlines_overlay_all
         from helpers.metrics import (
@@ -2961,6 +2966,14 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         crack_dir = os.path.join(self._metrics_dir(), f"cid{crack_id}", "auto")
         os.makedirs(crack_dir, exist_ok=True)
 
+        MIDLINE_DECIMALS = 3
+
+        def _round_midline(xy, decimals=MIDLINE_DECIMALS):
+            arr = np.asarray(xy, float)
+            if arr.ndim != 2 or arr.shape[1] != 2:
+                return []
+            return np.round(arr, decimals=decimals).tolist()
+
         # (execution continues unchanged with your existing code)
         
         # -----------------------------------
@@ -2976,7 +2989,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 #{"g11": 1.0, "g22": 10.0,  "g33": 10.0},   # local refinement near 25
                 {"g11": 1.0, "g22": 25.0,  "g33": 25.0},   # current baseline
                 #{"g11": 1.0, "g22": 50.0,  "g33": 50.0},   # moderate curvature
-                #{"g11": 1.0, "g22": 100.0, "g33": 100.0},  # LEGACY reference (old default)
+                {"g11": 1.0, "g22": 100.0, "g33": 100.0},  # LEGACY reference (old default)
             ]
         else:
             # user-supplied grid takes precedence
@@ -3183,8 +3196,10 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 # --------------------------------------------------
                 # TOPOLOGY INHERITANCE (FROM MANUAL CRACK)
                 # --------------------------------------------------
+                rounded_midline = _round_midline(track_xy, decimals=MIDLINE_DECIMALS)
+
                 variants_out[f"v{vid}"] = {
-                    "midline": track_xy.tolist(),
+                    "midline": rounded_midline,
                     "mask_bbox": [x, y, w, h],
                     "params": desc,
 
@@ -3192,6 +3207,15 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     "user_points": crack.get("user_points", []),
                     "user_connections": crack.get("user_connections", []),
                 }
+
+                vfile = os.path.join(crack_dir, f"v{vid}.json")
+                with open(vfile, "w", encoding="utf-8") as f:
+                    json.dump(
+                        variants_out[f"v{vid}"],
+                        f,
+                        indent=2,
+                        separators=(",", ":"),
+                    )
 
                 set_auto_variant_for_crack(
                     self.save_folder,
@@ -3428,6 +3452,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 plots_dir,
                 weight_col="global_weight",
                 selected_family=best_key,
+                save_folder=self.save_folder,
+                image_base=base_name,
             )
 
             if timing_all is not None and not timing_all.empty:
