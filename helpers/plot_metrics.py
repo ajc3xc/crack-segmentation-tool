@@ -206,7 +206,7 @@ def plot_edges_and_normals(
             ax.plot(
                 s[:, 0] - shift_x,
                 s[:, 1] - shift_y,
-                color="yellow",
+                color="darkorange",
                 lw=2.5,
                 linestyle="--",
                 alpha=0.75,
@@ -224,7 +224,7 @@ def plot_edges_and_normals(
                 ax.plot(
                     s[:, 0] - shift_x,
                     s[:, 1] - shift_y,
-                    color="black",
+                    color="white",
                     lw=2.2,
                     alpha=0.95,
                     zorder=5,
@@ -282,8 +282,8 @@ def plot_edges_and_normals(
         ]
     else:
         handles = [
-            Line2D([], [], color='yellow', lw=2.0, linestyle='--', label='Midline (Manual)'),
-            Line2D([], [], color='black', lw=2.0, label='Midline (Centered)'),
+            Line2D([], [], color='darkorange', lw=2.0, linestyle='--', label='Midline (Manual)'),
+            Line2D([], [], color='white', lw=2.0, label='Midline (Centered)'),
             Line2D([], [], color='red', lw=1.4, label='Edge 1 (Left)'),
             Line2D([], [], color='green', lw=1.4, label='Edge 2 (Right)'),
             Line2D([], [], color='cyan', lw=1.4, label='Normals'),

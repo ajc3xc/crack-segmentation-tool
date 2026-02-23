@@ -958,7 +958,27 @@ def dominant_segments_from_group(
         segs_b, assoc_b, flipped_branch = canonicalize_branch_direction(segs_b, associated_data=assoc_b)
         if flipped_branch:
             print(f"[CANON] dominant_segments branch={bi} flipped whole branch orientation")
-        assert_direction_consistency(segs_b)
+        try:
+            assert_direction_consistency(segs_b)
+        except AssertionError as e:
+            # Defensive repair: some branches still arrive with a locally reversed segment.
+            # Flip only the offending segment(s) based on endpoint continuity, then re-check.
+            print(f"[CANON] dominant_segments branch={bi} repairing direction inconsistency: {e}")
+            segs_b, assoc_b = enforce_branch_continuity(segs_b, associated_data=assoc_b)
+            try:
+                assert_direction_consistency(segs_b)
+            except AssertionError:
+                # Final local pairwise pass (handles edge cases after whole-branch canonicalization).
+                for j in range(1, len(segs_b)):
+                    a_prev = np.asarray(segs_b[j - 1], float)
+                    b_cur = np.asarray(segs_b[j], float)
+                    if len(a_prev) < 2 or len(b_cur) < 2:
+                        continue
+                    d_fwd = float(np.linalg.norm(a_prev[-1] - b_cur[0]))
+                    d_rev = float(np.linalg.norm(a_prev[-1] - b_cur[-1]))
+                    if d_rev < d_fwd:
+                        segs_b[j] = b_cur[::-1].copy()
+                assert_direction_consistency(segs_b)
 
         for seg_idx, (S, a) in enumerate(zip(segs_b, assoc_b)):
             canonical_kept.append(

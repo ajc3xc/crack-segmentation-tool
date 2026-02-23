@@ -1321,8 +1321,8 @@ def generate_mask_from_edges(
             derived_midline_segs=[mid] if len(mid) >= 2 else [],
             edge1_segs=[e1_plot],
             edge2_segs=[e2_plot],
-            norm1_segs=[]
-            norm2_segs=[]
+            norm1_segs=[],
+            norm2_segs=[],
             out_png=os.path.join(out_dir, f"{tag}_mask_overlay.png"),
             title=f"{tag} — mask overlay",
         )
