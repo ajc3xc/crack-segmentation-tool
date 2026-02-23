@@ -697,7 +697,7 @@ def main():
     # HARD-CODED USER CONFIG (WINDOWS PATHS OK)
     # ============================================================
     WIN_IN_DIR  = r"C:\Users\13144\Documents\Masters_Thesis\datasets\SUT_Compressed\Ground Truth"
-    WIN_OUT_DIR = r"C:\Users\13144\Documents\Masters_Thesis\datasets\SUT_Compressed\Outputs\baselines"
+    WIN_OUT_DIR = r"C:\Users\13144\Documents\Masters_Thesis\datasets\SUT_Compressed\width_baselines"
 
     # --- convert to WSL paths once ---
     IN_DIR  = wslPath.to_posix(WIN_IN_DIR)  if wslPath.is_windows_path(WIN_IN_DIR)  else WIN_IN_DIR
@@ -739,9 +739,9 @@ def main():
 
     # pandarallel
     PHYSICAL_CORES = physical_cores_linux()
-    NB_WORKERS = max(1, PHYSICAL_CORES - 1)
+    NB_WORKERS = max(1, PHYSICAL_CORES)
     print(PHYSICAL_CORES)
-    PROGRESS_BAR = False
+    PROGRESS_BAR = True
 
     EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
 
@@ -767,7 +767,8 @@ def main():
                 paths.append(os.path.join(root, fn))
 
     # hard cap
-    paths = paths[:4]
+    #############################################
+    #paths = paths[:8]
 
     paths = sorted(paths)
 

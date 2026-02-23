@@ -425,7 +425,7 @@ def CostFunction(oc,lambdaa, p):
     return cost
 
 def MultiScaleVesselness(U,ksi,zeta,sigmas_s,method,sigmas_ext = 0, sigmaa_ext = 0):
-    """Ërosion gives not the same results!!!"""
+    """Erosion gives not the same results!!!"""
     vesselnessfilter = []
     for sigma in sigmas_s:
         print(sigma)

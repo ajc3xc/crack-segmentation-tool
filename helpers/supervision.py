@@ -463,9 +463,9 @@ def _global_overview(entries, gt_mask, out_png, title="Global GT Overview"):
                 # packed style fallback
                 segs = _split_midline_packed(mid_raw)
 
-    for S in segs:
-        if len(S) >= 2:
-            ax.plot(S[:, 0], S[:, 1], lw=1.3, color=col, alpha=0.9)
+        for S in segs:
+            if len(S) >= 2:
+                ax.plot(S[:, 0], S[:, 1], lw=1.3, color=col, alpha=0.9)
 
     # ---------------------------
     # Legend
@@ -1493,6 +1493,18 @@ def export_gt_supervision_for_image(
     combined_flat = {str(m) for g in combined_groups.values() for m in g.get("members", [])}
 
     final_entries = []
+    gt_sup_diag = {
+        "atomic_total": 0,
+        "atomic_added": 0,
+        "atomic_skip_bad_midline": 0,
+        "atomic_skip_no_cc_label": 0,
+        "combined_total": 0,
+        "combined_added": 0,
+        "combined_skip_no_members": 0,
+        "combined_skip_no_cc_label": 0,
+        "combined_skip_no_dominant_segs": 0,
+        "combined_skip_empty_after_canon": 0,
+    }
 
     def _canonicalize_segments_with_meta(segs_in, meta_in, *, label):
         segs_valid = [np.asarray(s, float) for s in (segs_in or []) if s is not None and len(s) >= 2]
@@ -1545,10 +1557,12 @@ def export_gt_supervision_for_image(
     # 1) ATOMIC BEFORE MERGE  (USE USER mask_bbox ONLY)
     # =====================================================
     for cid, cr in (atomic or {}).items():
+        gt_sup_diag["atomic_total"] += 1
         scid = str(cid)
 
         mid_xy = np.asarray(cr.get("midline", []), float)
         if mid_xy.ndim != 2 or len(mid_xy) < 2:
+            gt_sup_diag["atomic_skip_bad_midline"] += 1
             continue
         mid_xy, _n, _w, _e1, _e2, cinfo = canonicalize_segment_direction(mid_xy)
         if cinfo.get("flipped", False):
@@ -1585,6 +1599,7 @@ def export_gt_supervision_for_image(
         # -------------------------------------------------
         lbl = _cc_label_for_midline(mid_xy, cc_labels)
         if lbl is None or lbl <= 0:
+            gt_sup_diag["atomic_skip_no_cc_label"] += 1
             continue
 
         crack_mask = (cc_labels == lbl).astype(np.uint8)
@@ -1664,14 +1679,17 @@ def export_gt_supervision_for_image(
                 )
 
         final_entries.append(atomic_entry)
+        gt_sup_diag["atomic_added"] += 1
         _cropped_preview(atomic_entry, gt_mask, original_image, atomic_crop_root)
 
     # =====================================================
     # 2) COMBINED  (USE UNION OF USER mask_bbox ONLY)
     # =====================================================
     for ccid, grp in (combined_groups or {}).items():
+        gt_sup_diag["combined_total"] += 1
         members = [str(m) for m in grp.get("members", [])]
         if not members:
+            gt_sup_diag["combined_skip_no_members"] += 1
             continue
 
         # -------------------------------------------------
@@ -1719,6 +1737,7 @@ def export_gt_supervision_for_image(
         # -------------------------------------------------
         lbl = _cc_label_for_members(members, atomic, cc_labels)
         if lbl is None or lbl <= 0:
+            gt_sup_diag["combined_skip_no_cc_label"] += 1
             continue
 
         crack_mask = (cc_labels == lbl).astype(np.uint8)
@@ -1740,12 +1759,14 @@ def export_gt_supervision_for_image(
         )
 
         if not segs:
+            gt_sup_diag["combined_skip_no_dominant_segs"] += 1
             continue
 
         dom_meta = dom_meta if isinstance(dom_meta, dict) else {}
         seg_meta = dom_meta.get("segments_meta", [])
         segs, seg_meta = _canonicalize_segments_with_meta(segs, seg_meta, label=f"combined {ccid}")
         if not segs:
+            gt_sup_diag["combined_skip_empty_after_canon"] += 1
             continue
         dom_meta["segments_meta"] = seg_meta
         
@@ -1918,11 +1939,16 @@ def export_gt_supervision_for_image(
                 )
 
         final_entries.append(combined_entry)
+        gt_sup_diag["combined_added"] += 1
         _cropped_preview(combined_entry, gt_mask, original_image, combined_crop_root)
 
     # =====================================================
     # 3) GLOBAL OVERVIEW
     # =====================================================
+    if not final_entries:
+        print(f"[GT_SUP DIAG] no final_entries produced: {gt_sup_diag}")
+    else:
+        print(f"[GT_SUP DIAG] entries={len(final_entries)} summary={gt_sup_diag}")
     global_png = os.path.join(sup_root, "global_overview.png")
     _global_overview(final_entries, gt_mask, global_png)
 

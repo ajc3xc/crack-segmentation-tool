@@ -224,7 +224,7 @@ def hausdorff_p95(A, B, q=95):
 
 def frechet_discrete_ds(A, B, max_points=800):
     """
-    Iterative EiterMannila discrete FrÃ©chet distance.
+    Iterative EiterMannila discrete Fréchet distance.
     - No recursion (avoids RecursionError)
     - Resamples long polylines to <= max_points for robustness
     """
@@ -539,16 +539,16 @@ def _reconstruct_full_mask(crack, H, W):
 
     # sanity
     if mc is None or bb is None:
-        print("[DEBUG MASK] âŒ missing mask_crop or mask_bbox")
+        print("[DEBUG MASK] ❌ missing mask_crop or mask_bbox")
         return np.zeros((H, W), dtype=np.uint8)
 
     crop = np.array(mc, dtype=np.uint8)
     if crop.ndim != 2:
-        print(f"[DEBUG MASK] âŒ mask_crop ndim={crop.ndim}, expected 2")
+        print(f"[DEBUG MASK] ❌ mask_crop ndim={crop.ndim}, expected 2")
         return np.zeros((H, W), dtype=np.uint8)
 
     if not isinstance(bb, (list, tuple)) or len(bb) != 4:
-        print("[DEBUG MASK] âŒ invalid bbox format")
+        print("[DEBUG MASK] ❌ invalid bbox format")
         return np.zeros((H, W), dtype=np.uint8)
 
     x, y, w, h = [int(v) for v in bb]
@@ -556,21 +556,21 @@ def _reconstruct_full_mask(crack, H, W):
 
     # check if bbox is within image
     if x < 0 or y < 0 or x >= W or y >= H:
-        print("[DEBUG MASK] âŒ bbox origin outside image bounds")
+        print("[DEBUG MASK] ❌ bbox origin outside image bounds")
         return np.zeros((H, W), dtype=np.uint8)
 
     # check crop consistency
     print(f"[DEBUG MASK] crop shape={crop.shape}, target area=({y}:{y+h}, {x}:{x+w})")
 
     if h <= 0 or w <= 0:
-        print("[DEBUG MASK] âŒ non-positive bbox dimensions")
+        print("[DEBUG MASK] ❌ non-positive bbox dimensions")
         return np.zeros((H, W), dtype=np.uint8)
 
     # safe paste within limits
     x2, y2 = min(x + w, W), min(y + h, H)
     w_eff, h_eff = max(0, x2 - x), max(0, y2 - y)
     if w_eff == 0 or h_eff == 0:
-        print("[DEBUG MASK] âŒ effective bbox has zero area after clipping")
+        print("[DEBUG MASK] ❌ effective bbox has zero area after clipping")
         return np.zeros((H, W), dtype=np.uint8)
 
     crop = (crop > 0).astype(np.uint8)
@@ -578,7 +578,7 @@ def _reconstruct_full_mask(crack, H, W):
 
     m = np.zeros((H, W), dtype=np.uint8)
     m[y:y+h_eff, x:x+w_eff] = crop
-    print(f"[DEBUG MASK] âœ… pasted crop ({crop.shape}) into full mask at ({x},{y})")
+    print(f"[DEBUG MASK] ✅ pasted crop ({crop.shape}) into full mask at ({x},{y})")
     return m
     
 # helpers/metrics.py
@@ -1187,7 +1187,7 @@ def build_branch_bite_masks(dominance_meta, H, W):
 
     for bid, bmeta in branches.items():
         bid = int(bid)
-        lost = bmeta.get("lost_to", [])  # â† THIS is critical
+        lost = bmeta.get("lost_to", [])  # ← THIS is critical
 
         masks = []
         for cause in lost:
@@ -1353,7 +1353,7 @@ def arclen_s(xy):
 
 def local_step_sizes(xy):
     """
-    Local step sizes Î”s_i = ||p_{i+1} - p_i||.
+    Local step sizes Δs_i = ||p_{i+1} - p_i||.
     """
     xy = np.asarray(xy, float)
     if xy.ndim != 2 or len(xy) < 2:
@@ -1364,8 +1364,8 @@ def local_step_sizes(xy):
 def _already_uniform_enough(xy, ds_target=1.0, mean_tol=0.02, cv_tol=0.05):
     """
     Very strict fast-path: treat as already-uniform only if:
-      - mean(Î”s) is close to ds_target
-      - coefficient of variation of Î”s is small
+      - mean(Δs) is close to ds_target
+      - coefficient of variation of Δs is small
     """
     ds = local_step_sizes(xy)
     if ds.size == 0:
@@ -1814,7 +1814,7 @@ def augment_combined_with_orphan_atomics(
             "midline_segments": [seg],
             "midline_segments_meta": [dict(seg_meta)],
 
-            # âœ… REQUIRED by your combined extractor now
+            # ✅ REQUIRED by your combined extractor now
             "derived_midline_segments": [seg],
             "derived_midline_segments_meta": [dict(seg_meta)],
 
@@ -8414,7 +8414,7 @@ def compute_midline_metrics_baseline(pred_xy, gt_xy, tau=3.0):
     mm["frechet_discrete_ds"] = np.nan
 
     # --------------------------------------------------
-    # Explicit Ï„-precision (spurious geometry penalty)
+    # Explicit τ-precision (spurious geometry penalty)
     # --------------------------------------------------
     try:
         from scipy.spatial import cKDTree
@@ -8500,14 +8500,14 @@ def compute_midline_metrics(auto_xy, man_xy, tau=3.0):
     out["coverage_min"]    = float(min(cov["A_to_B"], cov["B_to_A"]))
     out["hausdorff_p95"] = hausdorff_p95(A, B)
 
-    # --- FrÃ©chet (optional but standard) ---
+    # --- Fréchet (optional but standard) ---
     try:
         if len(A_ds) >= 2 and len(B_ds) >= 2:
             out["frechet_discrete_ds"] = _unwrap(
                 frechet_discrete_ds(A_ds, B_ds, max_points=800)
             )
     except Exception as e:
-        print(f"[metrics][warn] FrÃ©chet failed: {e}")
+        print(f"[metrics][warn] Fréchet failed: {e}")
 
     # --- Orthogonal deviation stats ---
     orth = orthogonal_deviation(A, B, N=400)
