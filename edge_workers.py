@@ -849,7 +849,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 pe2 = np.column_stack([pe2x, pe2y])
 
                 # Keep the historical filename as the prediction-mask plot.
-                pred_normals_path = os.path.join(dbg_dir, f"{midline_tag}_normals.png")
+                pred_normals_path = os.path.join(dbg_dir, f"{midline_tag}_derived_normals.png")
                 plot_gt_normals_on_gtbw(
                     pred_mask_u8,
                     derived_midline_crop,
@@ -862,8 +862,10 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
 
                 if midline_tag == "manual" and gt_crop is not None:
                     gt_mask_u8 = (np.asarray(gt_crop) > 0).astype(np.uint8) * 255
+                    # For GT-mask diagnostics, use the original/manual midline reference.
+                    # Prediction-mask diagnostics above intentionally use the derived midline.
                     (ge1x, ge1y, ge2x, ge2y, _), _ = normals_from_mask_for_midline(
-                        derived_midline_crop,
+                        midline_xy_crop,
                         gt_mask_u8 > 0,
                         max_radius=50,
                     )
@@ -872,7 +874,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                     gt_normals_path = os.path.join(dbg_dir, "manual_normals_on_gt.png")
                     plot_gt_normals_on_gtbw(
                         gt_mask_u8,
-                        derived_midline_crop,
+                        midline_xy_crop,
                         None,
                         ge1,
                         ge2,
