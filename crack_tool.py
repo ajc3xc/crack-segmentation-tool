@@ -1401,6 +1401,19 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                 self.change_image()
 
                 base = os.path.splitext(os.path.basename(self.name))[0]
+
+                # ----------------------------------------------------
+                # SNAPSHOT SYNC (CRITICAL FIX)
+                # ----------------------------------------------------
+                try:
+                    self._purge_metrics_for_current_image()
+                    self._sync_metrics_snapshot_from_authoring(
+                        refresh_combine=True,
+                        persist=True,
+                    )
+                except Exception as e:
+                    print(f"[global-metrics] snapshot sync failed for {base}: {e}")
+
                 print(f"\n====== [calibrate-edges] {t}/{len(idxs_sample)}: {base} ======")
 
                 ann = self.annotation.get("annotations", {}) or {}
@@ -1529,6 +1542,19 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                     self.n = idx
                     self.change_image()
                     base = os.path.splitext(os.path.basename(self.name))[0]
+
+                    # ----------------------------------------------------
+                    # SNAPSHOT SYNC (CRITICAL FIX)
+                    # ----------------------------------------------------
+                    try:
+                        self._purge_metrics_for_current_image()
+                        self._sync_metrics_snapshot_from_authoring(
+                            refresh_combine=True,
+                            persist=True,
+                        )
+                    except Exception as e:
+                        print(f"[global-metrics] snapshot sync failed for {base}: {e}")
+
                     print(f"\n====== [calibrate-RS3] {t}/{len(idxs_sample)}: {base} ======")
 
                     ann = self.annotation.get("annotations", {}) or {}
@@ -1615,6 +1641,18 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                 self.n = idx
                 self.change_image()
                 os.makedirs(img_dir, exist_ok=True)
+
+                # ----------------------------------------------------
+                # SNAPSHOT SYNC (CRITICAL FIX)
+                # ----------------------------------------------------
+                try:
+                    self._purge_metrics_for_current_image()
+                    self._sync_metrics_snapshot_from_authoring(
+                        refresh_combine=True,
+                        persist=True,
+                    )
+                except Exception as e:
+                    print(f"[apply] snapshot sync failed for {base}: {e}")
 
                 print(f"\n====== [apply] {t}/{len(apply_idxs)}: {base} ======")
 
@@ -2111,7 +2149,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         """
         
         #stopgap measure
-        do_edge_calibrate=False
+        #do_edge_calibrate=False
 
         import os, time, numpy as np, pandas as pd
         from helpers import metrics

@@ -712,13 +712,13 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 dcf = float(np.linalg.norm(d0c - p0) + np.linalg.norm(d1c - p1))
                 dcr = float(np.linalg.norm(d0c - p1) + np.linalg.norm(d1c - p0))
                 dcflag = "reversed_candidate" if dcr < dcf else "forward_candidate"
-                print(
+                '''print(
                     f"[ORIENT DBG][edge_worker] cid={cid} mode={seg_mode} plot_only={plot_only} "
                     f"manual_vs_pts fwd={dmf:.4f} rev={dmr:.4f} flag={mflag} "
                     f"derived_pre fwd={ddf:.4f} rev={ddr:.4f} flag={dflag} "
                     f"derived_post fwd={dcf:.4f} rev={dcr:.4f} flag={dcflag} "
                     f"flipped={bool(orient_info.get('flipped', False))}"
-                )
+                )'''
         except Exception as e:
             print(f"[ORIENT DBG][edge_worker] cid={cid} orientation check failed: {e}")
 

@@ -158,10 +158,10 @@ def plot_edges_and_normals(
         d_se = np.linalg.norm(seg_a[0] - seg_b[-1])
         d_es = np.linalg.norm(seg_a[-1] - seg_b[0])
         d_ee = np.linalg.norm(seg_a[-1] - seg_b[-1])
-        print(
+        '''print(
             f"[PLOT DIAG] {name_a}<->{name_b} endpoint dists: "
             f"ss={d_ss:.2f} se={d_se:.2f} es={d_es:.2f} ee={d_ee:.2f}"
-        )
+        )'''
 
     # Pre-normalize/correct lists once so plotting and diagnostics use the same data.
     midline_plot = [maybe_fix_xy(seg, H, W) for seg in (midline_segs or [])]
