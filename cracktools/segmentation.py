@@ -825,8 +825,12 @@ def edges_tracking(
     g2_yx = _run_geodesic(metric2, seeds_yx, tips_yx, sides, dims, prefer_gpu=prefer_gpu)
     t_geo2 = time.perf_counter() - t0
 
-    e1_raw = np.stack([g1_yx[:, 1], g1_yx[:, 0]], axis=1)  # (x,y)
-    e2_raw = np.stack([g2_yx[:, 1], g2_yx[:, 0]], axis=1)  # (x,y)
+    # _run_geodesic returns grid indices as (row, col) = (y, x).
+    # Convert explicitly once here to geometry coordinates (x, y).
+    g1_yx = np.asarray(g1_yx, dtype=float)
+    g2_yx = np.asarray(g2_yx, dtype=float)
+    e1_raw = np.column_stack([g1_yx[:, 1], g1_yx[:, 0]])  # (x,y)
+    e2_raw = np.column_stack([g2_yx[:, 1], g2_yx[:, 0]])  # (x,y)
 
     # --------------------------------------------------
     # 5b. Conservative anti-quantization (NEW only)
@@ -1218,6 +1222,72 @@ def generate_mask_from_edges(
     if not np.any(mask):
         raise ValueError("empty mask after midline-normal span rasterization")
 
+    # --------------------------------------------------
+    # DEBUG: the rasterized quad uses normals only (n1/n2), not e1/e2.
+    # Compare plotted inputs against the normals-driven geometry.
+    # --------------------------------------------------
+    def _diag_xy(name, A):
+        A = np.asarray(A, float)
+        if A.ndim != 2 or A.shape[1] != 2 or len(A) == 0:
+            print(f"[MASK DIAG] {name}: empty/invalid")
+            return None
+        p0, p1 = A[0], A[-1]
+        d = p1 - p0
+        ang = np.degrees(np.arctan2(d[1], d[0]))
+        print(
+            f"[MASK DIAG] {name}: n={len(A)} "
+            f"start=({p0[0]:.2f},{p0[1]:.2f}) end=({p1[0]:.2f},{p1[1]:.2f}) "
+            f"x=[{A[:,0].min():.2f},{A[:,0].max():.2f}] "
+            f"y=[{A[:,1].min():.2f},{A[:,1].max():.2f}] angle={ang:.1f}deg"
+        )
+        return A
+
+    def _end_dists(name_a, A, name_b, B):
+        if A is None or B is None or len(A) == 0 or len(B) == 0:
+            return
+        d_ss = np.linalg.norm(A[0] - B[0])
+        d_se = np.linalg.norm(A[0] - B[-1])
+        d_es = np.linalg.norm(A[-1] - B[0])
+        d_ee = np.linalg.norm(A[-1] - B[-1])
+        print(f"[MASK DIAG] {name_a}<->{name_b}: ss={d_ss:.2f} se={d_se:.2f} es={d_es:.2f} ee={d_ee:.2f}")
+
+    n1_good = n1[good]
+    n2_good = n2[good]
+    mid_from_normals = 0.5 * (n1_good + n2_good) if (len(n1_good) and len(n1_good) == len(n2_good)) else np.empty((0, 2))
+
+    _mid_diag = _diag_xy("midline_xy (plotted input)", mid)
+    _e1_diag = _diag_xy("edge1_xy (plotted input)", e1)
+    _e2_diag = _diag_xy("edge2_xy (plotted input)", e2)
+    _n1_diag = _diag_xy("norm1_xy (quad side)", n1_good)
+    _n2_diag = _diag_xy("norm2_xy (quad side)", n2_good)
+    _mf_diag = _diag_xy("mid_from_normals (quad implied)", mid_from_normals)
+    _end_dists("midline_xy", _mid_diag, "mid_from_normals", _mf_diag)
+    _end_dists("edge1_xy", _e1_diag, "norm1_xy", _n1_diag)
+    _end_dists("edge2_xy", _e2_diag, "norm2_xy", _n2_diag)
+
+    # Plot-only edge correction: if edges are supplied as (y,x) while normals/midline are (x,y),
+    # fix only the overlay inputs. Mask rasterization above already used normals and is correct.
+    e1_plot = e1
+    e2_plot = e2
+    if len(e1) >= 2 and len(e2) >= 2 and len(n1_good) >= 2 and len(n2_good) >= 2:
+        m1 = min(len(e1), len(n1_good))
+        m2 = min(len(e2), len(n2_good))
+        e1m, n1m = e1[:m1], n1_good[:m1]
+        e2m, n2m = e2[:m2], n2_good[:m2]
+
+        direct_err = float(np.mean(np.linalg.norm(e1m - n1m, axis=1)) + np.mean(np.linalg.norm(e2m - n2m, axis=1)))
+        swapped_err = float(
+            np.mean(np.linalg.norm(e1m[:, ::-1] - n1m, axis=1)) +
+            np.mean(np.linalg.norm(e2m[:, ::-1] - n2m, axis=1))
+        )
+        if swapped_err + 1e-6 < direct_err:
+            print(
+                f"[MASK PLOT FIX] edge inputs look like (y,x); swapping for overlay only "
+                f"(direct_err={direct_err:.2f}, swapped_err={swapped_err:.2f})"
+            )
+            e1_plot = e1[:, ::-1]
+            e2_plot = e2[:, ::-1]
+
     if do_morph:
         # ONLY hole filling — no opening / erosion
         from scipy.ndimage import binary_fill_holes
@@ -1248,11 +1318,11 @@ def generate_mask_from_edges(
         plot_edges_and_normals(
             base_image=(blended * 255).astype(np.uint8),
             midline_segs=[],
-            derived_midline_segs=[midline_xy] if midline_xy is not None else [],
-            edge1_segs=[e1],
-            edge2_segs=[e2],
-            norm1_segs=[],
-            norm2_segs=[],
+            derived_midline_segs=[mid] if len(mid) >= 2 else [],
+            edge1_segs=[e1_plot],
+            edge2_segs=[e2_plot],
+            norm1_segs=[]
+            norm2_segs=[]
             out_png=os.path.join(out_dir, f"{tag}_mask_overlay.png"),
             title=f"{tag} — mask overlay",
         )

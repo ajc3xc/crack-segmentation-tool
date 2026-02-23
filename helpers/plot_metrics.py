@@ -49,6 +49,8 @@ def plot_edges_and_normals(
     from matplotlib.lines import Line2D
 
     H, W = base_image.shape[:2]
+    _plot_fix_warned = {"xy_swap": False}
+    _diag_printed = {"done": False}
 
     # --- resolve crop ---
     if bbox is not None:
@@ -112,10 +114,79 @@ def plot_edges_and_normals(
         return out or [arr]
 
     # ------------------------------
+    # Cosmetic x/y swap guard (plot only)
+    # ------------------------------
+    def maybe_fix_xy(seg, H, W):
+        seg = np.asarray(seg, float)
+        if seg.ndim != 2 or seg.shape[1] != 2 or len(seg) == 0:
+            return seg
+
+        x_ok = 0 <= seg[:, 0].min() and seg[:, 0].max() <= W
+        y_ok = 0 <= seg[:, 1].min() and seg[:, 1].max() <= H
+        swapped_x_ok = 0 <= seg[:, 1].min() and seg[:, 1].max() <= W
+        swapped_y_ok = 0 <= seg[:, 0].min() and seg[:, 0].max() <= H
+
+        if not (x_ok and y_ok) and (swapped_x_ok and swapped_y_ok):
+            if not _plot_fix_warned["xy_swap"]:
+                print("[PLOT FIX] Detected x/y swap - correcting for visualization only.")
+                _plot_fix_warned["xy_swap"] = True
+            return seg[:, ::-1]
+        return seg
+
+    def _seg_diag(name, seg):
+        seg = np.asarray(seg, float)
+        if seg.ndim != 2 or seg.shape[1] != 2 or len(seg) == 0:
+            print(f"[PLOT DIAG] {name}: empty/invalid")
+            return None
+        p0 = seg[0]
+        p1 = seg[-1]
+        dx, dy = (p1 - p0)
+        ang = np.degrees(np.arctan2(dy, dx))
+        print(
+            f"[PLOT DIAG] {name}: n={len(seg)} "
+            f"start=({p0[0]:.2f},{p0[1]:.2f}) end=({p1[0]:.2f},{p1[1]:.2f}) "
+            f"x=[{seg[:,0].min():.2f},{seg[:,0].max():.2f}] "
+            f"y=[{seg[:,1].min():.2f},{seg[:,1].max():.2f}] "
+            f"d=({dx:.2f},{dy:.2f}) angle={ang:.1f}deg"
+        )
+        return seg
+
+    def _endpoint_dist_diag(name_a, seg_a, name_b, seg_b):
+        if seg_a is None or seg_b is None or len(seg_a) < 1 or len(seg_b) < 1:
+            return
+        d_ss = np.linalg.norm(seg_a[0] - seg_b[0])
+        d_se = np.linalg.norm(seg_a[0] - seg_b[-1])
+        d_es = np.linalg.norm(seg_a[-1] - seg_b[0])
+        d_ee = np.linalg.norm(seg_a[-1] - seg_b[-1])
+        print(
+            f"[PLOT DIAG] {name_a}<->{name_b} endpoint dists: "
+            f"ss={d_ss:.2f} se={d_se:.2f} es={d_es:.2f} ee={d_ee:.2f}"
+        )
+
+    # Pre-normalize/correct lists once so plotting and diagnostics use the same data.
+    midline_plot = [maybe_fix_xy(seg, H, W) for seg in (midline_segs or [])]
+    derived_plot = [maybe_fix_xy(seg, H, W) for seg in (derived_midline_segs or [])]
+    edge1_plot = [maybe_fix_xy(seg, H, W) for seg in (edge1_segs or [])]
+    edge2_plot = [maybe_fix_xy(seg, H, W) for seg in (edge2_segs or [])]
+    norm1_plot = [maybe_fix_xy(seg, H, W) for seg in (norm1_segs or [])]
+    norm2_plot = [maybe_fix_xy(seg, H, W) for seg in (norm2_segs or [])]
+
+    # One-shot geometric diagnostics (helps identify swapped/reversed edge tracks).
+    if not _diag_printed["done"]:
+        dmid0 = _seg_diag("derived_midline[0]", derived_plot[0]) if derived_plot else None
+        mid0 = _seg_diag("midline[0]", midline_plot[0]) if midline_plot else None
+        e10 = _seg_diag("edge1[0]", edge1_plot[0]) if edge1_plot else None
+        e20 = _seg_diag("edge2[0]", edge2_plot[0]) if edge2_plot else None
+        _endpoint_dist_diag("edge1[0]", e10, "derived_midline[0]", dmid0)
+        _endpoint_dist_diag("edge2[0]", e20, "derived_midline[0]", dmid0)
+        _endpoint_dist_diag("edge1[0]", e10, "edge2[0]", e20)
+        _endpoint_dist_diag("midline[0]", mid0, "derived_midline[0]", dmid0)
+        _diag_printed["done"] = True
+
+    # ------------------------------
     # Draw midline
     # ------------------------------
-    for seg in (midline_segs or []):
-        seg = np.asarray(seg)
+    for seg in midline_plot:
         if seg.ndim != 2 or len(seg) < 2:
             continue
 
@@ -146,15 +217,14 @@ def plot_edges_and_normals(
     # Draw derived midline
     # ------------------------------
     if not gt_plot:
-        for seg in (derived_midline_segs or []):
-            seg = np.asarray(seg)
+        for seg in derived_plot:
             if seg.ndim != 2 or len(seg) < 2:
                 continue
             for s in split(seg):
                 ax.plot(
                     s[:, 0] - shift_x,
                     s[:, 1] - shift_y,
-                    color="cyan",
+                    color="black",
                     lw=2.2,
                     alpha=0.95,
                     zorder=5,
@@ -164,25 +234,43 @@ def plot_edges_and_normals(
     # Draw edges
     # ------------------------------
     if not gt_plot:
-        for seg in (edge1_segs or []):
-            seg = np.asarray(seg)
+        for seg in edge1_plot:
             for s in split(seg):
                 ax.plot(s[:, 0] - shift_x, s[:, 1] - shift_y, "r-", lw=1.2)
 
-        for seg in (edge2_segs or []):
-            seg = np.asarray(seg)
+        for seg in edge2_plot:
             for s in split(seg):
                 ax.plot(s[:, 0] - shift_x, s[:, 1] - shift_y, "g-", lw=1.2)
 
     # ------------------------------
     # Draw normals (sparse)
     # ------------------------------
-    for n1, n2 in zip((norm1_segs or []), (norm2_segs or [])):
+    for n1, n2 in zip(norm1_plot, norm2_plot):
         n = min(len(n1), len(n2))
         for i in range(0, n, sparsity):
             p1 = n1[i] - [shift_x, shift_y]
             p2 = n2[i] - [shift_x, shift_y]
             ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color="cyan", lw=1.0)
+
+    # ------------------------------
+    # Start/end markers (debug only)
+    # ------------------------------
+    if not gt_plot:
+        marker_specs = [
+            ("derived", derived_plot, "cyan"),
+            ("edge1", edge1_plot, "red"),
+            ("edge2", edge2_plot, "lime"),
+        ]
+        for _name, segs, color in marker_specs:
+            if not segs:
+                continue
+            seg = np.asarray(segs[0], float)
+            if seg.ndim != 2 or len(seg) < 1:
+                continue
+            p_start = seg[0] - [shift_x, shift_y]
+            p_end = seg[-1] - [shift_x, shift_y]
+            ax.scatter([p_start[0]], [p_start[1]], s=22, c=color, marker="o", edgecolors="black", linewidths=0.4, zorder=10)
+            ax.scatter([p_end[0]], [p_end[1]], s=26, c=color, marker="x", linewidths=1.0, zorder=10)
 
     # ------------------------------
     # Legend
@@ -195,7 +283,7 @@ def plot_edges_and_normals(
     else:
         handles = [
             Line2D([], [], color='yellow', lw=2.0, linestyle='--', label='Midline (Manual)'),
-            Line2D([], [], color='cyan', lw=2.0, label='Midline (Centered)'),
+            Line2D([], [], color='black', lw=2.0, label='Midline (Centered)'),
             Line2D([], [], color='red', lw=1.4, label='Edge 1 (Left)'),
             Line2D([], [], color='green', lw=1.4, label='Edge 2 (Right)'),
             Line2D([], [], color='cyan', lw=1.4, label='Normals'),
