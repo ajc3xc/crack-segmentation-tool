@@ -58,6 +58,7 @@ def rs3_prestage_variant(
     g22: float = 25.0,
     g33: float = 25.0,
     include_metric_fallback: bool = True,
+    solver_dtype: str = "float64",
 ) -> Dict[str, Any]:
     """
     Build all inputs required by runReedsSheppGF for ONE (g11,g22,g33) variant.
@@ -76,12 +77,6 @@ def rs3_prestage_variant(
     NoCost, NxCost, NyCost = int(os_cost.shape[0]), int(os_cost.shape[1]), int(os_cost.shape[2])
     s_theta = 2 * _np.pi / NoCost
 
-    # Identity GF per voxel (same setup as in tracking.fast_marching)
-    gfLIF = _np.zeros((NoCost, NxCost, NyCost, 3, 3), dtype=_np.float32)
-    gfLIF[..., 0, 0] = 1
-    gfLIF[..., 1, 1] = 1
-    gfLIF[..., 2, 2] = 1
-
     dims = _np.array([NoCost, NxCost, NyCost], dtype=_np.int32)
 
     timing = {
@@ -91,15 +86,42 @@ def rs3_prestage_variant(
     }
 
     try:
-        # 1) Metric build (vectorized over theta, broadcast over x,y inside IncludeCost)
+        if solver_dtype not in ("float32", "float64"):
+            raise ValueError(f"solver_dtype must be 'float32' or 'float64', got {solver_dtype!r}")
+
+        # Match tracking.fast_marching: float32 cost early.
+        if getattr(ct.tracking, "CUPY_AVAILABLE", False) and hasattr(ct.tracking, "cp"):
+            _cp = ct.tracking.cp
+            if hasattr(_cp, "ndarray") and isinstance(os_cost, _cp.ndarray):
+                os_cost = os_cost.astype(_cp.float32, copy=False)
+            else:
+                os_cost = _np.asarray(os_cost, dtype=_np.float32, order="C")
+        else:
+            os_cost = _np.asarray(os_cost, dtype=_np.float32, order="C")
+
+        # 1) Metric build (optimized path: no gfLIF allocation)
         t0 = perf_counter()
-        metric_theta = ct.tracking.ReedsSheppMetricGFOld_vec(gfLIF, dims, g11, g22, g33)  # (No,3,3)
+        metric_theta = ct.tracking.ReedsSheppMetricGFOld_vec(None, dims, g11, g22, g33)  # (No,3,3)
         timing["fm_metric_build_sec"] = float(perf_counter() - t0)
 
-        # 2) Include cost: same pattern as tracking.fast_marching
+        # 2) Include cost on CPU (NumPy), matching tracking.fast_marching
         t0 = perf_counter()
-        cost_sq_input = os_cost**2
-        metricLIFinclCostOld = ct.tracking.IncludeCost(cost_sq_input, metric_theta)  # (No,Nx,Ny,3,3)
+        cost_sq_input = os_cost * os_cost
+        if getattr(ct.tracking, "CUPY_AVAILABLE", False) and hasattr(ct.tracking, "cp"):
+            _cp = ct.tracking.cp
+            if hasattr(_cp, "ndarray"):
+                cost_sq_np = cost_sq_input.get() if isinstance(cost_sq_input, _cp.ndarray) else _np.asarray(cost_sq_input, dtype=_np.float32)
+                metric_theta_np = metric_theta.get() if isinstance(metric_theta, _cp.ndarray) else _np.asarray(metric_theta, dtype=_np.float32)
+            else:
+                cost_sq_np = _np.asarray(cost_sq_input, dtype=_np.float32)
+                metric_theta_np = _np.asarray(metric_theta, dtype=_np.float32)
+        else:
+            cost_sq_np = _np.asarray(cost_sq_input, dtype=_np.float32)
+            metric_theta_np = _np.asarray(metric_theta, dtype=_np.float32)
+
+        cost_sq_np = _np.ascontiguousarray(cost_sq_np, dtype=_np.float32)
+        metric_theta_np = _np.ascontiguousarray(metric_theta_np, dtype=_np.float32)
+        metricLIFinclCostOld = (cost_sq_np[..., None, None] * metric_theta_np[:, None, None, :, :]).astype(_np.float32, copy=False)
         timing["fm_include_cost_sec"] = float(perf_counter() - t0)
 
         # 3) Transpose to (3,3,Nx,Ny,No) for Riemann3_Periodic
@@ -108,14 +130,15 @@ def rs3_prestage_variant(
         timing["fm_transpose_sec"] = float(perf_counter() - t0)
 
         # Rect + dims for RS3 (dims in [Nx,Ny,No] order for AGD)
-        a = _np.array([0, 2 * _np.pi]) - s_theta / 2
-        b = _np.array([0, NxCost]); c = _np.array([0, NyCost])
-        sides = _np.array([b, c, a], dtype=_np.float32)
+        solver_np_dtype = _np.float32 if solver_dtype == "float32" else _np.float64
+        a = _np.array([0, 2 * _np.pi], dtype=solver_np_dtype) - s_theta / 2
+        b = _np.array([0, NxCost], dtype=solver_np_dtype); c = _np.array([0, NyCost], dtype=solver_np_dtype)
+        sides = _np.array([b, c, a], dtype=solver_np_dtype)
         dims_rs3 = _np.array([NxCost, NyCost, NoCost], dtype=_np.int32)
 
         # seeds/tips as [y,x,theta] (π/2 orientation like your original code)
-        seeds = _np.array([p0_down_xy[1], p0_down_xy[0], _np.pi / 2], dtype=_np.float32)
-        tips  = _np.array([p1_down_xy[1], p1_down_xy[0], _np.pi / 2], dtype=_np.float32)
+        seeds = _np.array([p0_down_xy[1], p0_down_xy[0], _np.pi / 2], dtype=solver_np_dtype)
+        tips  = _np.array([p1_down_xy[1], p1_down_xy[0], _np.pi / 2], dtype=solver_np_dtype)
 
         # put metric into SHM so workers *could* attach without copying
         meta = shm_from_array(metric_5d)
@@ -128,6 +151,7 @@ def rs3_prestage_variant(
             tips=tips,
             metric_meta=meta,
             timing=timing,
+            solver_dtype=solver_dtype,
         )
         if include_metric_fallback:
             # Fallback: embed metric_5d directly in the payload (what workers actually use now)
@@ -139,30 +163,45 @@ def rs3_prestage_variant(
             "ok": False,
             "error": f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
             "timing": timing,
+            "solver_dtype": solver_dtype,
         }
 
 # ---- CPU RS3 (only) -------------------------------------------------
-def _runReedsSheppGF_cpu(sides, dims, seeds, tips, metric_5d):
+def _runReedsSheppGF_cpu(sides, dims, seeds, tips, metric_5d, solver_dtype="float64"):
     """Hard CPU path for Riemann3_Periodic."""
     import numpy as np
     from agd import Eikonal
     from agd.Metrics import Riemann
 
-    metric = np.asarray(metric_5d, dtype=np.float32)
+    if solver_dtype not in ("float32", "float64"):
+        raise ValueError(f"solver_dtype must be 'float32' or 'float64', got {solver_dtype!r}")
+    target_dtype = np.float32 if solver_dtype == "float32" else np.float64
+    metric = np.ascontiguousarray(metric_5d, dtype=target_dtype)
     # tripwire: enforce expected shape
     if metric.ndim != 5 or metric.shape[:2] != (3, 3):
         raise ValueError(f"Bad metric shape {metric.shape}, expected (3,3,Nx,Ny,No)")
 
-    hfmIn = Eikonal.dictIn({
-        'model'        : 'Riemann3_Periodic',
-        'seeds'        : [seeds],
-        'arrayOrdering': 'RowMajor',
-        'tips'         : [tips],
-        'metric'       : Riemann(metric),
-        'verbosity'    : 0,
-    })
-    hfmIn.SetRect(sides=sides, dims=dims)
-    hfmOut = hfmIn.Run()
+    try:
+        hfmIn = Eikonal.dictIn({
+            'model'        : 'Riemann3_Periodic',
+            'seeds'        : [seeds],
+            'arrayOrdering': 'RowMajor',
+            'tips'         : [tips],
+            'metric'       : Riemann(metric),
+            'verbosity'    : 0,
+        })
+        hfmIn.SetRect(sides=sides, dims=dims)
+        hfmOut = hfmIn.Run()
+    except TypeError as e:
+        msg = str(e)
+        if "set_array()" in msg and "'metric'" in msg:
+            raise TypeError(
+                f"HFM metric type mismatch for set_array('metric'): "
+                f"shape={metric.shape}, dtype={metric.dtype}, "
+                f"C_CONTIGUOUS={bool(metric.flags['C_CONTIGUOUS'])}, solver_dtype={solver_dtype}. "
+                f"The binding expects numpy.ndarray[numpy.float64]."
+            ) from None
+        raise
     geos = [g.T for g in hfmOut['geodesics']]
     return geos
 
@@ -175,6 +214,14 @@ def _rs3_cpu_worker(task: Dict[str, Any]) -> Dict[str, Any]:
     from time import perf_counter
 
     try:
+        if "error" in task and task.get("error"):
+            return {
+                "ok": False,
+                "variant_id": task.get("variant_id"),
+                "error": task.get("error"),
+                "timing": dict(task.get("timing", {})),
+            }
+
         metric = task.get("metric_5d", None)
         if metric is None:
             return {
@@ -185,7 +232,8 @@ def _rs3_cpu_worker(task: Dict[str, Any]) -> Dict[str, Any]:
 
         t0 = perf_counter()
         geos = _runReedsSheppGF_cpu(
-            task["sides"], task["dims"], task["seeds"], task["tips"], metric
+            task["sides"], task["dims"], task["seeds"], task["tips"], metric,
+            solver_dtype=task.get("solver_dtype", "float64")
         )
         solver_sec = float(perf_counter() - t0)
 
@@ -226,6 +274,7 @@ def run_rs3_variants_split(
     bbox_xyxy: List[int],       # [xmin,ymin,xmax,ymax]
     cpu_max_workers: int = None,
     mp_start_method: str = "spawn",
+    solver_dtype: str = "float64",
 ) -> List[Dict[str, Any]]:
     """
     PRESTAGE (main proc) per variant → RS3 worker per variant (CPU parallel).
@@ -262,6 +311,7 @@ def run_rs3_variants_split(
             g22=gv.get("g22", 25.0),
             g33=gv.get("g33", 25.0),
             include_metric_fallback=True,   # keep True until SHM is fully trusted
+            solver_dtype=solver_dtype,
         )
         if not pre.get("ok"):
             prepared.append({
@@ -272,6 +322,7 @@ def run_rs3_variants_split(
                 "seeds": None,
                 "tips": None,
                 "timing": pre.get("timing", {}),
+                "solver_dtype": solver_dtype,
                 "error": pre.get("error", "prestage failed"),
             })
             continue
@@ -288,6 +339,7 @@ def run_rs3_variants_split(
             "seeds": pre["seeds"],
             "tips":  pre["tips"],
             "timing": pre.get("timing", {}),
+            "solver_dtype": pre.get("solver_dtype", solver_dtype),
         })
 
     # ----------------------------------------------------------
