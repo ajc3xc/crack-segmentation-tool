@@ -49,7 +49,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import itertools, pandas as pd, os
 from edge_workers import *
 
-from rs3_split import run_rs3_variants_split
+from rs3_memory_stable import run_rs3_variants_memory_stable, RS3SolveConfig, hard_gpu_cleanup
 from edge_workers import *
 from combiner import *
 
@@ -2883,7 +2883,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
         import os, json, math, numpy as np, pandas as pd, cv2
         import cracktools as ct
-        from rs3_split import run_rs3_variants_split, _variant_desc, plot_midlines_overlay_all
+        from rs3_memory_stable import run_rs3_variants_memory_stable, RS3SolveConfig, hard_gpu_cleanup
+        from rs3_split import _variant_desc, plot_midlines_overlay_all
         from helpers.metrics import (
             set_auto_variant_for_crack,
             metric_atomic_path_for,
@@ -2986,9 +2987,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         if g_variants is None:
             # shared 8-variant grid (used when NOT smoke_test)
             g_variants_shared = [
-                #{"g11": 1.0, "g22": 10.0,  "g33": 10.0},   # local refinement near 25
+                {"g11": 1.0, "g22": 10.0,  "g33": 10.0},   # local refinement near 25
                 {"g11": 1.0, "g22": 25.0,  "g33": 25.0},   # current baseline
-                #{"g11": 1.0, "g22": 50.0,  "g33": 50.0},   # moderate curvature
+                {"g11": 1.0, "g22": 50.0,  "g33": 50.0},   # moderate curvature
                 {"g11": 1.0, "g22": 100.0, "g33": 100.0},  # LEGACY reference (old default)
             ]
         else:
@@ -3075,16 +3076,29 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 f"{[(v['g11'], v['g22'], v['g33']) for v in g_variants_run]}"
             )
 
-            fm_results = run_rs3_variants_split(
-                ct=__import__("cracktools"),
+            # Best-effort GPU pool cleanup before RS3 metric build/solve stage.
+            try:
+                _cp_mod = getattr(ct.tracking, "cp", None)
+            except Exception:
+                _cp_mod = None
+            hard_gpu_cleanup(_cp_mod)
+
+            fm_results = run_rs3_variants_memory_stable(
+                ct=ct,
                 os_cost=os_cost,
                 p0_down_xy=p0_down_xy,
                 p1_down_xy=p1_down_xy,
                 g_variants=g_variants_run,
                 down=int(down),
                 bbox_xyxy=[xmin, ymin, xmax, ymax],
-                cpu_max_workers=(cpu_max_workers or os.cpu_count()),
-                mp_start_method="spawn",
+                cfg=RS3SolveConfig(
+                    solver_dtype="float64",
+                    downsample_attempts=(1, 2, 4),
+                    theta_block=4,
+                    use_memmap_if_large=True,
+                    memmap_threshold_gib=3.5,
+                    verbose=False,
+                ),
             )
 
             # manual midline in local coordinates

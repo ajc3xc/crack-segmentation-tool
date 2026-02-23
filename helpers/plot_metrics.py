@@ -142,13 +142,13 @@ def plot_edges_and_normals(
         p1 = seg[-1]
         dx, dy = (p1 - p0)
         ang = np.degrees(np.arctan2(dy, dx))
-        print(
+        '''print(
             f"[PLOT DIAG] {name}: n={len(seg)} "
             f"start=({p0[0]:.2f},{p0[1]:.2f}) end=({p1[0]:.2f},{p1[1]:.2f}) "
             f"x=[{seg[:,0].min():.2f},{seg[:,0].max():.2f}] "
             f"y=[{seg[:,1].min():.2f},{seg[:,1].max():.2f}] "
             f"d=({dx:.2f},{dy:.2f}) angle={ang:.1f}deg"
-        )
+        )'''
         return seg
 
     def _endpoint_dist_diag(name_a, seg_a, name_b, seg_b):

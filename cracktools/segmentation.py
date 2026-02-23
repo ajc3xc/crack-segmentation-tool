@@ -1234,12 +1234,12 @@ def generate_mask_from_edges(
         p0, p1 = A[0], A[-1]
         d = p1 - p0
         ang = np.degrees(np.arctan2(d[1], d[0]))
-        print(
+        '''print(
             f"[MASK DIAG] {name}: n={len(A)} "
             f"start=({p0[0]:.2f},{p0[1]:.2f}) end=({p1[0]:.2f},{p1[1]:.2f}) "
             f"x=[{A[:,0].min():.2f},{A[:,0].max():.2f}] "
             f"y=[{A[:,1].min():.2f},{A[:,1].max():.2f}] angle={ang:.1f}deg"
-        )
+        )'''
         return A
 
     def _end_dists(name_a, A, name_b, B):
@@ -1249,7 +1249,7 @@ def generate_mask_from_edges(
         d_se = np.linalg.norm(A[0] - B[-1])
         d_es = np.linalg.norm(A[-1] - B[0])
         d_ee = np.linalg.norm(A[-1] - B[-1])
-        print(f"[MASK DIAG] {name_a}<->{name_b}: ss={d_ss:.2f} se={d_se:.2f} es={d_es:.2f} ee={d_ee:.2f}")
+        #print(f"[MASK DIAG] {name_a}<->{name_b}: ss={d_ss:.2f} se={d_se:.2f} es={d_es:.2f} ee={d_ee:.2f}")
 
     n1_good = n1[good]
     n2_good = n2[good]

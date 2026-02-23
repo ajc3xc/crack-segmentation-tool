@@ -1569,21 +1569,9 @@ def _plot_single_crack_geometry(
     if crack_rows.empty:
         return
 
-    def _exists(mode, g22):
-        return not crack_rows[
-            (crack_rows["os_mode"] == mode) &
-            (crack_rows["g11"] == 1.0) &
-            (crack_rows["g22"] == g22) &
-            (crack_rows["g33"] == g22)
-        ].empty
-
-    has_old_100 = _exists("old", 100.0)
-    has_new_100 = _exists("new", 100.0)
-    if not has_old_100:
-        print(f"[plot_rs3] debug mode: missing old,1,100,100 for crack {cid}")
-    if not has_new_100:
-        print(f"[plot_rs3] debug mode: missing new,1,100,100 for crack {cid}")
-
+    # ---------------------------------------------------------
+    # Load manual midline (required)
+    # ---------------------------------------------------------
     p_cr = metric_atomic_path_for(save_folder, image_base, cid)
     crack_json = safe_read_json(p_cr, None)
     if not crack_json:
@@ -1596,25 +1584,9 @@ def _plot_single_crack_geometry(
     metrics_root = os.path.join(save_folder, "metrics", image_base)
     auto_dir = os.path.join(metrics_root, f"cid{cid}", "auto")
 
-    print("---- GEOMETRY DEBUG ----")
-    print("CID:", cid)
-    print("save_folder:", save_folder)
-    print("image_base:", image_base)
-    print("metrics_root:", metrics_root)
-    print("auto_dir:", auto_dir)
-    print("auto_dir exists:", os.path.isdir(auto_dir))
-    if os.path.isdir(auto_dir):
-        try:
-            print("files in auto_dir:", sorted(os.listdir(auto_dir)))
-        except Exception as e:
-            print("files in auto_dir: <error>", e)
-    print("Available variant_global_id in D:")
-    try:
-        print(crack_rows["variant_global_id"].tolist())
-    except Exception:
-        print("<missing variant_global_id column>")
-    print("------------------------")
-
+    # ---------------------------------------------------------
+    # Variant loader
+    # ---------------------------------------------------------
     def load_variant(mode, g22):
         row = crack_rows[
             (crack_rows["os_mode"] == mode) &
@@ -1623,54 +1595,47 @@ def _plot_single_crack_geometry(
             (crack_rows["g33"] == g22)
         ]
         if row.empty:
-            return None, None
+            return None
 
         row0 = row.sort_values("score_mid", ascending=True).iloc[0]
         vid = int(row0["variant_global_id"])
-        print("Attempting to load:", f"v{vid}.json")
         vfile = os.path.join(auto_dir, f"v{vid}.json")
         if not os.path.exists(vfile):
-            print(f"[DEBUG] Missing variant file: {vfile}")
-            return None, None
+            return None
 
         vjson = safe_read_json(vfile, {})
         if "midline" in vjson:
-            xy = np.asarray(vjson.get("midline", []), float)
-        elif isinstance(vjson.get("auto_best"), dict) and ("midline" in vjson["auto_best"]):
-            xy = np.asarray(vjson["auto_best"].get("midline", []), float)
+            xy = np.asarray(vjson["midline"], float)
+        elif isinstance(vjson.get("auto_best"), dict) and "midline" in vjson["auto_best"]:
+            xy = np.asarray(vjson["auto_best"]["midline"], float)
         else:
-            print(f"[DEBUG] No midline key in variant JSON: {vfile}")
-            return None, None
+            return None
+
         if xy.ndim != 2 or xy.shape[1] != 2 or len(xy) < 2:
-            print(f"[DEBUG] Invalid/empty midline in variant JSON: {vfile}")
-            return None, None
-        return xy, row0
+            return None
 
-    plt.figure(figsize=(6, 6), dpi=220)
+        return xy
 
-    plt.plot(
-        manual_xy[:, 0], manual_xy[:, 1],
-        color="black", linewidth=2.8,
-        label="Manual",
-    )
-
-    n_plotted_auto = 0
-
-    for mode in ["old", "new"]:
-        xy, row = load_variant(mode, 100.0)
-        if xy is None:
-            continue
-
-        label = f"{mode},1,100,100"
-
-        plt.plot(
-            xy[:, 0], xy[:, 1],
-            linestyle="--" if mode == "old" else "-",
-            linewidth=1.8,
-            label=label,
+    # ---------------------------------------------------------
+    # Load required baseline: old,1,100,100
+    # ---------------------------------------------------------
+    xy_old_100 = load_variant("old", 100.0)
+    if xy_old_100 is None:
+        raise RuntimeError(
+            f"Missing required baseline old,1,100,100 for crack {cid}"
         )
-        n_plotted_auto += 1
 
+    # ---------------------------------------------------------
+    # Collect all NEW variants (one subplot per new)
+    # ---------------------------------------------------------
+    new_variants = []
+
+    # new,100
+    xy_new_100 = load_variant("new", 100.0)
+    if xy_new_100 is not None:
+        new_variants.append(("new,1,100,100", xy_new_100))
+
+    # flexible new variants
     flex_rows = crack_rows[
         (crack_rows["os_mode"] == "new") &
         (crack_rows["g22"] != 100.0)
@@ -1678,34 +1643,103 @@ def _plot_single_crack_geometry(
 
     for _, row in flex_rows.iterrows():
         g22 = float(row["g22"])
-        xy, _ = load_variant("new", g22)
+        xy = load_variant("new", g22)
         if xy is None:
             continue
-
         label = f"new,1,{int(g22)},{int(g22)}"
+        new_variants.append((label, xy))
 
-        plt.plot(
-            xy[:, 0], xy[:, 1],
-            linewidth=1.4,
-            alpha=0.85,
+    if len(new_variants) == 0:
+        raise RuntimeError(f"No new variants available for crack {cid}")
+
+    # ---------------------------------------------------------
+    # Subplot grid
+    # ---------------------------------------------------------
+    n = len(new_variants)
+
+    # Flexible layout
+    if n <= 4:
+        ncols = n
+        nrows = 1
+    else:
+        ncols = int(np.ceil(np.sqrt(n)))
+        nrows = int(np.ceil(n / ncols))
+    
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        figsize=(4 * ncols, 4 * nrows),
+        dpi=220,
+    )
+
+    if nrows == 1:
+        axes = np.atleast_1d(axes)
+    axes = axes.flatten()
+
+    # ---------------------------------------------------------
+    # Fix global axis limits (fair comparison)
+    # ---------------------------------------------------------
+    all_x = [manual_xy[:, 0], xy_old_100[:, 0]]
+    all_y = [manual_xy[:, 1], xy_old_100[:, 1]]
+
+    for _, xy in new_variants:
+        all_x.append(xy[:, 0])
+        all_y.append(xy[:, 1])
+
+    xmin = min(np.min(x) for x in all_x)
+    xmax = max(np.max(x) for x in all_x)
+    ymin = min(np.min(y) for y in all_y)
+    ymax = max(np.max(y) for y in all_y)
+
+    # ---------------------------------------------------------
+    # Plot each new variant against baseline
+    # ---------------------------------------------------------
+    for ax, (label, xy_new) in zip(axes, new_variants):
+
+        # Manual
+        ax.plot(
+            manual_xy[:, 0],
+            manual_xy[:, 1],
+            color="black",
+            linewidth=2.8,
+            label="Manual",
+        )
+
+        # Old baseline
+        ax.plot(
+            xy_old_100[:, 0],
+            xy_old_100[:, 1],
+            linestyle="--",
+            linewidth=1.8,
+            label="old,1,100,100",
+        )
+
+        # Current new variant
+        ax.plot(
+            xy_new[:, 0],
+            xy_new[:, 1],
+            linewidth=2.0,
             label=label,
         )
-        n_plotted_auto += 1
 
-    if n_plotted_auto <= 0:
-        raise RuntimeError(f"No auto variants available to plot for crack {cid}")
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(ymax, ymin)  # inverted
+        ax.set_aspect("equal")
+        ax.set_title(label, fontsize=9)
+        ax.legend(fontsize=7, framealpha=0.9)
 
-    plt.gca().invert_yaxis()
-    plt.title(f"RS3 sweep — crack {cid}")
-    plt.legend(loc="lower right", fontsize=7, framealpha=0.9, title="mode,g11,g22,g33")
-    plt.tight_layout()
+    # Hide unused axes
+    for ax in axes[len(new_variants):]:
+        ax.axis("off")
 
-    plt.savefig(
+    fig.suptitle(f"RS3 sweep — crack {cid}", fontsize=12)
+    fig.tight_layout()
+
+    fig.savefig(
         os.path.join(out_dir, filename),
         bbox_inches="tight",
     )
-    plt.close()
-
+    plt.close(fig)
 
 def plot_rs3_sweep_summary(
     df_all,
@@ -1937,14 +1971,16 @@ def plot_rs3_sweep_summary(
     plt.xlabel("RS3 family")
     plt.title("RS3 family selection frequency")
     plt.grid(axis="y", alpha=0.25)
-    plt.legend(
-        #handles=legend_handles,
-        fontsize=7,
-        frameon=True,
-        title="os_mode,g11,g22,g33",
-        title_fontsize=8,
-        loc="lower right",
-    )
+    ax = plt.gca()
+    handles, labels = ax.get_legend_handles_labels()
+    if any(lbl and not str(lbl).startswith("_") for lbl in labels):
+        plt.legend(
+            fontsize=7,
+            frameon=True,
+            title="os_mode,g11,g22,g33",
+            title_fontsize=8,
+            loc="lower right",
+        )
     plt.xticks(rotation=0)
 
     plt.tight_layout()
