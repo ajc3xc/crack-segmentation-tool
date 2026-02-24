@@ -2149,7 +2149,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         """
         
         #stopgap measure
-        #do_edge_calibrate=False
+        do_edge_calibrate=False
 
         import os, time, numpy as np, pandas as pd
         from helpers import metrics
@@ -2437,6 +2437,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         else:
             print("[quick] ⚠ no auto_packs; skipping RS3 family selection.")
 
+        #return
         # ------------------------------------------------------------
         # PHASE 2: GEODESIC EDGES FOR AUTO BEST MIDLINES
         # ------------------------------------------------------------

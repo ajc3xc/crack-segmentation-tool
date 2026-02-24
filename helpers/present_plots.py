@@ -1703,6 +1703,7 @@ def _plot_single_crack_geometry(
             color="black",
             linewidth=2.8,
             label="Manual",
+            alpha=.85
         )
 
         # Old baseline
@@ -1712,6 +1713,7 @@ def _plot_single_crack_geometry(
             linestyle="--",
             linewidth=1.8,
             label="old,1,100,100",
+            alpha=.85
         )
 
         # Current new variant
@@ -1720,6 +1722,7 @@ def _plot_single_crack_geometry(
             xy_new[:, 1],
             linewidth=2.0,
             label=label,
+            alpha=.85
         )
 
         ax.set_xlim(xmin, xmax)

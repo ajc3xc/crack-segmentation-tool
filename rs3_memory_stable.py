@@ -4,6 +4,8 @@ import gc
 import os
 import tempfile
 import traceback
+import ctypes
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -36,7 +38,70 @@ def hard_gpu_cleanup(cp_mod: Optional[Any]) -> None:
 
 def hard_cpu_cleanup(*objs: Any) -> None:
     _ = objs
+    # Windows-only best-effort heap compaction after large frees.
+    try:
+        ctypes.CDLL("msvcrt")._heapmin()
+    except Exception:
+        pass
     gc.collect()
+
+
+def _close_memmap_file(arr: Any) -> None:
+    """Best-effort close of numpy.memmap backing file (Windows keeps handle open)."""
+    try:
+        if isinstance(arr, np.memmap):
+            try:
+                arr.flush()
+            except Exception:
+                pass
+            mm = getattr(arr, "_mmap", None)
+            if mm is not None:
+                try:
+                    mm.close()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _cleanup_rs3_tmp_metric(metric_obj: Any, tmp_path: Optional[str]) -> None:
+    """Close memmap handles first, then unlink temp file."""
+    try:
+        _close_memmap_file(metric_obj)
+    finally:
+        try:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def _purge_stale_rs3_memmaps(*, older_than_hours: float = 12.0, max_delete: int = 256) -> int:
+    """
+    Best-effort cleanup of stale rs3 memmap temp files from prior failed runs.
+    Conservative: only removes old files matching our prefix in the system temp dir.
+    """
+    deleted = 0
+    try:
+        tmp_dir = tempfile.gettempdir()
+        cutoff = time.time() - float(older_than_hours) * 3600.0
+        for name in os.listdir(tmp_dir):
+            if deleted >= int(max_delete):
+                break
+            if not (name.startswith("rs3_metric_") and name.endswith(".dat")):
+                continue
+            path = os.path.join(tmp_dir, name)
+            try:
+                st = os.stat(path)
+                if st.st_mtime > cutoff:
+                    continue
+                os.remove(path)
+                deleted += 1
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return deleted
 
 
 def metric_bytes(Nx: int, Ny: int, No: int, dtype=np.float64) -> int:
@@ -184,56 +249,80 @@ def runReedsSheppGF_cpu(
     dims: Sequence[int],
     seeds: np.ndarray,
     tips: np.ndarray,
-    metric_5d_f64: np.ndarray,
+    metric_in: np.ndarray,
 ) -> List[np.ndarray]:
     from agd import Eikonal
-    from agd.Metrics import Riemann
+    import numpy as np
 
-    # HFM binding is strict: it wants a plain numpy.ndarray[float64] in C order.
-    # np.memmap (subclass), non-contiguous views, or odd strides can be rejected.
-    flags = getattr(metric_5d_f64, "flags", None)
-    is_c_contig = bool(flags["C_CONTIGUOUS"]) if flags is not None else False
-    if (type(metric_5d_f64) is not np.ndarray) or (getattr(metric_5d_f64, "dtype", None) != np.float64) or (not is_c_contig):
-        metric_5d_f64 = np.array(metric_5d_f64, dtype=np.float64, order="C", copy=True)
-    if metric_5d_f64.ndim != 5 or metric_5d_f64.shape[:2] != (3, 3):
-        raise ValueError(f"Bad metric shape {metric_5d_f64.shape}, expected (3,3,Nx,Ny,No)")
-    try:
-        metric_arg = Riemann(metric_5d_f64)
+    def _as_f64_c(a):
+        # Always return a plain ndarray float64 in C order
+        if type(a) is np.ndarray and a.dtype == np.float64 and a.flags["C_CONTIGUOUS"]:
+            return a
+        return np.array(a, dtype=np.float64, order="C", copy=True)
 
-        hfmIn = Eikonal.dictIn({
-            "model": "Riemann3_Periodic",
-            "seeds": [seeds],
-            "tips": [tips],
-            "arrayOrdering": "RowMajor",
-            "metric": metric_arg,
-            "verbosity": 0,
-        })
-        hfmIn.SetRect(sides=sides, dims=list(map(int, dims)))
-        hfmOut = hfmIn.Run()
-        return [g.T for g in hfmOut["geodesics"]]
-    except TypeError as e:
-        msg = str(e)
-        if "set_array()" in msg and "'metric'" in msg:
-            # Avoid huge ndarray dumps in the traceback by rethrowing a short diagnostic.
-            raw_flags = getattr(metric_5d_f64, "flags", None)
-            raw_c = bool(raw_flags["C_CONTIGUOUS"]) if raw_flags is not None else None
-            shape = getattr(metric_5d_f64, "shape", None)
-            dtype = getattr(metric_5d_f64, "dtype", None)
-            exact_type = type(metric_5d_f64)
-            metric_arg_obj = locals().get("metric_arg", None)
-            arg_type = type(metric_arg_obj) if metric_arg_obj is not None else None
-            arg_shape = getattr(metric_arg_obj, "shape", None)
-            arg_dtype = getattr(metric_arg_obj, "dtype", None)
-            arg_flags = getattr(metric_arg_obj, "flags", None)
-            arg_c = bool(arg_flags["C_CONTIGUOUS"]) if arg_flags is not None else None
-            raise TypeError(
-                "HFM metric type mismatch for set_array('metric'): "
-                f"raw_type={exact_type.__name__}, raw_shape={shape}, raw_dtype={dtype}, raw_C={raw_c}; "
-                f"arg_type={getattr(arg_type, '__name__', arg_type)}, arg_shape={arg_shape}, "
-                f"arg_dtype={arg_dtype}, arg_C={arg_c}. "
-                "Expected plain numpy.ndarray[numpy.float64] in C order (after AGD unwrap)."
-            ) from None
-        raise
+    def _pack_metric_riemann3(metric_any: np.ndarray) -> np.ndarray:
+        """
+        HFM/AGD expects lower-triangular flatten order for a 3x3 symmetric metric:
+          [g_xx, g_xy, g_yy, g_xt, g_yt, g_tt]
+        (equivalently [m00, m10, m11, m20, m21, m22]).
+        For HFM row-major NumPy input, pass channel-last packed layout:
+          shape (Nx, Ny, No, 6)
+        (the backend handles its own internal ordering conversion).
+        """
+        m = metric_any
+
+        # Case A: already packed channel-last (Nx,Ny,No,6)
+        if getattr(m, "ndim", None) == 4 and m.shape[-1] == 6:
+            return _as_f64_c(m)
+
+        # Case B: packed channel-first (6,Nx,Ny,No) -> move channels last
+        if getattr(m, "ndim", None) == 4 and m.shape[0] == 6:
+            m = _as_f64_c(m)
+            return _as_f64_c(np.moveaxis(m, 0, -1))
+
+        # Case C: full symmetric (3,3,Nx,Ny,No)
+        if getattr(m, "ndim", None) == 5 and m.shape[:2] == (3, 3):
+            m = _as_f64_c(m)  # ensure ndarray before slicing
+            Nx, Ny, No = int(m.shape[2]), int(m.shape[3]), int(m.shape[4])
+            packed = np.empty((Nx, Ny, No, 6), dtype=np.float64, order="C")
+
+            packed[..., 0] = m[0, 0, ...]  # g_xx (m00)
+            packed[..., 1] = m[1, 0, ...]  # g_xy (m10)
+            packed[..., 2] = m[1, 1, ...]  # g_yy (m11)
+            packed[..., 3] = m[2, 0, ...]  # g_xt (m20)
+            packed[..., 4] = m[2, 1, ...]  # g_yt (m21)
+            packed[..., 5] = m[2, 2, ...]  # g_tt (m22)
+
+            return packed
+
+        raise ValueError(
+            f"Bad metric shape {getattr(m, 'shape', None)}; expected "
+            f"(3,3,Nx,Ny,No) or packed (Nx,Ny,No,6)/(6,Nx,Ny,No)"
+        )
+
+    metric = _pack_metric_riemann3(metric_in)
+
+    # sanity vs dims
+    NxCost, NyCost, NoCost = map(int, dims)
+    if metric.shape[0] != NxCost or metric.shape[1] != NyCost or metric.shape[2] != NoCost or metric.shape[3] != 6:
+        raise ValueError(
+            f"Metric dims mismatch: metric is ({metric.shape[0]},{metric.shape[1]},{metric.shape[2]},{metric.shape[3]}) "
+            f"but dims={dims}"
+        )
+
+    print(f"[RS3 HFM] packed metric shape={metric.shape} dtype={metric.dtype} C={bool(metric.flags['C_CONTIGUOUS'])}")
+
+    hfmIn = Eikonal.dictIn({
+        "model": "Riemann3_Periodic",
+        "seeds": [seeds],
+        "tips": [tips],
+        "arrayOrdering": "RowMajor",
+        "metric": metric,   # <-- IMPORTANT: plain packed ndarray, not Riemann(...)
+        "verbosity": 0,
+    })
+    hfmIn.SetRect(sides=sides, dims=[NxCost, NyCost, NoCost])
+    hfmOut = hfmIn.Run()
+    return [g.T for g in hfmOut["geodesics"]]
 
 
 def solve_rs3_one_variant_with_fallback(
@@ -289,6 +378,8 @@ def solve_rs3_one_variant_with_fallback(
             if cfg.verbose:
                 print(f"[RS3] metric bytes ~ {human_bytes(need_bytes)} use_memmap={use_memmap}")
             if use_memmap:
+                # Best-effort cleanup from prior crashed runs before allocating another 5GB file.
+                _purge_stale_rs3_memmaps(older_than_hours=1.0)
                 fd, tmp_path = tempfile.mkstemp(prefix="rs3_metric_", suffix=".dat")
                 os.close(fd)
 
@@ -316,14 +407,11 @@ def solve_rs3_one_variant_with_fallback(
                 path_xy *= ds
 
             del geos
+            _cleanup_rs3_tmp_metric(metric_5d, tmp_path)
             del metric_5d
             metric_5d = None
-            gc.collect()
-            if tmp_path is not None:
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
+            tmp_path = None
+            hard_cpu_cleanup()
 
             return {
                 "ok": True,
@@ -344,15 +432,15 @@ def solve_rs3_one_variant_with_fallback(
                 print(f"[RS3] failed ds={ds}: {type(e).__name__}: {e}")
             if metric_5d is not None:
                 try:
+                    _cleanup_rs3_tmp_metric(metric_5d, tmp_path)
                     del metric_5d
                 except Exception:
                     pass
-            gc.collect()
-            if tmp_path:
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
+                metric_5d = None
+                tmp_path = None
+            hard_cpu_cleanup()
+            _cleanup_rs3_tmp_metric(None, tmp_path)
+            tmp_path = None
             if not _is_oom_exception(e):
                 return {"ok": False, "ds_used": ds, "error": f"{type(e).__name__}: {e}\n{traceback.format_exc()}"}
             continue
@@ -407,7 +495,7 @@ def run_rs3_variants_memory_stable(
                 "error": r.get("error", "RS3 failed"),
                 "timing": r.get("timing", {}),
             })
-            gc.collect()
+            hard_cpu_cleanup()
             continue
 
         path_xy_cd = np.asarray(r["track_full_xy_cropdown"], dtype=np.float64).copy()
@@ -428,6 +516,6 @@ def run_rs3_variants_memory_stable(
         })
 
         del r, path_xy_cd, track_full_xy
-        gc.collect()
+        hard_cpu_cleanup()
 
     return out

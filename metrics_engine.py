@@ -49,7 +49,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import itertools, pandas as pd, os
 from edge_workers import *
 
-from rs3_memory_stable import run_rs3_variants_memory_stable, RS3SolveConfig, hard_gpu_cleanup
+from rs3_memory_stable import run_rs3_variants_memory_stable, RS3SolveConfig, hard_gpu_cleanup, hard_cpu_cleanup
 from edge_workers import *
 from combiner import *
 
@@ -2883,7 +2883,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
         import os, json, math, numpy as np, pandas as pd, cv2
         import cracktools as ct
-        from rs3_memory_stable import run_rs3_variants_memory_stable, RS3SolveConfig, hard_gpu_cleanup
+        from rs3_memory_stable import run_rs3_variants_memory_stable, RS3SolveConfig, hard_gpu_cleanup, hard_cpu_cleanup
         from rs3_split import _variant_desc, plot_midlines_overlay_all
         from helpers.metrics import (
             set_auto_variant_for_crack,
@@ -2987,9 +2987,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         if g_variants is None:
             # shared 8-variant grid (used when NOT smoke_test)
             g_variants_shared = [
-                #{"g11": 1.0, "g22": 10.0,  "g33": 10.0},   # local refinement near 25
+                {"g11": 1.0, "g22": 10.0,  "g33": 10.0},   # local refinement near 25
                 {"g11": 1.0, "g22": 25.0,  "g33": 25.0},   # current baseline
-                #{"g11": 1.0, "g22": 50.0,  "g33": 50.0},   # moderate curvature
+                {"g11": 1.0, "g22": 50.0,  "g33": 50.0},   # moderate curvature
                 {"g11": 1.0, "g22": 100.0, "g33": 100.0},  # LEGACY reference (old default)
             ]
         else:
@@ -3082,6 +3082,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             except Exception:
                 _cp_mod = None
             hard_gpu_cleanup(_cp_mod)
+            hard_cpu_cleanup()
 
             fm_results = run_rs3_variants_memory_stable(
                 ct=ct,
@@ -3095,7 +3096,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     solver_dtype="float64",
                     downsample_attempts=(1, 2, 4),
                     theta_block=4,
-                    use_memmap_if_large=True,
+                    # Disable memmap temp files by default; rely on ds fallback
+                    # to avoid runaway disk usage on repeated RS3 failures.
+                    use_memmap_if_large=False,
                     memmap_threshold_gib=3.5,
                     verbose=False,
                 ),
