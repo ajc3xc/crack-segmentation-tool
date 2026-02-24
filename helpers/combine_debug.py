@@ -6,6 +6,7 @@ def _mask_from_crack(crack, H, W):
     """
     Safely reconstruct (H,W) mask from mask_crop+mask_bbox.
     Accepts [x,y,w,h] or [x0,y0,x1,y1].
+    Resolves format by matching mask_crop.shape (deterministic), not numeric plausibility.
     """
     import numpy as np
 
@@ -20,21 +21,69 @@ def _mask_from_crack(crack, H, W):
         return np.zeros((H, W), np.uint8)
 
     x0, y0 = bb[0], bb[1]
-    # heuristic: detect [x0,y0,x1,y1] vs [x,y,w,h]
-    if bb[2] > x0 and bb[3] > y0 and (bb[2]-x0) < W and (bb[3]-y0) < H:
-        x1, y1 = bb[2], bb[3]
+    a, b = bb[2], bb[3]
+    crop_h, crop_w = crop.shape[:2]
+
+    # Candidate 1: xywh
+    x1_xywh = x0 + a
+    y1_xywh = y0 + b
+    w_xywh = a
+    h_xywh = b
+
+    # Candidate 2: xyXY
+    x1_xyXY = a
+    y1_xyXY = b
+    w_xyXY = x1_xyXY - x0
+    h_xyXY = y1_xyXY - y0
+
+    is_xywh = (crop_w == w_xywh and crop_h == h_xywh)
+    is_xyXY = (crop_w == w_xyXY and crop_h == h_xyXY)
+
+    if is_xywh and not is_xyXY:
+        x1, y1 = x1_xywh, y1_xywh
+    elif is_xyXY and not is_xywh:
+        x1, y1 = x1_xyXY, y1_xyXY
+    elif is_xywh and is_xyXY:
+        # Ambiguous edge case (e.g., x0=y0=0); prefer the canonical project schema (xywh).
+        x1, y1 = x1_xywh, y1_xywh
     else:
-        x1, y1 = x0 + bb[2], y0 + bb[3]
+        # Schema mismatch or stale data; prefer xywh but warn.
+        try:
+            print("[MASK RECON WARN] bbox does not match crop shape")
+            print("incoming bbox:", bb)
+            print("incoming crop shape:", tuple(crop.shape))
+            print("xywh candidate wh:", (w_xywh, h_xywh))
+            print("xyXY candidate wh:", (w_xyXY, h_xyXY))
+        except Exception:
+            pass
+        x1, y1 = x1_xywh, y1_xywh
 
     x0, y0 = max(0, x0), max(0, y0)
     x1, y1 = min(W, x1), min(H, y1)
     if x1 <= x0 or y1 <= y0:
+        try:
+            print("[MASK RECON DEBUG] empty bbox after clamp")
+            print("incoming bbox:", bb)
+            print("incoming crop shape:", tuple(crop.shape))
+            print("clamped xyxy:", (x0, y0, x1, y1))
+        except Exception:
+            pass
         return np.zeros((H, W), np.uint8)
 
     mask = np.zeros((H, W), np.uint8)
     crop = (crop > 0).astype(np.uint8)
-    h_t, w_t = y1 - y0, x1 - x0
-    mask[y0:y0 + min(crop.shape[0], h_t), x0:x0 + min(crop.shape[1], w_t)] = crop[:h_t, :w_t]
+    h_t = min(crop_h, y1 - y0)
+    w_t = min(crop_w, x1 - x0)
+    mask[y0:y0 + h_t, x0:x0 + w_t] = crop[:h_t, :w_t]
+    if np.count_nonzero(crop) > 0 and np.count_nonzero(mask) == 0:
+        try:
+            print("[MASK RECON DEBUG] non-empty crop reconstructed to empty mask")
+            print("incoming bbox:", bb)
+            print("incoming crop shape:", tuple(crop.shape))
+            print("resolved xyxy:", (x0, y0, x1, y1))
+            print("H,W:", (H, W))
+        except Exception:
+            pass
     return mask
 
 def diag_combine_table(annotation_dict: dict, image_hw: tuple,
@@ -115,6 +164,65 @@ def auto_groups_from_atomic(annotation_dict_or_atomic,
     # Local import to avoid circular issues
     from helpers.combine_debug import _mask_from_crack
 
+    def _debug_mask_bbox_recon(crack, H, W, label):
+        """
+        Compare bbox interpretations for stored mask_crop + mask_bbox.
+        Prints enough detail to detect xywh vs xyXY ambiguity.
+        """
+        try:
+            mc = crack.get("mask_crop", None)
+            bb = crack.get("mask_bbox", None)
+            print(f"\n[DBG MASK {label}] --------------------------")
+            print("raw mask_bbox:", bb)
+
+            if mc is None:
+                print("mask_crop is None")
+                print("[END DBG MASK]\n")
+                return
+
+            crop = np.asarray(mc, dtype=np.uint8)
+            print("mask_crop shape:", tuple(crop.shape))
+            print("mask_crop nonzero:", int(np.count_nonzero(crop)))
+
+            if bb is None or len(bb) != 4:
+                print("mask_bbox missing/invalid")
+                print("[END DBG MASK]\n")
+                return
+
+            bb = [int(v) for v in bb]
+            x, y, b2, b3 = bb
+
+            # Interpretations
+            xywh = (x, y, x + b2, y + b3)
+            xyXY = (x, y, b2, b3)
+
+            def _recon_count(x0, y0, x1, y1):
+                x0 = int(max(0, min(W, x0)))
+                x1 = int(max(0, min(W, x1)))
+                y0 = int(max(0, min(H, y0)))
+                y1 = int(max(0, min(H, y1)))
+                if x1 <= x0 or y1 <= y0:
+                    return 0, (0, 0), (x0, y0, x1, y1)
+                h_t, w_t = y1 - y0, x1 - x0
+                mask = np.zeros((H, W), np.uint8)
+                mask[y0:y0 + min(crop.shape[0], h_t), x0:x0 + min(crop.shape[1], w_t)] = (crop[:h_t, :w_t] > 0).astype(np.uint8)
+                return int(np.count_nonzero(mask)), (int(min(crop.shape[0], h_t)), int(min(crop.shape[1], w_t))), (x0, y0, x1, y1)
+
+            cnt_xywh, shp_xywh, bb_xywh = _recon_count(*xywh)
+            cnt_xyXY, shp_xyXY, bb_xyXY = _recon_count(*xyXY)
+
+            print("xywh interpreted as:", bb_xywh)
+            print("xywh placed crop hw:", shp_xywh, "recon nonzero:", cnt_xywh)
+            print("xyXY interpreted as:", bb_xyXY)
+            print("xyXY placed crop hw:", shp_xyXY, "recon nonzero:", cnt_xyXY)
+
+            # Compare to current helper output
+            m_cur = _mask_from_crack(crack, H, W)
+            print("current helper nonzero:", int(np.count_nonzero(m_cur)))
+            print("[END DBG MASK]\n")
+        except Exception as e:
+            print(f"[DBG MASK {label}] failed: {e}")
+
     for i in range(len(ids)):
         for j in range(i + 1, len(ids)):
             a, b = ids[i], ids[j]
@@ -155,6 +263,15 @@ def auto_groups_from_atomic(annotation_dict_or_atomic,
                 mB = _mask_from_crack(cb, H, W)
                 maskA_px = int(mA.sum())
                 maskB_px = int(mB.sum())
+                if maskA_px == 0 or maskB_px == 0:
+                    print(
+                        f"[COMBINE_DBG MASK ZERO] pair ({a},{b}) maskA_px={maskA_px} maskB_px={maskB_px} "
+                        f"(H,W)=({H},{W})"
+                    )
+                    if maskA_px == 0:
+                        _debug_mask_bbox_recon(ca, H, W, f"A cid={a}")
+                    if maskB_px == 0:
+                        _debug_mask_bbox_recon(cb, H, W, f"B cid={b}")
                 inter = np.logical_and(mA, mB)
                 overlap_area = int(inter.sum())
                 overlap = overlap_area > 0

@@ -2169,6 +2169,8 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         do_edge_calibrate=False,
         rs3_strategy="full",
         rs3_fixed_family=None,
+        *,
+        skip_recomputing_midlines=False,
     ):
         """
         Fast single-image execution of:
@@ -2185,6 +2187,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         
         #stopgap measure
         do_edge_calibrate=False
+        skip_recomputing_midlines=True
         
 
         import os, time, numpy as np, pandas as pd
@@ -2257,7 +2260,10 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         # SNAPSHOT SYNC (CRITICAL for per-cid files + _metric_atomic)
         # ------------------------------------------------------------
         try:
-            self._purge_metrics_for_current_image()
+            if not skip_recomputing_midlines:
+                self._purge_metrics_for_current_image()
+            else:
+                print("[quick] preserving existing RS3 midlines + edges (no recompute)")
             # Builds metrics/<base>/cid*/cid*.json and sets self.metric_annotations
             self._sync_metrics_snapshot_from_authoring(
                 refresh_combine=True,
@@ -2455,61 +2461,65 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         # ------------------------------------------------------------
         # PHASE 1.5: RS3 AUTO VARIANTS (this image only)
         # ------------------------------------------------------------
-        print("[quick] running RS3 auto variants...")
-        t_auto_start = time.perf_counter()
         auto_packs = {}
-        rs3_g_variants_run = g_variants
-        if fixed_rs3_family is not None:
-            rs3_g_variants_run = [{
-                "g11": fixed_rs3_family["g11"],
-                "g22": fixed_rs3_family["g22"],
-                "g33": fixed_rs3_family["g33"],
-            }]
-            print(f"[quick] RS3 strategy={rs3_strategy_norm} using fixed family: {fixed_rs3_family}")
+        t_auto = 0.0
+        if not skip_recomputing_midlines:
+            print("[quick] running RS3 auto variants...")
+            t_auto_start = time.perf_counter()
+            rs3_g_variants_run = g_variants
+            if fixed_rs3_family is not None:
+                rs3_g_variants_run = [{
+                    "g11": fixed_rs3_family["g11"],
+                    "g22": fixed_rs3_family["g22"],
+                    "g33": fixed_rs3_family["g33"],
+                }]
+                print(f"[quick] RS3 strategy={rs3_strategy_norm} using fixed family: {fixed_rs3_family}")
 
-        for cid, cr in self._metric_atomic().items():
-            src = (cr.get("source") or "").lower()
-            if src.startswith("auto") or src == "combined":
-                continue
+            for cid, cr in self._metric_atomic().items():
+                src = (cr.get("source") or "").lower()
+                if src.startswith("auto") or src == "combined":
+                    continue
 
-            mid = np.asarray(cr.get("midline", []), float)
-            if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 2:
-                continue
+                mid = np.asarray(cr.get("midline", []), float)
+                if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 2:
+                    continue
 
-            pack = self.generate_auto_variants_for_manual_parallel(
-                crack_id=cid,
-                g_variants=rs3_g_variants_run,
-                edge_params_fixed=best_edge,
-                cpu_max_workers=cpu_max_workers,
-                force_recompute=True,
-                os_ablation=False,
-                smoke_test=False
-            )
-            if pack:
-                auto_packs[cid] = pack
+                pack = self.generate_auto_variants_for_manual_parallel(
+                    crack_id=cid,
+                    g_variants=rs3_g_variants_run,
+                    edge_params_fixed=best_edge,
+                    cpu_max_workers=cpu_max_workers,
+                    force_recompute=False,
+                    os_ablation=False,
+                    smoke_test=False
+                )
+                if pack:
+                    auto_packs[cid] = pack
 
-        t_auto = time.perf_counter() - t_auto_start
+            t_auto = time.perf_counter() - t_auto_start
 
-        # ------------------------------------------------------------
-        # PHASE 1.6: SELECT BEST RS3 FAMILY (IMAGE-LEVEL)
-        # ------------------------------------------------------------
-        print("[quick] selecting/applying RS3 family for this image...")
-        if auto_packs:
-            try:
-                if fixed_rs3_family is not None:
-                    apply_family_to_image(
-                        fixed_rs3_family,
-                        auto_packs,
-                        base_name=base_name,
-                        save_folder=self.save_folder,
-                    )
-                    print(f"[quick] applied fixed RS3 family (skipped selection): {fixed_rs3_family}")
-                else:
-                    self._select_best_rs3_across_subcracks(auto_packs)
-            except Exception as e:
-                print(f"[quick] ⚠ RS3 family selection failed: {e}")
+            # ------------------------------------------------------------
+            # PHASE 1.6: SELECT BEST RS3 FAMILY (IMAGE-LEVEL)
+            # ------------------------------------------------------------
+            print("[quick] selecting/applying RS3 family for this image...")
+            if auto_packs:
+                try:
+                    if fixed_rs3_family is not None:
+                        apply_family_to_image(
+                            fixed_rs3_family,
+                            auto_packs,
+                            base_name=base_name,
+                            save_folder=self.save_folder,
+                        )
+                        print(f"[quick] applied fixed RS3 family (skipped selection): {fixed_rs3_family}")
+                    else:
+                        self._select_best_rs3_across_subcracks(auto_packs)
+                except Exception as e:
+                    print(f"[quick] ⚠ RS3 family selection failed: {e}")
+            else:
+                print("[quick] ⚠ no auto_packs; skipping RS3 family selection.")
         else:
-            print("[quick] ⚠ no auto_packs; skipping RS3 family selection.")
+            print("[quick] ⏩ skipping RS3 recomputation (using cached midlines)")
 
         #return
         # ------------------------------------------------------------

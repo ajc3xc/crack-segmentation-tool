@@ -698,6 +698,16 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         atomic = {cid: cr for cid, cr in atomic_all.items() if _is_manual(cr)}
         print(f"[DEBUG METRICS] using {len(atomic)} manual cracks for mask/width metrics")
 
+        for cid, cr in atomic.items():
+            try:
+                mc = cr.get("mask_crop")
+                print(f"[PRE-COMBINE DEBUG] manual cid={cid}")
+                print("  source:", cr.get("source"))
+                print("  bbox:", cr.get("mask_bbox"))
+                print("  crop shape:", None if mc is None else tuple(np.asarray(mc).shape))
+            except Exception as e:
+                print(f"[PRE-COMBINE DEBUG] manual cid={cid} debug failed: {e}")
+
         # ------------------------------------------------------------------
         # 2) Build AUTO atomic set from per-cid snapshots (auto_best)
         # ------------------------------------------------------------------
@@ -713,6 +723,13 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 snap = safe_read_json(p, {})
                 if not snap:
                     continue
+                try:
+                    print(f"[SNAPSHOT LOAD DEBUG] auto loop cid={scid} source={snap.get('source')}")
+                    print("  bbox:", snap.get("mask_bbox"))
+                    mc_dbg = snap.get("mask_crop")
+                    print("  crop shape:", None if mc_dbg is None else tuple(np.asarray(mc_dbg).shape))
+                except Exception as e:
+                    print(f"[SNAPSHOT LOAD DEBUG] auto loop cid={scid} debug failed: {e}")
 
                 ab = snap.get("auto_best")
                 if not isinstance(ab, dict):
@@ -753,6 +770,15 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 auto_atomic[scid] = auto_cr
 
             print(f"[DEBUG METRICS] built {len(auto_atomic)} auto_best cracks for mask/width metrics")
+            for cid, cr in auto_atomic.items():
+                try:
+                    mc = cr.get("mask_crop")
+                    print(f"[PRE-COMBINE DEBUG] auto cid={cid}")
+                    print("  source:", cr.get("source"))
+                    print("  bbox:", cr.get("mask_bbox"))
+                    print("  crop shape:", None if mc is None else tuple(np.asarray(mc).shape))
+                except Exception as e:
+                    print(f"[PRE-COMBINE DEBUG] auto cid={cid} debug failed: {e}")
         else:
             print("[DEBUG METRICS] auto metrics disabled for this call.")
 

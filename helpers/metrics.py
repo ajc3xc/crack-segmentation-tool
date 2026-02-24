@@ -8659,8 +8659,21 @@ def merged_metric_atomic(authoring_atomic: dict, save_folder: str, image_base: s
     merged = {}
     base_dir = os.path.join(save_folder, "metrics", image_base)
 
+    def _mask_dbg(tag, cid, cr_obj):
+        try:
+            bb = (cr_obj or {}).get("mask_bbox", None)
+            mc = (cr_obj or {}).get("mask_crop", None)
+            shp = None if mc is None else tuple(np.asarray(mc).shape)
+            src = (cr_obj or {}).get("source", None)
+            print(f"[SNAPSHOT LOAD DEBUG] {tag} cid={cid} source={src}")
+            print(f"  bbox: {bb}")
+            print(f"  crop shape: {shp}")
+        except Exception as e:
+            print(f"[SNAPSHOT LOAD DEBUG] {tag} cid={cid} debug failed: {e}")
+
     for cid, cr in (authoring_atomic or {}).items():
         merged[cid] = dict(cr)
+        _mask_dbg("authoring", cid, merged[cid])
 
         # preferred new path
         canonical_dir  = os.path.join(base_dir, f"cid{cid}")
@@ -8675,7 +8688,9 @@ def merged_metric_atomic(authoring_atomic: dict, save_folder: str, image_base: s
                 try:
                     with open(p, "r") as f:
                         snap = json.load(f) or {}
+                    _mask_dbg(f"snapshot_file={os.path.basename(p)}", cid, snap)
                     merged[cid].update(snap)
+                    _mask_dbg("merged_after_update", cid, merged[cid])
                 except Exception:
                     print(f"[merge] warning: failed reading {p}")
                 break

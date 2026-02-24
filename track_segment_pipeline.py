@@ -658,6 +658,26 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
                 "user_connections": getattr(self, "user_connections", []),
             }
 
+            # DEBUG: mask_bbox origin/schema check (writer side)
+            try:
+                _mbb = crack_entry.get("mask_bbox")
+                _mc = np.asarray(crack_entry.get("mask_crop")) if crack_entry.get("mask_crop") is not None else None
+                if _mbb is not None and _mc is not None and _mc.ndim >= 2:
+                    _h, _w = int(_mc.shape[0]), int(_mc.shape[1])
+                    _x0, _y0, _a, _b = [int(v) for v in _mbb]
+                    _is_xywh = (_w == _a and _h == _b)
+                    _is_xyxy = (_w == (_a - _x0) and _h == (_b - _y0))
+                    print("\n[MASK ORIGIN DEBUG]")
+                    print("function: track_segment_pipeline.save_current_segment")
+                    print("cid:", getattr(self, "current_crack_id", None), "source:", src)
+                    print("bbox:", _mbb)
+                    print("crop shape:", (_h, _w))
+                    print("xywh match:", _is_xywh)
+                    print("xyxy match:", _is_xyxy)
+                    print("[END MASK ORIGIN DEBUG]\n")
+            except Exception as _e_mask_dbg:
+                print(f"[MASK ORIGIN DEBUG] writer-side debug failed: {_e_mask_dbg}")
+
             crack_entry = save_load_files._to_py(crack_entry)
             atomic_cracks[str(self.current_crack_id)] = crack_entry
             print(f"[DEBUG] atomic_cracks updated for id={self.current_crack_id}")

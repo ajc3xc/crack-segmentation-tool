@@ -2284,6 +2284,7 @@ def build_combined_crack_stateless(
     from collections import defaultdict
 
     branch_to_segs = defaultdict(list)
+    branch_to_segmeta = defaultdict(list)
 
     # Be robust if lengths ever diverge
     for i, S in enumerate(segs):
@@ -2292,9 +2293,12 @@ def build_combined_crack_stateless(
         if i >= len(midline_segments_meta):
             # fallback: treat as its own "unknown" branch
             bid = -1
+            mm = {}
         else:
-            bid = int(midline_segments_meta[i].get("branch_id", -1))
+            mm = midline_segments_meta[i] if isinstance(midline_segments_meta[i], dict) else {}
+            bid = int(mm.get("branch_id", -1))
         branch_to_segs[bid].append(np.asarray(S, float))
+        branch_to_segmeta[bid].append(dict(mm) if isinstance(mm, dict) else {})
 
     for bid, seg_list in branch_to_segs.items():
         if len(seg_list) >= 2:
@@ -2345,6 +2349,94 @@ def build_combined_crack_stateless(
         if not seg_list:
             continue
 
+        seg_meta_list = list(branch_to_segmeta.get(branch_id, []))
+
+        def _user_endpoint_points(cr):
+            pts = []
+            if not isinstance(cr, dict):
+                return np.zeros((0, 2), float)
+            ups = cr.get("user_points", []) or []
+            ucs = cr.get("user_connections", []) or []
+            seen = set()
+            for pair in ucs:
+                try:
+                    for idx in pair:
+                        ii = int(idx)
+                        if 0 <= ii < len(ups):
+                            p = ups[ii]
+                            key = (float(p[0]), float(p[1]))
+                            if key not in seen:
+                                seen.add(key)
+                                pts.append([key[0], key[1]])
+                except Exception:
+                    continue
+            return np.asarray(pts, float) if pts else np.zeros((0, 2), float)
+
+        def _nearest_pt_info(p, pts):
+            try:
+                p = np.asarray(p, float)
+                pts = np.asarray(pts, float)
+                if pts.ndim != 2 or pts.shape[1] != 2 or len(pts) == 0:
+                    return None, None
+                d = np.sqrt(np.sum((pts - p[None, :]) ** 2, axis=1))
+                j = int(np.argmin(d))
+                return j, float(d[j])
+            except Exception:
+                return None, None
+
+        # Debug endpoint drift vs declared user topology before stitching.
+        if len(seg_list) >= 2:
+            try:
+                print(f"[TOPO PRE-STITCH] branch={branch_id} n_segs={len(seg_list)}")
+                for i, S in enumerate(seg_list):
+                    S = np.asarray(S, float)
+                    mm = seg_meta_list[i] if i < len(seg_meta_list) and isinstance(seg_meta_list[i], dict) else {}
+                    aid = str(mm.get("atomic_id")) if mm.get("atomic_id", None) is not None else None
+                    cr = (authoring_atomic.get(aid, {}) or {}) if aid is not None else {}
+                    ups = np.asarray(cr.get("user_points", []) or [], float)
+                    ueps = _user_endpoint_points(cr)
+                    p0 = np.asarray(S[0], float)
+                    p1 = np.asarray(S[-1], float)
+                    u0_idx, u0_d = _nearest_pt_info(p0, ups)
+                    u1_idx, u1_d = _nearest_pt_info(p1, ups)
+                    e0_idx, e0_d = _nearest_pt_info(p0, ueps)
+                    e1_idx, e1_d = _nearest_pt_info(p1, ueps)
+                    print(
+                        f"[TOPO PRE-STITCH] seg{i} atomic={aid} n={len(S)} "
+                        f"start=({p0[0]:.3f},{p0[1]:.3f}) end=({p1[0]:.3f},{p1[1]:.3f})"
+                    )
+                    print(
+                        f"[TOPO PRE-STITCH] seg{i} nearest_userpt start=(idx={u0_idx},d={u0_d}) "
+                        f"end=(idx={u1_idx},d={u1_d})"
+                    )
+                    print(
+                        f"[TOPO PRE-STITCH] seg{i} nearest_user_endpoint start=(idx={e0_idx},d={e0_d}) "
+                        f"end=(idx={e1_idx},d={e1_d}) n_user_endpoints={len(ueps)}"
+                    )
+
+                for i in range(len(seg_list)):
+                    for j in range(i + 1, len(seg_list)):
+                        mi = seg_meta_list[i] if i < len(seg_meta_list) and isinstance(seg_meta_list[i], dict) else {}
+                        mj = seg_meta_list[j] if j < len(seg_meta_list) and isinstance(seg_meta_list[j], dict) else {}
+                        ai = str(mi.get("atomic_id")) if mi.get("atomic_id", None) is not None else None
+                        aj = str(mj.get("atomic_id")) if mj.get("atomic_id", None) is not None else None
+                        cri = (authoring_atomic.get(ai, {}) or {}) if ai is not None else {}
+                        crj = (authoring_atomic.get(aj, {}) or {}) if aj is not None else {}
+                        ei = _user_endpoint_points(cri)
+                        ej = _user_endpoint_points(crj)
+                        shared = []
+                        if len(ei) and len(ej):
+                            for pi in ei:
+                                d = np.sqrt(np.sum((ej - pi[None, :]) ** 2, axis=1))
+                                if np.any(d <= 1e-6):
+                                    shared.append((float(pi[0]), float(pi[1])))
+                        print(
+                            f"[TOPO PRE-STITCH] pair i={i}({ai}) j={j}({aj}) "
+                            f"shared_user_endpoints={len(shared)} {shared[:4]}"
+                        )
+            except Exception as _e:
+                print(f"[TOPO PRE-STITCH] debug failed branch={branch_id}: {_e}")
+
         # ====================================================
         # 0) Stitch segments into ONE continuous polyline
         # ====================================================
@@ -2361,6 +2453,38 @@ def build_combined_crack_stateless(
             segs = [np.asarray(s, float) for s in seg_list if s is not None and len(s) >= 2]
             if not segs:
                 return None, False, "no valid segs"
+
+            def _print_stitch_disconnect_debug():
+                try:
+                    print(f"[STITCH DBG] branch={branch_id} disconnected under tol={float(tol):.3f} n_segs={len(segs)}")
+                    for i, s in enumerate(segs):
+                        p0 = np.asarray(s[0], float)
+                        p1 = np.asarray(s[-1], float)
+                        seg_len = float(np.sum(np.sqrt(np.sum(np.diff(s, axis=0) ** 2, axis=1)))) if len(s) >= 2 else 0.0
+                        print(
+                            f"[STITCH DBG] seg{i}: n={len(s)} arc={seg_len:.3f} "
+                            f"p0=({p0[0]:.3f},{p0[1]:.3f}) p1=({p1[0]:.3f},{p1[1]:.3f})"
+                        )
+                    print(f"[STITCH DBG] endpoint degrees: {sorted((k, int(v)) for k, v in degrees.items())}")
+                    print(f"[STITCH DBG] start_key={start_key} candidates={ep_map.get(start_key, [])}")
+                    print(f"[STITCH DBG] used={sorted(int(i) for i in used)} excluded={sorted(int(i) for i in set(range(len(segs))) - set(used))}")
+                    for i in range(len(segs)):
+                        for j in range(len(segs)):
+                            if i == j:
+                                continue
+                            a0, a1 = np.asarray(segs[i][0], float), np.asarray(segs[i][-1], float)
+                            b0, b1 = np.asarray(segs[j][0], float), np.asarray(segs[j][-1], float)
+                            d_a1_b0 = float(np.linalg.norm(a1 - b0))
+                            d_a1_b1 = float(np.linalg.norm(a1 - b1))
+                            d_a0_b0 = float(np.linalg.norm(a0 - b0))
+                            d_a0_b1 = float(np.linalg.norm(a0 - b1))
+                            print(
+                                f"[STITCH DBG] i={i}->j={j} "
+                                f"d(a1,b0)={d_a1_b0:.3f} d(a1,b1)={d_a1_b1:.3f} "
+                                f"d(a0,b0)={d_a0_b0:.3f} d(a0,b1)={d_a0_b1:.3f}"
+                            )
+                except Exception as _e:
+                    print(f"[STITCH DBG] failed to print disconnect debug: {_e}")
 
             # endpoints for each segment
             ends = []
@@ -2430,6 +2554,7 @@ def build_combined_crack_stateless(
 
             # Check if we consumed all segments
             if len(used) != len(segs):
+                _print_stitch_disconnect_debug()
                 return None, False, f"disconnected: used {len(used)}/{len(segs)}"
 
             # concatenate, avoiding duplicate endpoints
@@ -2459,6 +2584,21 @@ def build_combined_crack_stateless(
             # -- your existing split-on-jumps fallback --
             S_branch_raw = np.vstack(seg_list)
             runs = split_polyline_on_jumps(S_branch_raw, max_step=5.0)
+            try:
+                run_lens = [int(len(r)) for r in (runs or [])]
+                print(f"[COMBINER] branch {branch_id}: fallback runs={len(runs or [])} run_lens={run_lens}")
+                for _rid, _r in enumerate(runs or []):
+                    if _r is None or len(_r) == 0:
+                        print(f"[COMBINER] branch {branch_id}: run {_rid} empty")
+                        continue
+                    _r = np.asarray(_r, float)
+                    print(
+                        f"[COMBINER] branch {branch_id}: run {_rid} bbox="
+                        f"({float(_r[:,0].min()):.2f},{float(_r[:,1].min()):.2f})-"
+                        f"({float(_r[:,0].max()):.2f},{float(_r[:,1].max()):.2f})"
+                    )
+            except Exception as _e:
+                print(f"[COMBINER] branch {branch_id}: fallback run debug failed: {_e}")
             if not runs:
                 continue
         else:
