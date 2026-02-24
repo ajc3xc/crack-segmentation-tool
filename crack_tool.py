@@ -1177,6 +1177,8 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         apply_to_sample=False,
         edges_only=False,
         edge_parallel_workers=None,
+        rs3_strategy="full",
+        rs3_fixed_family=None,
     ):
         """
         GLOBAL METRICS DRIVER
@@ -1351,6 +1353,34 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                     self.change_image()
                 except Exception:
                     pass
+
+        def _resolve_fixed_rs3_family():
+            if isinstance(rs3_fixed_family, dict):
+                fam = dict(rs3_fixed_family)
+            else:
+                g0 = (g_variants[0] if isinstance(g_variants, (list, tuple)) and len(g_variants) else {}) or {}
+                fam = {
+                    "os_mode": "new",
+                    "g11": float(g0.get("g11", 1.0)),
+                    "g22": float(g0.get("g22", 25.0)),
+                    "g33": float(g0.get("g33", 25.0)),
+                }
+            fam["os_mode"] = str(fam.get("os_mode", "new"))
+            fam["g11"] = float(fam.get("g11", 1.0))
+            fam["g22"] = float(fam.get("g22", 25.0))
+            fam["g33"] = float(fam.get("g33", 25.0))
+            return fam
+
+        rs3_strategy_norm = str(rs3_strategy or "full").strip().lower()
+        fixed_rs3_family = _resolve_fixed_rs3_family() if rs3_strategy_norm in {"default_only", "fixed"} else None
+        rs3_g_variants_run = g_variants
+        if fixed_rs3_family is not None:
+            rs3_g_variants_run = [{
+                "g11": fixed_rs3_family["g11"],
+                "g22": fixed_rs3_family["g22"],
+                "g33": fixed_rs3_family["g33"],
+            }]
+            print(f"[global-metrics] RS3 strategy={rs3_strategy_norm} fixed family={fixed_rs3_family}")
 
         # ------------------------------------------------------------------
         # Build calibration set
@@ -1533,7 +1563,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         global_best_rs3 = None
         tA2 = 0.0
 
-        if not edges_only:
+        if not edges_only and fixed_rs3_family is None:
             tA2_start = time.perf_counter()
             packs_by_image = {}
 
@@ -1571,7 +1601,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
 
                         pack = self.generate_auto_variants_for_manual_parallel(
                             crack_id=cid,
-                            g_variants=g_variants,
+                            g_variants=rs3_g_variants_run,
                             edge_params_fixed=global_best_edge,
                             cpu_max_workers=cpu_max_workers,
                             force_recompute=True,
@@ -1602,6 +1632,9 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
 
             tA2 = time.perf_counter() - tA2_start
             print(f"[global-metrics] ⏱ RS3 calibration: {tA2:.2f}s")
+        elif not edges_only and fixed_rs3_family is not None:
+            global_best_rs3 = dict(fixed_rs3_family)
+            print(f"[global-metrics] ⏭ skipping RS3 calibration; using fixed family: {global_best_rs3}")
 
         # RS3 availability flag
         rs3_enabled = (global_best_rs3 is not None) and (not edges_only)
@@ -1734,7 +1767,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                             try:
                                 pack = self.generate_auto_variants_for_manual_parallel(
                                     crack_id=cid,
-                                    g_variants=g_variants,
+                                    g_variants=rs3_g_variants_run,
                                     edge_params_fixed=global_best_edge,
                                     cpu_max_workers=cpu_max_workers,
                                     force_recompute=True,
@@ -2133,7 +2166,9 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         edge_grid=None,
         g_variants=None,
         cpu_max_workers=8,
-        do_edge_calibrate=False
+        do_edge_calibrate=False,
+        rs3_strategy="full",
+        rs3_fixed_family=None,
     ):
         """
         Fast single-image execution of:
@@ -2150,14 +2185,36 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         
         #stopgap measure
         do_edge_calibrate=False
+        
 
         import os, time, numpy as np, pandas as pd
         from helpers import metrics
         from helpers.save_load_files import load_snapshot_from_files
+        from helpers.variant_optimizer import apply_family_to_image
 
         if getattr(self, "original_image", None) is None:
             print("[quick] ❌ no image loaded")
             return {}
+
+        def _resolve_fixed_rs3_family():
+            if isinstance(rs3_fixed_family, dict):
+                fam = dict(rs3_fixed_family)
+            else:
+                g0 = (g_variants[0] if isinstance(g_variants, (list, tuple)) and len(g_variants) else {}) or {}
+                fam = {
+                    "os_mode": "new",
+                    "g11": float(g0.get("g11", 1.0)),
+                    "g22": float(g0.get("g22", 25.0)),
+                    "g33": float(g0.get("g33", 25.0)),
+                }
+            fam["os_mode"] = str(fam.get("os_mode", "new"))
+            fam["g11"] = float(fam.get("g11", 1.0))
+            fam["g22"] = float(fam.get("g22", 25.0))
+            fam["g33"] = float(fam.get("g33", 25.0))
+            return fam
+
+        rs3_strategy_norm = str(rs3_strategy or "full").strip().lower()
+        fixed_rs3_family = _resolve_fixed_rs3_family() if rs3_strategy_norm in {"default_only", "fixed"} else None
 
         base_name = self._image_base()
         print(f"\n[quick] metrics for current image: {base_name}")
@@ -2401,6 +2458,14 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         print("[quick] running RS3 auto variants...")
         t_auto_start = time.perf_counter()
         auto_packs = {}
+        rs3_g_variants_run = g_variants
+        if fixed_rs3_family is not None:
+            rs3_g_variants_run = [{
+                "g11": fixed_rs3_family["g11"],
+                "g22": fixed_rs3_family["g22"],
+                "g33": fixed_rs3_family["g33"],
+            }]
+            print(f"[quick] RS3 strategy={rs3_strategy_norm} using fixed family: {fixed_rs3_family}")
 
         for cid, cr in self._metric_atomic().items():
             src = (cr.get("source") or "").lower()
@@ -2413,11 +2478,11 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
 
             pack = self.generate_auto_variants_for_manual_parallel(
                 crack_id=cid,
-                g_variants=g_variants,
+                g_variants=rs3_g_variants_run,
                 edge_params_fixed=best_edge,
                 cpu_max_workers=cpu_max_workers,
                 force_recompute=True,
-                os_ablation=True,
+                os_ablation=False,
                 smoke_test=False
             )
             if pack:
@@ -2428,10 +2493,19 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         # ------------------------------------------------------------
         # PHASE 1.6: SELECT BEST RS3 FAMILY (IMAGE-LEVEL)
         # ------------------------------------------------------------
-        print("[quick] selecting best RS3 family for this image...")
+        print("[quick] selecting/applying RS3 family for this image...")
         if auto_packs:
             try:
-                self._select_best_rs3_across_subcracks(auto_packs)
+                if fixed_rs3_family is not None:
+                    apply_family_to_image(
+                        fixed_rs3_family,
+                        auto_packs,
+                        base_name=base_name,
+                        save_folder=self.save_folder,
+                    )
+                    print(f"[quick] applied fixed RS3 family (skipped selection): {fixed_rs3_family}")
+                else:
+                    self._select_best_rs3_across_subcracks(auto_packs)
             except Exception as e:
                 print(f"[quick] ⚠ RS3 family selection failed: {e}")
         else:

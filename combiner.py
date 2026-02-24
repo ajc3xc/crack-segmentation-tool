@@ -2661,16 +2661,37 @@ def build_combined_crack_stateless(
 
             # ---- mask generation ----
             from cracktools.segmentation import generate_mask_from_edges
-            mask_run = generate_mask_from_edges(
-                img_gray=gray_full,
-                edge1_xy=e1_full,
-                edge2_xy=e2_full,
-                midline_xy=derived_mid_full,
-                normals_xy=(n1_full, n2_full),
-                out_dir=None,
-                tag=None,
-                do_morph=False,
-            )
+            m_norm = min(len(n1_full), len(n2_full))
+            if m_norm < 2:
+                print(
+                    f"[COMBINER DIAG] branch={branch_id} run={run_id} insufficient normals "
+                    f"after mapping/canon: len(S_run)={len(S_run)} len(derived_mid)={len(derived_mid_full)} "
+                    f"len(e1)={len(e1_full)} len(e2)={len(e2_full)} "
+                    f"len(n1)={len(n1_full)} len(n2)={len(n2_full)} "
+                    f"raw_norm_shapes={(np.shape(e1x), np.shape(e1y), np.shape(e2x), np.shape(e2y))}"
+                )
+                # Keep pipeline alive and let downstream combined mask reflect remaining valid runs.
+                continue
+
+            try:
+                mask_run = generate_mask_from_edges(
+                    img_gray=gray_full,
+                    edge1_xy=e1_full,
+                    edge2_xy=e2_full,
+                    midline_xy=derived_mid_full,
+                    normals_xy=(n1_full, n2_full),
+                    out_dir=None,
+                    tag=None,
+                    do_morph=False,
+                )
+            except ValueError as e:
+                if "normals_xy" in str(e):
+                    print(
+                        f"[COMBINER DIAG] generate_mask_from_edges failed branch={branch_id} run={run_id}: {e} "
+                        f"(len derived={len(derived_mid_full)} e1={len(e1_full)} e2={len(e2_full)} "
+                        f"n1={len(n1_full)} n2={len(n2_full)})"
+                    )
+                raise
 
             if mask_run is not None and mask_run.any():
                 union_mask |= (mask_run > 0).astype(np.uint8)

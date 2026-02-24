@@ -2987,9 +2987,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         if g_variants is None:
             # shared 8-variant grid (used when NOT smoke_test)
             g_variants_shared = [
-                {"g11": 1.0, "g22": 10.0,  "g33": 10.0},   # local refinement near 25
-                {"g11": 1.0, "g22": 25.0,  "g33": 25.0},   # current baseline
-                {"g11": 1.0, "g22": 50.0,  "g33": 50.0},   # moderate curvature
+                #{"g11": 1.0, "g22": 10.0,  "g33": 10.0},   # local refinement near 25
+                #{"g11": 1.0, "g22": 25.0,  "g33": 25.0},   # current baseline
+                #{"g11": 1.0, "g22": 50.0,  "g33": 50.0},   # moderate curvature
                 {"g11": 1.0, "g22": 100.0, "g33": 100.0},  # LEGACY reference (old default)
             ]
         else:
