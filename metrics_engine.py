@@ -865,6 +865,32 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             mode_label: 'manual' or 'auto'
             atomic_src: dict of atomic cracks to combine
             """
+            def _arr_fingerprint(arr_like):
+                try:
+                    import hashlib
+                    arr = np.asarray(arr_like, float)
+                    if arr.ndim != 2 or arr.shape[1] != 2 or len(arr) == 0:
+                        return None
+                    arr = np.ascontiguousarray(np.round(arr, 6), dtype=np.float64)
+                    return (hashlib.md5(arr.tobytes()).hexdigest(), int(arr.shape[0]))
+                except Exception:
+                    return None
+
+            def _crack_fingerprint(cr):
+                if not isinstance(cr, dict):
+                    return {"src": None, "mid": None, "dmid": None, "bbox": None, "has_edges": False}
+                mid = _arr_fingerprint(cr.get("midline", []))
+                dmid_raw = cr.get("derived_midline", None)
+                dmid = _arr_fingerprint(dmid_raw) if dmid_raw is not None else None
+                ge = cr.get("geodesic_edges", None)
+                return {
+                    "src": cr.get("source"),
+                    "mid": mid,
+                    "dmid": dmid,
+                    "bbox": cr.get("mask_bbox"),
+                    "has_edges": isinstance(ge, dict) and bool(ge),
+                }
+
             out = {}
             for ccid, cmb in (authoring_combined or {}).items():
                 members = cmb.get("members", []) or []
@@ -894,6 +920,18 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     except Exception as e:
                         print(f"[{mode_label.upper()}_COMBINE_DBG] debug_callback failed: {e}")
 
+                try:
+                    print(
+                        f"[COMBINER CALLSITE] mode={mode_label} base={base_name} ccid={ccid} "
+                        f"members={[str(m) for m in members]} atomic_id={id(atomic_src)}"
+                    )
+                    for _m in members:
+                        _sid = str(_m)
+                        _cr = (atomic_src or {}).get(_sid, {}) or {}
+                        print(f"[ATOMIC FINGER PRE] mode={mode_label} cid={_sid} {_crack_fingerprint(_cr)}")
+                except Exception as e:
+                    print(f"[COMBINER CALLSITE] debug fingerprint failed mode={mode_label} ccid={ccid}: {e}")
+
                 rebuilt = build_combined_crack_stateless(
                     original_image=self.original_image,
                     authoring_atomic=atomic_src,
@@ -904,6 +942,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     crack_mask_full=self.current_mask,
                     #crack_mask_full=self.full_prediction_mask,
                     debug_callback=_cb,
+                    is_auto=(mode_label == "auto"),
                 )
                 rebuilt["members"] = members
                 out[str(ccid)] = rebuilt

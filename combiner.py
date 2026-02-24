@@ -2089,11 +2089,19 @@ def _split_derived_by_atomic_junctions(
     derived_run_xy: np.ndarray,
     mid_segs: list,
     mid_meta: list,
-    tol_shared=2.5,
+    tol_shared=2.5,   # kept for signature compatibility; not used in arclen method
 ):
     """
     Split ONE derived branch polyline into per-atomic segments.
+
+    NEW: split by arclength FRACTIONS along the ordered midline chain,
+         NOT by XY proximity to junction points.
+
+    This is robust for AUTO where derived midline may not pass near the
+    user junction XY in the middle of the crack.
     """
+    import numpy as np
+
     if derived_run_xy is None:
         raise ValueError(f"[DERIVED SPLIT] branch={branch_id} derived_run_xy is None")
 
@@ -2112,6 +2120,74 @@ def _split_derived_by_atomic_junctions(
             "source": "derived_unsplit_no_midline",
         }]
 
+    # ------------------------------------------------------------
+    # SAFETY REPAIR:
+    # If _order_midline_branch_chain loses atomic_id diversity,
+    # rebuild the chain deterministically by seg_idx (when present).
+    # This avoids "derived_unsplit_single_atomic" when the input
+    # mid_meta clearly contains multiple atomics.
+    # ------------------------------------------------------------
+    try:
+        in_aids = []
+        for mm in (mid_meta or []):
+            if isinstance(mm, dict):
+                aid = mm.get("atomic_id", None)
+                if aid is not None:
+                    in_aids.append(str(aid))
+        in_unique = sorted(set(in_aids))
+
+        chain_aids = []
+        for mm in (chain_metas or []):
+            if isinstance(mm, dict):
+                aid = mm.get("atomic_id", None)
+                if aid is not None:
+                    chain_aids.append(str(aid))
+        chain_unique = sorted(set(chain_aids))
+
+        if len(in_unique) >= 2 and len(chain_unique) <= 1:
+            print(
+                f"[DERIVED SPLIT WARN] branch={branch_id} "
+                f"_order_midline_branch_chain collapsed atomic_ids "
+                f"in_unique={in_unique} chain_unique={chain_unique} -> rebuilding by seg_idx"
+            )
+
+            pairs = []
+            for Sx, mx in zip(mid_segs or [], mid_meta or []):
+                if Sx is None or len(Sx) < 2:
+                    continue
+                mm = mx if isinstance(mx, dict) else {}
+                sidx = mm.get("seg_idx", None)
+                try:
+                    sidx = int(sidx) if sidx is not None else None
+                except Exception:
+                    sidx = None
+                pairs.append((sidx, np.asarray(Sx, float), dict(mm)))
+
+            if pairs and all(p[0] is not None for p in pairs):
+                pairs.sort(key=lambda t: int(t[0]))
+            else:
+                pairs.sort(key=lambda t: 10**9 if t[0] is None else int(t[0]))
+
+            chain_segs = [p[1] for p in pairs]
+            chain_metas = [p[2] for p in pairs]
+
+            for i in range(1, len(chain_segs)):
+                a_prev = np.asarray(chain_segs[i - 1], float)
+                b_cur = np.asarray(chain_segs[i], float)
+                if len(a_prev) < 2 or len(b_cur) < 2:
+                    continue
+                d_fwd = float(np.linalg.norm(a_prev[-1] - b_cur[0]))
+                d_rev = float(np.linalg.norm(a_prev[-1] - b_cur[-1]))
+                if d_rev < d_fwd:
+                    chain_segs[i] = b_cur[::-1].copy()
+
+            if chain_segs:
+                chain_start = np.asarray(chain_segs[0][0], float)
+                chain_end = np.asarray(chain_segs[-1][-1], float)
+    except Exception as _e:
+        print(f"[DERIVED SPLIT WARN] branch={branch_id} chain repair failed: {_e}")
+
+    # --- Ensure derived direction matches chain direction (same as your current code) ---
     d0 = _safe_float_xy(D[0]); d1 = _safe_float_xy(D[-1])
     cs = _safe_float_xy(chain_start); ce = _safe_float_xy(chain_end)
     forward_score = float(np.linalg.norm(d0 - cs) + np.linalg.norm(d1 - ce))
@@ -2119,6 +2195,7 @@ def _split_derived_by_atomic_junctions(
     if reverse_score + 1e-6 < forward_score:
         D = D[::-1].copy()
 
+    # --- Extract atomic sequence in chain order ---
     atomic_seq = []
     for m in chain_metas:
         aid = m.get("atomic_id", None) if isinstance(m, dict) else None
@@ -2126,6 +2203,14 @@ def _split_derived_by_atomic_junctions(
 
     unique_aids = [a for a in atomic_seq if a is not None]
     if len(set(unique_aids)) <= 1:
+        try:
+            print(f"[DERIVED SPLIT DBG] branch={branch_id} atomic_seq={atomic_seq} unique_aids={sorted(set(unique_aids))}")
+            print(
+                f"[DERIVED SPLIT DBG] branch={branch_id} chain_metas_atomic="
+                f"{[((m if isinstance(m, dict) else {}).get('atomic_id'), (m if isinstance(m, dict) else {}).get('seg_idx')) for m in (chain_metas or [])]}"
+            )
+        except Exception as _e:
+            print(f"[DERIVED SPLIT DBG] branch={branch_id} chain atomic debug failed: {_e}")
         aid0 = unique_aids[0] if unique_aids else None
         return [D], [{
             "branch_id": int(branch_id),
@@ -2134,78 +2219,123 @@ def _split_derived_by_atomic_junctions(
             "source": "derived_unsplit_single_atomic",
         }]
 
-    cut_points = []
-    for i in range(len(chain_segs) - 1):
-        a_left = atomic_seq[i]
-        a_right = atomic_seq[i + 1]
-        if a_left is None or a_right is None:
-            continue
-        if a_left == a_right:
-            continue
+    # --- Helper: arclength cumulative ---
+    def _cumlen(xy: np.ndarray) -> np.ndarray:
+        xy = np.asarray(xy, float)
+        d = np.sqrt(np.sum(np.diff(xy, axis=0) ** 2, axis=1))
+        return np.concatenate([[0.0], np.cumsum(d)])
 
-        end_left = _safe_float_xy(chain_segs[i][-1])
-        start_right = _safe_float_xy(chain_segs[i + 1][0])
-        if float(np.linalg.norm(end_left - start_right)) <= float(tol_shared):
-            cut_xy = 0.5 * (end_left + start_right)
-            cut_points.append((cut_xy, a_left, a_right))
+    # --- Compute cut FRACTIONS along the ordered MIDLINE chain ---
+    seg_lens = []
+    for S in chain_segs:
+        S = np.asarray(S, float)
+        if len(S) < 2:
+            seg_lens.append(0.0)
+        else:
+            c = _cumlen(S)
+            seg_lens.append(float(c[-1]))
 
-    if not cut_points:
-        aid0 = unique_aids[0] if unique_aids else None
+    total_L = float(np.sum(seg_lens))
+    if total_L <= 1e-9:
+        # degenerate midline chain -> cannot fraction-split
         return [D], [{
             "branch_id": int(branch_id),
-            "atomic_id": aid0,
+            "atomic_id": unique_aids[0] if unique_aids else None,
             "seg_idx": 0,
-            "source": "derived_unsplit_no_junctions",
+            "source": "derived_unsplit_midline_zero_length",
         }]
 
-    cut_idx = []
-    for (p, aL, aR) in cut_points:
-        idx = _nearest_index(D, p)
-        cut_idx.append((idx, aL, aR))
+    # Boundaries at end of each segment except the last: [L1, L1+L2, ...] / total_L
+    cum_end = np.cumsum(seg_lens)
+    cut_fracs = [float(c / total_L) for c in cum_end[:-1] if np.isfinite(c)]
 
-    cut_idx.sort(key=lambda t: t[0])
-    cleaned = []
+    # --- Convert those fractions to indices on derived polyline by derived arclength ---
+    cD = _cumlen(D)
+    LD = float(cD[-1])
+    if LD <= 1e-9:
+        raise ValueError(f"[DERIVED SPLIT] branch={branch_id} derived polyline zero length")
+
+    sD = cD / LD  # normalized [0..1]
+
+    # Turn each cut fraction into an index in D (nearest in normalized arclength)
+    raw_cut_idx = []
+    for frac in cut_fracs:
+        # clamp to interior to avoid empty pieces
+        frac = float(np.clip(frac, 1e-6, 1.0 - 1e-6))
+        idx = int(np.argmin(np.abs(sD - frac)))
+        raw_cut_idx.append(idx)
+
+    # --- De-dup / enforce strict increasing cut indices ---
+    cut_idx = []
     last = -10**9
-    for (idx, aL, aR) in cut_idx:
+    for idx in sorted(raw_cut_idx):
         if idx <= last + 1:
             continue
-        cleaned.append((idx, aL, aR))
+        cut_idx.append(idx)
         last = idx
-    cut_idx = cleaned
 
+    if not cut_idx:
+        # Nothing usable -> return unsplit (still better than “missing derived segment” fatal)
+        return [D], [{
+            "branch_id": int(branch_id),
+            "atomic_id": unique_aids[0] if unique_aids else None,
+            "seg_idx": 0,
+            "source": "derived_unsplit_no_valid_cuts",
+        }]
+
+    # --- Emit segments with atomic ids aligned to chain_metas order ---
     out_segs = []
     out_meta = []
+
     start_i = 0
-    current_atomic = cut_idx[0][1]
     seg_counter = 0
 
-    for (idx, aL, aR) in cut_idx:
+    for k, idx in enumerate(cut_idx):
         end_i = int(idx) + 1
         if end_i - start_i >= 2:
             piece = D[start_i:end_i]
+            aid = atomic_seq[k]  # kth segment in chain order
             out_segs.append(piece)
             out_meta.append({
                 "branch_id": int(branch_id),
-                "atomic_id": str(aL),
+                "atomic_id": str(aid) if aid is not None else None,
                 "seg_idx": int(seg_counter),
-                "source": "derived_split_at_atomic_junction",
+                "source": "derived_split_by_midline_arclen_fraction",
             })
             seg_counter += 1
         start_i = int(idx)
-        current_atomic = str(aR)
 
+    # tail
     if len(D) - start_i >= 2:
-        piece = D[start_i:]
-        out_segs.append(piece)
+        aid = atomic_seq[len(out_segs)] if len(out_segs) < len(atomic_seq) else atomic_seq[-1]
+        out_segs.append(D[start_i:])
         out_meta.append({
             "branch_id": int(branch_id),
-            "atomic_id": str(current_atomic),
+            "atomic_id": str(aid) if aid is not None else None,
             "seg_idx": int(seg_counter),
-            "source": "derived_split_at_atomic_junction",
+            "source": "derived_split_by_midline_arclen_fraction",
         })
 
     if not out_segs:
         raise RuntimeError(f"[DERIVED SPLIT] branch={branch_id} produced zero output segments")
+
+    # DEBUG: verify split output (segment count, atomic assignments, endpoints)
+    try:
+        print(f"[DERIVED SPLIT DBG] branch={branch_id} out_segs={len(out_segs)} out_meta={len(out_meta)}")
+        for i, (S, m) in enumerate(zip(out_segs, out_meta)):
+            S = np.asarray(S, float)
+            mm = m if isinstance(m, dict) else {}
+            aid = mm.get("atomic_id", None)
+            if S.ndim == 2 and S.shape[1] == 2 and len(S) >= 1:
+                print(
+                    f"[DERIVED SPLIT DBG]  seg{i}: atomic_id={aid} n={len(S)} "
+                    f"start=({float(S[0,0]):.3f},{float(S[0,1]):.3f}) "
+                    f"end=({float(S[-1,0]):.3f},{float(S[-1,1]):.3f})"
+                )
+            else:
+                print(f"[DERIVED SPLIT DBG]  seg{i}: atomic_id={aid} invalid_shape={getattr(S, 'shape', None)}")
+    except Exception as _e:
+        print(f"[DERIVED SPLIT DBG] branch={branch_id} failed: {_e}")
 
     return out_segs, out_meta
 
@@ -2225,6 +2355,7 @@ def build_combined_crack_stateless(
     debug_callback=None,
     crack_mask_full: np.ndarray = None,
     mode="new",
+    is_auto: bool = False,
 ):
     """
     Stateless “metrics-safe” combiner with fully instrumented timing.
@@ -2439,170 +2570,168 @@ def build_combined_crack_stateless(
 
         # ====================================================
         # 0) Stitch segments into ONE continuous polyline
+        #    - Connectivity is assumed (dominance/user topology already decided)
+        #    - Ordering only
+        #    - AUTO ONLY: snap/join to nearest declared USER endpoint (within snap_px)
+        #    - HARD FAILS: no run-splitting fallback
         # ====================================================
 
-        def _pt_key(p, tol=1.5):
-            # stable key for "same endpoint" with pixel-ish tolerance
-            return (int(np.round(p[0] / tol)), int(np.round(p[1] / tol)))
+        def _user_endpoint_points(cr):
+            """
+            Returns unique USER endpoints referenced by user_connections (indices into user_points).
+            """
+            pts = []
+            if not isinstance(cr, dict):
+                return np.zeros((0, 2), float)
+            ups = cr.get("user_points", []) or []
+            ucs = cr.get("user_connections", []) or []
+            seen = set()
+            for pair in ucs:
+                try:
+                    for idx in pair:
+                        ii = int(idx)
+                        if 0 <= ii < len(ups):
+                            p = ups[ii]
+                            key = (float(p[0]), float(p[1]))
+                            if key not in seen:
+                                seen.add(key)
+                                pts.append([key[0], key[1]])
+                except Exception:
+                    continue
+            return np.asarray(pts, float) if pts else np.zeros((0, 2), float)
 
-        def stitch_branch_segments(seg_list, tol=1.5):
+        def _nearest_user_endpoint(p, ueps):
             """
-            Try to order + orient segments into a single chain.
-            Returns (S_chain, ok, reason)
+            Returns (pt, dist) for nearest endpoint in ueps to p, or (None, inf).
             """
+            p = np.asarray(p, float)
+            ueps = np.asarray(ueps, float)
+            if ueps.ndim != 2 or ueps.shape[1] != 2 or len(ueps) == 0:
+                return None, float("inf")
+            d = np.sqrt(np.sum((ueps - p[None, :]) ** 2, axis=1))
+            j = int(np.argmin(d))
+            return np.asarray(ueps[j], float), float(d[j])
+
+        # ====================================================
+        # 0) Stitch segments into ONE continuous polyline
+        # ====================================================
+
+        def stitch_branch_segments(seg_list, max_jump=10.0, *, allow_teleport=False):
+            """
+            Order + orient segments into a single chain.
+
+            Assumes connectivity is already guaranteed by topology (branch_id + dominance).
+            Does NOT modify geometry (no snapping, no insertion).
+            Teleports are either:
+            - treated as failure (allow_teleport=False)
+            - tolerated with warnings (allow_teleport=True)
+            """
+
             segs = [np.asarray(s, float) for s in seg_list if s is not None and len(s) >= 2]
             if not segs:
                 return None, False, "no valid segs"
 
-            def _print_stitch_disconnect_debug():
-                try:
-                    print(f"[STITCH DBG] branch={branch_id} disconnected under tol={float(tol):.3f} n_segs={len(segs)}")
-                    for i, s in enumerate(segs):
-                        p0 = np.asarray(s[0], float)
-                        p1 = np.asarray(s[-1], float)
-                        seg_len = float(np.sum(np.sqrt(np.sum(np.diff(s, axis=0) ** 2, axis=1)))) if len(s) >= 2 else 0.0
-                        print(
-                            f"[STITCH DBG] seg{i}: n={len(s)} arc={seg_len:.3f} "
-                            f"p0=({p0[0]:.3f},{p0[1]:.3f}) p1=({p1[0]:.3f},{p1[1]:.3f})"
-                        )
-                    print(f"[STITCH DBG] endpoint degrees: {sorted((k, int(v)) for k, v in degrees.items())}")
-                    print(f"[STITCH DBG] start_key={start_key} candidates={ep_map.get(start_key, [])}")
-                    print(f"[STITCH DBG] used={sorted(int(i) for i in used)} excluded={sorted(int(i) for i in set(range(len(segs))) - set(used))}")
-                    for i in range(len(segs)):
-                        for j in range(len(segs)):
-                            if i == j:
-                                continue
-                            a0, a1 = np.asarray(segs[i][0], float), np.asarray(segs[i][-1], float)
-                            b0, b1 = np.asarray(segs[j][0], float), np.asarray(segs[j][-1], float)
-                            d_a1_b0 = float(np.linalg.norm(a1 - b0))
-                            d_a1_b1 = float(np.linalg.norm(a1 - b1))
-                            d_a0_b0 = float(np.linalg.norm(a0 - b0))
-                            d_a0_b1 = float(np.linalg.norm(a0 - b1))
-                            print(
-                                f"[STITCH DBG] i={i}->j={j} "
-                                f"d(a1,b0)={d_a1_b0:.3f} d(a1,b1)={d_a1_b1:.3f} "
-                                f"d(a0,b0)={d_a0_b0:.3f} d(a0,b1)={d_a0_b1:.3f}"
-                            )
-                except Exception as _e:
-                    print(f"[STITCH DBG] failed to print disconnect debug: {_e}")
-
-            # endpoints for each segment
-            ends = []
-            for s in segs:
-                a = s[0]
-                b = s[-1]
-                ends.append((_pt_key(a, tol), _pt_key(b, tol)))
-
-            # Build endpoint -> list of (seg_idx, end_side)
-            # end_side: 0 means start endpoint, 1 means end endpoint
-            ep_map = {}
-            for i, (ka, kb) in enumerate(ends):
-                ep_map.setdefault(ka, []).append((i, 0))
-                ep_map.setdefault(kb, []).append((i, 1))
-
-            # Pick a start endpoint:
-            # Prefer degree-1 endpoint (an "end" of a chain); otherwise any endpoint.
-            degrees = {k: len(v) for k, v in ep_map.items()}
-            start_key = None
-            for k, deg in degrees.items():
-                if deg == 1:
-                    start_key = k
-                    break
-            if start_key is None:
-                # likely a loop or messy, pick arbitrary
-                start_key = ends[0][0]
-
             used = set()
+            chain = [segs[0]]
+            used.add(0)
 
-            # Find a starting segment that touches start_key
-            candidates = ep_map.get(start_key, [])
-            if not candidates:
-                return None, False, "start_key missing in ep_map"
+            while len(used) < len(segs):
+                cur_pt = np.asarray(chain[-1][-1], float)
 
-            seg_idx, side = candidates[0]
+                best_j = None
+                best_dist = float("inf")
+                best_oriented = None
+                best_flipped = False
 
-            # Orient first segment so it starts at start_key
-            s0 = segs[seg_idx]
-            if _pt_key(s0[0], tol) != start_key:
-                s0 = s0[::-1].copy()
-
-            chain = [s0]
-            used.add(seg_idx)
-
-            cur_key = _pt_key(chain[-1][-1], tol)
-
-            # Greedy walk along matching endpoints
-            while True:
-                nxt = None
-                for (j, side_j) in ep_map.get(cur_key, []):
+                for j, sj in enumerate(segs):
                     if j in used:
                         continue
-                    nxt = j
+
+                    sj = np.asarray(sj, float)
+                    a = sj[0]
+                    b = sj[-1]
+
+                    d0 = float(np.linalg.norm(cur_pt - a))
+                    d1 = float(np.linalg.norm(cur_pt - b))
+
+                    if d0 < best_dist:
+                        best_dist = d0
+                        best_j = j
+                        best_oriented = sj
+                        best_flipped = False
+
+                    if d1 < best_dist:
+                        best_dist = d1
+                        best_j = j
+                        best_oriented = sj[::-1].copy()
+                        best_flipped = True
+
+                if best_j is None:
                     break
 
-                if nxt is None:
-                    break
+                try:
+                    join_dist = float(np.linalg.norm(np.asarray(chain[-1][-1], float) - np.asarray(best_oriented[0], float)))
+                    print(
+                        f"[STITCH JOIN DBG] branch={branch_id} append_j={best_j} "
+                        f"best_dist={float(best_dist):.3f} join_dist={join_dist:.3f} "
+                        f"flipped={best_flipped} mode={mode} is_auto={bool(is_auto)}"
+                    )
+                except Exception as _e:
+                    print(f"[STITCH JOIN DBG] branch={branch_id} failed: {_e}")
 
-                sj = segs[nxt]
-                # orient sj so it starts at cur_key
-                if _pt_key(sj[0], tol) != cur_key:
-                    sj = sj[::-1].copy()
+                chain.append(best_oriented)
+                used.add(best_j)
 
-                chain.append(sj)
-                used.add(nxt)
-                cur_key = _pt_key(chain[-1][-1], tol)
-
-            # Check if we consumed all segments
             if len(used) != len(segs):
-                _print_stitch_disconnect_debug()
-                return None, False, f"disconnected: used {len(used)}/{len(segs)}"
+                print(f"[STITCH WARN] branch={branch_id} ordering incomplete used={len(used)}/{len(segs)}")
 
-            # concatenate, avoiding duplicate endpoints
-            out = [chain[0]]
-            for s in chain[1:]:
-                if np.linalg.norm(out[-1][-1] - s[0]) <= tol:
-                    out.append(s[1:])  # drop duplicate join point
+            # Concatenate (no geometry modification)
+            S_chain = np.vstack(chain)
+
+            # Teleport diagnostics (but do NOT fail when allow_teleport=True)
+            d = np.sqrt(np.sum(np.diff(S_chain, axis=0) ** 2, axis=1)) if len(S_chain) >= 2 else np.array([], float)
+            if len(d) and np.any(d > max_jump):
+                bad = np.where(d > max_jump)[0]
+                first_bad = int(bad[0]) if len(bad) else -1
+                max_step = float(np.max(d)) if len(d) else 0.0
+
+                try:
+                    pA = np.asarray(S_chain[first_bad], float) if 0 <= first_bad < len(S_chain) else None
+                    pB = np.asarray(S_chain[first_bad + 1], float) if 0 <= first_bad + 1 < len(S_chain) else None
+                    if pA is not None and pB is not None:
+                        print(
+                            f"[STITCH TELEPORT] branch={branch_id} threshold={float(max_jump):.3f} "
+                            f"count={len(bad)} first_idx={first_bad} max_step={max_step:.3f} "
+                            f"first_bad_pts=({pA[0]:.3f},{pA[1]:.3f})->({pB[0]:.3f},{pB[1]:.3f})"
+                        )
+                    else:
+                        print(
+                            f"[STITCH TELEPORT] branch={branch_id} threshold={float(max_jump):.3f} "
+                            f"count={len(bad)} first_idx={first_bad} max_step={max_step:.3f}"
+                        )
+                except Exception as _e:
+                    print(f"[STITCH TELEPORT] branch={branch_id} debug failed: {_e}")
+
+                if not allow_teleport:
+                    return None, False, "teleport remains after stitch"
                 else:
-                    out.append(s)
-            S_chain = np.vstack(out)
-
-            # final sanity: ensure no giant teleports remain
-            d = np.sqrt(np.sum(np.diff(S_chain, axis=0) ** 2, axis=1))
-            if np.any(d > 10.0):
-                return None, False, "teleport remains after stitch"
+                    print(f"[STITCH TELEPORT] branch={branch_id} WARNING: teleport tolerated (auto mode)")
 
             return S_chain, True, "ok"
 
-        S_branch, ok, reason = stitch_branch_segments(seg_list, tol=1.5)
+
+        # AUTO/MANUAL semantics are passed explicitly by caller; `mode` is edge mode ("old"/"new").
+        allow_teleport = bool(is_auto)
+        S_branch, ok, reason = stitch_branch_segments(seg_list, max_jump=10.0, allow_teleport=allow_teleport)
 
         # ====================================================
-        # 1) If stitching fails, fall back to run splitting
+        # 1) No fallback runs in AUTO. Either proceed or fail.
         # ====================================================
         if not ok:
-            print(f"[COMBINER] branch {branch_id}: stitch failed ({reason}); falling back to runs")
+            # If you want *absolutely no funny business*, keep it a hard fail.
+            raise ValueError(f"[COMBINER] branch {branch_id}: stitch failed ({reason})")
 
-            # -- your existing split-on-jumps fallback --
-            S_branch_raw = np.vstack(seg_list)
-            runs = split_polyline_on_jumps(S_branch_raw, max_step=5.0)
-            try:
-                run_lens = [int(len(r)) for r in (runs or [])]
-                print(f"[COMBINER] branch {branch_id}: fallback runs={len(runs or [])} run_lens={run_lens}")
-                for _rid, _r in enumerate(runs or []):
-                    if _r is None or len(_r) == 0:
-                        print(f"[COMBINER] branch {branch_id}: run {_rid} empty")
-                        continue
-                    _r = np.asarray(_r, float)
-                    print(
-                        f"[COMBINER] branch {branch_id}: run {_rid} bbox="
-                        f"({float(_r[:,0].min()):.2f},{float(_r[:,1].min()):.2f})-"
-                        f"({float(_r[:,0].max()):.2f},{float(_r[:,1].max()):.2f})"
-                    )
-            except Exception as _e:
-                print(f"[COMBINER] branch {branch_id}: fallback run debug failed: {_e}")
-            if not runs:
-                continue
-        else:
-            runs = [S_branch]  # ONE RUN ONLY (what you want)
+        runs = [S_branch]  # ALWAYS one run; never fallback
 
         # ====================================================
         # 2) Process each run (normally 1 per branch now)
@@ -2915,6 +3044,20 @@ def build_combined_crack_stateless(
         mid_segs_b = mid_pack["segs"]
         mid_meta_b = mid_pack["meta"]
 
+        try:
+            print(f"[MID META DBG] branch={bi} mid_segs_b={len(mid_segs_b)} mid_meta_b={len(mid_meta_b)}")
+            for ii, (Sx, mx) in enumerate(zip(mid_segs_b, mid_meta_b)):
+                Sx = np.asarray(Sx, float)
+                mm = mx if isinstance(mx, dict) else {}
+                print(
+                    f"[MID META DBG]  seg{ii}: n={len(Sx)} "
+                    f"atomic_id={mm.get('atomic_id')} branch_id={mm.get('branch_id')} seg_idx={mm.get('seg_idx')}"
+                )
+            if len(mid_segs_b) != len(mid_meta_b):
+                print(f"[MID META DBG] branch={bi} WARNING len mismatch segs={len(mid_segs_b)} meta={len(mid_meta_b)}")
+        except Exception as _e:
+            print(f"[MID META DBG] branch={bi} failed: {_e}")
+
         d_segs, d_meta = _split_derived_by_atomic_junctions(
             branch_id=bi,
             derived_run_xy=D,
@@ -2922,6 +3065,11 @@ def build_combined_crack_stateless(
             mid_meta=mid_meta_b,
             tol_shared=2.5,
         )
+        try:
+            print(f"[DERIVED SPLIT CALL] branch={bi} sources={[((mm if isinstance(mm, dict) else {}) or {}).get('source') for mm in (d_meta or [])]}")
+            print(f"[DERIVED SPLIT CALL] branch={bi} atomic_ids={[((mm if isinstance(mm, dict) else {}) or {}).get('atomic_id') for mm in (d_meta or [])]}")
+        except Exception as _e:
+            print(f"[DERIVED SPLIT CALL] branch={bi} debug failed: {_e}")
         # Enforce continuity + deterministic branch direction on split derived segments.
         if d_segs:
             d_assoc = [dict(mm if isinstance(mm, dict) else {}) for mm in d_meta]

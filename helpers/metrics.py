@@ -4272,6 +4272,27 @@ def compare_widths_for_aligned_cracks(
         for _Sm, mm in zip(mid_keep_segs, mid_keep_meta):
             k = _k_ab(mm)
             if k not in buckets or not buckets[k]:
+                # DEBUG: inspect expected vs available derived keys before failing
+                try:
+                    print(f"[DERIVED MATCH DBG] cid={cid} MISSING key={k}")
+                    print(f"[DERIVED MATCH DBG] midline_meta count={len(mid_keep_meta or [])} derived_meta count={len(dmeta_in or [])}")
+
+                    exp = []
+                    for _mm in (mid_keep_meta or []):
+                        if not isinstance(_mm, dict):
+                            continue
+                        exp.append(_k_ab(_mm))
+                    print(f"[DERIVED MATCH DBG] expected(midline) keys sample={exp[:20]}")
+
+                    avail = []
+                    for _dm in (dmeta_in or []):
+                        if not isinstance(_dm, dict):
+                            continue
+                        avail.append(_k_ab(_dm))
+                    print(f"[DERIVED MATCH DBG] available(derived) keys sample={avail[:40]}")
+                    print(f"[DERIVED MATCH DBG] derived atomic_ids={sorted({a for (a, _) in avail if a is not None})}")
+                except Exception as _e:
+                    print(f"[DERIVED MATCH DBG] failed: {_e}")
                 raise RuntimeError(f"[FATAL] Missing derived segment for key={k} in cid={cid}")
             Sd, md = buckets[k].pop(0)
             out_segs.append(Sd)
