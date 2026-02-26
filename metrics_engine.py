@@ -52,6 +52,7 @@ from edge_workers import *
 from rs3_memory_stable import run_rs3_variants_memory_stable, RS3SolveConfig, hard_gpu_cleanup, hard_cpu_cleanup
 from edge_workers import *
 from combiner import *
+from helpers.cpu_affinity import process_pool_affinity_config
 
 
 #from crackutils import CrackUtils
@@ -196,7 +197,11 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             raise ValueError("grid must be dict or list of param dicts")
 
         rows = []
-        with ProcessPoolExecutor(max_workers=max_workers) as ex:
+        pool_workers, pool_init, pool_initargs, pool_cpus = process_pool_affinity_config(
+            max_workers, label="edge-sweep"
+        )
+        print(f"[AFFINITY] edge-sweep workers={pool_workers} cpus={pool_cpus}", flush=True)
+        with ProcessPoolExecutor(max_workers=pool_workers, initializer=pool_init, initargs=pool_initargs) as ex:
             futs = {}
             for params in combos:
                 payload = dict(base)
@@ -2864,12 +2869,21 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         # 3) Run workers in parallel
         # ---------------------------------------------------------------------
         rows = []
-        with ProcessPoolExecutor(max_workers=cpu_max_workers) as ex:
-            futs = {ex.submit(edge_param_worker, p): cid for (cid, p) in tasks}
+        pool_workers, pool_init, pool_initargs, pool_cpus = process_pool_affinity_config(
+            cpu_max_workers, label="edge-parallel"
+        )
+        print(f"[AFFINITY] edge-parallel workers={pool_workers} cpus={pool_cpus}", flush=True)
+        with ProcessPoolExecutor(max_workers=pool_workers, initializer=pool_init, initargs=pool_initargs) as ex:
+            futs = {}
+            for (cid, p) in tasks:
+                print(f"[edge-parallel] submit cid{cid} plot_only={bool(p.get('plot_only', False))}", flush=True)
+                fut = ex.submit(edge_param_worker, p)
+                futs[fut] = cid
 
             for fut in as_completed(futs):
                 cid = futs[fut]
                 try:
+                    print(f"[edge-parallel] future-ready cid{cid}", flush=True)
                     ew = fut.result()
 
                     if isinstance(ew, dict):
@@ -3052,9 +3066,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         if g_variants is None:
             # shared 8-variant grid (used when NOT smoke_test)
             g_variants_shared = [
-                #{"g11": 1.0, "g22": 10.0,  "g33": 10.0},   # local refinement near 25
-                #{"g11": 1.0, "g22": 25.0,  "g33": 25.0},   # current baseline
-                #{"g11": 1.0, "g22": 50.0,  "g33": 50.0},   # moderate curvature
+                {"g11": 1.0, "g22": 10.0,  "g33": 10.0},   # local refinement near 25
+                {"g11": 1.0, "g22": 25.0,  "g33": 25.0},   # current baseline
+                {"g11": 1.0, "g22": 50.0,  "g33": 50.0},   # moderate curvature
                 {"g11": 1.0, "g22": 100.0, "g33": 100.0},  # LEGACY reference (old default)
             ]
         else:

@@ -231,6 +231,8 @@ def plot_widths_colormap_on_crop(
     if n < 2:
         return
 
+    print(f"[WIDTHS_DBG] start n={n} bg_shape={gt_vs_manual_rgb.shape}", flush=True)
+
     e1  = e1[:n]
     e2  = e2[:n]
     mid = mid[:n]
@@ -259,6 +261,8 @@ def plot_widths_colormap_on_crop(
 
     if not runs:
         return
+
+    print(f"[WIDTHS_DBG] finite_runs={len(runs)}", flush=True)
 
     # ------------------------------------------------------------
     # GLOBAL width scale (0 → max width)
@@ -328,6 +332,8 @@ def plot_widths_colormap_on_crop(
                 alpha=0.97,
                 solid_capstyle="round",
             )
+
+    print(f"[WIDTHS_DBG] line_segments_drawn", flush=True)
 
     # ---- optional geodesic edges ----
     if track_e1 is not None and len(track_e1) > 1:
@@ -424,9 +430,12 @@ def plot_widths_colormap_on_crop(
     plt.tight_layout(pad=0)
 
     if out_png:
+        print(f"[WIDTHS_DBG] savefig:start out={out_png}", flush=True)
         fig.savefig(out_png, dpi=320, bbox_inches="tight", pad_inches=0)
+        print(f"[WIDTHS_DBG] savefig:done", flush=True)
 
     plt.close(fig)
+    print(f"[WIDTHS_DBG] done", flush=True)
 
 def save_cropped_overlay(img_full_bgr, bbox, mask_or_rgb, out_png, margin=0):
     x, y, w, h = map(int, bbox)
@@ -531,7 +540,11 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     geom_cache_path = payload.get("geom_cache_path", None)
     plot_only = bool(geom_cache_path) and os.path.isfile(str(geom_cache_path))
 
-    print(f"[SUPER DEBUG] Payload type {str(payload.get('midline_type', '')).lower()} | plot_only={plot_only}")
+    print(
+        f"[SUPER DEBUG] cid={crack_id} payload_type={str(payload.get('midline_type', '')).lower()} "
+        f"| plot_only={plot_only}",
+        flush=True,
+    )
 
     try:
         ORIENT_DEBUG = True
@@ -539,11 +552,13 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         # -------------------------------------------------------
         # Normalize crop to 8-bit (still needed for plotting)
         # -------------------------------------------------------
+        print(f"[EDGE_STALL_DBG] cid={crack_id} stage=normalize:start", flush=True)
         img_norm = cv2.normalize(
             img.astype(np.float32),
             None, 0, 255,
             cv2.NORM_MINMAX
         ).astype(np.uint8)
+        print(f"[EDGE_STALL_DBG] cid={crack_id} stage=normalize:done shape={img_norm.shape}", flush=True)
 
         midline_xy_crop = np.column_stack([track_yx[1], track_yx[0]])
 
@@ -580,12 +595,15 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         # PLOT-ONLY MODE: load geometry from geom_cache.npz
         # =======================================================
         if plot_only:
+            print(f"[EDGE_STALL_DBG] cid={cid} stage=plot_only:np_load:start path={geom_cache_path}", flush=True)
             t_load0 = time.perf_counter()
             data = np.load(str(geom_cache_path), allow_pickle=True)
+            print(f"[EDGE_STALL_DBG] cid={cid} stage=plot_only:np_load:done keys={len(data.files)}", flush=True)
 
             # Required keys
             for k in ["mask_crop", "track_e1", "track_e2", "normals_e1", "normals_e2", "midline_xy_crop", "bbox"]:
                 if k not in data:
+                    print(f"[EDGE_STALL_DBG] cid={cid} stage=plot_only:bad_cache missing={k}", flush=True)
                     return {
                         "status": "fail_bad_geom_cache",
                         "error": f"geom_cache missing key: {k}",
@@ -613,6 +631,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 }
 
             x, y, w, h = map(int, bbox_arr.tolist())
+            print(f"[EDGE_STALL_DBG] cid={cid} stage=plot_only:cache_parsed bbox={(x,y,w,h)}", flush=True)
 
             t_edge_masks = 0.0
             t_edges_tracking = 0.0
@@ -672,6 +691,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             t_load = 0.0
 
         try:
+            print(f"[EDGE_STALL_DBG] cid={cid} stage=orient:start", flush=True)
             p0 = np.asarray(pts_crop[0], float)
             p1 = np.asarray(pts_crop[1], float)
             d0 = np.asarray(derived_midline_crop[0], float)
@@ -721,6 +741,8 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 )'''
         except Exception as e:
             print(f"[ORIENT DBG][edge_worker] cid={cid} orientation check failed: {e}")
+        else:
+            print(f"[EDGE_STALL_DBG] cid={cid} stage=orient:done", flush=True)
 
         if not plot_only:
             from cracktools.segmentation import generate_mask_from_edges  # adjust import path
@@ -745,6 +767,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         if not calib_only:
             pretty_path = os.path.join(dbg_dir, "edges_midlines_normals_pretty.png")
             try:
+                print(f"[EDGE_STALL_DBG] cid={cid} stage=plot_pretty:start", flush=True)
                 plot_normals_pretty(
                     img_norm,
                     track_e1, track_e2,
@@ -754,6 +777,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                     cid,
                     derived_midline_xy=derived_midline_crop,
                 )
+                print(f"[EDGE_STALL_DBG] cid={cid} stage=plot_pretty:done", flush=True)
             except Exception as e:
                 print(f"[DEBUG VIS] ⚠ plot_normals_pretty failed for cid{cid}: {e}")
 
@@ -765,6 +789,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         gt_vs_manual_overlay = None
 
         if gt_crop is not None:
+            print(f"[EDGE_STALL_DBG] cid={cid} stage=metrics_crop:start", flush=True)
             gt_bin   = (np.asarray(gt_crop) > 0).astype(np.uint8)
             pred_bin = (np.asarray(mask_crop) > 0).astype(np.uint8)
 
@@ -800,6 +825,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                     print(f"[DEBUG VIS] wrote → {out_iou}")
                 except Exception as e:
                     print(f"[DEBUG VIS] ⚠ crop IoU overlay failed cid{cid}: {e}")
+            print(f"[EDGE_STALL_DBG] cid={cid} stage=metrics_crop:done", flush=True)
 
         # =======================================================
         # 3) Widths colormap (crop-level)
@@ -807,6 +833,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         if not calib_only:
             widths_path = os.path.join(dbg_dir, "widths_colormap_on_crop.png")
             try:
+                print(f"[EDGE_STALL_DBG] cid={cid} stage=widths_plot:start", flush=True)
                 if gt_vs_manual_overlay is not None:
                     S = 3.0
                     plot_widths_colormap_on_crop(
@@ -830,6 +857,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                         out_png          = widths_path,
                     )
                 print(f"[DEBUG VIS] wrote → {widths_path}")
+                print(f"[EDGE_STALL_DBG] cid={cid} stage=widths_plot:done", flush=True)
             except Exception as e:
                 print(f"[DEBUG VIS] ⚠ widths colormap failed cid{cid}: {e}")
 
@@ -839,6 +867,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             #   - manual only: also GT-mask normals for side-by-side diagnosis
             # =======================================================
             try:
+                print(f"[EDGE_STALL_DBG] cid={cid} stage=normals_plot:start", flush=True)
                 pred_mask_u8 = (np.asarray(mask_crop) > 0).astype(np.uint8) * 255
                 (pe1x, pe1y, pe2x, pe2y, _), _ = normals_from_mask_for_midline(
                     derived_midline_crop,
@@ -883,11 +912,14 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                     print(f"[DEBUG VIS] wrote → {gt_normals_path}")
             except Exception as e:
                 print(f"[DEBUG VIS] ⚠ normals plotting failed cid{cid}: {e}")
+            else:
+                print(f"[EDGE_STALL_DBG] cid={cid} stage=normals_plot:done", flush=True)
 
             # =======================================================
             # 5) GLOBAL overlay via save_gt_vs_manual_overlay
             # =======================================================
             try:
+                print(f"[EDGE_STALL_DBG] cid={cid} stage=global_overlay:start", flush=True)
                 if (
                     image_shape is not None and
                     gt_full is not None and
@@ -927,6 +959,8 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                     )
             except Exception as e:
                 print(f"[edge_worker] ⚠ save_gt_vs_manual_overlay failed cid{cid}: {e}")
+            else:
+                print(f"[EDGE_STALL_DBG] cid={cid} stage=global_overlay:done", flush=True)
 
         # -------------------------------------------------------
         # Cache geometry for later plotting (calibration runs)
@@ -1026,13 +1060,14 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         result.update(P)
         result.update(metrics_all)
+        print(f"[EDGE_STALL_DBG] cid={cid} stage=return:ok", flush=True)
         return result
 
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
-        print(f"[edge_worker] ❌ unexpected failure for params={P}")
-        print(tb)
+        print(f"[edge_worker] ❌ unexpected failure for params={P}", flush=True)
+        print(tb, flush=True)
 
         out: Dict[str, Any] = {
             "status": "fail_exception",
@@ -1040,4 +1075,5 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             "traceback": tb,
         }
         out.update(P)
+        print(f"[EDGE_STALL_DBG] cid={crack_id} stage=return:exception", flush=True)
         return out

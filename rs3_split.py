@@ -30,6 +30,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import get_context
 from multiprocessing.shared_memory import SharedMemory
 from typing import Dict, Any, List, Optional, Tuple
+from helpers.cpu_affinity import process_pool_affinity_config
 
 try:
     import cupy as cp  # type: ignore
@@ -590,7 +591,17 @@ def run_rs3_variants_split_adaptive(
                     gc.collect()
 
                 ctx = get_context(mp_start_method)
-                with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
+                pool_workers, pool_init, pool_initargs, pool_cpus = process_pool_affinity_config(
+                    workers, label="rs3-prestaged"
+                )
+                if verbose:
+                    print(f"[AFFINITY] rs3-prestaged workers={pool_workers} cpus={pool_cpus}")
+                with ProcessPoolExecutor(
+                    max_workers=pool_workers,
+                    mp_context=ctx,
+                    initializer=pool_init,
+                    initargs=pool_initargs,
+                ) as ex:
                     futs = [ex.submit(_rs3_cpu_worker, t) for t in prepared]
                     for fut in as_completed(futs):
                         try:
@@ -1080,7 +1091,18 @@ def run_rs3_variants_adaptive(
                 "mode_tag": mode_tag,
             })
         try:
-            with ProcessPoolExecutor(max_workers=min(cpu_max_workers, len(tasks)), mp_context=ctx) as ex:
+            req_workers = min(cpu_max_workers, len(tasks))
+            pool_workers, pool_init, pool_initargs, pool_cpus = process_pool_affinity_config(
+                req_workers, label="rs3-small"
+            )
+            if verbose:
+                print(f"[AFFINITY] rs3-small workers={pool_workers} cpus={pool_cpus}")
+            with ProcessPoolExecutor(
+                max_workers=pool_workers,
+                mp_context=ctx,
+                initializer=pool_init,
+                initargs=pool_initargs,
+            ) as ex:
                 futs = {ex.submit(_rs3_worker_small, t): i for i, t in enumerate(tasks)}
                 for fut in as_completed(futs):
                     i = futs[fut]

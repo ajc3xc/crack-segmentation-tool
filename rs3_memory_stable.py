@@ -18,6 +18,50 @@ except Exception:
     cp = None
     CUPY_AVAILABLE = False
 
+# ============================================================
+# RS3 PARALLELIZATION CONTROLS
+# ============================================================
+
+RS3_ENABLE_PARALLEL = True          # <-- MASTER SWITCH
+RS3_MAX_WORKERS = 4              # None = auto
+RS3_MEMORY_FRACTION = 0.75           # max fraction of total RAM to use
+RS3_ASSUME_PER_WORKER_GIB = 11.0      # empirical ds=1 peak
+
+
+def _rs3_compute_safe_worker_count() -> int:
+    """
+    Estimate safe worker count based on system RAM and empirical
+    per-worker RS3 memory footprint.
+    """
+    try:
+        import psutil
+        total_gib = psutil.virtual_memory().total / (1024**3)
+    except Exception:
+        total_gib = 32.0
+
+    usable = total_gib * float(RS3_MEMORY_FRACTION)
+    per = float(RS3_ASSUME_PER_WORKER_GIB)
+    max_by_mem = max(1, int(usable // per))
+
+    if RS3_MAX_WORKERS is not None:
+        return max(1, min(int(RS3_MAX_WORKERS), max_by_mem))
+
+    return max_by_mem
+
+
+def _rs3_result_is_oom(res: Dict[str, Any]) -> bool:
+    if not isinstance(res, dict):
+        return False
+    if res.get("ok"):
+        return False
+    err = str(res.get("error", "")).lower()
+    return (
+        "oom" in err
+        or "out of memory" in err
+        or "unable to allocate" in err
+        or "paging file is too small" in err
+    )
+
 
 def hard_gpu_cleanup(cp_mod: Optional[Any]) -> None:
     if cp_mod is not None:
@@ -448,6 +492,70 @@ def solve_rs3_one_variant_with_fallback(
     return {"ok": False, "ds_used": None, "error": f"[OOM after fallbacks] {type(last_exc).__name__}: {last_exc}"}
 
 
+def _rs3_worker_variant(args):
+    """
+    Worker wrapper for single variant.
+    Keeps solver logic untouched.
+    """
+    import cracktools as ct
+
+    (
+        os_cost,
+        p0_down_xy,
+        p1_down_xy,
+        gv,
+        down,
+        bbox_xyxy,
+        cfg,
+        vidx,
+    ) = args
+
+    xmin, ymin, xmax, ymax = map(int, bbox_xyxy)
+    _ = (xmax, ymax)
+
+    g11 = float(gv.get("g11", 1.0))
+    g22 = float(gv.get("g22", 25.0))
+    g33 = float(gv.get("g33", 25.0))
+
+    r = solve_rs3_one_variant_with_fallback(
+        ct,
+        os_cost=os_cost,
+        p0_xy=np.asarray(p0_down_xy, dtype=np.float64),
+        p1_xy=np.asarray(p1_down_xy, dtype=np.float64),
+        g11=g11,
+        g22=g22,
+        g33=g33,
+        cfg=cfg,
+    )
+
+    if not r.get("ok"):
+        return {
+            "ok": False,
+            "variant_id": vidx,
+            "ds_used": r.get("ds_used"),
+            "error": r.get("error", "RS3 failed"),
+            "timing": r.get("timing", {}),
+        }
+
+    path_xy_cd = np.asarray(r["track_full_xy_cropdown"], dtype=np.float64).copy()
+    path_xy_cd[0] -= 0.5
+    path_xy_cd[1] -= 0.5
+    path_xy_cd[0] *= float(down)
+    path_xy_cd[1] *= float(down)
+
+    xg = path_xy_cd[0] + float(xmin)
+    yg = path_xy_cd[1] + float(ymin)
+    track_full_xy = np.vstack([xg, yg])
+
+    return {
+        "ok": True,
+        "variant_id": vidx,
+        "ds_used": r.get("ds_used"),
+        "track_full_xy": track_full_xy,
+        "timing": r.get("timing", {}),
+    }
+
+
 def run_rs3_variants_memory_stable(
     ct,
     os_cost: np.ndarray,
@@ -460,19 +568,123 @@ def run_rs3_variants_memory_stable(
     cfg: RS3SolveConfig,
 ) -> List[Dict[str, Any]]:
     """
-    Sequential, memory-stable RS3 variants runner. Returns same core fields as rs3_split:
+    Memory-stable RS3 variants runner. Returns same core fields as rs3_split:
       ok, variant_id, track_full_xy, timing (+ ds_used on success).
     """
+    os_cost = np.asarray(os_cost, dtype=np.float32, order="C")
+
+    # ============================================================
+    # PARALLEL MODE (adaptive, OOM-safe)
+    # ============================================================
+    if RS3_ENABLE_PARALLEL and len(g_variants) > 1:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        from concurrent.futures.process import BrokenProcessPool
+
+        print("\n========== RS3 PARALLEL DEBUG ==========")
+        print("RS3_ENABLE_PARALLEL =", RS3_ENABLE_PARALLEL)
+        print("len(g_variants) =", len(g_variants))
+
+        initial_workers = _rs3_compute_safe_worker_count()
+        workers = max(1, min(int(initial_workers), len(g_variants)))
+        print(f"[RS3 PARALLEL] initial_workers={initial_workers}")
+        print(f"[RS3 PARALLEL] starting_workers={workers}")
+
+        args_list = []
+        for vidx, gv in enumerate(g_variants):
+            args_list.append((
+                os_cost,
+                np.asarray(p0_down_xy, dtype=np.float64),
+                np.asarray(p1_down_xy, dtype=np.float64),
+                gv,
+                down,
+                bbox_xyxy,
+                cfg,
+                vidx,
+            ))
+
+        while workers >= 1:
+            print(f"[RS3 PARALLEL] attempting run with workers={workers}")
+            pool_workers = workers
+            pool_init = None
+            pool_initargs = ()
+            pool_cpus = None
+            try:
+                from helpers.cpu_affinity import process_pool_affinity_config
+
+                pool_workers, pool_init, pool_initargs, pool_cpus = process_pool_affinity_config(
+                    workers, label="rs3-memory-stable"
+                )
+            except Exception:
+                pass
+
+            if cfg.verbose:
+                print(f"[RS3 PARALLEL] attempting workers={pool_workers} (requested={workers})")
+                if pool_cpus is not None:
+                    print(f"[AFFINITY] rs3-memory-stable workers={pool_workers} cpus={pool_cpus}")
+
+            out: List[Dict[str, Any]] = []
+            had_oom = False
+
+            try:
+                with ProcessPoolExecutor(
+                    max_workers=pool_workers,
+                    initializer=pool_init,
+                    initargs=pool_initargs,
+                ) as ex:
+                    futures = [ex.submit(_rs3_worker_variant, a) for a in args_list]
+
+                    for f in as_completed(futures):
+                        try:
+                            res = f.result()
+                        except Exception as e:
+                            # Abrupt worker termination often surfaces as BrokenProcessPool,
+                            # which is typically an OOM/process-kill in this workload.
+                            print(f"[RS3 PARALLEL] worker crashed: {e}")
+                            had_oom = True
+                            raise BrokenProcessPool(str(e)) from e
+
+                        if _rs3_result_is_oom(res):
+                            had_oom = True
+
+                        out.append(res)
+
+                if had_oom:
+                    raise MemoryError("RS3 parallel OOM detected")
+
+                out.sort(key=lambda d: d.get("variant_id", -1))
+                print(f"[RS3 PARALLEL] success with workers={pool_workers}")
+                return out
+
+            except (MemoryError, BrokenProcessPool) as e:
+                print(f"[RS3 PARALLEL] ⚠ failure at workers={workers}: {type(e).__name__}")
+
+                workers = int(pool_workers) // 2
+                print(f"[RS3 PARALLEL] reducing workers to {workers}")
+                hard_cpu_cleanup()
+                try:
+                    gc.collect()
+                except Exception:
+                    pass
+
+                if workers < 1:
+                    break
+
+        print("[RS3 PARALLEL] ⛔ falling back to SEQUENTIAL mode")
+        print("========================================\n")
+
+    # ============================================================
+    # SEQUENTIAL FALLBACK (UNCHANGED LOGIC)
+    # ============================================================
+    out: List[Dict[str, Any]] = []
+
     xmin, ymin, xmax, ymax = map(int, bbox_xyxy)
     _ = (xmax, ymax)
-
-    os_cost = np.asarray(os_cost, dtype=np.float32, order="C")
-    out: List[Dict[str, Any]] = []
 
     for vidx, gv in enumerate(g_variants):
         g11 = float(gv.get("g11", 1.0))
         g22 = float(gv.get("g22", 25.0))
         g33 = float(gv.get("g33", 25.0))
+
         if cfg.verbose:
             print(f"\n[RS3] variant v{vidx} g11={g11} g22={g22} g33={g33}")
 
@@ -503,6 +715,7 @@ def run_rs3_variants_memory_stable(
         path_xy_cd[1] -= 0.5
         path_xy_cd[0] *= float(down)
         path_xy_cd[1] *= float(down)
+
         xg = path_xy_cd[0] + float(xmin)
         yg = path_xy_cd[1] + float(ymin)
         track_full_xy = np.vstack([xg, yg])

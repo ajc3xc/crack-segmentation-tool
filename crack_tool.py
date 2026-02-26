@@ -2200,7 +2200,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         
         #stopgap measure
         do_edge_calibrate=False
-        skip_recomputing_midlines=True
+        skip_recomputing_midlines=False
         
 
         import os, time, numpy as np, pandas as pd
