@@ -789,9 +789,17 @@ def track_crop_to_full(track_crop,start_point,end_point,sides1,sides2):
 from pathlib import Path
 
 def get_files(folder='cracktools/crackimages', formats=['png','jpg'], basename=True):
+    import re
+
+    def natural_key(path_like):
+        name = Path(path_like).name if not basename else str(path_like)
+        stem = Path(name).name.lower()
+        return [int(part) if part.isdigit() else part for part in re.split(r'(\d+)', stem)]
+
     exts = [e.lower() for e in formats]
     files = []
     for f in Path(folder).glob("*"):
         if f.suffix.lower().lstrip(".") in exts:
             files.append(f.name if basename else str(f))
+    files.sort(key=natural_key)
     return files

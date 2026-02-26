@@ -28,6 +28,7 @@ plt.ioff()   # no interactive figure updates
 
 import json
 import os
+import sys
 from skimage.segmentation import mark_boundaries
 import os
 from PyQt5.QtWidgets import QListWidgetItem
@@ -59,6 +60,18 @@ from combiner import *
 DEBUG_SAVE_LIGHT = True   # True → only high-res compact outputs
 from helpers.endpoint_annotator import CrackAnnotator
 min_crop_size = 16   
+
+def _force_pyqt5_qt_plugin_paths():
+    """OpenCV wheels may overwrite Qt plugin paths to cv2/qt/plugins; restore PyQt5 paths."""
+    py_ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    plugin_root = os.path.join(sys.prefix, "lib", py_ver, "site-packages", "PyQt5", "Qt5", "plugins")
+    platform_dir = os.path.join(plugin_root, "platforms")
+
+    if os.path.isdir(plugin_root):
+        os.environ["QT_PLUGIN_PATH"] = plugin_root
+    if os.path.isdir(platform_dir):
+        os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = platform_dir
+
 class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, CombineClearSegments, CrackUtils, Ui_MainWindow):
     def setupUi(self, MainWindow):
         super().setupUi(MainWindow)
@@ -2613,8 +2626,8 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
     
     
 if __name__ == "__main__":
-    import sys
     from time import time
+    _force_pyqt5_qt_plugin_paths()
     app = QtWidgets.QApplication(sys.argv)
     font = QtGui.QFont()
     font.setPointSize(7)
