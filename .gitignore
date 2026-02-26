@@ -173,3 +173,5 @@ cracktools/__pycache__/__init__.cpython-310.pyc
 cracktools/__pycache__/os.cpython-310.pyc
 **/*.pyc
 *.mp4
+*.webm
+repomix*
