@@ -3,6 +3,7 @@
 #*.mp4
 *.gif
 *.jpg
+*.mp4
 #*.png
 folder_config.json
 # Byte-compiled / optimized / DLL files
@@ -171,3 +172,4 @@ cython_debug/
 cracktools/__pycache__/__init__.cpython-310.pyc
 cracktools/__pycache__/os.cpython-310.pyc
 **/*.pyc
+*.mp4
