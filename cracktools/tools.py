@@ -417,9 +417,14 @@ class Draw():
                     redraw_committed()
                     live_points = []
 
-            # --- Disable wheel zoom in OpenCV Qt HighGUI windows ---
-            # Qt HighGUI can enter its own hand/pan viewport mode after wheel zoom,
-            # which steals left-drag from our drawing callback.
+            # --- Linux/OpenCV Qt workaround (KNOWN DEGRADED BEHAVIOR) ---
+            # NOTE: Current subprocess + HighGUI path is unstable on Linux when
+            # wheel zoom is enabled: OpenCV Qt enters a hand/pan viewport mode
+            # ("fist" cursor) and steals left-drag from manual tracing.
+            # We intentionally disable wheel zoom here and use keyboard +/- zoom
+            # as a temporary workaround. The original wheel-zoom behavior should
+            # be restored once manual drawing is migrated off OpenCV HighGUI (or
+            # a reliable non-Qt HighGUI backend is enforced).
             elif event == cv2.EVENT_MOUSEWHEEL:
                 return
 
@@ -652,6 +657,9 @@ class Draw():
         self.active = False
     
         
+        # Linux/OpenCV Qt workaround: wheel zoom is intentionally not used here
+        # because HighGUI Qt can switch to hand/pan viewport mode and hijack
+        # left-drag interactions. Use +/- keyboard zoom for now.
         bb_name = 'draw bb (Esc closes, RightClick deletes most recent; +/- zoom)'
         gui_normal_flag = getattr(cv2, "WINDOW_GUI_NORMAL", 0)
         # AUTOSIZE avoids OpenCV Qt viewport drag/pan behavior hijacking left-drag.

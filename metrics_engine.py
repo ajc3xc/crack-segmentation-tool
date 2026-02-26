@@ -72,7 +72,16 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         baseline roots wired in when available.
         """
         import os
+        import shutil
         from helpers.summarize_metrics import summarize_dataset_metrics as _summarize_dataset_metrics
+
+        out_dir = os.path.join(self.save_folder, "metrics", "_summary")
+        try:
+            if os.path.isdir(out_dir):
+                shutil.rmtree(out_dir)
+                print(f"[summarize] cleared stale summary dir: {out_dir}")
+        except Exception as e:
+            print(f"[summarize] ⚠ failed to clear _summary: {e}")
 
         baseline_roots = []
         for p in (
@@ -84,7 +93,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
         report = _summarize_dataset_metrics(
             save_folder=self.save_folder,
-            out_dir=os.path.join(self.save_folder, "metrics", "_summary"),
+            out_dir=out_dir,
             baseline_roots=baseline_roots,
             verbose=True,
         )

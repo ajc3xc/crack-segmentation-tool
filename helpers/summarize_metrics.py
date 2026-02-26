@@ -10,6 +10,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 
 plt.ioff()
 
@@ -74,6 +75,8 @@ def _save_bar(
     labels: List[str],
     values: List[float],
     *,
+    colors: Optional[List[str]] = None,
+    color_legend: Optional[List[Tuple[str, str]]] = None,
     out_png: str,
     title: str,
     ylabel: str,
@@ -92,10 +95,21 @@ def _save_bar(
     fig_w = max(7.0, 0.45 * len(labs))
     plt.figure(figsize=(fig_w, 4.2), dpi=180)
     xs = np.arange(len(labs))
-    plt.bar(xs, vals)
+    bar_kwargs = {}
+    if colors is not None:
+        try:
+            color_arr = [colors[i] for i in range(len(colors)) if i < len(keep) and keep[i]]
+            if len(color_arr) == len(labs):
+                bar_kwargs["color"] = color_arr
+        except Exception:
+            pass
+    plt.bar(xs, vals, **bar_kwargs)
     plt.xticks(xs, labs, rotation=rotate, ha="right")
     plt.ylabel(ylabel)
     plt.title(title)
+    if color_legend:
+        handles = [Patch(facecolor=c, edgecolor="none", label=str(lbl)) for lbl, c in color_legend]
+        plt.legend(handles=handles, loc="best", framealpha=0.9, fontsize=8)
     plt.tight_layout()
     plt.savefig(out_png)
     plt.close()
@@ -288,14 +302,18 @@ def _aggregate_width_metrics(
     # --------------------------------------------------------
     # Clean method labeling (x-axis)
     # --------------------------------------------------------
-    grouped["method_name"] = grouped.apply(
-        lambda r: (
-            r["baseline_method"]
-            if str(r["method_family"]) == "baseline"
-            else r["method_family"]
-        ),
-        axis=1,
-    )
+    def _width_method_label(row):
+        mf = str(row.get("method_family", "") or "")
+        mt = str(row.get("midline_type", "") or "")
+        bm = str(row.get("baseline_method", "") or "")
+        if mf == "baseline":
+            return bm or "baseline"
+        if mf in ("", "model", "nan", "None"):
+            # "model" is just an internal bucket; use the actual supervision source.
+            return mt or "model"
+        return f"{mt}:{mf}" if mt and mt != "unknown" else mf
+
+    grouped["method_name"] = grouped.apply(_width_method_label, axis=1)
 
     # --------------------------------------------------------
     # Color classification
@@ -323,31 +341,37 @@ def _aggregate_width_metrics(
 
     mae_col = "mae_px_mean" if "mae_px_mean" in grouped.columns else None
     rmse_col = "rmse_px_mean" if "rmse_px_mean" in grouped.columns else None
+    total_grouped = grouped[grouped["crack_type"].astype(str).str.upper() == "TOTAL"].copy()
+    plot_grouped = total_grouped if not total_grouped.empty else grouped
+    legend_items = [(k, v) for k, v in [("manual", COLOR_MAP["manual"]), ("auto", COLOR_MAP["auto"]), ("baseline", COLOR_MAP["baseline"])]
+                    if k in set(plot_grouped["source_class"].astype(str).tolist())]
 
     if mae_col:
-        top = grouped.sort_values(mae_col, ascending=True).head(20)
+        top = plot_grouped.sort_values(mae_col, ascending=True).head(20)
 
         out_png = os.path.join(out_dir, "dataset_width_mae_by_method.png")
         _save_bar(
             labels=top["method_name"].astype(str).tolist(),
             values=top[mae_col].astype(float).tolist(),
             colors=top["color"].tolist(),
+            color_legend=legend_items,
             out_png=out_png,
-            title="Dataset width MAE by method",
+            title="Dataset width MAE by method (TOTAL cracks)" if not total_grouped.empty else "Dataset width MAE by method",
             ylabel="MAE (px)",
         )
         outputs["width_mae_png"] = out_png
 
     if rmse_col:
-        top = grouped.sort_values(rmse_col, ascending=True).head(20)
+        top = plot_grouped.sort_values(rmse_col, ascending=True).head(20)
 
         out_png = os.path.join(out_dir, "dataset_width_rmse_by_method.png")
         _save_bar(
             labels=top["method_name"].astype(str).tolist(),
             values=top[rmse_col].astype(float).tolist(),
             colors=top["color"].tolist(),
+            color_legend=legend_items,
             out_png=out_png,
-            title="Dataset width RMSE by method",
+            title="Dataset width RMSE by method (TOTAL cracks)" if not total_grouped.empty else "Dataset width RMSE by method",
             ylabel="RMSE (px)",
         )
         outputs["width_rmse_png"] = out_png

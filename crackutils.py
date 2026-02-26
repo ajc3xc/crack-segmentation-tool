@@ -1219,6 +1219,21 @@ class CrackUtils:
         self.bb_pts_list = getattr(self, 'bb_pts_list', [])
         display_image = self.original_image.copy()
 
+        # Optional light GT mask overlay for easier box placement (read-only preview).
+        try:
+            mask = getattr(self, "current_mask", None)
+            if mask is not None and len(np.asarray(mask).shape) >= 2:
+                h0, w0 = display_image.shape[:2]
+                mask_u8 = np.asarray(mask).astype(np.uint8)
+                if mask_u8.shape[:2] != (h0, w0):
+                    mask_u8 = cv2.resize(mask_u8, (w0, h0), interpolation=cv2.INTER_NEAREST)
+                mask_bin = (mask_u8 > 0).astype(np.uint8)
+                if np.any(mask_bin):
+                    mask_rgb = np.repeat((mask_bin * 255)[:, :, None], 3, axis=2).astype(np.uint8)
+                    display_image = cv2.addWeighted(display_image, 0.85, mask_rgb, 0.15, 0.0)
+        except Exception as e:
+            print(f"[DRAW_BOX] mask overlay preview skipped: {e}")
+
         # Draw saved (blue) and pending (green) boxes
         for box_dict in (self.annotation.get('annotations', {}).get('box') or {}).values():
             bb = np.array(box_dict['bounding_box'], dtype=np.int32)

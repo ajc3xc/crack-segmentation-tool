@@ -141,8 +141,11 @@ class Ui_MainWindow(object):
         self.man_auto_metrics_button.setGeometry(QtCore.QRect(100, 535, 86, 31))
         self.man_auto_metrics_button.setObjectName("man_auto_metrics_button")
         self.full_dataset_metrics_button = QtWidgets.QPushButton(self.tab_5)
-        self.full_dataset_metrics_button.setGeometry(QtCore.QRect(35, 575, 130, 24))
+        self.full_dataset_metrics_button.setGeometry(QtCore.QRect(15, 575, 100, 24))
         self.full_dataset_metrics_button.setObjectName("full_dataset_metrics_button")
+        self.summarize_dataset_button = QtWidgets.QPushButton(self.tab_5)
+        self.summarize_dataset_button.setGeometry(QtCore.QRect(120, 575, 75, 24))
+        self.summarize_dataset_button.setObjectName("summarize_dataset_button")
         
         self.clear_boxes_button = QtWidgets.QPushButton(self.tab_5)
         self.clear_boxes_button.setGeometry(QtCore.QRect(50, 850, 121, 28))
@@ -622,6 +625,7 @@ class Ui_MainWindow(object):
         self.man_only_metrics_button.raise_()
         self.man_auto_metrics_button.raise_()
         self.full_dataset_metrics_button.raise_()
+        self.summarize_dataset_button.raise_()
         
         
         #####################################
@@ -833,6 +837,7 @@ class Ui_MainWindow(object):
         self.man_only_metrics_button.setText(_translate("MainWindow", "Manual"))
         self.man_auto_metrics_button.setText(_translate("MainWindow", "Manual+Auto"))
         self.full_dataset_metrics_button.setText(_translate("MainWindow", "Full Dataset"))
+        self.summarize_dataset_button.setText(_translate("MainWindow", "Summarize"))
         
         self.label_37.setText(_translate("MainWindow", "Image size:"))
         self.draw_box_button.setText(_translate("MainWindow", "Draw boxes"))

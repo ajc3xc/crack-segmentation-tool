@@ -105,6 +105,9 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                 edges_only=False,
             )
         )
+        self.summarize_dataset_button.clicked.connect(
+            lambda: self.summarize_dataset_metrics()
+        )
 
         
         
@@ -857,8 +860,8 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
 
         sweep_rows = []
         orig_n = self.n
-        summ_dir = os.path.join(self.save_folder, "metrics", "_summary")
-        os.makedirs(summ_dir, exist_ok=True)
+        calib_dir = os.path.join(self.save_folder, "metrics", "_calibration")
+        os.makedirs(calib_dir, exist_ok=True)
 
         # --- PHASE A: Calibration timer ---
         tA_start = time.perf_counter()
@@ -1427,8 +1430,8 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             ]
 
         orig_n = self.n
-        summ_dir = os.path.join(self.save_folder, "metrics", "_summary")
-        os.makedirs(summ_dir, exist_ok=True)
+        calib_dir = os.path.join(self.save_folder, "metrics", "_calibration")
+        os.makedirs(calib_dir, exist_ok=True)
 
 
         # ============================================================
@@ -1504,7 +1507,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                 # write per-image JSON (mirrors rs3_global_best_family.json)
                 try:
                     out_json = os.path.join(
-                        summ_dir,
+                        calib_dir,
                         f"{base}_edge_global_best_family.json"
                     )
                     with open(out_json, "w", encoding="utf-8") as f:
@@ -1524,7 +1527,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             df_edges = pd.DataFrame(edge_families)
             try:
                 df_edges.to_csv(
-                    os.path.join(summ_dir, "global_edge_families_by_image.csv"),
+                    os.path.join(calib_dir, "global_edge_families_by_image.csv"),
                     index=False,
                 )
             except Exception as e:
@@ -1559,12 +1562,12 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                 if not rank.empty:
                     global_best_edge = _coerce_edge_params(rank.iloc[0].to_dict())
                     try:
-                        rank.to_csv(os.path.join(summ_dir, "global_edge_family_ranked.csv"), index=False)
+                        rank.to_csv(os.path.join(calib_dir, "global_edge_family_ranked.csv"), index=False)
                     except Exception as e:
                         print(f"[global-metrics] could not write global_edge_family_ranked.csv: {e}")
 
         try:
-            with open(os.path.join(summ_dir, "global_best_edge_params.json"), "w", encoding="utf-8") as f:
+            with open(os.path.join(calib_dir, "global_best_edge_params.json"), "w", encoding="utf-8") as f:
                 json.dump(global_best_edge, f, indent=2)
             print(f"[global-metrics] global edge params: {global_best_edge}")
         except Exception as e:
@@ -1630,7 +1633,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                 if packs_by_image:
                     global_best_rs3 = optimize_across_dataset(
                         packs_by_image,
-                        save_global_json=os.path.join(summ_dir, "global_best_rs3_family.json")
+                        save_global_json=os.path.join(calib_dir, "global_best_rs3_family.json")
                     )
                     if global_best_rs3:
                         print(f"[global-metrics] ✅ global RS3 family: {global_best_rs3}")
@@ -1874,9 +1877,10 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             # ---- Write per-image runtime table ----
             if per_image_times:
                 df_times = pd.DataFrame(per_image_times)
-                df_times.to_csv(os.path.join(summ_dir, "global_per_image_runtime.csv"), index=False)
+                df_times.to_csv(os.path.join(calib_dir, "global_per_image_runtime.csv"), index=False)
 
-            # Final dataset-level summarization
+            # Final dataset-level summarization (cleanup now handled centrally
+            # inside summarize_dataset_metrics()).
             self.summarize_dataset_metrics()
 
             # ---- Aggregate per-image runtime logs ----
@@ -1890,7 +1894,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                     logs.append(df)
             if logs:
                 DF = pd.concat(logs, ignore_index=True)
-                DF.to_csv(os.path.join(summ_dir, "global_runtime.csv"), index=False)
+                DF.to_csv(os.path.join(calib_dir, "global_runtime.csv"), index=False)
 
         finally:
             self.n = orig_n
@@ -1899,7 +1903,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         # Final timing summary
         tB = time.perf_counter() - tB_start
         total = tA1 + tA2 + tB
-        with open(os.path.join(summ_dir, "global_runtime_summary.txt"), "w") as f:
+        with open(os.path.join(calib_dir, "global_runtime_summary.txt"), "w") as f:
             f.write(f"Phase A1 (edge calibration): {tA1:.2f} s\n")
             f.write(f"Phase A2 (RS3 calibration): {tA2:.2f} s\n")
             f.write(f"Phase B (application): {tB:.2f} s\n")
