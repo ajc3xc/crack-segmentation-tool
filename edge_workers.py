@@ -212,9 +212,17 @@ def plot_widths_colormap_on_crop(
     import numpy as np
     import matplotlib.pyplot as plt
     import matplotlib as mpl
+    import time
     from scipy.ndimage import gaussian_filter1d
+    from matplotlib.collections import LineCollection
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
+
+    t_widths0 = time.perf_counter()
+
+    def _wdbg(msg: str) -> None:
+        dt = time.perf_counter() - t_widths0
+        print(f"[WIDTHS_DBG] +{dt:.3f}s {msg}", flush=True)
 
     # ---- convert arrays ----
     e1  = np.asarray(e1, float)
@@ -231,7 +239,7 @@ def plot_widths_colormap_on_crop(
     if n < 2:
         return
 
-    print(f"[WIDTHS_DBG] start n={n} bg_shape={gt_vs_manual_rgb.shape}", flush=True)
+    _wdbg(f"start n={n} bg_shape={gt_vs_manual_rgb.shape}")
 
     e1  = e1[:n]
     e2  = e2[:n]
@@ -262,7 +270,7 @@ def plot_widths_colormap_on_crop(
     if not runs:
         return
 
-    print(f"[WIDTHS_DBG] finite_runs={len(runs)}", flush=True)
+    _wdbg(f"finite_runs={len(runs)}")
 
     # ------------------------------------------------------------
     # GLOBAL width scale (0 → max width)
@@ -287,15 +295,21 @@ def plot_widths_colormap_on_crop(
 
     H, W = gt_vs_manual_rgb.shape[:2]
 
+    _wdbg("figure:create:start")
     fig, ax = plt.subplots(figsize=(7, 7), dpi=320)
+    _wdbg("figure:create:done")
 
     # ---- background ----
+    _wdbg(f"imshow:start H={H} W={W}")
     ax.imshow(gt_vs_manual_rgb[..., ::-1], interpolation="bilinear")
+    _wdbg("imshow:done")
 
     # ------------------------------------------------------------
     # Plot each segment independently
     # ------------------------------------------------------------
-    for i0, i1 in runs:
+    total_line_segments = 0
+    for run_idx, (i0, i1) in enumerate(runs):
+        _wdbg(f"run[{run_idx}] prep:start len={i1 - i0}")
         coords = mid[i0:i1].copy()
         widths = np.linalg.norm(e1[i0:i1] - e2[i0:i1], axis=1)
 
@@ -306,9 +320,11 @@ def plot_widths_colormap_on_crop(
         if len(coords) < 2:
             continue
 
+        _wdbg(f"run[{run_idx}] smooth:start n={len(widths)}")
         widths_smooth = gaussian_filter1d(
             widths.astype(float), sigma=1.2, mode="nearest"
         )
+        _wdbg(f"run[{run_idx}] smooth:done n={len(widths_smooth)}")
 
         # Remove only consecutive duplicates
         dxy = np.diff(coords, axis=0)
@@ -321,19 +337,28 @@ def plot_widths_colormap_on_crop(
         if len(coords) < 2:
             continue
 
+        _wdbg(f"run[{run_idx}] colors:start n={len(widths_smooth)}")
         colors = cmap(norm(widths_smooth))
+        _wdbg(f"run[{run_idx}] colors:done n={len(colors)}")
 
-        for k in range(len(coords) - 1):
-            ax.plot(
-                [coords[k, 0], coords[k + 1, 0]],
-                [coords[k, 1], coords[k + 1, 1]],
-                color=colors[k],
-                linewidth=2.4,
+        n_seg = max(0, len(coords) - 1)
+        _wdbg(f"run[{run_idx}] draw_segments:start n={n_seg}")
+        if n_seg > 0:
+            # Much faster than issuing hundreds of individual ax.plot() calls,
+            # especially on large images when multiple workers render in parallel.
+            segments = np.stack([coords[:-1], coords[1:]], axis=1)  # (n_seg, 2, 2)
+            lc = LineCollection(
+                segments,
+                colors=colors[:-1],
+                linewidths=2.4,
                 alpha=0.97,
-                solid_capstyle="round",
+                capstyle="round",
             )
+            ax.add_collection(lc)
+        total_line_segments += n_seg
+        _wdbg(f"run[{run_idx}] draw_segments:done n={n_seg}")
 
-    print(f"[WIDTHS_DBG] line_segments_drawn", flush=True)
+    _wdbg(f"line_segments_drawn total={total_line_segments}")
 
     # ---- optional geodesic edges ----
     if track_e1 is not None and len(track_e1) > 1:
@@ -348,7 +373,9 @@ def plot_widths_colormap_on_crop(
     # ---- colorbar with explicit ticks ----
     sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
+    _wdbg("colorbar:create:start")
     cb = plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.02)
+    _wdbg("colorbar:create:done")
     cb.set_label("Estimated width (px)", fontsize=10, fontweight="bold")
 
     # Keep automatic ticks, but ensure endpoints are present & labeled
@@ -408,6 +435,7 @@ def plot_widths_colormap_on_crop(
         Patch(facecolor=(1, 0, 0), edgecolor="gray", label="GT only"),
     ])
 
+    _wdbg("legend:create:start")
     leg = ax.legend(
         handles=handles,
         loc="lower right",
@@ -419,6 +447,7 @@ def plot_widths_colormap_on_crop(
         title="Legend",
         title_fontsize=11,
     )
+    _wdbg("legend:create:done")
 
     plt.setp(leg.get_title(), color="blue", fontweight="bold")
     for t in leg.get_texts():
@@ -427,15 +456,18 @@ def plot_widths_colormap_on_crop(
     ax.set_xlim(0, W)
     ax.set_ylim(H, 0)
     ax.axis("off")
+    _wdbg("tight_layout:start")
     plt.tight_layout(pad=0)
+    _wdbg("tight_layout:done")
 
     if out_png:
-        print(f"[WIDTHS_DBG] savefig:start out={out_png}", flush=True)
+        _wdbg(f"savefig:start out={out_png}")
         fig.savefig(out_png, dpi=320, bbox_inches="tight", pad_inches=0)
-        print(f"[WIDTHS_DBG] savefig:done", flush=True)
+        _wdbg("savefig:done")
 
+    _wdbg("close_fig:start")
     plt.close(fig)
-    print(f"[WIDTHS_DBG] done", flush=True)
+    _wdbg("done")
 
 def save_cropped_overlay(img_full_bgr, bbox, mask_or_rgb, out_png, margin=0):
     x, y, w, h = map(int, bbox)
@@ -868,17 +900,27 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             # =======================================================
             try:
                 print(f"[EDGE_STALL_DBG] cid={cid} stage=normals_plot:start", flush=True)
+                t_normals_plot0 = time.perf_counter()
+                def _ndbg(msg: str) -> None:
+                    dt = time.perf_counter() - t_normals_plot0
+                    print(f"[NORMALS_PLOT_DBG] cid={cid} +{dt:.3f}s {msg}", flush=True)
+
+                _ndbg(f"pred_mask:build:start shape={np.asarray(mask_crop).shape}")
                 pred_mask_u8 = (np.asarray(mask_crop) > 0).astype(np.uint8) * 255
+                _ndbg("pred_mask:build:done")
+                _ndbg("pred_normals:compute:start")
                 (pe1x, pe1y, pe2x, pe2y, _), _ = normals_from_mask_for_midline(
                     derived_midline_crop,
                     pred_mask_u8 > 0,
                     max_radius=50,
                 )
+                _ndbg("pred_normals:compute:done")
                 pe1 = np.column_stack([pe1x, pe1y])
                 pe2 = np.column_stack([pe2x, pe2y])
 
                 # Keep the historical filename as the prediction-mask plot.
                 pred_normals_path = os.path.join(dbg_dir, f"{midline_tag}_derived_normals.png")
+                _ndbg(f"pred_normals:plot:start out={pred_normals_path}")
                 plot_gt_normals_on_gtbw(
                     pred_mask_u8,
                     derived_midline_crop,
@@ -887,20 +929,26 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                     pe2,
                     pred_normals_path,
                 )
+                _ndbg("pred_normals:plot:done")
                 print(f"[DEBUG VIS] wrote → {pred_normals_path}")
 
                 if midline_tag == "manual" and gt_crop is not None:
+                    _ndbg(f"gt_mask:build:start shape={np.asarray(gt_crop).shape}")
                     gt_mask_u8 = (np.asarray(gt_crop) > 0).astype(np.uint8) * 255
+                    _ndbg("gt_mask:build:done")
                     # For GT-mask diagnostics, use the original/manual midline reference.
                     # Prediction-mask diagnostics above intentionally use the derived midline.
+                    _ndbg("gt_normals:compute:start")
                     (ge1x, ge1y, ge2x, ge2y, _), _ = normals_from_mask_for_midline(
                         midline_xy_crop,
                         gt_mask_u8 > 0,
                         max_radius=50,
                     )
+                    _ndbg("gt_normals:compute:done")
                     ge1 = np.column_stack([ge1x, ge1y])
                     ge2 = np.column_stack([ge2x, ge2y])
                     gt_normals_path = os.path.join(dbg_dir, "manual_normals_on_gt.png")
+                    _ndbg(f"gt_normals:plot:start out={gt_normals_path}")
                     plot_gt_normals_on_gtbw(
                         gt_mask_u8,
                         midline_xy_crop,
@@ -909,6 +957,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                         ge2,
                         gt_normals_path,
                     )
+                    _ndbg("gt_normals:plot:done")
                     print(f"[DEBUG VIS] wrote → {gt_normals_path}")
             except Exception as e:
                 print(f"[DEBUG VIS] ⚠ normals plotting failed cid{cid}: {e}")

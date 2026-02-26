@@ -2173,6 +2173,76 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         total_time = time.perf_counter() - t_total_start
         print(f"[SMOKE] ✅ completed minimal metrics in {total_time:.2f}s\n")'''
          
+    def _rs3_cache_complete_for_image(self, g_variants=None) -> bool:
+        """
+        Strict cache completeness check for quick-mode RS3 skip.
+        Returns True only if every relevant manual crack has a canonical per-cid
+        snapshot containing an auto-best result (or auto variants).
+        """
+        import os
+        import json
+        import numpy as np
+
+        base_name = self._image_base()
+        base_dir = os.path.join(self.save_folder, "metrics", base_name)
+
+        atomic = {}
+        try:
+            atomic = dict(self._metric_atomic() or {})
+        except Exception:
+            atomic = {}
+
+        # Fallback to authoring annotations if snapshot is not yet synced.
+        if not atomic:
+            ann = (getattr(self, "annotation", {}) or {}).get("annotations", {}) or {}
+            atomic = dict(ann.get("atomic_cracks", {}) or {})
+
+        required_cids = []
+        for cid, cr in atomic.items():
+            src = str((cr or {}).get("source") or "").lower()
+            if src.startswith("auto") or src == "combined":
+                continue
+
+            mid = np.asarray((cr or {}).get("midline", []), float)
+            if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 2:
+                continue
+
+            required_cids.append(cid)
+
+        if not required_cids:
+            print("[RS3 CACHE] no eligible manual cracks for cache check")
+            return False
+
+        for cid in required_cids:
+            canonical_json = os.path.join(base_dir, f"cid{cid}", f"cid{cid}.json")
+            if not os.path.exists(canonical_json):
+                print(f"[RS3 CACHE] missing file for cid={cid}: {canonical_json}")
+                return False
+
+            try:
+                with open(canonical_json, "r", encoding="utf-8") as f:
+                    snap = json.load(f) or {}
+            except Exception:
+                print(f"[RS3 CACHE] unreadable snapshot for cid={cid}")
+                return False
+
+            auto_best = snap.get("auto_best", None)
+            has_auto_best = False
+            if isinstance(auto_best, dict):
+                ab_mid = np.asarray(auto_best.get("midline", []), float)
+                has_auto_best = (ab_mid.ndim == 2 and ab_mid.shape[1] == 2 and len(ab_mid) >= 2)
+            elif str(snap.get("source", "")).lower() == "auto_best":
+                top_mid = np.asarray(snap.get("midline", []), float)
+                has_auto_best = (top_mid.ndim == 2 and top_mid.shape[1] == 2 and len(top_mid) >= 2)
+
+            has_auto_variants = isinstance(snap.get("variants"), (dict, list)) or isinstance(snap.get("auto_variants"), (dict, list))
+
+            if not (has_auto_best or has_auto_variants):
+                print(f"[RS3 CACHE] no auto_best/variants for cid={cid}")
+                return False
+
+        return True
+
     # ---- 8) Quick metrics driver (unified; snapshot-only) ----------------------
     def run_full_metrics_current_image(
         self,
@@ -2198,9 +2268,8 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         Uses the same snapshot structure as batch_run, but without global calibration.
         """
         
-        #stopgap measure
-        do_edge_calibrate=False
-        skip_recomputing_midlines=False
+        # stopgap measure (leave edge calibration off unless explicitly re-enabled)
+        do_edge_calibrate = False
         
 
         import os, time, numpy as np, pandas as pd
@@ -2234,6 +2303,13 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
 
         base_name = self._image_base()
         print(f"\n[quick] metrics for current image: {base_name}")
+
+        if skip_recomputing_midlines:
+            if not self._rs3_cache_complete_for_image(g_variants):
+                print("[quick] RS3 cache incomplete — forcing recompute")
+                skip_recomputing_midlines = False
+            else:
+                print("[quick] RS3 cache complete — skipping recompute")
 
         # ------------------------------------------------------------
         # SAFETY CHECK — must have ≥2-pt manual midlines in AUTHORING

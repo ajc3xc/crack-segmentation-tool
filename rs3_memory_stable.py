@@ -658,7 +658,7 @@ def run_rs3_variants_memory_stable(
             except (MemoryError, BrokenProcessPool) as e:
                 print(f"[RS3 PARALLEL] ⚠ failure at workers={workers}: {type(e).__name__}")
 
-                workers = int(pool_workers) // 2
+                workers = max(1, (int(pool_workers) + 1) // 2)
                 print(f"[RS3 PARALLEL] reducing workers to {workers}")
                 hard_cpu_cleanup()
                 try:

@@ -327,11 +327,22 @@ def bbox_from_mask(mask: np.ndarray):
 def plot_gt_normals_on_gtbw(gt_mask_u8, derived_midline_xy, midline_xy, e1, e2, out_png, crop_bbox=None):
     import numpy as np
     import matplotlib.pyplot as plt
+    import time
+    from matplotlib.collections import LineCollection
     from matplotlib.lines import Line2D
 
+    t0 = time.perf_counter()
+    def _pdbg(msg: str) -> None:
+        print(f"[NORMALS_VIS_DBG] +{(time.perf_counter()-t0):.3f}s {msg}", flush=True)
+
     H, W = gt_mask_u8.shape[:2]
+    _pdbg(f"start shape=({H},{W}) out={out_png}")
+    _pdbg("figure:create:start")
     fig, ax = plt.subplots(figsize=(7, 7), dpi=320)
+    _pdbg("figure:create:done")
+    _pdbg("imshow:start")
     ax.imshow(gt_mask_u8, cmap='gray', interpolation='nearest')
+    _pdbg("imshow:done")
 
     handles = []
 
@@ -345,9 +356,14 @@ def plot_gt_normals_on_gtbw(gt_mask_u8, derived_midline_xy, midline_xy, e1, e2, 
 
     if e1 is not None and e2 is not None and len(e1) > 1 and len(e2) > 1:
         step = max(1, len(e1)//60)
-        for i in range(0, len(e1), step):
-            ax.plot([e1[i,0], e2[i,0]], [e1[i,1], e2[i,1]],
-                    '-', lw=1.0, color='cyan', alpha=0.9)
+        idx = np.arange(0, len(e1), step, dtype=int)
+        idx = idx[(idx >= 0) & (idx < len(e1)) & (idx < len(e2))]
+        _pdbg(f"normals_segments:prep count={len(idx)} step={step}")
+        if len(idx) > 0:
+            segs = np.stack([e1[idx, :2], e2[idx, :2]], axis=1)
+            lc = LineCollection(segs, colors="cyan", linewidths=1.0, alpha=0.9)
+            ax.add_collection(lc)
+        _pdbg("normals_segments:done")
         handles.append(Line2D([], [], color='cyan', lw=1.8, label='Normals'))
 
     if handles:
@@ -372,9 +388,15 @@ def plot_gt_normals_on_gtbw(gt_mask_u8, derived_midline_xy, midline_xy, e1, e2, 
         ax.set_xlim(x, x+w)
         ax.set_ylim(y+h, y)
 
+    _pdbg("tight_layout:start")
     plt.tight_layout(pad=0)
+    _pdbg("tight_layout:done")
+    _pdbg("savefig:start")
     fig.savefig(out_png, dpi=320, bbox_inches="tight", pad_inches=0)
+    _pdbg("savefig:done")
+    _pdbg("close_fig:start")
     plt.close(fig)
+    _pdbg("done")
 
 def plot_gt_normals_for_crack(crack: dict, gt_full_u8: np.ndarray,
                                out_dir: str, fname: str, bbox=None):

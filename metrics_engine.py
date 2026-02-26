@@ -470,6 +470,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             if per_crack_geom:
                 print("[EDGE global] plot-only rendering manual-best from caches...")
 
+                # Plot-only rerender is debug-only and still performs heavy normals
+                # diagnostics/Matplotlib exports. Run it serially to avoid stalls
+                # from concurrent plotting on large crops.
                 self.run_edge_tracking_parallel(
                     crack_ids=list(per_crack_geom.keys()),
                     edge_params_fixed={
@@ -481,7 +484,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     },
                     plot_only=True,
                     per_crack_geom=per_crack_geom,
-                    cpu_max_workers=8,
+                    cpu_max_workers=1,
                 )
 
             else:
@@ -2869,8 +2872,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         # 3) Run workers in parallel
         # ---------------------------------------------------------------------
         rows = []
+        requested_edge_workers = min(int(cpu_max_workers), len(tasks)) if cpu_max_workers is not None else len(tasks)
         pool_workers, pool_init, pool_initargs, pool_cpus = process_pool_affinity_config(
-            cpu_max_workers, label="edge-parallel"
+            requested_edge_workers, label="edge-parallel"
         )
         print(f"[AFFINITY] edge-parallel workers={pool_workers} cpus={pool_cpus}", flush=True)
         with ProcessPoolExecutor(max_workers=pool_workers, initializer=pool_init, initargs=pool_initargs) as ex:
@@ -3066,9 +3070,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         if g_variants is None:
             # shared 8-variant grid (used when NOT smoke_test)
             g_variants_shared = [
-                {"g11": 1.0, "g22": 10.0,  "g33": 10.0},   # local refinement near 25
+                #{"g11": 1.0, "g22": 10.0,  "g33": 10.0},   # local refinement near 25
                 {"g11": 1.0, "g22": 25.0,  "g33": 25.0},   # current baseline
-                {"g11": 1.0, "g22": 50.0,  "g33": 50.0},   # moderate curvature
+                #{"g11": 1.0, "g22": 50.0,  "g33": 50.0},   # moderate curvature. Ignoring due to ram limitations
                 {"g11": 1.0, "g22": 100.0, "g33": 100.0},  # LEGACY reference (old default)
             ]
         else:
