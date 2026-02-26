@@ -345,8 +345,9 @@ class Draw():
         live_points = []
 
         contours_name = f"{mode.upper()} contours (Esc or 'X' closes) midline(Cyan=combined, White=atomic); mask(Red); non-combined atomic endpoints (Blue)"
-        cv2.namedWindow(contours_name, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(contours_name, 1200, 800)  # make window large by default
+        gui_normal_flag = getattr(cv2, "WINDOW_GUI_NORMAL", 0)
+        # AUTOSIZE avoids OpenCV Qt viewport drag/pan behavior hijacking left-drag.
+        cv2.namedWindow(contours_name, cv2.WINDOW_AUTOSIZE | gui_normal_flag)
         cv2.moveWindow(contours_name, move_x, move_y)
 
         if mode=='add':
@@ -362,6 +363,23 @@ class Draw():
             nonlocal committed
             committed = draw_midline_overlay(base.copy(), annotations)
             committed = redrow_lines(committed, self.contours_x, self.contours_y, self.t, 1, color=done_draw_color)
+
+        def _apply_zoom(rx, ry, zoom_in):
+            ddx = (W - (self.dx1 + self.dx2)) * self.p
+            ddy = (H - (self.dy1 + self.dy2)) * self.p
+            if zoom_in:
+                self.dx1 = max(int2(self.dx1 + ddx * rx), 0)
+                self.dx2 = max(int2(self.dx2 + ddx * (1 - rx)), 1)
+                self.dy1 = max(int2(self.dy1 + ddy * ry), 0)
+                self.dy2 = max(int2(self.dy2 + ddy * (1 - ry)), 1)
+            else:
+                self.dx1 = max(int2(self.dx1 - ddx * rx), 0)
+                self.dx2 = max(int2(self.dx2 - ddx * (1 - rx)), 1)
+                self.dy1 = max(int2(self.dy1 - ddy * ry), 0)
+                self.dy2 = max(int2(self.dy2 - ddy * (1 - ry)), 1)
+
+            self.scale2x = 1 - (self.dx1 + self.dx2) / W
+            self.scale2y = 1 - (self.dy1 + self.dy2) / H
 
         def on_mouse(event, x, y, flags, param):
             nonlocal live_points
@@ -399,24 +417,11 @@ class Draw():
                     redraw_committed()
                     live_points = []
 
-            # --- Zoom with scroll wheel ---
+            # --- Disable wheel zoom in OpenCV Qt HighGUI windows ---
+            # Qt HighGUI can enter its own hand/pan viewport mode after wheel zoom,
+            # which steals left-drag from our drawing callback.
             elif event == cv2.EVENT_MOUSEWHEEL:
-                rx, ry = x / self.image_countur.shape[1], y / self.image_countur.shape[0]
-                ddx = (W - (self.dx1 + self.dx2)) * self.p
-                ddy = (H - (self.dy1 + self.dy2)) * self.p
-                if flags > 0:  # zoom in
-                    self.dx1 = max(int2(self.dx1 + ddx * rx), 0)
-                    self.dx2 = max(int2(self.dx2 + ddx * (1 - rx)), 1)
-                    self.dy1 = max(int2(self.dy1 + ddy * ry), 0)
-                    self.dy2 = max(int2(self.dy2 + ddy * (1 - ry)), 1)
-                else:  # zoom out
-                    self.dx1 = max(int2(self.dx1 - ddx * rx), 0)
-                    self.dx2 = max(int2(self.dx2 - ddx * (1 - rx)), 1)
-                    self.dy1 = max(int2(self.dy1 - ddy * ry), 0)
-                    self.dy2 = max(int2(self.dy2 - ddy * (1 - ry)), 1)
-
-                self.scale2x = 1 - (self.dx1 + self.dx2) / W
-                self.scale2y = 1 - (self.dy1 + self.dy2) / H
+                return
 
         cv2.setMouseCallback(contours_name, on_mouse)
 
@@ -447,11 +452,15 @@ class Draw():
 
             new_w = int2(view.shape[1] / self.scale / self.scale2x)
             new_h = int2(view.shape[0] / self.scale / self.scale2y)
-            self.image_countur = cv2.resize(view, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+            self.image_countur = cv2.resize(view, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
             cv2.imshow(contours_name, self.image_countur)
 
             key = cv2.waitKey(1) & 0xFF
+            if key in (ord('+'), ord('='), ord(']')):
+                _apply_zoom(0.5, 0.5, True)
+            elif key in (ord('-'), ord('_'), ord('[')):
+                _apply_zoom(0.5, 0.5, False)
             if key == 27 or cv2.getWindowProperty(contours_name, cv2.WND_PROP_VISIBLE) < 1:
                 break
 
@@ -643,22 +652,52 @@ class Draw():
         self.active = False
     
         
-        bb_name = 'draw bb (Esc closes, RightClick deletes most recent)'
-        cv2.namedWindow(bb_name)
+        bb_name = 'draw bb (Esc closes, RightClick deletes most recent; +/- zoom)'
+        gui_normal_flag = getattr(cv2, "WINDOW_GUI_NORMAL", 0)
+        # AUTOSIZE avoids OpenCV Qt viewport drag/pan behavior hijacking left-drag.
+        cv2.namedWindow(bb_name, cv2.WINDOW_AUTOSIZE | gui_normal_flag)
         cv2.moveWindow(bb_name, move_x, move_y)
         cv2.setMouseCallback(bb_name,self.bb)
 
+        def _apply_bb_zoom(rx, ry, zoom_in):
+            ddx = (self.image.shape[1] - (self.dx1 + self.dx2)) * self.p
+            ddy = (self.image.shape[0] - (self.dy1 + self.dy2)) * self.p
+            if zoom_in:
+                self.dx1 = np.max([int2(self.dx1 + ddx * rx), 0])
+                self.dx2 = np.max([int2(self.dx2 + ddx * (1 - rx)), 1])
+                self.dy1 = np.max([int2(self.dy1 + ddy * ry), 0])
+                self.dy2 = np.max([int2(self.dy2 + ddy * (1 - ry)), 1])
+            else:
+                self.dx1 = np.max([int2(self.dx1 - ddx * rx), 0])
+                self.dx2 = np.max([int2(self.dx2 - ddx * (1 - rx)), 1])
+                self.dy1 = np.max([int2(self.dy1 - ddy * ry), 0])
+                self.dy2 = np.max([int2(self.dy2 - ddy * (1 - ry)), 1])
+            self.scale2x = 1 - (self.dx1 + self.dx2) / self.image.shape[1]
+            self.scale2y = 1 - (self.dy1 + self.dy2) / self.image.shape[0]
+            self.image_countur = self.image2[self.dy1:-self.dy2, self.dx1:-self.dx2, :]
+            self.image_countur = cv2.resize(
+                self.image_countur,
+                [int2(self.image_countur.shape[1] / self.scale / self.scale2x),
+                 int2(self.image_countur.shape[0] / self.scale / self.scale2y)],
+                interpolation=cv2.INTER_LINEAR,
+            )
+
         self.image_countur = cv2.resize(self.image_countur,[int2(self.image_countur.shape[1]/scale),
                                                             int2(self.image_countur.shape[0]/scale)],
-                                        interpolation = cv2.INTER_NEAREST)
+                                        interpolation = cv2.INTER_LINEAR)
         while(1):
             cv2.imshow(bb_name,self.image_countur)
-            if cv2.waitKey(1) & 0xFF == 27:
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord('+'), ord('='), ord(']')):
+                _apply_bb_zoom(0.5, 0.5, True)
+            elif key in (ord('-'), ord('_'), ord('[')):
+                _apply_bb_zoom(0.5, 0.5, False)
+            if key == 27:
                 break
             if len(self.c)<int(len(self.pts)/2):
-                if cv2.waitKey(1) & 0xFF == 49:
+                if key == 49:
                     self.c.append(1)
-                if cv2.waitKey(1) & 0xFF == 50:
+                if key == 50:
                     self.c.append(2)
                 
         cv2.destroyAllWindows()
@@ -710,7 +749,7 @@ class Draw():
                     self.image_countur = cv2.resize(self.image2[self.dy1:-self.dy2,self.dx1:-self.dx2,:],
                                                     [int2(self.image.shape[1]/self.scale/self.scale2),
                                                      int2(self.image.shape[0]/self.scale/self.scale2)],
-                                interpolation = cv2.INTER_NEAREST)
+                                interpolation = cv2.INTER_LINEAR)
 
                     
         if event==cv2.EVENT_MOUSEMOVE:
@@ -721,7 +760,7 @@ class Draw():
             self.image_countur = cv2.resize(self.image2[self.dy1:-self.dy2,self.dx1:-self.dx2,:],
                                             [int2(self.image.shape[1]/self.scale/self.scale2),
                                              int2(self.image.shape[0]/self.scale/self.scale2)],
-                        interpolation = cv2.INTER_NEAREST)
+                        interpolation = cv2.INTER_LINEAR)
                 
 
         elif event==cv2.EVENT_MOUSEWHEEL and flags>0:
@@ -742,7 +781,7 @@ class Draw():
             self.image_countur = self.image2[self.dy1:-self.dy2,self.dx1:-self.dx2,:]
             self.image_countur = cv2.resize(self.image_countur,[int2(self.image_countur.shape[1]/self.scale/self.scale2x),
                                                     int2(self.image_countur.shape[0]/self.scale/self.scale2y)],
-                                                    interpolation = cv2.INTER_NEAREST)
+                                                    interpolation = cv2.INTER_LINEAR)
             
             
         elif event==cv2.EVENT_MOUSEWHEEL:
@@ -762,7 +801,7 @@ class Draw():
             self.image_countur = self.image2[self.dy1:-self.dy2,self.dx1:-self.dx2,:]
             self.image_countur = cv2.resize(self.image_countur,[int2(self.image_countur.shape[1]/self.scale/self.scale2x),
                                                     int2(self.image_countur.shape[0]/self.scale/self.scale2y)],
-                                                    interpolation = cv2.INTER_NEAREST)
+                                                    interpolation = cv2.INTER_LINEAR)
             
 
 def image_crop(image,start_point,end_point,pts,sides1 = 10,sides2 = 10):

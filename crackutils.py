@@ -347,6 +347,164 @@ class CrackUtils:
     These methods are copied verbatim from your current file.
     """
 
+    def _run_opencv_bounding_box_subprocess(self, image_bgr, image_size):
+        """
+        Isolate OpenCV HighGUI drawing in a child process to avoid PyQt/OpenCV
+        Qt backend conflicts in the main process.
+        Returns (pts, classes) matching ct.tools.Draw().bounding_box(...)
+        """
+        import json
+        import os
+        import shutil
+        import subprocess
+        import sys
+        import tempfile
+
+        worker_py = os.path.join(os.path.dirname(__file__), "opencv_draw_worker.py")
+        if not os.path.isfile(worker_py):
+            raise RuntimeError(f"OpenCV draw worker not found: {worker_py}")
+
+        tmp_dir = tempfile.mkdtemp(prefix="opencv_draw_box_")
+        in_json = os.path.join(tmp_dir, "input.json")
+        out_json = os.path.join(tmp_dir, "output.json")
+        img_npy = os.path.join(tmp_dir, "image.npy")
+
+        try:
+            np.save(img_npy, np.asarray(image_bgr))
+            with open(in_json, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "mode": "bounding_box",
+                        "image_npy": img_npy,
+                        "image_size": float(image_size),
+                    },
+                    f,
+                )
+
+            env = os.environ.copy()
+            env.pop("QT_PLUGIN_PATH", None)
+            env.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+            # Prefer a non-Qt HighGUI backend in the worker when available so
+            # OpenCV's Qt viewport hand/pan interactions don't hijack drawing.
+            env.setdefault("OPENCV_UI_BACKEND", "GTK3")
+
+            proc = subprocess.run(
+                [sys.executable, worker_py, in_json, out_json],
+                cwd=os.path.dirname(__file__),
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+
+            if proc.stdout:
+                print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n", flush=True)
+            if proc.returncode != 0:
+                if proc.stderr:
+                    print(proc.stderr, end="" if proc.stderr.endswith("\n") else "\n", flush=True)
+                raise RuntimeError(f"OpenCV draw worker failed with exit code {proc.returncode}")
+
+            with open(out_json, "r", encoding="utf-8") as f:
+                result = json.load(f) or {}
+
+            if not result.get("ok", False):
+                raise RuntimeError(str(result.get("error", "Unknown OpenCV draw worker error")))
+
+            pts = [np.asarray(p, dtype=np.float32) for p in (result.get("pts") or [])]
+            classes = list(result.get("classes") or [])
+            return pts, classes
+        finally:
+            try:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+    def _run_opencv_contours_subprocess(self, image_bgr, image_size, annotations, mode):
+        """
+        Isolate OpenCV HighGUI contour drawing in a child process to avoid
+        PyQt/OpenCV Qt backend conflicts in the main process.
+        Returns (x, y) arrays matching ct.tools.Draw().contours(...)
+        """
+        import json
+        import os
+        import shutil
+        import subprocess
+        import sys
+        import tempfile
+
+        worker_py = os.path.join(os.path.dirname(__file__), "opencv_draw_worker.py")
+        if not os.path.isfile(worker_py):
+            raise RuntimeError(f"OpenCV draw worker not found: {worker_py}")
+
+        tmp_dir = tempfile.mkdtemp(prefix="opencv_draw_contours_")
+        in_json = os.path.join(tmp_dir, "input.json")
+        out_json = os.path.join(tmp_dir, "output.json")
+        img_npy = os.path.join(tmp_dir, "image.npy")
+
+        def _json_default(o):
+            try:
+                import numpy as _np
+                if isinstance(o, _np.ndarray):
+                    return o.tolist()
+                if isinstance(o, (_np.integer,)):
+                    return int(o)
+                if isinstance(o, (_np.floating,)):
+                    return float(o)
+            except Exception:
+                pass
+            raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+        try:
+            np.save(img_npy, np.asarray(image_bgr))
+            with open(in_json, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "mode": "contours",
+                        "image_npy": img_npy,
+                        "image_size": float(image_size),
+                        "annotations": annotations or {},
+                        "contour_mode": str(mode),
+                    },
+                    f,
+                    default=_json_default,
+                )
+
+            env = os.environ.copy()
+            env.pop("QT_PLUGIN_PATH", None)
+            env.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+            # Prefer a non-Qt HighGUI backend in the worker when available so
+            # OpenCV's Qt viewport hand/pan interactions don't hijack drawing.
+            env.setdefault("OPENCV_UI_BACKEND", "GTK3")
+
+            proc = subprocess.run(
+                [sys.executable, worker_py, in_json, out_json],
+                cwd=os.path.dirname(__file__),
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+
+            if proc.stdout:
+                print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n", flush=True)
+            if proc.returncode != 0:
+                if proc.stderr:
+                    print(proc.stderr, end="" if proc.stderr.endswith("\n") else "\n", flush=True)
+                raise RuntimeError(f"OpenCV draw worker failed with exit code {proc.returncode}")
+
+            with open(out_json, "r", encoding="utf-8") as f:
+                result = json.load(f) or {}
+
+            if not result.get("ok", False):
+                raise RuntimeError(str(result.get("error", "Unknown OpenCV draw worker error")))
+
+            x = np.asarray(result.get("x") or [], dtype=np.float32)
+            y = np.asarray(result.get("y") or [], dtype=np.float32)
+            return x, y
+        finally:
+            try:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
     def save_annotation(self):
         self._debug_print_atomic_cracks("save_annotation START")
         import numpy as np
@@ -1091,8 +1249,13 @@ class CrackUtils:
         scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
         self.ImageScreen.setPixmap(scaled_pixmap)
 
-        # --- Draw box using your custom tool ---
-        bb_pts, _ = ct.tools.Draw().bounding_box(display_for_box[:, :, ::-1], self.image_size)
+        # --- Draw box via isolated subprocess (OpenCV HighGUI only in child process) ---
+        try:
+            bb_pts, _ = self._run_opencv_bounding_box_subprocess(display_for_box[:, :, ::-1], self.image_size)
+        except Exception as e:
+            print(f"[DRAW_BOX] subprocess draw failed: {e}", flush=True)
+            error(e)
+            return
 
         if bb_pts is None or len(bb_pts) < 2 or len(bb_pts) % 2 != 0:
             print("No complete boxes drawn, nothing to add.")

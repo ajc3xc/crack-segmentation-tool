@@ -519,11 +519,11 @@ class ManualDrawing(CrackUtils):
                     self.clear_pending_segment()
 
             image_size = self.select_image_size.value()
-            x, y = ct.tools.Draw().contours(
+            x, y = self._run_opencv_contours_subprocess(
                 self.image[:, :, ::-1],
                 image_size,
-                annotations=self.annotation.get("annotations", {}),
-                mode=mode
+                self.annotation.get("annotations", {}),
+                mode,
             )
             if len(x) < 3:
                 return  # not enough points
@@ -677,11 +677,11 @@ class ManualDrawing(CrackUtils):
                     self.clear_pending_segment()
 
             image_size = self.select_image_size.value()
-            x, y = ct.tools.Draw().contours(
+            x, y = self._run_opencv_contours_subprocess(
                 self.image[:, :, ::-1],
                 image_size,
-                annotations=self.annotation.get("annotations", {}),
-                mode=mode
+                self.annotation.get("annotations", {}),
+                mode,
             )
             if len(x) < 3:
                 print("[DRAW_SEGMENT] too few points; abort.")

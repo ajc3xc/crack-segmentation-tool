@@ -2705,10 +2705,29 @@ if __name__ == "__main__":
     from time import time
     _force_pyqt5_qt_plugin_paths()
     app = QtWidgets.QApplication(sys.argv)
+    try:
+        app_root = os.path.dirname(os.path.abspath(__file__))
+        icon_candidates = [
+            os.path.join(app_root, "cracktools", "Picture2.png"),
+            os.path.join(app_root, "images", "TUe_logo.png"),
+            os.path.join(app_root, "images", "TUe_logo.ico"),
+        ]
+        for icon_path in icon_candidates:
+            if os.path.isfile(icon_path):
+                icon = QtGui.QIcon(icon_path)
+                if not icon.isNull():
+                    app.setWindowIcon(icon)
+                    break
+    except Exception as e:
+        print(f"[ICON] warning: failed to set app icon: {e}")
     font = QtGui.QFont()
     font.setPointSize(7)
     app.setFont(font)
     MainWindow = QtWidgets.QMainWindow()
+    try:
+        MainWindow.setWindowIcon(app.windowIcon())
+    except Exception:
+        pass
     ui = CrackToolsApplication()
     ui.setupUi(MainWindow)
     MainWindow.show()

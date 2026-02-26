@@ -239,14 +239,17 @@ def _aggregate_width_metrics(
 ) -> Dict[str, str]:
     outputs = {}
     frames = []
+
     for img_dir in image_dirs:
         image = os.path.basename(img_dir)
         for p in glob.glob(os.path.join(img_dir, "**", "*_width_summary_*.csv"), recursive=True):
             df = _safe_read_csv(p)
             if df is None:
                 continue
+
             rel = os.path.relpath(p, img_dir)
             midline_type, method_family, baseline_method = _parse_width_summary_context(rel)
+
             crack_type = "unknown"
             stem = os.path.basename(p)
             token = "_width_summary_"
@@ -266,56 +269,88 @@ def _aggregate_width_metrics(
         return outputs
 
     all_df = pd.concat(frames, ignore_index=True)
+
     all_csv = os.path.join(out_dir, "dataset_width_summary_all.csv")
     all_df.to_csv(all_csv, index=False)
     outputs["width_summary_all_csv"] = all_csv
 
     metric_cols = [c for c in ["n_samples", "mae_px", "rmse_px", "bias_px", "corr"] if c in all_df.columns]
+
     grouped = _aggregate_numeric(
         all_df,
         group_cols=["midline_type", "method_family", "baseline_method", "crack_type"],
         numeric_cols=metric_cols,
     )
-    if not grouped.empty:
-        grouped["group_label"] = grouped.apply(
-            lambda r: (
-                f"{r['midline_type']}:{r['crack_type']}"
-                if str(r["method_family"]) != "baseline"
-                else f"{r['baseline_method']}:{r['midline_type']}:{r['crack_type']}"
-            ),
-            axis=1,
-        )
-        grp_csv = os.path.join(out_dir, "dataset_width_summary_grouped.csv")
-        grouped.to_csv(grp_csv, index=False)
-        outputs["width_summary_grouped_csv"] = grp_csv
 
-        mae_col = "mae_px_mean" if "mae_px_mean" in grouped.columns else None
-        rmse_col = "rmse_px_mean" if "rmse_px_mean" in grouped.columns else None
-        if mae_col or rmse_col:
-            top = grouped.copy()
-            if mae_col:
-                top = top.sort_values(mae_col, ascending=True).head(20)
-            labels = top["group_label"].astype(str).tolist()
-            if mae_col:
-                out_png = os.path.join(out_dir, "dataset_width_mae_by_group.png")
-                _save_bar(
-                    labels,
-                    top[mae_col].astype(float).tolist(),
-                    out_png=out_png,
-                    title="Dataset width MAE by group",
-                    ylabel="MAE (px)",
-                )
-                outputs["width_mae_png"] = out_png
-            if rmse_col:
-                out_png = os.path.join(out_dir, "dataset_width_rmse_by_group.png")
-                _save_bar(
-                    labels,
-                    top[rmse_col].astype(float).tolist(),
-                    out_png=out_png,
-                    title="Dataset width RMSE by group",
-                    ylabel="RMSE (px)",
-                )
-                outputs["width_rmse_png"] = out_png
+    if grouped.empty:
+        return outputs
+
+    # --------------------------------------------------------
+    # Clean method labeling (x-axis)
+    # --------------------------------------------------------
+    grouped["method_name"] = grouped.apply(
+        lambda r: (
+            r["baseline_method"]
+            if str(r["method_family"]) == "baseline"
+            else r["method_family"]
+        ),
+        axis=1,
+    )
+
+    # --------------------------------------------------------
+    # Color classification
+    # --------------------------------------------------------
+    def _classify(row):
+        if str(row["method_family"]) == "baseline":
+            return "baseline"
+        if str(row["midline_type"]) == "manual":
+            return "manual"
+        return "auto"
+
+    grouped["source_class"] = grouped.apply(_classify, axis=1)
+
+    COLOR_MAP = {
+        "baseline": "#6c757d",  # gray
+        "auto": "#0077cc",      # blue
+        "manual": "#d62728",    # red
+    }
+
+    grouped["color"] = grouped["source_class"].map(COLOR_MAP)
+
+    grp_csv = os.path.join(out_dir, "dataset_width_summary_grouped.csv")
+    grouped.to_csv(grp_csv, index=False)
+    outputs["width_summary_grouped_csv"] = grp_csv
+
+    mae_col = "mae_px_mean" if "mae_px_mean" in grouped.columns else None
+    rmse_col = "rmse_px_mean" if "rmse_px_mean" in grouped.columns else None
+
+    if mae_col:
+        top = grouped.sort_values(mae_col, ascending=True).head(20)
+
+        out_png = os.path.join(out_dir, "dataset_width_mae_by_method.png")
+        _save_bar(
+            labels=top["method_name"].astype(str).tolist(),
+            values=top[mae_col].astype(float).tolist(),
+            colors=top["color"].tolist(),
+            out_png=out_png,
+            title="Dataset width MAE by method",
+            ylabel="MAE (px)",
+        )
+        outputs["width_mae_png"] = out_png
+
+    if rmse_col:
+        top = grouped.sort_values(rmse_col, ascending=True).head(20)
+
+        out_png = os.path.join(out_dir, "dataset_width_rmse_by_method.png")
+        _save_bar(
+            labels=top["method_name"].astype(str).tolist(),
+            values=top[rmse_col].astype(float).tolist(),
+            colors=top["color"].tolist(),
+            out_png=out_png,
+            title="Dataset width RMSE by method",
+            ylabel="RMSE (px)",
+        )
+        outputs["width_rmse_png"] = out_png
 
     _log(verbose, f"[summarize] width summary rows={len(all_df)}")
     return outputs
