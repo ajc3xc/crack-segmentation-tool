@@ -710,8 +710,7 @@ def main():
         "medial_dse",
         "profile_normal",
         "pca_local",
-        "adaptive_pca",
-        # "distance_ridge",  # optional
+        "adaptive_pca"
     ]
 
     MAKE_PLOTS = True
