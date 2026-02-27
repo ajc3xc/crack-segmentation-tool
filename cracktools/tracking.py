@@ -64,13 +64,13 @@ try:
             raise RuntimeError("No CUDA device found")
 
     except Exception as e:
-        print(f"[cupy] ⚠️ GPU unavailable or failed ({e}) — falling back to NumPy")
+        print(f"[cupy] [WARN] GPU unavailable or failed ({e}) - falling back to NumPy")
         import numpy as np
         cp = np
         CUPY_AVAILABLE = False
 
 except ImportError:
-    print("[cupy] ❌ CuPy not installed — using NumPy fallback")
+    print("[cupy] [WARN] CuPy not installed - using NumPy fallback")
     import numpy as np
     cp = np
     CUPY_AVAILABLE = False
