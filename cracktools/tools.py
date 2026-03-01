@@ -417,16 +417,12 @@ class Draw():
                     redraw_committed()
                     live_points = []
 
-            # --- Linux/OpenCV Qt workaround (KNOWN DEGRADED BEHAVIOR) ---
-            # NOTE: Current subprocess + HighGUI path is unstable on Linux when
-            # wheel zoom is enabled: OpenCV Qt enters a hand/pan viewport mode
-            # ("fist" cursor) and steals left-drag from manual tracing.
-            # We intentionally disable wheel zoom here and use keyboard +/- zoom
-            # as a temporary workaround. The original wheel-zoom behavior should
-            # be restored once manual drawing is migrated off OpenCV HighGUI (or
-            # a reliable non-Qt HighGUI backend is enforced).
             elif event == cv2.EVENT_MOUSEWHEEL:
-                return
+                # Restore original wheel zoom behavior for manual draw/erase.
+                if flags > 0:
+                    _apply_zoom(x / self.image_countur.shape[1], y / self.image_countur.shape[0], True)
+                else:
+                    _apply_zoom(x / self.image_countur.shape[1], y / self.image_countur.shape[0], False)
 
         cv2.setMouseCallback(contours_name, on_mouse)
 
@@ -626,7 +622,48 @@ class Draw():
                                                     int2(self.image_countur.shape[0]/self.scale/self.scale2y)],
                                                     interpolation = cv2.INTER_NEAREST)
             
-    def bounding_box(self,image,scale,t = 5, move_x = 0, move_y = 0):
+    def _bb_toggle_hit(self, x, y):
+        if not getattr(self, "_bb_has_alt", False):
+            return False
+        x0, y0, x1, y1 = getattr(self, "_bb_toggle_rect", (0, 0, 0, 0))
+        return (x0 <= x <= x1) and (y0 <= y <= y1)
+
+    def _bb_draw_toggle_button(self, frame):
+        if not getattr(self, "_bb_has_alt", False):
+            return frame
+        x0, y0, x1, y1 = self._bb_toggle_rect
+        out = frame.copy()
+        cv2.rectangle(out, (x0, y0), (x1, y1), (30, 30, 30), -1)
+        cv2.rectangle(out, (x0, y0), (x1, y1), (220, 220, 220), 1)
+        label = "View: RAW" if self._bb_show_alt else "View: OVERLAY"
+        cv2.putText(out, label, (x0 + 8, y0 + 17), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (235, 235, 235), 1, cv2.LINE_AA)
+        cv2.putText(out, "Toggle: T", (x0 + 8, y0 + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
+        return out
+
+    def _bb_refresh_view(self, x_real=None, y_real=None):
+        base = (self.image_alt if self._bb_show_alt else self.image).copy()
+        if x_real is None or y_real is None:
+            self.image2 = redrow_bb(
+                base, None, None, self.t, np.mean([self.scale2x, self.scale2y]),
+                self.pts, self.active, self.c
+            )
+        else:
+            self.image2 = redrow_coordinates(
+                base, int(x_real), int(y_real), self.t, np.mean([self.scale2x, self.scale2y])
+            )
+            self.image2 = redrow_bb(
+                self.image2, int(x_real), int(y_real), self.t, np.mean([self.scale2x, self.scale2y]),
+                self.pts, self.active, self.c
+            )
+
+        crop = self.image2[self.dy1:-self.dy2, self.dx1:-self.dx2, :]
+        if crop.size == 0:
+            crop = self.image2
+        new_w = max(1, int2(crop.shape[1] / self.scale / max(self.scale2x, 1e-8)))
+        new_h = max(1, int2(crop.shape[0] / self.scale / max(self.scale2y, 1e-8)))
+        self.image_countur = cv2.resize(crop, [new_w, new_h], interpolation=cv2.INTER_LINEAR)
+
+    def bounding_box(self,image,scale,t = 5, move_x = 0, move_y = 0, image_alt=None):
         """
         image : array
             Image to drow on
@@ -634,6 +671,20 @@ class Draw():
             defins size of display window    
         """
         self.image = image
+        if image_alt is not None:
+            self.image_alt = image_alt
+            if self.image_alt.shape[:2] != self.image.shape[:2]:
+                self.image_alt = cv2.resize(
+                    self.image_alt,
+                    (self.image.shape[1], self.image.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            if self.image_alt.ndim == 2:
+                self.image_alt = cv2.cvtColor(self.image_alt, cv2.COLOR_GRAY2BGR)
+        else:
+            self.image_alt = None
+        if self.image.ndim == 2:
+            self.image = cv2.cvtColor(self.image, cv2.COLOR_GRAY2BGR)
         self.image_countur = self.image.copy()
         self.scale = scale
         
@@ -655,12 +706,15 @@ class Draw():
         self.scale2x = 1
         self.scale2y = 1
         self.active = False
+        self._bb_has_alt = self.image_alt is not None
+        self._bb_show_alt = False
+        self._bb_toggle_rect = (10, 10, 240, 48)
     
         
         # Linux/OpenCV Qt workaround: wheel zoom is intentionally not used here
         # because HighGUI Qt can switch to hand/pan viewport mode and hijack
         # left-drag interactions. Use +/- keyboard zoom for now.
-        bb_name = 'draw bb (Esc closes, RightClick deletes most recent; +/- zoom)'
+        bb_name = "draw bb (Esc closes, RightClick deletes most recent; +/- zoom; T toggles view)"
         gui_normal_flag = getattr(cv2, "WINDOW_GUI_NORMAL", 0)
         # AUTOSIZE avoids OpenCV Qt viewport drag/pan behavior hijacking left-drag.
         cv2.namedWindow(bb_name, cv2.WINDOW_AUTOSIZE | gui_normal_flag)
@@ -682,24 +736,22 @@ class Draw():
                 self.dy2 = np.max([int2(self.dy2 - ddy * (1 - ry)), 1])
             self.scale2x = 1 - (self.dx1 + self.dx2) / self.image.shape[1]
             self.scale2y = 1 - (self.dy1 + self.dy2) / self.image.shape[0]
-            self.image_countur = self.image2[self.dy1:-self.dy2, self.dx1:-self.dx2, :]
-            self.image_countur = cv2.resize(
-                self.image_countur,
-                [int2(self.image_countur.shape[1] / self.scale / self.scale2x),
-                 int2(self.image_countur.shape[0] / self.scale / self.scale2y)],
-                interpolation=cv2.INTER_LINEAR,
-            )
+            self._bb_refresh_view()
 
         self.image_countur = cv2.resize(self.image_countur,[int2(self.image_countur.shape[1]/scale),
                                                             int2(self.image_countur.shape[0]/scale)],
                                         interpolation = cv2.INTER_LINEAR)
         while(1):
-            cv2.imshow(bb_name,self.image_countur)
+            frame = self._bb_draw_toggle_button(self.image_countur)
+            cv2.imshow(bb_name,frame)
             key = cv2.waitKey(1) & 0xFF
             if key in (ord('+'), ord('='), ord(']')):
                 _apply_bb_zoom(0.5, 0.5, True)
             elif key in (ord('-'), ord('_'), ord('[')):
                 _apply_bb_zoom(0.5, 0.5, False)
+            elif key in (ord('t'), ord('T')) and self._bb_has_alt:
+                self._bb_show_alt = not self._bb_show_alt
+                self._bb_refresh_view()
             if key == 27:
                 break
             if len(self.c)<int(len(self.pts)/2):
@@ -721,6 +773,10 @@ class Draw():
     def bb(self,event,x,y,flags,param):
 
         if event==cv2.EVENT_LBUTTONDOWN:
+            if self._bb_toggle_hit(x, y):
+                self._bb_show_alt = not self._bb_show_alt
+                self._bb_refresh_view()
+                return
             if self.active == False:
                 self.active = True
                 self.pt1_x,self.pt1_y=self.dx1+x*self.scale*self.scale2x,self.dy1+y*self.scale*self.scale2y
@@ -733,8 +789,7 @@ class Draw():
                 x1,y1=self.dx1+x*self.scale*self.scale2x,self.dy1+y*self.scale*self.scale2y
                 self.pt1_x,self.pt1_y=self.dx1+x*self.scale*self.scale2x,self.dy1+y*self.scale*self.scale2y
                 self.pts.append(np.array([self.pt1_x,self.pt1_y]))
-                self.image2 = redrow_bb(self.image,int(x1),int(y1),self.t,np.mean([self.scale2x,self.scale2y]),
-                                        self.pts,self.active,self.c)
+                self._bb_refresh_view(x1, y1)
 #                 self.c.append(input('class (1-crack, 2-corrosion):'))
     #             self.image2 = redrow_points(self.image,self.pts,1,1)
 #                 cv2.line(self.image_countur,(int2(x-10),int2(y)),(int2(x+10),int2(y)),color=(0,255,0),thickness=1)
@@ -752,23 +807,14 @@ class Draw():
                     self.pts = self.pts[:-2]
                     self.c = self.c[:-1]
                 if len(self.pts)>0:
-                    self.image2 = redrow_bb(self.image,None,None,self.t,np.mean([self.scale2x,self.scale2y]),
-                                        self.pts,self.active,self.c)
-                    self.image_countur = cv2.resize(self.image2[self.dy1:-self.dy2,self.dx1:-self.dx2,:],
-                                                    [int2(self.image.shape[1]/self.scale/self.scale2),
-                                                     int2(self.image.shape[0]/self.scale/self.scale2)],
-                                interpolation = cv2.INTER_LINEAR)
+                    self._bb_refresh_view()
+                else:
+                    self._bb_refresh_view()
 
                     
         if event==cv2.EVENT_MOUSEMOVE:
             x1,y1=self.dx1+x*self.scale*self.scale2x,self.dy1+y*self.scale*self.scale2y
-            self.image2 = redrow_coordinates(self.image,int(x1),int(y1),self.t,np.mean([self.scale2x,self.scale2y]))
-            self.image2 = redrow_bb(self.image,int(x1),int(y1),self.t,np.mean([self.scale2x,self.scale2y]),
-                                    self.pts,self.active,self.c)
-            self.image_countur = cv2.resize(self.image2[self.dy1:-self.dy2,self.dx1:-self.dx2,:],
-                                            [int2(self.image.shape[1]/self.scale/self.scale2),
-                                             int2(self.image.shape[0]/self.scale/self.scale2)],
-                        interpolation = cv2.INTER_LINEAR)
+            self._bb_refresh_view(x1, y1)
                 
 
         elif event==cv2.EVENT_MOUSEWHEEL and flags>0:
@@ -785,11 +831,7 @@ class Draw():
 
             self.scale2x = 1-(self.dx1+self.dx2)/self.image.shape[1]
             self.scale2y = 1-(self.dy1+self.dy2)/self.image.shape[0]
-    #         image2 = redrow_lines(image,contours_x,contours_y,t,scale*scale2x)
-            self.image_countur = self.image2[self.dy1:-self.dy2,self.dx1:-self.dx2,:]
-            self.image_countur = cv2.resize(self.image_countur,[int2(self.image_countur.shape[1]/self.scale/self.scale2x),
-                                                    int2(self.image_countur.shape[0]/self.scale/self.scale2y)],
-                                                    interpolation = cv2.INTER_LINEAR)
+            self._bb_refresh_view()
             
             
         elif event==cv2.EVENT_MOUSEWHEEL:
@@ -805,11 +847,7 @@ class Draw():
 
             self.scale2x = 1-(self.dx1+self.dx2)/self.image.shape[1]
             self.scale2y = 1-(self.dy1+self.dy2)/self.image.shape[0]
-    #         image2 = redrow_lines(image,contours_x,contours_y,t,scale*scale2x)
-            self.image_countur = self.image2[self.dy1:-self.dy2,self.dx1:-self.dx2,:]
-            self.image_countur = cv2.resize(self.image_countur,[int2(self.image_countur.shape[1]/self.scale/self.scale2x),
-                                                    int2(self.image_countur.shape[0]/self.scale/self.scale2y)],
-                                                    interpolation = cv2.INTER_LINEAR)
+            self._bb_refresh_view()
             
 
 def image_crop(image,start_point,end_point,pts,sides1 = 10,sides2 = 10):

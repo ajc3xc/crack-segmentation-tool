@@ -31,12 +31,18 @@ def main() -> int:
             raise ValueError("missing image_npy")
 
         image = np.load(str(image_npy))
+        image_npy_alt = payload.get("image_npy_alt")
+        image_alt = np.load(str(image_npy_alt)) if image_npy_alt else None
         image_size = float(payload.get("image_size", 1.0))
 
         import cracktools as ct
 
         if mode == "bounding_box":
-            pts, classes = ct.tools.Draw().bounding_box(image, image_size)
+            pts, classes = ct.tools.Draw().bounding_box(
+                image,
+                image_size,
+                image_alt=image_alt,
+            )
 
             pts_json = []
             if pts is not None:

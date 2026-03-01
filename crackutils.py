@@ -347,7 +347,7 @@ class CrackUtils:
     These methods are copied verbatim from your current file.
     """
 
-    def _run_opencv_bounding_box_subprocess(self, image_bgr, image_size):
+    def _run_opencv_bounding_box_subprocess(self, image_bgr, image_size, image_bgr_alt=None):
         """
         Isolate OpenCV HighGUI drawing in a child process to avoid PyQt/OpenCV
         Qt backend conflicts in the main process.
@@ -368,14 +368,20 @@ class CrackUtils:
         in_json = os.path.join(tmp_dir, "input.json")
         out_json = os.path.join(tmp_dir, "output.json")
         img_npy = os.path.join(tmp_dir, "image.npy")
+        img_alt_npy = os.path.join(tmp_dir, "image_alt.npy")
 
         try:
             np.save(img_npy, np.asarray(image_bgr))
+            image_npy_alt = None
+            if image_bgr_alt is not None:
+                np.save(img_alt_npy, np.asarray(image_bgr_alt))
+                image_npy_alt = img_alt_npy
             with open(in_json, "w", encoding="utf-8") as f:
                 json.dump(
                     {
                         "mode": "bounding_box",
                         "image_npy": img_npy,
+                        "image_npy_alt": image_npy_alt,
                         "image_size": float(image_size),
                     },
                     f,
@@ -1219,21 +1225,6 @@ class CrackUtils:
         self.bb_pts_list = getattr(self, 'bb_pts_list', [])
         display_image = self.original_image.copy()
 
-        # Optional light GT mask overlay for easier box placement (read-only preview).
-        try:
-            mask = getattr(self, "current_mask", None)
-            if mask is not None and len(np.asarray(mask).shape) >= 2:
-                h0, w0 = display_image.shape[:2]
-                mask_u8 = np.asarray(mask).astype(np.uint8)
-                if mask_u8.shape[:2] != (h0, w0):
-                    mask_u8 = cv2.resize(mask_u8, (w0, h0), interpolation=cv2.INTER_NEAREST)
-                mask_bin = (mask_u8 > 0).astype(np.uint8)
-                if np.any(mask_bin):
-                    mask_rgb = np.repeat((mask_bin * 255)[:, :, None], 3, axis=2).astype(np.uint8)
-                    display_image = cv2.addWeighted(display_image, 0.85, mask_rgb, 0.15, 0.0)
-        except Exception as e:
-            print(f"[DRAW_BOX] mask overlay preview skipped: {e}")
-
         # Draw saved (blue) and pending (green) boxes
         for box_dict in (self.annotation.get('annotations', {}).get('box') or {}).values():
             bb = np.array(box_dict['bounding_box'], dtype=np.int32)
@@ -1254,19 +1245,47 @@ class CrackUtils:
             scale_factor = min(target_w / w, target_h / h)
             new_w = int(w * scale_factor)
             new_h = int(h * scale_factor)
-            display_for_box = cv2.resize(display_image, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+            display_for_qt = cv2.resize(display_image, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
         else:
-            display_for_box = display_image
+            display_for_qt = display_image
+
+        # Build separate box-drawing input:
+        # keep Qt preview unchanged, blend only for OpenCV subprocess.
+        draw_input_image = display_image.copy()
+        try:
+            mask = getattr(self, "current_mask", None)
+            if mask is not None and len(np.asarray(mask).shape) >= 2:
+                h0, w0 = draw_input_image.shape[:2]
+                mask_u8 = np.asarray(mask).astype(np.uint8)
+                if mask_u8.shape[:2] != (h0, w0):
+                    mask_u8 = cv2.resize(mask_u8, (w0, h0), interpolation=cv2.INTER_NEAREST)
+                mask_bin = (mask_u8 > 0).astype(np.uint8)
+                if np.any(mask_bin):
+                    mask_rgb = np.repeat((mask_bin * 255)[:, :, None], 3, axis=2).astype(np.uint8)
+                    draw_input_image = cv2.addWeighted(draw_input_image, 0.70, mask_rgb, 0.30, 0.0)
+        except Exception as e:
+            print(f"[DRAW_BOX] mask overlay for box input skipped: {e}")
+
+        if scale_factor != 1.0:
+            display_for_box = cv2.resize(draw_input_image, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+            display_for_box_alt = cv2.resize(display_image, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+        else:
+            display_for_box = draw_input_image
+            display_for_box_alt = display_image
 
         # --- Qt display for user feedback ---
-        qimage = QImage(display_for_box.astype(np.uint8), display_for_box.shape[1], display_for_box.shape[0], display_for_box.strides[0], QImage.Format_RGB888)
+        qimage = QImage(display_for_qt.astype(np.uint8), display_for_qt.shape[1], display_for_qt.shape[0], display_for_qt.strides[0], QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(qimage)
         scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
         self.ImageScreen.setPixmap(scaled_pixmap)
 
         # --- Draw box via isolated subprocess (OpenCV HighGUI only in child process) ---
         try:
-            bb_pts, _ = self._run_opencv_bounding_box_subprocess(display_for_box[:, :, ::-1], self.image_size)
+            bb_pts, _ = self._run_opencv_bounding_box_subprocess(
+                display_for_box[:, :, ::-1],
+                self.image_size,
+                image_bgr_alt=display_for_box_alt[:, :, ::-1],
+            )
         except Exception as e:
             print(f"[DRAW_BOX] subprocess draw failed: {e}", flush=True)
             error(e)
@@ -1279,7 +1298,7 @@ class CrackUtils:
         # Group every two points into a box
         boxes = [np.array([bb_pts[i], bb_pts[i + 1]], dtype=np.float32) for i in range(0, len(bb_pts), 2)]
         h, w = self.original_image.shape[:2]
-        snap_margin = max(2, int(0.01 * min(h, w)))
+        snap_margin = max(2, int(0.01 * max(h, w)))
 
         for box in boxes:
             # Scale down if image was upscaled for display
