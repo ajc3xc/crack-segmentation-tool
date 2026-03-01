@@ -1197,11 +1197,11 @@ class CrackUtils:
                 if abs(x) < margin:
                     x = 0
                 elif abs(x - (w-1)) < margin:
-                    x = w-1
+                    x = w
                 if abs(y) < margin:
                     y = 0
                 elif abs(y - (h-1)) < margin:
-                    y = h-1
+                    y = h
                 snapped.append([int(x), int(y)])
             snapped = np.array(snapped, dtype=int)
 
@@ -1304,6 +1304,7 @@ class CrackUtils:
             # Scale down if image was upscaled for display
             box = box / scale_factor
             if snap:
+                print(f"Snapping {box}")
                 box = snap_box_points(box, self.original_image.shape, margin=snap_margin)
             box = box.astype(np.int32)
             if box.shape == (2, 2):
