@@ -1298,7 +1298,7 @@ class CrackUtils:
         # Group every two points into a box
         boxes = [np.array([bb_pts[i], bb_pts[i + 1]], dtype=np.float32) for i in range(0, len(bb_pts), 2)]
         h, w = self.original_image.shape[:2]
-        snap_margin = max(2, int(0.01 * max(h, w)))
+        snap_margin = max(2, int(0.01 * min(h, w)))
 
         for box in boxes:
             # Scale down if image was upscaled for display
