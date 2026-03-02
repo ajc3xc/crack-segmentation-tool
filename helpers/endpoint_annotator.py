@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtWidgets import QMessageBox
@@ -23,6 +23,21 @@ class CrackAnnotator(QtWidgets.QWidget):
             self.img_w, self.img_h = 100, 100
 
         self.points = list(initial_points) if initial_points else []
+        # Sanitize any preloaded endpoints to image bounds.
+        if self.points:
+            xmax0 = float(max(0, self.img_w - 1))
+            ymax0 = float(max(0, self.img_h - 1))
+            pts = []
+            for p in self.points:
+                try:
+                    x = float(p[0])
+                    y = float(p[1])
+                except Exception:
+                    continue
+                x = min(max(x, 0.0), xmax0)
+                y = min(max(y, 0.0), ymax0)
+                pts.append((x, y))
+            self.points = pts
         self.connections = [(min(a, b), max(a, b)) for a, b in (initial_connections or []) if a != b]
 
         min_dim = min(self.img_w, self.img_h) if self.img_w and self.img_h else 100
@@ -201,9 +216,32 @@ class CrackAnnotator(QtWidgets.QWidget):
         super().keyPressEvent(event)
 
     def _to_image_coords(self, pos):
-        # Map from widget coords → image coords (match pan/scale logic in paintEvent)
+        # Map from widget coords â†’ image coords (match pan/scale logic in paintEvent)
         return ((pos.x() - self.pan_x) / self.scale,
                 (pos.y() - self.pan_y) / self.scale)
+
+    def _clamp_xy_to_image(self, x, y, edge_snap_px=1.0):
+        """
+        Clamp coordinates to image bounds and snap near-border points to edges.
+        """
+        x = float(x)
+        y = float(y)
+        xmax = float(max(0, self.img_w - 1))
+        ymax = float(max(0, self.img_h - 1))
+
+        if abs(x) <= edge_snap_px:
+            x = 0.0
+        elif abs(x - xmax) <= edge_snap_px:
+            x = xmax
+        if abs(y) <= edge_snap_px:
+            y = 0.0
+        elif abs(y - ymax) <= edge_snap_px:
+            y = ymax
+
+        x = min(max(x, 0.0), xmax)
+        y = min(max(y, 0.0), ymax)
+        return x, y
+
 
     '''def _find_point_at(self, pos):
         # Keep hitbox radius constant in screen space, not image space
@@ -528,7 +566,7 @@ class CrackAnnotator(QtWidgets.QWidget):
                     f"Auto midline for pair {key} must be entirely inside a single bounding box with both endpoints.\nInsertion cancelled.")
                 return False
 
-        # ok — insert
+        # ok â€” insert
         self.midlines[key] = [(float(x), float(y)) for (x, y) in poly]
         self.update()
         return True
@@ -1415,7 +1453,7 @@ class CrackAnnotator(QtWidgets.QWidget):
         old = float(self.scale)
         new = float(max(self._min_scale(), min(10.0, old * float(factor))))
         if abs(new - old) < 1e-9:
-            print("[ZOOM] Skipped (new≈old)")
+            print("[ZOOM] Skipped (newâ‰ˆold)")
             return
 
         if not self._sa:
@@ -1708,8 +1746,9 @@ class CrackAnnotator(QtWidgets.QWidget):
 
             if not self.connection_mode:
                 if point_i is None:
-                    self.points.append((float(p[0]), float(p[1])))
-                    print(f"[PRESS] Added new point at {p}")
+                    px, py = self._clamp_xy_to_image(p[0], p[1], edge_snap_px=1.0)
+                    self.points.append((px, py))
+                    print(f"[PRESS] Added new point at ({px}, {py})")
                 else:
                     if any(point_i in c for c in self.readonly_connections) or \
                     any(point_i in k for k in self.readonly_midlines.keys()):

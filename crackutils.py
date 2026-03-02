@@ -347,7 +347,7 @@ class CrackUtils:
     These methods are copied verbatim from your current file.
     """
 
-    def _run_opencv_bounding_box_subprocess(self, image_bgr, image_size, image_bgr_alt=None):
+    def _run_opencv_bounding_box_subprocess(self, image_bgr, image_size, image_bgr_alt=None, initial_pts=None):
         """
         Isolate OpenCV HighGUI drawing in a child process to avoid PyQt/OpenCV
         Qt backend conflicts in the main process.
@@ -382,6 +382,7 @@ class CrackUtils:
                         "mode": "bounding_box",
                         "image_npy": img_npy,
                         "image_npy_alt": image_npy_alt,
+                        "initial_pts": initial_pts or [],
                         "image_size": float(image_size),
                     },
                     f,
@@ -1225,13 +1226,12 @@ class CrackUtils:
         self.bb_pts_list = getattr(self, 'bb_pts_list', [])
         display_image = self.original_image.copy()
 
-        # Draw saved (blue) and pending (green) boxes
+        # Draw saved boxes (blue). Pending unsaved boxes are now editable inside
+        # the OpenCV bounding-box session (dark green there), so do not bake them
+        # into the background image passed to the worker.
         for box_dict in (self.annotation.get('annotations', {}).get('box') or {}).values():
             bb = np.array(box_dict['bounding_box'], dtype=np.int32)
             cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0,128,255), 3)
-        for bb in self.bb_pts_list:
-            if bb.shape == (2,2):
-                cv2.rectangle(display_image, tuple(bb[0]), tuple(bb[1]), (0,255,0), 3)
 
         # --- Smart upscaling for small images ---
         screen_rect = QtWidgets.QApplication.desktop().screenGeometry()
@@ -1273,6 +1273,20 @@ class CrackUtils:
             display_for_box = draw_input_image
             display_for_box_alt = display_image
 
+        # Existing pending boxes (from prior prompts), converted into worker
+        # coordinate space so they can be right-click undone in LIFO order.
+        initial_pts_for_worker = []
+        if self.bb_pts_list:
+            for bb in self.bb_pts_list:
+                try:
+                    arr = np.asarray(bb, dtype=np.float32).reshape(2, 2)
+                except Exception:
+                    continue
+                arr = arr * float(scale_factor)
+                initial_pts_for_worker.append([float(arr[0, 0]), float(arr[0, 1])])
+                initial_pts_for_worker.append([float(arr[1, 0]), float(arr[1, 1])])
+        initial_box_count = int(len(initial_pts_for_worker) // 2)
+
         # --- Qt display for user feedback ---
         qimage = QImage(display_for_qt.astype(np.uint8), display_for_qt.shape[1], display_for_qt.shape[0], display_for_qt.strides[0], QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(qimage)
@@ -1285,6 +1299,7 @@ class CrackUtils:
                 display_for_box[:, :, ::-1],
                 self.image_size,
                 image_bgr_alt=display_for_box_alt[:, :, ::-1],
+                initial_pts=initial_pts_for_worker,
             )
         except Exception as e:
             print(f"[DRAW_BOX] subprocess draw failed: {e}", flush=True)
@@ -1300,7 +1315,8 @@ class CrackUtils:
         h, w = self.original_image.shape[:2]
         snap_margin = max(2, int(0.01 * min(h, w)))
 
-        for box in boxes:
+        updated_boxes = []
+        for bi, box in enumerate(boxes):
             # Scale down if image was upscaled for display
             box = box / scale_factor
             if snap:
@@ -1314,6 +1330,10 @@ class CrackUtils:
                 width = abs(xmax - xmin)
                 height = abs(ymax - ymin)
                 if width < min_crop_size or height < min_crop_size:
+                    if bi < initial_box_count:
+                        # Keep previously pending boxes even if small.
+                        updated_boxes.append(box)
+                        continue
                     from PyQt5.QtWidgets import QMessageBox
                     msg = QMessageBox()
                     msg.setIcon(QMessageBox.Warning)
@@ -1324,7 +1344,9 @@ class CrackUtils:
                     msg.setWindowTitle("Box Too Small")
                     msg.exec_()
                     continue  # Skip adding this box or previewing it
-                self.bb_pts_list.append(box)
+                updated_boxes.append(box)
+
+        self.bb_pts_list = updated_boxes
 
         print("DRAW BOX: List after session:", self.bb_pts_list)
         self.update_green_preview()
@@ -1347,6 +1369,11 @@ class CrackUtils:
         pixmap = QPixmap.fromImage(qimage)
         scaled_pixmap = pixmap.scaled(self.ImageScreen.width(), self.ImageScreen.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
         self.ImageScreen.setPixmap(scaled_pixmap)
+
+    def clear_pending_boxes(self):
+        # Clear only unsaved in-memory boxes (green), keep saved annotation boxes (blue).
+        self.bb_pts_list = []
+        self.update_green_preview()
 
     def save_boxes(self):
         class_ = self.ClassSpinBox.value()

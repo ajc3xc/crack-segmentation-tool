@@ -93,8 +93,11 @@ class Ui_MainWindow(object):
         self.filename_label_2.setGeometry(QtCore.QRect(65, 370, 171, 20))
         self.filename_label_2.setObjectName("filename_label_2")
         self.draw_box_button = QtWidgets.QPushButton(self.tab_5)
-        self.draw_box_button.setGeometry(QtCore.QRect(45, 670, 111, 31))
+        self.draw_box_button.setGeometry(QtCore.QRect(45, 650, 111, 31))
         self.draw_box_button.setObjectName("draw_box_button")
+        self.clear_pending_boxes_button = QtWidgets.QPushButton(self.tab_5)
+        self.clear_pending_boxes_button.setGeometry(QtCore.QRect(45, 688, 111, 28))
+        self.clear_pending_boxes_button.setObjectName("clear_pending_boxes_button")
         self.label_29 = QtWidgets.QLabel(self.tab_5)
         self.label_29.setGeometry(QtCore.QRect(40, 720, 55, 20))
         self.label_29.setObjectName("label_29")
@@ -841,6 +844,7 @@ class Ui_MainWindow(object):
         
         self.label_37.setText(_translate("MainWindow", "Image size:"))
         self.draw_box_button.setText(_translate("MainWindow", "Draw boxes"))
+        self.clear_pending_boxes_button.setText(_translate("MainWindow", "Clear pending"))
              
         self.clear_boxes_button.setText(_translate("MainWindow", "Clear boxes"))
         self.clear_segmentation_button.setText(_translate("MainWindow", "Clear segmentations"))

@@ -112,6 +112,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         
         
         self.draw_box_button.clicked.connect(self.draw_box)
+        self.clear_pending_boxes_button.clicked.connect(self.clear_pending_boxes)
         self.save_b_button.clicked.connect(self.save_boxes)
         
         self.clear_boxes_button.clicked.connect(self.clear_boxes)

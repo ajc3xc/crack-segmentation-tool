@@ -33,6 +33,7 @@ def main() -> int:
         image = np.load(str(image_npy))
         image_npy_alt = payload.get("image_npy_alt")
         image_alt = np.load(str(image_npy_alt)) if image_npy_alt else None
+        initial_pts = payload.get("initial_pts") or []
         image_size = float(payload.get("image_size", 1.0))
 
         import cracktools as ct
@@ -42,6 +43,7 @@ def main() -> int:
                 image,
                 image_size,
                 image_alt=image_alt,
+                initial_pts=initial_pts,
             )
 
             pts_json = []

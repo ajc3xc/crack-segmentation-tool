@@ -90,21 +90,25 @@ def redrow_points(img,pts,t,scale):
 
 def redrow_coordinates(img,x,y,t,scale):
     img2 = img.copy()
-    img2 = cv2.line(img2,(x,img2.shape[0]),(x,0),color=(0,255,0),thickness=int2(np.ceil(t*scale)))
-    img2 = cv2.line(img2,(img2.shape[1],y),(0,y),color=(0,255,0),thickness=int2(np.ceil(t*scale)))
+    # Red crosshair for current cursor position.
+    img2 = cv2.line(img2,(x,img2.shape[0]),(x,0),color=(0,0,255),thickness=int2(np.ceil(t*scale)))
+    img2 = cv2.line(img2,(img2.shape[1],y),(0,y),color=(0,0,255),thickness=int2(np.ceil(t*scale)))
     return (img2)
 
-def redrow_bb(img,x,y,t,scale,pts,active,c):
+def redrow_bb(img,x,y,t,scale,pts,active,c,initial_pairs=0):
     img2 = img.copy()
-    img2 = cv2.line(img2,(x,img2.shape[0]),(x,0),color=(0,255,0),thickness=int2(np.ceil(t*scale)))
-    img2 = cv2.line(img2,(img2.shape[1],y),(0,y),color=(0,255,0),thickness=int2(np.ceil(t*scale)))
+    img2 = cv2.line(img2,(x,img2.shape[0]),(x,0),color=(0,0,255),thickness=int2(np.ceil(t*scale)))
+    img2 = cv2.line(img2,(img2.shape[1],y),(0,y),color=(0,0,255),thickness=int2(np.ceil(t*scale)))
     if len(pts)>1:
         for i in range(0,len(pts)-1,2):
             x0 = int(pts[i][0])
             y0 = int(pts[i][1])
             x1 = int(pts[i+1][0])
             y1 = int(pts[i+1][1])
-            color = (255,0,0)
+            pair_idx = int(i/2)
+            # Previously pending (unsaved) boxes: dark green.
+            # Newly drawn boxes in current session: lime green.
+            color = (0, 140, 0) if pair_idx < int(initial_pairs) else (0,255,0)
             if len(c)>int(i/2):
                 if c[int(i/2)] == 1:
                     color = (0,0,255)
@@ -119,10 +123,12 @@ def redrow_bb(img,x,y,t,scale,pts,active,c):
         x1 = int(pts[-1][0])
         y1 = int(pts[-1][1])
 
-        img2 = cv2.line(img2,(x,y),(x1,y),color=(255,0,0),thickness=int2(np.ceil(t*scale)))
-        img2 = cv2.line(img2,(x,y),(x,y1),color=(255,0,0),thickness=int2(np.ceil(t*scale)))
-        img2 = cv2.line(img2,(x,y1),(x1,y1),color=(255,0,0),thickness=int2(np.ceil(t*scale)))
-        img2 = cv2.line(img2,(x1,y),(x1,y1),color=(255,0,0),thickness=int2(np.ceil(t*scale)))
+        # Active box currently being drawn: lime green.
+        active_color = (0,255,0)
+        img2 = cv2.line(img2,(x,y),(x1,y),color=active_color,thickness=int2(np.ceil(t*scale)))
+        img2 = cv2.line(img2,(x,y),(x,y1),color=active_color,thickness=int2(np.ceil(t*scale)))
+        img2 = cv2.line(img2,(x,y1),(x1,y1),color=active_color,thickness=int2(np.ceil(t*scale)))
+        img2 = cv2.line(img2,(x1,y),(x1,y1),color=active_color,thickness=int2(np.ceil(t*scale)))
     return (img2)
 
 def drow_mask_lines(img,contours_x,contours_y,color,t=1):
@@ -641,19 +647,33 @@ class Draw():
         return out
 
     def _bb_refresh_view(self, x_real=None, y_real=None):
+        if x_real is not None and y_real is not None:
+            self._bb_last_cursor_real = (float(x_real), float(y_real))
+
         base = (self.image_alt if self._bb_show_alt else self.image).copy()
         if x_real is None or y_real is None:
-            self.image2 = redrow_bb(
-                base, None, None, self.t, np.mean([self.scale2x, self.scale2y]),
-                self.pts, self.active, self.c
-            )
+            last = getattr(self, "_bb_last_cursor_real", None)
+            if last is not None:
+                lx, ly = last
+                self.image2 = redrow_coordinates(
+                    base, int(lx), int(ly), self.t, np.mean([self.scale2x, self.scale2y])
+                )
+                self.image2 = redrow_bb(
+                    self.image2, int(lx), int(ly), self.t, np.mean([self.scale2x, self.scale2y]),
+                    self.pts, self.active, self.c, initial_pairs=getattr(self, "_bb_initial_pairs", 0)
+                )
+            else:
+                self.image2 = redrow_bb(
+                    base, None, None, self.t, np.mean([self.scale2x, self.scale2y]),
+                    self.pts, self.active, self.c, initial_pairs=getattr(self, "_bb_initial_pairs", 0)
+                )
         else:
             self.image2 = redrow_coordinates(
                 base, int(x_real), int(y_real), self.t, np.mean([self.scale2x, self.scale2y])
             )
             self.image2 = redrow_bb(
                 self.image2, int(x_real), int(y_real), self.t, np.mean([self.scale2x, self.scale2y]),
-                self.pts, self.active, self.c
+                self.pts, self.active, self.c, initial_pairs=getattr(self, "_bb_initial_pairs", 0)
             )
 
         crop = self.image2[self.dy1:-self.dy2, self.dx1:-self.dx2, :]
@@ -661,9 +681,140 @@ class Draw():
             crop = self.image2
         new_w = max(1, int2(crop.shape[1] / self.scale / max(self.scale2x, 1e-8)))
         new_h = max(1, int2(crop.shape[0] / self.scale / max(self.scale2y, 1e-8)))
-        self.image_countur = cv2.resize(crop, [new_w, new_h], interpolation=cv2.INTER_LINEAR)
+        canvas = cv2.resize(crop, [new_w, new_h], interpolation=cv2.INTER_LINEAR)
 
-    def bounding_box(self,image,scale,t = 5, move_x = 0, move_y = 0, image_alt=None):
+        # Cap display image to monitor bounds so HighGUI window stays usable.
+        max_w = int(max(1, getattr(self, "_bb_max_disp_w", canvas.shape[1])))
+        max_h = int(max(1, getattr(self, "_bb_max_disp_h", canvas.shape[0])))
+        ds = min(1.0, max_w / float(max(canvas.shape[1], 1)), max_h / float(max(canvas.shape[0], 1)))
+        self._bb_display_scale = float(ds)
+        if ds < 1.0:
+            dw = max(1, int(round(canvas.shape[1] * ds)))
+            dh = max(1, int(round(canvas.shape[0] * ds)))
+            self.image_countur = cv2.resize(canvas, [dw, dh], interpolation=cv2.INTER_AREA)
+        else:
+            self.image_countur = canvas
+
+    def _bb_get_view_bounds(self):
+        H, W = self.image.shape[:2]
+        x1 = int(max(0, self.dx1))
+        x2 = int(min(W - self.dx2, W))
+        y1 = int(max(0, self.dy1))
+        y2 = int(min(H - self.dy2, H))
+        if x2 <= x1:
+            x1, x2 = 0, W
+        if y2 <= y1:
+            y1, y2 = 0, H
+        return x1, x2, y1, y2
+
+    def _bb_draw_minimap(self, frame):
+        out = frame.copy()
+        fh, fw = out.shape[:2]
+        if fh < 80 or fw < 120:
+            self._bb_minimap_rect = None
+            return out
+
+        src = self.image_alt if (self._bb_has_alt and self._bb_show_alt) else self.image
+        H, W = src.shape[:2]
+        pad = 10
+        max_w = min(260, max(120, int(fw * 0.28)))
+        max_h = min(190, max(80, int(fh * 0.28)))
+        aspect = float(W) / float(max(H, 1))
+        mini_w = max_w
+        mini_h = int(round(mini_w / max(aspect, 1e-8)))
+        if mini_h > max_h:
+            mini_h = max_h
+            mini_w = int(round(mini_h * aspect))
+        mini_w = max(80, min(mini_w, fw - 2 * pad))
+        mini_h = max(60, min(mini_h, fh - 2 * pad))
+
+        x0 = max(pad, fw - mini_w - pad)
+        if getattr(self, "_bb_minimap_anchor", "top_right") == "bottom_right":
+            y0 = max(pad, fh - mini_h - pad)
+        else:
+            y0 = pad
+        x1 = x0 + mini_w
+        y1 = y0 + mini_h
+        self._bb_minimap_rect = (x0, y0, x1, y1)
+
+        mini = cv2.resize(src, (mini_w, mini_h), interpolation=cv2.INTER_AREA)
+        out[y0:y1, x0:x1] = mini
+        cv2.rectangle(out, (x0, y0), (x1, y1), (255, 255, 255), 1)
+
+        vx1, vx2, vy1, vy2 = self._bb_get_view_bounds()
+        rx0 = x0 + int(round((vx1 / max(W, 1)) * mini_w))
+        rx1 = x0 + int(round((vx2 / max(W, 1)) * mini_w))
+        ry0 = y0 + int(round((vy1 / max(H, 1)) * mini_h))
+        ry1 = y0 + int(round((vy2 / max(H, 1)) * mini_h))
+        rx0 = int(np.clip(rx0, x0, x1 - 1))
+        ry0 = int(np.clip(ry0, y0, y1 - 1))
+        rx1 = int(np.clip(rx1, rx0 + 1, x1))
+        ry1 = int(np.clip(ry1, ry0 + 1, y1))
+        cv2.rectangle(out, (rx0, ry0), (rx1, ry1), (0, 255, 255), 1)
+        anchor_txt = "BR" if getattr(self, "_bb_minimap_anchor", "top_right") == "bottom_right" else "TR"
+        cv2.putText(out, f"Minimap ({anchor_txt})", (x0 + 6, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+        return out
+
+    def _bb_pan_to_minimap_xy(self, mx, my):
+        if not getattr(self, "_bb_minimap_rect", None):
+            return
+        x0, y0, x1, y1 = self._bb_minimap_rect
+        if x1 <= x0 or y1 <= y0:
+            return
+        px = float(np.clip((mx - x0) / float(x1 - x0), 0.0, 1.0))
+        py = float(np.clip((my - y0) / float(y1 - y0), 0.0, 1.0))
+
+        H, W = self.image.shape[:2]
+        vx1, vx2, vy1, vy2 = self._bb_get_view_bounds()
+        vw = max(1, vx2 - vx1)
+        vh = max(1, vy2 - vy1)
+
+        cx = int(round(px * (W - 1)))
+        cy = int(round(py * (H - 1)))
+        nx1 = int(np.clip(cx - vw // 2, 0, max(W - vw, 0)))
+        ny1 = int(np.clip(cy - vh // 2, 0, max(H - vh, 0)))
+        nx2 = nx1 + vw
+        ny2 = ny1 + vh
+
+        self.dx1 = nx1
+        self.dx2 = max(1, W - nx2)
+        self.dy1 = ny1
+        self.dy2 = max(1, H - ny2)
+        self.scale2x = 1 - (self.dx1 + self.dx2) / W
+        self.scale2y = 1 - (self.dy1 + self.dy2) / H
+        self._bb_refresh_view()
+
+    def _bb_pan_pixels(self, shift_x, shift_y):
+        H, W = self.image.shape[:2]
+        vx1, vx2, vy1, vy2 = self._bb_get_view_bounds()
+        vw = max(1, vx2 - vx1)
+        vh = max(1, vy2 - vy1)
+        nx1 = int(np.clip(vx1 + shift_x, 0, max(W - vw, 0)))
+        ny1 = int(np.clip(vy1 + shift_y, 0, max(H - vh, 0)))
+        nx2 = nx1 + vw
+        ny2 = ny1 + vh
+        self.dx1 = nx1
+        self.dx2 = max(1, W - nx2)
+        self.dy1 = ny1
+        self.dy2 = max(1, H - ny2)
+        self.scale2x = 1 - (self.dx1 + self.dx2) / W
+        self.scale2y = 1 - (self.dy1 + self.dy2) / H
+        self._bb_refresh_view()
+
+    def _bb_get_screen_size(self):
+        # Try native Windows metrics first; fallback to sane defaults.
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            return int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1))
+        except Exception:
+            return 1920, 1080
+
+    def _bb_event_to_canvas(self, x, y):
+        s = float(max(getattr(self, "_bb_display_scale", 1.0), 1e-8))
+        return float(x) / s, float(y) / s
+
+    def bounding_box(self,image,scale,t = 5, move_x = 0, move_y = 0, image_alt=None, initial_pts=None):
         """
         image : array
             Image to drow on
@@ -692,7 +843,18 @@ class Draw():
         self.p = 0.1
         self.pt1_x , self.pt1_y = None , None
         self.pts = []
-        self.c = []
+        if initial_pts is not None:
+            try:
+                for p in list(initial_pts):
+                    arr = np.asarray(p, dtype=float).ravel()
+                    if arr.size >= 2:
+                        self.pts.append(np.array([arr[0], arr[1]], dtype=float))
+            except Exception:
+                self.pts = []
+        self._bb_initial_pairs = int(len(self.pts) // 2)
+        # Use neutral class marker for pre-existing pending boxes so class hotkeys
+        # continue to apply only to newly drawn boxes.
+        self.c = [0] * self._bb_initial_pairs
         self.pt_x = []
         self.pt_y = []
         self.image2 = image.copy()
@@ -709,17 +871,28 @@ class Draw():
         self._bb_has_alt = self.image_alt is not None
         self._bb_show_alt = False
         self._bb_toggle_rect = (10, 10, 240, 48)
+        self._bb_minimap_rect = None
+        self._bb_drag_minimap = False
+        self._bb_minimap_anchor = "top_right"
+        self._bb_last_cursor_real = None
+        self._bb_display_scale = 1.0
+        sw, sh = self._bb_get_screen_size()
+        self._bb_max_disp_w = max(320, int(sw * 0.92))
+        self._bb_max_disp_h = max(240, int(sh * 0.86))
     
         
         # Linux/OpenCV Qt workaround: wheel zoom is intentionally not used here
         # because HighGUI Qt can switch to hand/pan viewport mode and hijack
         # left-drag interactions. Use +/- keyboard zoom for now.
-        bb_name = "draw bb (Esc closes, RightClick deletes most recent; +/- zoom; T toggles view)"
+        bb_name = "draw bb (Esc close; RightClick undo; +/- zoom; arrows pan; T toggle view; M minimap side)"
         gui_normal_flag = getattr(cv2, "WINDOW_GUI_NORMAL", 0)
         # AUTOSIZE avoids OpenCV Qt viewport drag/pan behavior hijacking left-drag.
         cv2.namedWindow(bb_name, cv2.WINDOW_AUTOSIZE | gui_normal_flag)
-        cv2.moveWindow(bb_name, move_x, move_y)
+        safe_x = int(np.clip(move_x, 0, max(0, sw - 200)))
+        safe_y = int(np.clip(move_y, 0, max(0, sh - 150)))
+        cv2.moveWindow(bb_name, safe_x, safe_y)
         cv2.setMouseCallback(bb_name,self.bb)
+        self._bb_refresh_view()
 
         def _apply_bb_zoom(rx, ry, zoom_in):
             ddx = (self.image.shape[1] - (self.dx1 + self.dx2)) * self.p
@@ -738,26 +911,44 @@ class Draw():
             self.scale2y = 1 - (self.dy1 + self.dy2) / self.image.shape[0]
             self._bb_refresh_view()
 
-        self.image_countur = cv2.resize(self.image_countur,[int2(self.image_countur.shape[1]/scale),
-                                                            int2(self.image_countur.shape[0]/scale)],
-                                        interpolation = cv2.INTER_LINEAR)
         while(1):
             frame = self._bb_draw_toggle_button(self.image_countur)
+            frame = self._bb_draw_minimap(frame)
             cv2.imshow(bb_name,frame)
-            key = cv2.waitKey(1) & 0xFF
-            if key in (ord('+'), ord('='), ord(']')):
+            key = cv2.waitKeyEx(1)
+            key_ascii = key & 0xFF
+            if key_ascii in (ord('+'), ord('='), ord(']')):
                 _apply_bb_zoom(0.5, 0.5, True)
-            elif key in (ord('-'), ord('_'), ord('[')):
+            elif key_ascii in (ord('-'), ord('_'), ord('[')):
                 _apply_bb_zoom(0.5, 0.5, False)
-            elif key in (ord('t'), ord('T')) and self._bb_has_alt:
+            elif key_ascii in (ord('t'), ord('T')) and self._bb_has_alt:
                 self._bb_show_alt = not self._bb_show_alt
                 self._bb_refresh_view()
-            if key == 27:
+            elif key_ascii in (ord('m'), ord('M')):
+                self._bb_minimap_anchor = "bottom_right" if self._bb_minimap_anchor == "top_right" else "top_right"
+                self._bb_refresh_view()
+            elif key in (2424832, 65361, 81):  # left
+                vx1, vx2, vy1, vy2 = self._bb_get_view_bounds()
+                step = max(10, int(0.08 * max(1, vx2 - vx1)))
+                self._bb_pan_pixels(-step, 0)
+            elif key in (2555904, 65363, 83):  # right
+                vx1, vx2, vy1, vy2 = self._bb_get_view_bounds()
+                step = max(10, int(0.08 * max(1, vx2 - vx1)))
+                self._bb_pan_pixels(step, 0)
+            elif key in (2490368, 65362, 82):  # up
+                vx1, vx2, vy1, vy2 = self._bb_get_view_bounds()
+                step = max(10, int(0.08 * max(1, vy2 - vy1)))
+                self._bb_pan_pixels(0, -step)
+            elif key in (2621440, 65364, 84):  # down
+                vx1, vx2, vy1, vy2 = self._bb_get_view_bounds()
+                step = max(10, int(0.08 * max(1, vy2 - vy1)))
+                self._bb_pan_pixels(0, step)
+            if key_ascii == 27:
                 break
             if len(self.c)<int(len(self.pts)/2):
-                if key == 49:
+                if key_ascii == 49:
                     self.c.append(1)
-                if key == 50:
+                if key_ascii == 50:
                     self.c.append(2)
                 
         cv2.destroyAllWindows()
@@ -773,21 +964,37 @@ class Draw():
     def bb(self,event,x,y,flags,param):
 
         if event==cv2.EVENT_LBUTTONDOWN:
+            if self._bb_minimap_rect is not None:
+                x0, y0, x1, y1 = self._bb_minimap_rect
+                if x0 <= x <= x1 and y0 <= y <= y1:
+                    self._bb_drag_minimap = True
+                    self._bb_pan_to_minimap_xy(x, y)
+                    return
             if self._bb_toggle_hit(x, y):
                 self._bb_show_alt = not self._bb_show_alt
                 self._bb_refresh_view()
                 return
+        elif event==cv2.EVENT_MOUSEMOVE and self._bb_drag_minimap:
+            self._bb_pan_to_minimap_xy(x, y)
+            return
+        elif event==cv2.EVENT_LBUTTONUP and self._bb_drag_minimap:
+            self._bb_drag_minimap = False
+            return
+
+        if event==cv2.EVENT_LBUTTONDOWN:
             if self.active == False:
                 self.active = True
-                self.pt1_x,self.pt1_y=self.dx1+x*self.scale*self.scale2x,self.dy1+y*self.scale*self.scale2y
+                x_canvas, y_canvas = self._bb_event_to_canvas(x, y)
+                self.pt1_x,self.pt1_y=self.dx1+x_canvas*self.scale*self.scale2x,self.dy1+y_canvas*self.scale*self.scale2y
                 self.pts.append(np.array([self.pt1_x,self.pt1_y]))
     #             self.image2 = redrow_points(self.image,self.pts,1,1)
 #                 cv2.line(self.image_countur,(int2(x-10),int2(y)),(int2(x+10),int2(y)),color=(0,255,0),thickness=1)
 #                 cv2.line(self.image_countur,(int2(x),int2(y-10)),(int2(x),int2(y+10)),color=(0,255,0),thickness=1)
             elif self.active == True:
                 self.active = False
-                x1,y1=self.dx1+x*self.scale*self.scale2x,self.dy1+y*self.scale*self.scale2y
-                self.pt1_x,self.pt1_y=self.dx1+x*self.scale*self.scale2x,self.dy1+y*self.scale*self.scale2y
+                x_canvas, y_canvas = self._bb_event_to_canvas(x, y)
+                x1,y1=self.dx1+x_canvas*self.scale*self.scale2x,self.dy1+y_canvas*self.scale*self.scale2y
+                self.pt1_x,self.pt1_y=self.dx1+x_canvas*self.scale*self.scale2x,self.dy1+y_canvas*self.scale*self.scale2y
                 self.pts.append(np.array([self.pt1_x,self.pt1_y]))
                 self._bb_refresh_view(x1, y1)
 #                 self.c.append(input('class (1-crack, 2-corrosion):'))
@@ -806,6 +1013,7 @@ class Draw():
                 elif self.active == False:
                     self.pts = self.pts[:-2]
                     self.c = self.c[:-1]
+                self._bb_initial_pairs = min(getattr(self, "_bb_initial_pairs", 0), int(len(self.pts)//2))
                 if len(self.pts)>0:
                     self._bb_refresh_view()
                 else:
@@ -813,7 +1021,8 @@ class Draw():
 
                     
         if event==cv2.EVENT_MOUSEMOVE:
-            x1,y1=self.dx1+x*self.scale*self.scale2x,self.dy1+y*self.scale*self.scale2y
+            x_canvas, y_canvas = self._bb_event_to_canvas(x, y)
+            x1,y1=self.dx1+x_canvas*self.scale*self.scale2x,self.dy1+y_canvas*self.scale*self.scale2y
             self._bb_refresh_view(x1, y1)
                 
 
