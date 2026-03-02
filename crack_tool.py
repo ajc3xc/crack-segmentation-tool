@@ -118,6 +118,9 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         self.clear_boxes_button.clicked.connect(self.clear_boxes)
         self.clear_segmentation_button.clicked.connect(self.clear_segmentation)
         self.clear_combined_cracks_button.clicked.connect(self.clear_combined_cracks)
+        self.create_modified_gt_button.clicked.connect(self.create_or_edit_modified_gt)
+        self.delete_modified_gt_button.clicked.connect(self.delete_modified_gt)
+        self.tabWidget.currentChanged.connect(self.on_main_tab_changed)
 
 
 

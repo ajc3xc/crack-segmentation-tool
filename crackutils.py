@@ -1375,6 +1375,163 @@ class CrackUtils:
         self.bb_pts_list = []
         self.update_green_preview()
 
+    def _get_gt_modified_path(self, base_name=None, original_mask_path=None):
+        import os
+        if base_name is None:
+            base_name = os.path.splitext(os.path.basename(getattr(self, "name", "") or ""))[0]
+        mask_base = base_name
+        if original_mask_path:
+            mask_base = os.path.splitext(os.path.basename(str(original_mask_path)))[0]
+        elif getattr(self, "use_masks", False) and hasattr(self, "mask_map"):
+            src = self.mask_map.get(base_name)
+            if src:
+                mask_base = os.path.splitext(os.path.basename(str(src)))[0]
+        out_root = os.path.join(getattr(self, "mask_folder", "") or "", "gt_masks")
+        return os.path.join(out_root, f"{mask_base}_modified.png")
+
+    def _load_binary_mask_from_path(self, mask_path):
+        import os
+        import cv2
+        import numpy as np
+        if not mask_path or not os.path.isfile(mask_path):
+            return None
+        if str(mask_path).lower().endswith(".npy"):
+            m = np.load(mask_path)
+            m = np.asarray(m)
+            return (m > 0).astype(np.uint8)
+        m = cv2.imread(mask_path, 0)
+        if m is None:
+            return None
+        return (m > 0).astype(np.uint8)
+
+    def update_modify_gt_preview(self):
+        try:
+            import cv2
+            if not hasattr(self, "gt_modify_preview"):
+                return
+            if getattr(self, "original_image", None) is None:
+                self.gt_modify_preview.clear()
+                return
+
+            im = np.asarray(self.original_image).astype(np.uint8)
+            if im.ndim == 2:
+                im = np.repeat(im[:, :, None], 3, axis=2)
+
+            mask = getattr(self, "current_mask", None)
+            if mask is not None:
+                m = np.asarray(mask).astype(np.uint8)
+                if m.shape[:2] != im.shape[:2]:
+                    m = cv2.resize(m, (im.shape[1], im.shape[0]), interpolation=cv2.INTER_NEAREST)
+                m = (m > 0).astype(np.uint8)
+                mask_rgb = np.repeat((m * 255)[:, :, None], 3, axis=2).astype(np.uint8)
+                disp = cv2.addWeighted(im, 0.60, mask_rgb, 0.40, 0.0)
+            else:
+                disp = im
+
+            qimage = QImage(
+                disp.astype(np.uint8),
+                disp.shape[1],
+                disp.shape[0],
+                disp.strides[0],
+                QImage.Format_RGB888,
+            )
+            pixmap = QPixmap.fromImage(qimage)
+            scaled = pixmap.scaled(
+                self.gt_modify_preview.width(),
+                self.gt_modify_preview.height(),
+                Qt.KeepAspectRatio,
+                Qt.FastTransformation,
+            )
+            self.gt_modify_preview.setPixmap(scaled)
+        except Exception as e:
+            print(f"[MODIFY_GT] preview update failed: {e}")
+
+    def create_or_edit_modified_gt(self):
+        import os
+        if getattr(self, "original_image", None) is None:
+            error("No image loaded.")
+            return
+        if getattr(self, "current_mask", None) is None:
+            error("No ground truth mask loaded for this image.")
+            return
+        if not getattr(self, "mask_folder", ""):
+            error("Mask folder is not set. Enable masks and select a valid mask folder first.")
+            return
+
+        base_name = os.path.splitext(os.path.basename(getattr(self, "name", "") or ""))[0]
+        source_gt_path = getattr(self, "current_gt_source_path", None)
+        out_path = self._get_gt_modified_path(base_name=base_name, original_mask_path=source_gt_path)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+        try:
+            from helpers import mask_modifier
+            ok, edited_mask = mask_modifier.edit_mask_dialog(
+                np.asarray(self.original_image)[:, :, ::-1],
+                np.asarray(self.current_mask),
+                out_path,
+                parent=getattr(self, "MainWindow", None),
+            )
+        except Exception as e:
+            error(f"Failed to open mask editor: {e}")
+            return
+
+        if not ok:
+            return
+
+        if edited_mask is None:
+            edited_mask = self._load_binary_mask_from_path(out_path)
+        if edited_mask is None:
+            error("Mask editor returned no saved mask.")
+            return
+
+        self.current_mask = (np.asarray(edited_mask) > 0).astype(np.uint8)
+        self.current_modified_gt_path = out_path
+        self.update_modify_gt_preview()
+        print(f"[MODIFY_GT] saved modified mask: {out_path}")
+
+    def delete_modified_gt(self):
+        import os
+        base_name = os.path.splitext(os.path.basename(getattr(self, "name", "") or ""))[0]
+        source_gt_path = getattr(self, "current_gt_source_path", None)
+        modified_path = self._get_gt_modified_path(base_name=base_name, original_mask_path=source_gt_path)
+        if os.path.isfile(modified_path):
+            try:
+                os.remove(modified_path)
+                print(f"[MODIFY_GT] deleted modified mask: {modified_path}")
+            except Exception as e:
+                error(f"Failed to delete modified GT mask:\n{e}")
+                return
+        self.change_image()
+        self.update_modify_gt_preview()
+
+    def on_main_tab_changed(self, idx):
+        # Safety: entering Modify GT tab without a loaded GT mask should not
+        # display a misleading overlay.
+        try:
+            if not hasattr(self, "tabWidget") or not hasattr(self, "tab_gt_edit"):
+                return
+            gt_tab_idx = self.tabWidget.indexOf(self.tab_gt_edit)
+            if idx != gt_tab_idx:
+                return
+
+            mask = getattr(self, "current_mask", None)
+            if mask is None:
+                error("No ground-truth mask loaded for this image.")
+                if hasattr(self, "gt_modify_preview"):
+                    self.gt_modify_preview.clear()
+                return
+
+            m = np.asarray(mask)
+            if m.size == 0:
+                error("Ground-truth mask is empty for this image.")
+                if hasattr(self, "gt_modify_preview"):
+                    self.gt_modify_preview.clear()
+                return
+
+            self.update_modify_gt_preview()
+        except Exception as e:
+            print(f"[MODIFY_GT] tab-change handler failed: {e}")
+
     def save_boxes(self):
         class_ = self.ClassSpinBox.value()
         if not hasattr(self, 'bb_pts_list') or len(self.bb_pts_list) == 0:
@@ -1973,17 +2130,22 @@ class CrackUtils:
 
         # ---- MASK LOADING (optional external masks) ----
         self.current_mask = None
+        self.current_gt_source_path = None
+        self.current_modified_gt_path = None
         if getattr(self, "use_masks", False) and hasattr(self, "mask_map"):
             mask_path = self.mask_map.get(base_name)
             print(f"[DEBUG change_image] mask_path for {base_name}: {mask_path}")
             if mask_path:
-                if mask_path.endswith('.npy'):
-                    mask = np.load(mask_path)
-                    mask = (mask > 0).astype(np.uint8) if mask.max() > 1 else mask.astype(np.uint8)
-                else:
-                    mask = cv2.imread(mask_path, 0)
-                    mask = (mask > 0).astype(np.uint8) if mask is not None else None
-                self.current_mask = mask
+                self.current_gt_source_path = mask_path
+                modified_path = self._get_gt_modified_path(base_name=base_name, original_mask_path=mask_path)
+                if os.path.isfile(modified_path):
+                    mask = self._load_binary_mask_from_path(modified_path)
+                    if mask is not None:
+                        self.current_mask = mask
+                        self.current_modified_gt_path = modified_path
+                        print(f"[DEBUG change_image] using modified GT mask: {modified_path}")
+                if self.current_mask is None:
+                    self.current_mask = self._load_binary_mask_from_path(mask_path)
             else:
                 print(f"[DEBUG change_image] No mask found for {base_name}")
 
@@ -2128,6 +2290,9 @@ class CrackUtils:
             is_gray=True
         )
         self.all_segments_display.setPixmap(pixmap_mask)
+
+        # Update Modify GT tab preview (original 0.6 + current GT 0.4).
+        self.update_modify_gt_preview()
         
         if hasattr(self, "reset_canvas"):
             self.reset_canvas()

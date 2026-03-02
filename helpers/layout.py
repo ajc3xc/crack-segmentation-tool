@@ -805,6 +805,26 @@ class Ui_MainWindow(object):
         
         
         self.tabWidget.addTab(self.tab_3, "")
+
+        #####################################
+        # Modify Ground Truth tab
+        #####################################
+        self.tab_gt_edit = QtWidgets.QWidget()
+        self.tab_gt_edit.setObjectName("tab_gt_edit")
+        self.create_modified_gt_button = QtWidgets.QPushButton(self.tab_gt_edit)
+        self.create_modified_gt_button.setGeometry(QtCore.QRect(20, 20, 170, 40))
+        self.create_modified_gt_button.setObjectName("create_modified_gt_button")
+        self.delete_modified_gt_button = QtWidgets.QPushButton(self.tab_gt_edit)
+        self.delete_modified_gt_button.setGeometry(QtCore.QRect(20, 70, 170, 36))
+        self.delete_modified_gt_button.setObjectName("delete_modified_gt_button")
+        self.gt_modify_preview = QtWidgets.QLabel(self.tab_gt_edit)
+        self.gt_modify_preview.setGeometry(QtCore.QRect(220, 20, 1680, 920))
+        self.gt_modify_preview.setFrameShape(QtWidgets.QFrame.Box)
+        self.gt_modify_preview.setText("")
+        self.gt_modify_preview.setAlignment(QtCore.Qt.AlignCenter)
+        self.gt_modify_preview.setObjectName("gt_modify_preview")
+        self.tabWidget.addTab(self.tab_gt_edit, "")
+
         #MainWindow.setCentralWidget(self.centralwidget)
         MainWindow.setCentralWidget(self.scrollArea)
         self.statusbar = QtWidgets.QStatusBar(MainWindow)
@@ -961,3 +981,8 @@ class Ui_MainWindow(object):
         self.reset_segment_button.setText(_translate("MainWindow", "Reset\nCanvas"))
         self.save_manuall_segment_button.setText(_translate("MainWindow", "Save\nSegment"))
         self.manual_segment_full_screen_button.setText(_translate("MainWindow", "Show Segment\nFull Screen"))
+
+        # Modify GT Tab
+        self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_gt_edit), _translate("MainWindow", "Modify Ground Truth"))
+        self.create_modified_gt_button.setText(_translate("MainWindow", "Create/Edit Modified GT"))
+        self.delete_modified_gt_button.setText(_translate("MainWindow", "Delete Modified GT"))
