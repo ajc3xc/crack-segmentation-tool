@@ -40,6 +40,11 @@ import matplotlib.pyplot as plt
 
 from width_baseline_plots import *
 
+# Hardcoded switch:
+# True  -> run full recomputation pipeline
+# False -> only reload existing .npz outputs and regenerate plots
+RECOMPUTE_BASELINES = False
+
 # ----------------------------
 # Optional GPU deps (cucim/cupy)
 # ----------------------------
@@ -148,24 +153,88 @@ def _save_npz(
 def _plot_overview(
     out_path: str,
     bw: np.ndarray,
-    panels: List[Tuple[str, np.ndarray, np.ndarray]],
+    panels: List[Tuple[str, np.ndarray, np.ndarray, str]],
+    *,
+    mode: str = "grouped",
 ) -> None:
     """
-    panels: list of (label, width_map, support_mask)
+    panels: list of (label, width_map, support_mask, method_key)
+    mode:
+      - "grouped": medial+medial_dse share scale; pca_local+adaptive_pca share scale.
+      - "global_zero_to_max": all panels share [0, global_max] scale.
     """
     _safe_mkdir(os.path.dirname(out_path))
+
+    def _vals(wmap: np.ndarray, supp: np.ndarray) -> np.ndarray:
+        v = np.asarray(wmap)[np.asarray(supp).astype(bool)]
+        if v.size == 0:
+            return np.asarray([0.0], dtype=np.float32)
+        v = v[np.isfinite(v)]
+        if v.size == 0:
+            return np.asarray([0.0], dtype=np.float32)
+        return v.astype(np.float32)
+
+    def _group(method_key: str) -> str:
+        if method_key in ("medial", "medial_dse"):
+            return "medial_pair"
+        if method_key in ("pca_local", "adaptive_pca"):
+            return "pca_pair"
+        return method_key
+
+    panel_limits: List[Tuple[float, float]] = []
+    if mode == "grouped":
+        grouped = {}
+        for _, wmap, supp, method_key in panels:
+            g = _group(method_key)
+            vals = _vals(wmap, supp)
+            vmin = float(np.min(vals))
+            vmax = float(np.max(vals))
+            if g not in grouped:
+                grouped[g] = [vmin, vmax]
+            else:
+                grouped[g][0] = min(grouped[g][0], vmin)
+                grouped[g][1] = max(grouped[g][1], vmax)
+        for _, _, _, method_key in panels:
+            vmin, vmax = grouped[_group(method_key)]
+            if not np.isfinite(vmin):
+                vmin = 0.0
+            if not np.isfinite(vmax) or vmax <= vmin:
+                vmax = vmin + 1.0
+            panel_limits.append((float(vmin), float(vmax)))
+    elif mode == "global_zero_to_max":
+        all_max = 0.0
+        for _, wmap, supp, _ in panels:
+            vals = _vals(wmap, supp)
+            vmax = float(np.max(vals))
+            if np.isfinite(vmax):
+                all_max = max(all_max, vmax)
+        if all_max <= 0.0:
+            all_max = 1.0
+        panel_limits = [(0.0, float(all_max)) for _ in panels]
+    else:
+        raise ValueError(f"Unknown overview mode: {mode}")
 
     n = len(panels)
     fig, axes = plt.subplots(1, n, figsize=(5 * n, 6), dpi=200)
     if n == 1:
         axes = [axes]
 
-    for ax, (label, wmap, supp) in zip(axes, panels):
+    for ax, (label, wmap, supp, _), (vmin, vmax) in zip(axes, panels, panel_limits):
         ax.imshow(bw, cmap="gray", alpha=0.50)
         ys, xs = np.nonzero(supp)
         if len(xs) > 0:
-            sc = ax.scatter(xs, ys, c=wmap[ys, xs], s=6, cmap="plasma")
-            plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.02, label="Width (px)")
+            sc = ax.scatter(
+                xs,
+                ys,
+                c=wmap[ys, xs],
+                s=6,
+                cmap="plasma",
+                vmin=vmin,
+                vmax=vmax,
+            )
+            cbar = plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.02, label="Width (px)")
+            cbar.set_ticks([vmin, vmax])
+            cbar.set_ticklabels([f"{vmin:.2f}", f"{vmax:.2f}"])
         ax.set_title(label)
         ax.axis("off")
 
@@ -499,9 +568,10 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
                 skel=sk_medial,
                 meta=meta,
             )
+            medial_mask = sk_medial.astype(bool)
 
             if make_plots:
-                panels.append(("Medial (no DSE)", wmap, sk_medial))
+                panels.append(("Medial Axis", wmap, sk_medial, "medial"))
 
         # ---- medial + DSE ----
         if "medial_dse" in medial_results:
@@ -526,9 +596,10 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
                 skel=sk_dse,
                 meta=meta,
             )
+            medial_dse_mask = sk_dse.astype(bool)
 
             if make_plots:
-                panels.append(("Medial + DSE", wmap, sk_dse))
+                panels.append(("Medial Axis + DSE", wmap, sk_dse, "medial_dse"))
 
 
     # --------------------------------------------------
@@ -561,7 +632,7 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
         )
 
         if make_plots:
-            panels.append(("Profile-Normal", wmap, skel))
+            panels.append(("Profile-Normal", wmap, skel, "profile_normal"))
 
 
     # --------------------------------------------------
@@ -596,7 +667,7 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
         )
 
         if make_plots:
-            panels.append(("PCA-Local", wmap, skel))
+            panels.append(("PCA-Local", wmap, skel, "pca_local"))
 
 
     # --------------------------------------------------
@@ -631,17 +702,18 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
         )
 
         if make_plots:
-            panels.append(("Adaptive PCA", wmap, skel))
+            panels.append(("Adaptive PCA", wmap, skel, "adaptive_pca"))
 
     # --------------------------------------------------
     # Geometry-only comparison plot (skeleton vs medial)
     # --------------------------------------------------
     if make_plots:
-        geoms = [("Skeletonize", skel)]
+        geoms = []
         if medial_mask is not None:
-            geoms.append(("Medial (no DSE)", medial_mask))
+            geoms.append(("Medial Axis", medial_mask))
         if medial_dse_mask is not None:
-            geoms.append(("Medial + DSE", medial_dse_mask))
+            geoms.append(("Medial Axis + DSE", medial_dse_mask))
+        geoms.append(("Skeletonize", skel))
 
         plot_geometry_comparison(
             os.path.join(img_out_root, "geometry_comparison.png"),
@@ -653,8 +725,11 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
     # Width overview plot
     # --------------------------------------------------
     if make_plots and panels:
-        plot_path = os.path.join(img_out_root, "baselines_overview.png")
-        _plot_overview(plot_path, bw=bw, panels=panels)
+        plot_path_grouped = os.path.join(img_out_root, "baselines_overview.png")
+        _plot_overview(plot_path_grouped, bw=bw, panels=panels, mode="grouped")
+
+        plot_path_global = os.path.join(img_out_root, "baselines_overview_global_scale.png")
+        _plot_overview(plot_path_global, bw=bw, panels=panels, mode="global_zero_to_max")
 
     t1_total = time.perf_counter()
 
@@ -685,6 +760,117 @@ def normalize_path(p):
         return wslPath.to_posix(p)
 
     return p
+
+
+def _collect_image_paths(in_dir: str) -> List[str]:
+    exts = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+    paths = []
+    for root, _, files in os.walk(in_dir):
+        for fn in files:
+            if os.path.splitext(fn)[1].lower() in exts:
+                paths.append(os.path.join(root, fn))
+    return sorted(paths)
+
+
+def replot_from_saved_npz(
+    *,
+    in_dir: str,
+    out_dir: str,
+    threshold: float,
+    min_area_px: int,
+    methods: List[str],
+) -> int:
+    """
+    Mini alternate flow:
+      - load per-image saved width_map.npz files
+      - regenerate geometry + overview plots without recomputing baselines
+    """
+    paths = _collect_image_paths(in_dir)
+    if not paths:
+        print(f"[width_baseline_creator] No images found under: {in_dir}")
+        return 2
+
+    image_by_stem = {
+        os.path.splitext(os.path.basename(p))[0]: p
+        for p in paths
+    }
+    load_methods = list(methods)
+    if "medial_dse" in load_methods and "medial" not in load_methods:
+        load_methods = ["medial"] + load_methods
+
+    method_label = {
+        "medial": "Medial Axis",
+        "medial_dse": "Medial Axis + DSE",
+        "profile_normal": "Profile-Normal",
+        "pca_local": "PCA-Local",
+        "adaptive_pca": "Adaptive PCA",
+    }
+
+    stems = sorted(
+        d for d in os.listdir(out_dir)
+        if os.path.isdir(os.path.join(out_dir, d))
+    )
+    if not stems:
+        print(f"[width_baseline_creator] No baseline folders found in: {out_dir}")
+        return 2
+
+    for stem in stems:
+        img_path = image_by_stem.get(stem, None)
+        if img_path is None:
+            continue
+
+        bw0 = _read_mask(img_path, threshold=threshold)
+        bw = remove_small_objects(bw0.astype(bool), min_size=min_area_px).astype(bool)
+        img_out_root = os.path.join(out_dir, stem)
+
+        panels: List[Tuple[str, np.ndarray, np.ndarray, str]] = []
+        geoms: List[Tuple[str, np.ndarray]] = []
+        skeletonize_geom = skeletonize(bw).astype(bool)
+
+        for method in load_methods:
+            npz_path = os.path.join(img_out_root, method, "width_map.npz")
+            if not os.path.isfile(npz_path):
+                continue
+            try:
+                data = np.load(npz_path, allow_pickle=True)
+                wmap = np.asarray(data["width_map"], dtype=np.float32)
+                supp = np.asarray(data["support_mask"], dtype=np.uint8)
+                skel = np.asarray(data["skel"], dtype=np.uint8).astype(bool)
+            except Exception as e:
+                print(f"[replot] failed to load {npz_path}: {e}")
+                continue
+
+            panels.append((method_label.get(method, method), wmap, supp, method))
+
+            if method == "medial":
+                geoms.append(("Medial Axis", skel))
+            elif method == "medial_dse":
+                geoms.append(("Medial Axis + DSE", skel))
+        if skeletonize_geom is not None:
+            geoms.append(("Skeletonize", skeletonize_geom))
+
+        if geoms:
+            plot_geometry_comparison(
+                os.path.join(img_out_root, "geometry_comparison.png"),
+                bw=bw,
+                geoms=geoms,
+            )
+        if panels:
+            _plot_overview(
+                os.path.join(img_out_root, "baselines_overview.png"),
+                bw=bw,
+                panels=panels,
+                mode="grouped",
+            )
+            _plot_overview(
+                os.path.join(img_out_root, "baselines_overview_global_scale.png"),
+                bw=bw,
+                panels=panels,
+                mode="global_zero_to_max",
+            )
+        print(f"[replot] refreshed plots for {stem}")
+
+    return 0
 
 
 def main():
@@ -742,8 +928,6 @@ def main():
     print(PHYSICAL_CORES)
     PROGRESS_BAR = True
 
-    EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
-
     # ============================================================
     # Setup
     # ============================================================
@@ -758,12 +942,7 @@ def main():
     # ============================================================
     # Collect images
     # ============================================================
-    paths = []
-
-    for root, _, files in os.walk(IN_DIR):
-        for fn in files:
-            if os.path.splitext(fn)[1].lower() in EXTS:
-                paths.append(os.path.join(root, fn))
+    paths = _collect_image_paths(IN_DIR)
 
     # hard cap
     #############################################
@@ -792,6 +971,16 @@ def main():
         "adaptive_base_patch": ADAPTIVE_BASE_PATCH,
         "gpu_lock_path": GPU_LOCK_PATH,
     }
+
+    if not RECOMPUTE_BASELINES:
+        print("[width_baseline_creator] RECOMPUTE_BASELINES=False -> replaying plots from saved npz only")
+        return replot_from_saved_npz(
+            in_dir=IN_DIR,
+            out_dir=OUT_DIR,
+            threshold=THRESHOLD,
+            min_area_px=MIN_AREA_PX,
+            methods=METHODS,
+        )
 
     # ============================================================
     # Sanity info
@@ -867,4 +1056,3 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

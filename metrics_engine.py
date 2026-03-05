@@ -3463,6 +3463,16 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             return
 
         df_all = pd.concat(geom_frames, ignore_index=True)
+        if {"os_mode", "g11", "g22", "g33"}.issubset(df_all.columns):
+            def _fam_label_row(r):
+                try:
+                    return (
+                        f"{r['os_mode']}|g11={float(r['g11']):.1f}|"
+                        f"g22={float(r['g22']):.1f}|g33={float(r['g33']):.1f}"
+                    )
+                except Exception:
+                    return str(r.get("os_mode", "unknown"))
+            df_all["family_label"] = df_all.apply(_fam_label_row, axis=1)
 
         # ------------------------------------------------------------
         # 2) Global weights (length × sqrt(area))
@@ -3549,6 +3559,99 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             )
         else:
             timing_all = None
+
+        # ------------------------------------------------------------
+        # 5.5) Length-score diagnostics (per-image + all-images)
+        # ------------------------------------------------------------
+        try:
+            from helpers.present_plots import plot_midline_length_score_relationship
+
+            len_dir = os.path.join(plots_dir, "length_score")
+            os.makedirs(len_dir, exist_ok=True)
+
+            # Full sweep: where each RS3 family degrades as segment length increases.
+            plot_midline_length_score_relationship(
+                df_all=df_all,
+                out_dir=len_dir,
+                prefix="rs3_length_score_all_families",
+                length_col="length_px",
+                score_col="score_mid",
+                group_cols=("family_label",),
+                bins=12,
+                max_groups=10,
+            )
+
+            # Selected (best) family only: behavior after selection.
+            df_best_family = df_all[
+                (df_all["os_mode"] == best_key[0]) &
+                (df_all["g11"] == best_key[1]) &
+                (df_all["g22"] == best_key[2]) &
+                (df_all["g33"] == best_key[3])
+            ].copy()
+            if not df_best_family.empty:
+                df_best_family["selected_family"] = "selected_best_family"
+                plot_midline_length_score_relationship(
+                    df_all=df_best_family,
+                    out_dir=len_dir,
+                    prefix="rs3_length_score_selected_family",
+                    length_col="length_px",
+                    score_col="score_mid",
+                    group_cols=("selected_family",),
+                    bins=10,
+                    max_groups=1,
+                )
+
+            # Global aggregate across images (upsert by image).
+            summary_dir = os.path.join(self.save_folder, "metrics", "_summary", "rs3_length_score")
+            os.makedirs(summary_dir, exist_ok=True)
+
+            def _upsert_by_image(csv_path, df_new):
+                if df_new is None or df_new.empty:
+                    return pd.DataFrame()
+                df_new = df_new.copy()
+                if os.path.exists(csv_path):
+                    try:
+                        old = pd.read_csv(csv_path)
+                    except Exception:
+                        old = pd.DataFrame()
+                else:
+                    old = pd.DataFrame()
+                if not old.empty and "image" in old.columns and "image" in df_new.columns:
+                    old = old[old["image"].astype(str) != str(base_name)].copy()
+                merged = pd.concat([old, df_new], ignore_index=True)
+                merged.to_csv(csv_path, index=False)
+                return merged
+
+            all_csv = os.path.join(summary_dir, "rs3_length_score_all_images.csv")
+            all_df = _upsert_by_image(all_csv, df_all)
+            if not all_df.empty:
+                plot_midline_length_score_relationship(
+                    df_all=all_df,
+                    out_dir=summary_dir,
+                    prefix="rs3_length_score_all_images",
+                    length_col="length_px",
+                    score_col="score_mid",
+                    group_cols=("family_label",),
+                    bins=14,
+                    max_groups=12,
+                )
+
+            best_all_csv = os.path.join(summary_dir, "rs3_length_score_selected_family_all_images.csv")
+            best_all_df = _upsert_by_image(best_all_csv, df_best_family)
+            if not best_all_df.empty:
+                plot_midline_length_score_relationship(
+                    df_all=best_all_df,
+                    out_dir=summary_dir,
+                    prefix="rs3_length_score_selected_family_all_images",
+                    length_col="length_px",
+                    score_col="score_mid",
+                    group_cols=("family_label",),
+                    bins=12,
+                    max_groups=12,
+                )
+
+        except Exception as e:
+            print(f"[AUTO global] length-score diagnostics skipped: {e}")
         
         # ------------------------------------------------------------
         # 6) Visualization (EXISTING PLOTS ONLY)

@@ -97,7 +97,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         )
         self.full_dataset_metrics_button.clicked.connect(
             lambda: self.batch_run_metrics_global(
-                sample_frac=0.20,
+                sample_frac=0.10,
                 max_images=10,
                 seed=0,
                 cpu_max_workers=8,
@@ -121,6 +121,8 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         self.create_modified_gt_button.clicked.connect(self.create_or_edit_modified_gt)
         self.delete_modified_gt_button.clicked.connect(self.delete_modified_gt)
         self.tabWidget.currentChanged.connect(self.on_main_tab_changed)
+        if hasattr(self, "gt_modify_preview"):
+            self.gt_modify_preview.setAlignment(Qt.AlignLeft | Qt.AlignTop)
 
 
 
@@ -1188,7 +1190,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
 
     def batch_run_metrics_global(
         self,
-        sample_frac=0.20,
+        sample_frac=0.10,
         max_images=10,
         seed=0,
         edge_grid=None,

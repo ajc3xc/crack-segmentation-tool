@@ -454,7 +454,9 @@ class CrackAnnotator(QtWidgets.QWidget):
         # Enhanced shared-edge / overlap rule
         # -------------------------------------------------
         if self.boxes:
-            def _boxes_containing_xy(x, y, tol=0.5):
+            tol = 1.0
+
+            def _boxes_containing_xy(x, y, tol=tol):
                 hits = []
                 for i, (xmin, ymin, xmax, ymax) in enumerate(self.boxes or []):
                     if (xmin - tol) <= x <= (xmax + tol) and (ymin - tol) <= y <= (ymax + tol):
@@ -468,11 +470,11 @@ class CrackAnnotator(QtWidgets.QWidget):
                 oxmax, oymax = min(xmax1, xmax2), min(ymax1, ymax2)
                 return (oxmin, oymin, oxmax, oymax) if (oxmin <= oxmax and oymin <= oymax) else None
 
-            def _poly_inside_rect(poly, rect):
+            def _poly_inside_rect(poly, rect, tol=tol):
                 xmin, ymin, xmax, ymax = rect
                 for (x, y) in poly:
                     x, y = float(x), float(y)
-                    if not (xmin <= x <= xmax and ymin <= y <= ymax):
+                    if not ((xmin - tol) <= x <= (xmax + tol) and (ymin - tol) <= y <= (ymax + tol)):
                         return False
                 return True
 
@@ -492,23 +494,28 @@ class CrackAnnotator(QtWidgets.QWidget):
                 self.update()
                 return
 
-            effective_region = None
-
             shared = S & E
-            if shared:
-                bidx = next(iter(shared))
-                effective_region = self.boxes[bidx]
-            else:
-                for i in S:
-                    for j in E:
+            candidate_regions = []
+
+            # 1) Any shared box is valid if the entire polyline fits in it.
+            for bidx in sorted(shared):
+                candidate_regions.append(self.boxes[bidx])
+
+            # 2) If no shared-box fit, allow overlap regions between endpoint boxes.
+            if not candidate_regions:
+                for i in sorted(S):
+                    for j in sorted(E):
                         rect = _intersection_rect(i, j)
                         if rect is not None:
-                            effective_region = rect
-                            break
-                    if effective_region is not None:
-                        break
+                            candidate_regions.append(rect)
 
-            if effective_region is None or not _poly_inside_rect(poly, effective_region):
+            valid = False
+            for rect in candidate_regions:
+                if _poly_inside_rect(poly, rect, tol=tol):
+                    valid = True
+                    break
+
+            if (not candidate_regions) or (not valid):
                 QMessageBox.warning(
                     self, "Out of bounds",
                     "The midline and both endpoints must lie inside a single valid box/overlap region.\nCommit cancelled."

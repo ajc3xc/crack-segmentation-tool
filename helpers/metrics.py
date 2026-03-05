@@ -8042,7 +8042,11 @@ def compare_widths_for_aligned_cracks(
     if midline_metric_rows:
         try:
             import pandas as pd
-            from helpers.present_plots import plot_rs3_midline_diagnostics
+            from pathlib import Path
+            from helpers.present_plots import (
+                plot_rs3_midline_diagnostics,
+                plot_midline_length_score_relationship,
+            )
 
             df_mid = pd.DataFrame(midline_metric_rows)
 
@@ -8054,6 +8058,84 @@ def compare_widths_for_aligned_cracks(
                 out_dir=diag_dir,
                 selected_family=None,   # GENERALIZED
             )
+
+            # Per-image length-score diagnostics (continuous + binned + summary CSVs).
+            plot_midline_length_score_relationship(
+                df_all=df_mid,
+                out_dir=diag_dir,
+                prefix=f"{base_name}_length_score",
+                length_col="length_px",
+                score_col="score_mid",
+                group_cols=("midline_type", "geometry_type", "variant_id"),
+                bins=10,
+                max_groups=8,
+            )
+
+            # Aggregate all images into metrics/_summary and refresh global plots.
+            def _metrics_root_from_any_path(pth):
+                try:
+                    p = Path(pth).resolve()
+                    parts = list(p.parts)
+                    idx = None
+                    for i, part in enumerate(parts):
+                        if str(part).lower() == "metrics":
+                            idx = i
+                    if idx is None:
+                        return str(p.parent)
+                    return str(Path(*parts[: idx + 1]))
+                except Exception:
+                    return os.path.dirname(os.path.abspath(str(pth)))
+
+            def _upsert_by_keys(csv_path, df_new, key_cols):
+                if df_new is None or df_new.empty:
+                    return pd.DataFrame()
+                df_new = df_new.copy()
+                if os.path.exists(csv_path):
+                    try:
+                        old = pd.read_csv(csv_path)
+                    except Exception:
+                        old = pd.DataFrame()
+                else:
+                    old = pd.DataFrame()
+
+                if old.empty:
+                    merged = df_new
+                elif all(c in old.columns for c in key_cols) and all(c in df_new.columns for c in key_cols):
+                    merged = old.copy()
+                    new_keys = df_new[key_cols].drop_duplicates()
+                    for tup in new_keys.itertuples(index=False, name=None):
+                        mask = np.ones(len(merged), dtype=bool)
+                        for c, v in zip(key_cols, tup):
+                            mask &= (merged[c].astype(str) == str(v))
+                        merged = merged[~mask]
+                    merged = pd.concat([merged, df_new], ignore_index=True)
+                else:
+                    merged = pd.concat([old, df_new], ignore_index=True)
+
+                merged.to_csv(csv_path, index=False)
+                return merged
+
+            metrics_root = _metrics_root_from_any_path(metrics_dir)
+            global_dir = os.path.join(metrics_root, "_summary", "compare_midline_length_score")
+            os.makedirs(global_dir, exist_ok=True)
+
+            global_csv = os.path.join(global_dir, "compare_midline_length_score_all_images.csv")
+            df_global = _upsert_by_keys(
+                global_csv,
+                df_mid,
+                key_cols=("image", "midline_type", "crack_type", "variant_id"),
+            )
+            if not df_global.empty:
+                plot_midline_length_score_relationship(
+                    df_all=df_global,
+                    out_dir=global_dir,
+                    prefix="compare_midline_length_score_all_images",
+                    length_col="length_px",
+                    score_col="score_mid",
+                    group_cols=("midline_type", "geometry_type", "variant_id"),
+                    bins=12,
+                    max_groups=10,
+                )
 
             print(f"[MIDLINE METRICS] plotted {len(df_mid)} combined diagnostics")
 

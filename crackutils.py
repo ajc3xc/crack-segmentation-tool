@@ -814,10 +814,12 @@ class CrackUtils:
                             d.get("mask_baseline_folder", ""),
                             d.get("use_masks", False),
                             d.get("use_baselines", False),
+                            d.get("last_image_name", ""),
+                            d.get("last_image_folder", ""),
                         )
                 except Exception:
                     pass
-            return "", "", "", "", "", False, False
+            return "", "", "", "", "", False, False, "", ""
 
         def save_last_folders(
             img_folder, save_folder, mask_folder, width_baseline_folder, mask_baseline_folder,
@@ -828,6 +830,12 @@ class CrackUtils:
                 'folder_config.json'
             )
             try:
+                prev = {}
+                if os.path.isfile(config_path):
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        loaded = json.load(f)
+                        if isinstance(loaded, dict):
+                            prev = loaded
                 with open(config_path, 'w') as f:
                     json.dump({
                         "img_folder": img_folder,
@@ -837,6 +845,8 @@ class CrackUtils:
                         "mask_baseline_folder": mask_baseline_folder,
                         "use_masks": use_masks,
                         "use_baselines": use_baselines,
+                        "last_image_name": prev.get("last_image_name", ""),
+                        "last_image_folder": prev.get("last_image_folder", ""),
                     }, f, indent=2)
             except Exception:
                 pass
@@ -852,6 +862,8 @@ class CrackUtils:
             default_mask_baseline_folder,
             default_use_masks,
             default_use_baselines,
+            default_last_image_name,
+            default_last_image_folder,
         ) = load_last_folders()
 
         img_folder_init = getattr(self, "current_folder", default_img_folder)
@@ -1131,6 +1143,15 @@ class CrackUtils:
 
         if self.image_names:
             self.n = 0
+            try:
+                selected_img_folder = os.path.normcase(os.path.abspath(self.current_folder))
+                saved_img_folder = os.path.normcase(os.path.abspath(default_last_image_folder)) if default_last_image_folder else ""
+                if default_last_image_name and selected_img_folder == saved_img_folder:
+                    names = [os.path.basename(p) for p in self.image_names]
+                    if default_last_image_name in names:
+                        self.n = names.index(default_last_image_name)
+            except Exception:
+                self.n = 0
             self.change_image()
         else:
             self.ImageScreen.clear()
@@ -1386,7 +1407,7 @@ class CrackUtils:
             src = self.mask_map.get(base_name)
             if src:
                 mask_base = os.path.splitext(os.path.basename(str(src)))[0]
-        out_root = os.path.join(getattr(self, "mask_folder", "") or "", "gt_masks")
+        out_root = os.path.join(getattr(self, "mask_folder", "") or "", "edited_gt_masks")
         return os.path.join(out_root, f"{mask_base}_modified.png")
 
     def _load_binary_mask_from_path(self, mask_path):
@@ -2081,6 +2102,27 @@ class CrackUtils:
         self.original_image = self.image.copy()
         self.filename_label_2.setText(os.path.basename(self.name))
         base_name = os.path.splitext(os.path.basename(self.name))[0]
+        current_image_name = os.path.basename(self.name)
+
+        # Persist the current image selection so re-selecting the same dataset
+        # resumes on this image next time.
+        try:
+            config_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "folder_config.json",
+            )
+            cfg = {}
+            if os.path.isfile(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        cfg = loaded
+            cfg["last_image_name"] = current_image_name
+            cfg["last_image_folder"] = os.path.abspath(getattr(self, "current_folder", ""))
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+        except Exception:
+            pass
         
         # ------------------------------------------------------------
         # Width baseline folder (per-image handle)
@@ -3388,8 +3430,10 @@ class CrackUtils:
                 except Exception:
                     continue
 
-                # --- Enhanced shared-edge / overlap rule (fixed) ---
-                def boxes_containing(x, y, tol=0.5):
+                # --- Enhanced shared-edge / overlap rule (fits ANY valid region) ---
+                tol = 1.0
+
+                def boxes_containing(x, y, tol=tol):
                     hits = []
                     for i, (xmin, ymin, xmax, ymax) in enumerate(boxes):
                         if (xmin - tol) <= x <= (xmax + tol) and (ymin - tol) <= y <= (ymax + tol):
@@ -3405,27 +3449,25 @@ class CrackUtils:
                     QMessageBox.warning(dlg, "Invalid midline", "One or both endpoints are outside all boxes.")
                     return
 
-                # 1️⃣ use shared box if possible
-                effective_region = None
                 shared = S & E
-                if shared:
-                    bidx = next(iter(shared))
-                    effective_region = boxes[bidx]
-                else:
-                    # 2️⃣ otherwise use overlap of their boxes
-                    for i in S:
-                        for j in E:
+                candidate_regions = []
+
+                # 1) Try all shared boxes first.
+                for bidx in sorted(shared):
+                    candidate_regions.append(boxes[bidx])
+
+                # 2) Otherwise try all overlaps between endpoint box sets.
+                if not candidate_regions:
+                    for i in sorted(S):
+                        for j in sorted(E):
                             xmin1, ymin1, xmax1, ymax1 = boxes[i]
                             xmin2, ymin2, xmax2, ymax2 = boxes[j]
                             oxmin, oymin = max(xmin1, xmin2), max(ymin1, ymin2)
                             oxmax, oymax = min(xmax1, xmax2), min(ymax1, ymax2)
                             if oxmin <= oxmax and oymin <= oymax:
-                                effective_region = (oxmin, oymin, oxmax, oymax)
-                                break
-                        if effective_region:
-                            break
+                                candidate_regions.append((oxmin, oymin, oxmax, oymax))
 
-                if effective_region is None:
+                if not candidate_regions:
                     QMessageBox.warning(
                         dlg,
                         "Invalid midline",
@@ -3433,16 +3475,25 @@ class CrackUtils:
                     )
                     return
 
-                xmin, ymin, xmax, ymax = effective_region
-                for (x, y) in poly:
-                    x, y = float(x), float(y)
-                    if not (xmin <= x <= xmax and ymin <= y <= ymax):
-                        QMessageBox.warning(
-                            dlg,
-                            "Invalid midline",
-                            "A manual midline has points outside its valid box/overlap region. Please fix before continuing."
-                        )
-                        return
+                valid = False
+                for xmin, ymin, xmax, ymax in candidate_regions:
+                    inside = True
+                    for (x, y) in poly:
+                        x, y = float(x), float(y)
+                        if not ((xmin - tol) <= x <= (xmax + tol) and (ymin - tol) <= y <= (ymax + tol)):
+                            inside = False
+                            break
+                    if inside:
+                        valid = True
+                        break
+
+                if not valid:
+                    QMessageBox.warning(
+                        dlg,
+                        "Invalid midline",
+                        "A manual midline has points outside its valid box/overlap region. Please fix before continuing."
+                    )
+                    return
 
             # --- collect points and connections ---
             self.user_points = annot.points
@@ -3930,7 +3981,9 @@ class CrackUtils:
                 except Exception:
                     continue
 
-                def boxes_containing(x, y, tol=0.5):
+                tol = 1.0
+
+                def boxes_containing(x, y, tol=tol):
                     hits = []
                     for i, (xmin, ymin, xmax, ymax) in enumerate(boxes):
                         if (xmin - tol) <= x <= (xmax + tol) and (ymin - tol) <= y <= (ymax + tol):
@@ -3947,40 +4000,45 @@ class CrackUtils:
                                         "One or both endpoints are outside all boxes.")
                     return
 
-                effective_region = None
                 shared = S & E
-                if shared:
-                    bidx = next(iter(shared))
-                    effective_region = boxes[bidx]
-                else:
-                    for i in S:
-                        for j in E:
+                candidate_regions = []
+                for bidx in sorted(shared):
+                    candidate_regions.append(boxes[bidx])
+                if not candidate_regions:
+                    for i in sorted(S):
+                        for j in sorted(E):
                             xmin1, ymin1, xmax1, ymax1 = boxes[i]
                             xmin2, ymin2, xmax2, ymax2 = boxes[j]
                             oxmin, oymin = max(xmin1, xmin2), max(ymin1, ymin2)
                             oxmax, oymax = min(xmax1, xmax2), min(ymax1, ymax2)
                             if oxmin <= oxmax and oymin <= oymax:
-                                effective_region = (oxmin, oymin, oxmax, oymax)
-                                break
-                        if effective_region:
-                            break
+                                candidate_regions.append((oxmin, oymin, oxmax, oymax))
 
-                if effective_region is None:
+                if not candidate_regions:
                     QMessageBox.warning(
                         dlg, "Invalid midline",
                         "A manual midline spans boxes that don't share a region. Please fix before continuing."
                     )
                     return
 
-                xmin, ymin, xmax, ymax = effective_region
-                for (x, y) in poly:
-                    x, y = float(x), float(y)
-                    if not (xmin <= x <= xmax and ymin <= y <= ymax):
-                        QMessageBox.warning(
-                            dlg, "Invalid midline",
-                            "A manual midline has points outside its valid region. Please fix."
-                        )
-                        return
+                valid = False
+                for xmin, ymin, xmax, ymax in candidate_regions:
+                    inside = True
+                    for (x, y) in poly:
+                        x, y = float(x), float(y)
+                        if not ((xmin - tol) <= x <= (xmax + tol) and (ymin - tol) <= y <= (ymax + tol)):
+                            inside = False
+                            break
+                    if inside:
+                        valid = True
+                        break
+
+                if not valid:
+                    QMessageBox.warning(
+                        dlg, "Invalid midline",
+                        "A manual midline has points outside its valid region. Please fix."
+                    )
+                    return
 
             # ---- collect ui results ----
             self.user_points = annot.points

@@ -4,15 +4,32 @@
 from __future__ import annotations
 
 import os
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
+
+try:
+    import psutil  # type: ignore
+except Exception:
+    psutil = None
 
 
 def _current_affinity() -> List[int]:
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            return sorted(os.sched_getaffinity(0))
+        except Exception:
+            pass
+
+    if psutil is not None:
+        try:
+            return sorted(psutil.Process().cpu_affinity())
+        except Exception:
+            pass
+
     try:
-        return sorted(os.sched_getaffinity(0))
+        n = psutil.cpu_count(logical=True) if psutil is not None else os.cpu_count()
     except Exception:
-        n = os.cpu_count() or 1
-        return list(range(n))
+        n = os.cpu_count()
+    return list(range(n or 1))
 
 
 def _linux_core_type(cpu_id: int) -> Optional[int]:
@@ -51,8 +68,18 @@ def apply_process_affinity(cpu_ids: Sequence[int], label: str = "worker") -> Non
     """Best-effort process affinity pinning for current process."""
     if not cpu_ids:
         return
+    pinset = sorted(set(int(c) for c in cpu_ids))
     try:
-        os.sched_setaffinity(0, set(int(c) for c in cpu_ids))
+        if hasattr(os, "sched_setaffinity"):
+            os.sched_setaffinity(0, set(pinset))
+            return
+        if psutil is not None:
+            psutil.Process().cpu_affinity(pinset)
+            return
+        print(
+            f"[AFFINITY] {label} pid={os.getpid()} setaffinity unsupported on this platform",
+            flush=True,
+        )
     except Exception as e:
         print(f"[AFFINITY] {label} pid={os.getpid()} setaffinity failed: {e}", flush=True)
 
@@ -75,4 +102,3 @@ def process_pool_affinity_config(
     initializer = apply_process_affinity if enable_worker_pinning else None
     initargs = (list(cpu_ids), f"{label}-worker") if enable_worker_pinning else ()
     return max_workers, initializer, initargs, list(cpu_ids)
-

@@ -2435,6 +2435,264 @@ def plot_rs3_midline_diagnostics(
             plt.close()
 
 
+def plot_midline_length_score_relationship(
+    df_all,
+    out_dir,
+    *,
+    prefix="midline_length_score",
+    length_col="length_px",
+    score_col="score_mid",
+    group_cols=("midline_type", "geometry_type", "os_mode", "variant_id"),
+    bins=12,
+    max_groups=10,
+):
+    """
+    Export + plot the relationship between segment length and a midline score.
+
+    Outputs:
+      - <prefix>_points.csv
+      - <prefix>_bins.csv
+      - <prefix>_high_vs_low.csv
+      - <prefix>_scatter.png
+      - <prefix>_binned.png
+    """
+    import os
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    if not isinstance(df_all, pd.DataFrame):
+        try:
+            df = pd.DataFrame(df_all)
+        except Exception:
+            return
+    else:
+        df = df_all.copy()
+
+    if length_col not in df.columns or score_col not in df.columns:
+        return
+
+    df[length_col] = pd.to_numeric(df[length_col], errors="coerce")
+    df[score_col] = pd.to_numeric(df[score_col], errors="coerce")
+    df = df[np.isfinite(df[length_col]) & np.isfinite(df[score_col])].copy()
+    df = df[df[length_col] > 0].copy()
+    if df.empty:
+        return
+
+    def _group_key(frame):
+        keys = []
+        for c in group_cols:
+            if c in frame.columns:
+                s = frame[c].astype(str).fillna("")
+                s = s.replace("nan", "")
+                keys.append(s)
+
+        if not keys:
+            return pd.Series(["all"] * len(frame), index=frame.index)
+
+        out = keys[0].copy()
+        for s in keys[1:]:
+            out = np.where(
+                (out != "") & (s != ""),
+                out + "|" + s,
+                np.where(out != "", out, s),
+            )
+        out = pd.Series(out, index=frame.index)
+        out = out.replace("", "all")
+        return out
+
+    df["_group"] = _group_key(df)
+    grp_counts = df["_group"].value_counts()
+    keep_groups = list(grp_counts.index[: max(1, int(max_groups))])
+    if not keep_groups:
+        keep_groups = ["all"]
+        df["_group"] = "all"
+    else:
+        df["_group"] = np.where(df["_group"].isin(keep_groups), df["_group"], "other")
+        if "other" in set(df["_group"]):
+            keep_groups = keep_groups + ["other"]
+
+    points_csv = os.path.join(out_dir, f"{prefix}_points.csv")
+    df.to_csv(points_csv, index=False)
+
+    # Continuous view: scatter
+    try:
+        plt.figure(figsize=(8.0, 5.2), dpi=200)
+        for g in keep_groups:
+            sub = df[df["_group"] == g]
+            if sub.empty:
+                continue
+            if len(sub) > 5000:
+                sub = sub.sample(n=5000, random_state=0)
+            plt.scatter(
+                sub[length_col].values,
+                sub[score_col].values,
+                s=12,
+                alpha=0.28,
+                label=str(g),
+            )
+
+        plt.xlabel(length_col)
+        plt.ylabel(score_col)
+        plt.title("Segment Length vs Midline Score")
+        if len(keep_groups) <= 12:
+            plt.legend(fontsize=7, framealpha=0.9)
+        plt.grid(True, alpha=0.25)
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, f"{prefix}_scatter.png"), dpi=200)
+        plt.close()
+    except Exception:
+        pass
+
+    # Discrete view: quantile-bin stats
+    bins_rows = []
+    for g in keep_groups:
+        sub = df[df["_group"] == g].copy()
+        if sub.empty:
+            continue
+
+        n_unique = int(sub[length_col].nunique(dropna=True))
+        q = min(max(2, int(bins)), max(2, n_unique))
+        if q <= 1:
+            continue
+
+        try:
+            sub["_len_bin"] = pd.qcut(sub[length_col], q=q, duplicates="drop")
+        except Exception:
+            lo = float(np.min(sub[length_col].values))
+            hi = float(np.max(sub[length_col].values))
+            if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+                continue
+            edges = np.linspace(lo, hi, num=min(q, 20) + 1)
+            edges = np.unique(edges)
+            if len(edges) < 2:
+                continue
+            sub["_len_bin"] = pd.cut(sub[length_col], bins=edges, include_lowest=True)
+
+        for bin_key, gb in sub.groupby("_len_bin", dropna=False):
+            vals_len = pd.to_numeric(gb[length_col], errors="coerce").values
+            vals_sc = pd.to_numeric(gb[score_col], errors="coerce").values
+            mask = np.isfinite(vals_len) & np.isfinite(vals_sc)
+            vals_len = vals_len[mask]
+            vals_sc = vals_sc[mask]
+            if vals_len.size == 0:
+                continue
+
+            left = np.nan
+            right = np.nan
+            if hasattr(bin_key, "left") and hasattr(bin_key, "right"):
+                try:
+                    left = float(bin_key.left)
+                    right = float(bin_key.right)
+                except Exception:
+                    left = np.nan
+                    right = np.nan
+
+            bins_rows.append(
+                {
+                    "group": str(g),
+                    "bin_label": str(bin_key),
+                    "n": int(vals_len.size),
+                    "length_bin_left": left,
+                    "length_bin_right": right,
+                    "length_bin_center": float(np.nanmedian(vals_len)),
+                    "length_mean": float(np.nanmean(vals_len)),
+                    "length_median": float(np.nanmedian(vals_len)),
+                    "score_mean": float(np.nanmean(vals_sc)),
+                    "score_median": float(np.nanmedian(vals_sc)),
+                    "score_p10": float(np.nanpercentile(vals_sc, 10)),
+                    "score_p90": float(np.nanpercentile(vals_sc, 90)),
+                }
+            )
+
+    df_bins = pd.DataFrame(bins_rows)
+    bins_csv = os.path.join(out_dir, f"{prefix}_bins.csv")
+    if not df_bins.empty:
+        df_bins = df_bins.sort_values(["group", "length_bin_center"]).reset_index(drop=True)
+        df_bins.to_csv(bins_csv, index=False)
+
+        try:
+            plt.figure(figsize=(8.4, 5.4), dpi=200)
+            for g in keep_groups:
+                sub = df_bins[df_bins["group"] == str(g)].copy()
+                if sub.empty:
+                    continue
+                x = sub["length_bin_center"].values.astype(float)
+                y = sub["score_median"].values.astype(float)
+                ylo = sub["score_p10"].values.astype(float)
+                yhi = sub["score_p90"].values.astype(float)
+                plt.plot(x, y, marker="o", linewidth=1.6, label=str(g))
+                plt.fill_between(x, ylo, yhi, alpha=0.15)
+
+            plt.xlabel("Segment length (px)")
+            plt.ylabel(score_col)
+            plt.title("Midline Score by Length Bin")
+            if len(keep_groups) <= 12:
+                plt.legend(fontsize=7, framealpha=0.9)
+            plt.grid(True, alpha=0.25)
+            plt.tight_layout()
+            plt.savefig(os.path.join(out_dir, f"{prefix}_binned.png"), dpi=200)
+            plt.close()
+        except Exception:
+            pass
+    else:
+        pd.DataFrame(columns=[
+            "group", "bin_label", "n",
+            "length_bin_left", "length_bin_right", "length_bin_center",
+            "length_mean", "length_median",
+            "score_mean", "score_median", "score_p10", "score_p90",
+        ]).to_csv(bins_csv, index=False)
+
+    # "Where it gets bad at high lengths" summary by quartiles.
+    summary_rows = []
+    for g in keep_groups:
+        sub = df[df["_group"] == g].copy()
+        if len(sub) < 8:
+            continue
+        try:
+            q = pd.qcut(sub[length_col], q=4, labels=False, duplicates="drop")
+        except Exception:
+            continue
+        if q is None:
+            continue
+        sub["_q"] = q
+        if sub["_q"].dropna().empty:
+            continue
+        qmin = int(sub["_q"].min())
+        qmax = int(sub["_q"].max())
+        low = pd.to_numeric(sub.loc[sub["_q"] == qmin, score_col], errors="coerce").dropna()
+        high = pd.to_numeric(sub.loc[sub["_q"] == qmax, score_col], errors="coerce").dropna()
+        if low.empty or high.empty:
+            continue
+
+        pear = float(pd.to_numeric(sub[length_col], errors="coerce").corr(
+            pd.to_numeric(sub[score_col], errors="coerce"),
+            method="pearson",
+        ))
+        spear = float(pd.to_numeric(sub[length_col], errors="coerce").corr(
+            pd.to_numeric(sub[score_col], errors="coerce"),
+            method="spearman",
+        ))
+
+        summary_rows.append(
+            {
+                "group": str(g),
+                "n": int(len(sub)),
+                "score_low_len_mean": float(low.mean()),
+                "score_high_len_mean": float(high.mean()),
+                "delta_high_minus_low": float(high.mean() - low.mean()),
+                "pearson_length_score": pear,
+                "spearman_length_score": spear,
+            }
+        )
+
+    pd.DataFrame(summary_rows).to_csv(
+        os.path.join(out_dir, f"{prefix}_high_vs_low.csv"),
+        index=False,
+    )
+
 
 # ======================================================================
 # helpers/present_plots.py
