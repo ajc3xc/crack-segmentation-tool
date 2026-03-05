@@ -23,6 +23,7 @@ import time
 import json
 import math
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Dict, Any, Tuple, Optional, List
 
@@ -814,61 +815,91 @@ def replot_from_saved_npz(
         print(f"[width_baseline_creator] No baseline folders found in: {out_dir}")
         return 2
 
+    tasks = []
     for stem in stems:
         img_path = image_by_stem.get(stem, None)
         if img_path is None:
             continue
+        tasks.append((stem, img_path))
 
-        bw0 = _read_mask(img_path, threshold=threshold)
-        bw = remove_small_objects(bw0.astype(bool), min_size=min_area_px).astype(bool)
-        img_out_root = os.path.join(out_dir, stem)
+    if not tasks:
+        print("[replot] no overlapping image stems between input masks and baseline folders")
+        return 2
 
-        panels: List[Tuple[str, np.ndarray, np.ndarray, str]] = []
-        geoms: List[Tuple[str, np.ndarray]] = []
-        skeletonize_geom = skeletonize(bw).astype(bool)
+    def _replot_one(stem_img: Tuple[str, str]) -> Tuple[str, bool, str]:
+        stem, img_path = stem_img
+        try:
+            bw0 = _read_mask(img_path, threshold=threshold)
+            bw = remove_small_objects(bw0.astype(bool), min_size=min_area_px).astype(bool)
+            img_out_root = os.path.join(out_dir, stem)
 
-        for method in load_methods:
-            npz_path = os.path.join(img_out_root, method, "width_map.npz")
-            if not os.path.isfile(npz_path):
-                continue
-            try:
-                data = np.load(npz_path, allow_pickle=True)
-                wmap = np.asarray(data["width_map"], dtype=np.float32)
-                supp = np.asarray(data["support_mask"], dtype=np.uint8)
-                skel = np.asarray(data["skel"], dtype=np.uint8).astype(bool)
-            except Exception as e:
-                print(f"[replot] failed to load {npz_path}: {e}")
-                continue
+            panels: List[Tuple[str, np.ndarray, np.ndarray, str]] = []
+            geoms: List[Tuple[str, np.ndarray]] = []
+            skeletonize_geom = skeletonize(bw).astype(bool)
 
-            panels.append((method_label.get(method, method), wmap, supp, method))
+            for method in load_methods:
+                npz_path = os.path.join(img_out_root, method, "width_map.npz")
+                if not os.path.isfile(npz_path):
+                    continue
+                try:
+                    data = np.load(npz_path, allow_pickle=True)
+                    wmap = np.asarray(data["width_map"], dtype=np.float32)
+                    supp = np.asarray(data["support_mask"], dtype=np.uint8)
+                    skel = np.asarray(data["skel"], dtype=np.uint8).astype(bool)
+                except Exception as e:
+                    print(f"[replot] failed to load {npz_path}: {e}")
+                    continue
 
-            if method == "medial":
-                geoms.append(("Medial Axis", skel))
-            elif method == "medial_dse":
-                geoms.append(("Medial Axis + DSE", skel))
-        if skeletonize_geom is not None:
+                panels.append((method_label.get(method, method), wmap, supp, method))
+
+                if method == "medial":
+                    geoms.append(("Medial Axis", skel))
+                elif method == "medial_dse":
+                    geoms.append(("Medial Axis + DSE", skel))
+
             geoms.append(("Skeletonize", skeletonize_geom))
 
-        if geoms:
-            plot_geometry_comparison(
-                os.path.join(img_out_root, "geometry_comparison.png"),
-                bw=bw,
-                geoms=geoms,
-            )
-        if panels:
-            _plot_overview(
-                os.path.join(img_out_root, "baselines_overview.png"),
-                bw=bw,
-                panels=panels,
-                mode="grouped",
-            )
-            _plot_overview(
-                os.path.join(img_out_root, "baselines_overview_global_scale.png"),
-                bw=bw,
-                panels=panels,
-                mode="global_zero_to_max",
-            )
-        print(f"[replot] refreshed plots for {stem}")
+            if geoms:
+                plot_geometry_comparison(
+                    os.path.join(img_out_root, "geometry_comparison.png"),
+                    bw=bw,
+                    geoms=geoms,
+                )
+            if panels:
+                _plot_overview(
+                    os.path.join(img_out_root, "baselines_overview.png"),
+                    bw=bw,
+                    panels=panels,
+                    mode="grouped",
+                )
+                _plot_overview(
+                    os.path.join(img_out_root, "baselines_overview_global_scale.png"),
+                    bw=bw,
+                    panels=panels,
+                    mode="global_zero_to_max",
+                )
+            return stem, True, "ok"
+        except Exception as e:
+            return stem, False, repr(e)
+
+    max_workers = max(1, min(os.cpu_count()//2 or 4, len(tasks)))
+    print(f"[replot] parallel workers={max_workers} tasks={len(tasks)}")
+    failures = 0
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futs = [ex.submit(_replot_one, t) for t in tasks]
+        for fut in as_completed(futs):
+            stem, ok, msg = fut.result()
+            if ok:
+                print(f"[replot] refreshed plots for {stem}")
+            else:
+                failures += 1
+                print(f"[replot] failed for {stem}: {msg}")
+
+    if failures > 0:
+        print(f"[replot] completed with failures: {failures}/{len(tasks)}")
+    else:
+        print(f"[replot] completed successfully: {len(tasks)}/{len(tasks)}")
 
     return 0
 
