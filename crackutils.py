@@ -1567,7 +1567,7 @@ class CrackUtils:
 
         box_dict = self.annotation['annotations']['box']
         existing_keys = [int(k) for k in box_dict.keys()] if box_dict else []
-        next_idx = max(existing_keys) + 1 if existing_keys else 1
+        next_idx = max(existing_keys) + 1 if existing_keys else 0
 
         # Save each pending box with a unique key
         for bb_pts in self.bb_pts_list:
@@ -1604,7 +1604,10 @@ class CrackUtils:
             error("No saved boxes to delete.")
             return
 
-        keys = list(box_dict.keys())
+        try:
+            keys = sorted(list(box_dict.keys()), key=lambda k: int(k))
+        except Exception:
+            keys = sorted(list(box_dict.keys()), key=lambda k: str(k))
         dlg = QDialog(self.MainWindow)
         dlg.setWindowTitle("Select Bounding Boxes to Delete")
         layout = QVBoxLayout(dlg)
@@ -2086,6 +2089,29 @@ class CrackUtils:
                 new_combined[sk] = cmb
             ann_root["combined_cracks"] = new_combined
 
+        def _normalize_box_ids(ann_root):
+            """
+            Normalize annotation box keys to contiguous zero-based strings: "0","1","2",...
+            Keeps box payloads unchanged, only rewrites keys.
+            """
+            if not isinstance(ann_root, dict):
+                return False
+            box = ann_root.get("box", None)
+            if not isinstance(box, dict) or not box:
+                return False
+
+            old_keys = list(box.keys())
+            try:
+                old_keys_sorted = sorted(old_keys, key=lambda k: int(k))
+            except Exception:
+                old_keys_sorted = sorted(old_keys, key=lambda k: str(k))
+
+            reindexed = {str(i): box[k] for i, k in enumerate(old_keys_sorted)}
+            changed = (list(reindexed.keys()) != old_keys_sorted) or any(str(i) != k for i, k in enumerate(old_keys_sorted))
+            if changed:
+                ann_root["box"] = reindexed
+            return changed
+
         # ------------------------------------------------------------
 
         if not hasattr(self, "image_names") or not self.image_names:
@@ -2211,6 +2237,7 @@ class CrackUtils:
             # B) *** APPLY ID NORMALIZATION RIGHT AFTER LOADING ***
             # ------------------------------------------------------------
             _normalize_ann_ids(ann)
+            _normalize_box_ids(ann)
             # ------------------------------------------------------------
 
             atomic = ann.get("atomic_cracks", {}) or {}
@@ -3214,6 +3241,12 @@ class CrackUtils:
 
         # Manually sync ONCE
         on_overlay_toggled(overlay_btn.isChecked())
+        # Keyboard T in annotator should execute the exact same button toggle path.
+        def _toggle_overlay_via_button():
+            if overlay_img is None:
+                return
+            overlay_btn.toggle()
+        annot.overlay_toggle_cb = _toggle_overlay_via_button
 
         #annot.readonly_midlines = readonly_midlines
         #annot.readonly_connections = readonly_conn_idx
@@ -3317,6 +3350,10 @@ class CrackUtils:
         dlg.setWindowTitle("Endpoints, Connections & Manual Midlines")
         dlg.setWindowModality(Qt.ApplicationModal)
         dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowMaximizeButtonHint)
+        # Bind T at dialog level so it works even when focus is not on annotator.
+        t_sc = QtWidgets.QShortcut(QtGui.QKeySequence("T"), dlg)
+        t_sc.setContext(Qt.WindowShortcut)
+        t_sc.activated.connect(_toggle_overlay_via_button)
         layout = QVBoxLayout(dlg)
 
         mode_btn = QPushButton("Switch to Connection Mode")
@@ -3333,7 +3370,7 @@ class CrackUtils:
 
         hint = QLabel(
             "Editable: Auto/Manual in black/light-blue.     Read-only: Auto/Manual cracks in green — cant delete in editor, must delete segment in Delete Segmentations.\n"
-            "Click unconnected point in Connection Mode to create new point.        Hover and click in respective mode to delete.        Mousewheel/2-finger swipe = zoom in/out.\n"
+            "Click unconnected point in Connection Mode to create new point.        Hover and click in respective mode to delete.        Mousewheel/2-finger swipe = zoom in/out.        T: toggle overlay.\n"
             "Manual: Left-hold on starting point → draw → finish on a different endpoint.       Backspace/Z or Right-hold for fast/slow deletion.       Shimmy: zoom in toward direction, zoom out slightly to move; image may distort until 1.0 scale."
         )
         layout.addWidget(hint)
@@ -3885,7 +3922,7 @@ class CrackUtils:
 
         hint = QLabel(
             "Editable: Auto/Manual in black/light-blue.   Read-only shown in gray/beige.\n"
-            "Point/Connection modes add endpoints or connect them.  Mousewheel = zoom.\n"
+            "Point/Connection modes add endpoints or connect them.  Mousewheel = zoom.  T: toggle overlay.\n"
             "Manual midline: Left-hold on start endpoint → draw → release on different endpoint."
         )
         layout.addWidget(hint)
@@ -4288,3 +4325,4 @@ class CrackUtils:
             traceback.print_exc()
             error(f"update_image_crop: {e}")
             self.update_os_button.setStyleSheet("background-color : red")
+

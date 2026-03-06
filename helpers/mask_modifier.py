@@ -160,6 +160,10 @@ class ImageMaskEditor(QtWidgets.QLabel):
     def set_brush_radius(self, r):
         self.brush_radius = max(1, min(80, int(r)))
 
+    def _effective_brush_radius(self):
+        # UI size 1 should produce a single painted pixel.
+        return max(0, int(self.brush_radius) - 1)
+
     def push_undo(self):
         if len(self.undo_stack) >= self.undo_limit:
             self.undo_stack.pop(0)
@@ -239,20 +243,22 @@ class ImageMaskEditor(QtWidgets.QLabel):
             return
 
         if self.last_point is None:
+            rr = self._effective_brush_radius()
             cv2.circle(self.mask, (ix, iy),
-                       self.brush_radius, self.paint_value, -1)
+                       rr, self.paint_value, -1)
         else:
             # Dense interpolation
             x0, y0 = self.last_point
             x1, y1 = ix, iy
             dist = int(np.hypot(x1 - x0, y1 - y0))
             steps = max(1, dist // 1)  # max density
+            rr = self._effective_brush_radius()
             for i in range(steps + 1):
                 t = i / steps
                 xi = int(x0 + t * (x1 - x0))
                 yi = int(y0 + t * (y1 - y0))
                 cv2.circle(self.mask, (xi, yi),
-                           self.brush_radius, self.paint_value, -1)
+                           rr, self.paint_value, -1)
 
         self.last_point = (ix, iy)
         self.refresh()

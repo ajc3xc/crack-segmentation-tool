@@ -85,6 +85,11 @@ class CrackAnnotator(QtWidgets.QWidget):
         self._erase_timer.timeout.connect(self._erase_tick)
         self._erase_start_time = None
 
+        # Optional overlay background state.
+        self.overlay_pixmap = None
+        self.use_overlay = False
+        self.overlay_toggle_cb = None
+
         self.readonly_midlines = {}
         self.readonly_connections = []
 
@@ -226,6 +231,14 @@ class CrackAnnotator(QtWidgets.QWidget):
         if event.key() in (Qt.Key_Backspace, Qt.Key_Z):
             if self.polyline_mode and self._is_drawing and self.polyline:
                 self._undo_polyline_points(2)
+                self.update()
+                return
+        if event.key() == Qt.Key_T:
+            if callable(self.overlay_toggle_cb):
+                self.overlay_toggle_cb()
+                return
+            if self.overlay_pixmap is not None:
+                self.use_overlay = not self.use_overlay
                 self.update()
                 return
         if event.key() == Qt.Key_Escape:
