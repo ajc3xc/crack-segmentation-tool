@@ -1135,6 +1135,7 @@ def generate_mask_from_edges(
     Outputs:
       - <tag>_mask.png
       - <tag>_mask_overlay.png (GT-style overlay)
+      - <tag>_mask_quads.png (quad rasterization debug)
 
     Returns
     -------
@@ -1196,6 +1197,7 @@ def generate_mask_from_edges(
         raise ValueError(f"insufficient usable normals ({good_frac*100.0:.1f}%)")
 
     mask = np.zeros((H, W), np.uint8)
+    raster_quads = []
 
     # Fill a continuous strip by rasterizing quads between consecutive normals.
     good_idx = np.where(good)[0]
@@ -1216,6 +1218,7 @@ def generate_mask_from_edges(
 
         quad[:, 0] = np.clip(quad[:, 0], 0, W - 1)
         quad[:, 1] = np.clip(quad[:, 1], 0, H - 1)
+        raster_quads.append(quad.copy())
         quad_i = np.round(quad).astype(np.int32).reshape(-1, 1, 2)
         cv2.fillPoly(mask, [quad_i], 1)
 
@@ -1295,6 +1298,16 @@ def generate_mask_from_edges(
 
     if out_dir:
         cv2.imwrite(os.path.join(out_dir, f"{tag}_mask.png"), mask * 255)
+        try:
+            save_mask_quadrilateral_debug_plot(
+                img_gray=img_gray,
+                quads_xy=raster_quads,
+                n1_xy=n1[good],
+                n2_xy=n2[good],
+                out_png=os.path.join(out_dir, f"{tag}_mask_quads.png"),
+            )
+        except Exception as e:
+            print(f"[MASK DEBUG] failed to save quad plot: {e}")
 
     # --------------------------------------------------
     # DEBUG: GT-style overlay (KEEP THIS)
@@ -1328,6 +1341,89 @@ def generate_mask_from_edges(
         )
 
     return mask
+
+
+def save_mask_quadrilateral_debug_plot(
+    *,
+    img_gray,
+    quads_xy,
+    n1_xy=None,
+    n2_xy=None,
+    out_png,
+):
+    """
+    Save a side-by-side debug image:
+      - Left: cv2.polylines view of n1/n2 normal-side traces.
+      - Right: quadrilateral rasterization view used for mask construction.
+
+    Parameters
+    ----------
+    img_gray : (H,W) or (H,W,3)
+        Base crop image.
+    quads_xy : list of (4,2) arrays
+        Quad vertices in (x,y) order.
+    n1_xy, n2_xy : optional (N,2)
+        Normal-side points used to build quads.
+    out_png : str
+        Output path.
+    """
+    import os
+    import numpy as np
+    import cv2
+
+    src = np.asarray(img_gray)
+    if src.ndim == 2:
+        base = cv2.cvtColor(src.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+    elif src.ndim == 3 and src.shape[2] == 3:
+        base = src.astype(np.uint8).copy()
+    else:
+        raise ValueError(f"unexpected img_gray shape: {src.shape}")
+
+    H, W = base.shape[:2]
+
+    # ----------------------------
+    # Left panel: polylines only
+    # ----------------------------
+    left = base.copy()
+    for arr, col in ((n1_xy, (0, 255, 255)), (n2_xy, (255, 255, 0))):
+        if arr is None:
+            continue
+        A = np.asarray(arr, np.float32)
+        if A.ndim != 2 or A.shape[1] != 2:
+            continue
+        A = A[np.isfinite(A).all(axis=1)]
+        if len(A) >= 2:
+            A[:, 0] = np.clip(A[:, 0], 0, W - 1)
+            A[:, 1] = np.clip(A[:, 1], 0, H - 1)
+            pts = np.round(A).astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(left, [pts], isClosed=False, color=col, thickness=1, lineType=cv2.LINE_AA)
+
+    # ----------------------------
+    # Right panel: quad rasterization
+    # ----------------------------
+    overlay = base.copy()
+    line = base.copy()
+    for q in (quads_xy or []):
+        q = np.asarray(q, np.float32).reshape(-1, 2)
+        if q.shape != (4, 2):
+            continue
+        q[:, 0] = np.clip(q[:, 0], 0, W - 1)
+        q[:, 1] = np.clip(q[:, 1], 0, H - 1)
+        qi = np.round(q).astype(np.int32).reshape(-1, 1, 2)
+        cv2.fillPoly(overlay, [qi], color=(40, 180, 255))
+        cv2.polylines(line, [qi], isClosed=True, color=(255, 90, 20), thickness=1, lineType=cv2.LINE_AA)
+    right = cv2.addWeighted(overlay, 0.33, line, 0.67, 0.0)
+
+    # Side-by-side canvas
+    gap = np.full((H, 8, 3), 40, dtype=np.uint8)
+    vis = np.hstack([left, gap, right])
+    cv2.putText(vis, "Polylines (n1/n2)", (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1, cv2.LINE_AA)
+    cv2.putText(vis, "Quads", (W + 16, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1, cv2.LINE_AA)
+
+    out_dir = os.path.dirname(out_png)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    cv2.imwrite(out_png, vis)
 
 
 def int2(a):
