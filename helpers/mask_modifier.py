@@ -175,6 +175,31 @@ class ImageMaskEditor(QtWidgets.QLabel):
         self.mask = self.original_mask.copy()
         self.refresh()
 
+    def toggle_overlay_mode(self):
+        self.overlay_mode = not self.overlay_mode
+        if self.show_image_only:
+            self.show_image_only = False
+        self.refresh()
+
+    def toggle_image_only_mode(self):
+        self.show_image_only = not self.show_image_only
+        if self.show_image_only:
+            self.painting = False
+            self.last_point = None
+        self.refresh()
+
+    def zoom_in(self):
+        anchor = self.mapFromGlobal(QtGui.QCursor.pos())
+        if not self.rect().contains(anchor):
+            anchor = QtCore.QPoint(self.width() // 2, self.height() // 2)
+        self._zoom_at(anchor, 1.15)
+
+    def zoom_out(self):
+        anchor = self.mapFromGlobal(QtGui.QCursor.pos())
+        if not self.rect().contains(anchor):
+            anchor = QtCore.QPoint(self.width() // 2, self.height() // 2)
+        self._zoom_at(anchor, 1.0 / 1.15)
+
     # ========================================================
     # Painting (Higher Density Interpolation)
     # ========================================================
@@ -333,27 +358,13 @@ class ImageMaskEditor(QtWidgets.QLabel):
     def keyPressEvent(self, event):
         win = self.window()
         if event.key() in (Qt.Key_M,):
-            self.overlay_mode = not self.overlay_mode
-            if self.show_image_only:
-                self.show_image_only = False
-            self.refresh()
+            self.toggle_overlay_mode()
         elif event.key() == Qt.Key_T:
-            # Toggle image-only vs overlay view.
-            self.show_image_only = not self.show_image_only
-            if self.show_image_only:
-                self.painting = False
-                self.last_point = None
-            self.refresh()
+            self.toggle_image_only_mode()
         elif event.key() in (Qt.Key_Plus, Qt.Key_Equal):
-            anchor = self.mapFromGlobal(QtGui.QCursor.pos())
-            if not self.rect().contains(anchor):
-                anchor = QtCore.QPoint(self.width() // 2, self.height() // 2)
-            self._zoom_at(anchor, 1.15)
+            self.zoom_in()
         elif event.key() in (Qt.Key_Minus, Qt.Key_Underscore):
-            anchor = self.mapFromGlobal(QtGui.QCursor.pos())
-            if not self.rect().contains(anchor):
-                anchor = QtCore.QPoint(self.width() // 2, self.height() // 2)
-            self._zoom_at(anchor, 1.0 / 1.15)
+            self.zoom_out()
         elif event.key() == Qt.Key_Z and event.modifiers() & Qt.ControlModifier:
             self.undo()
         elif event.key() == Qt.Key_R:
@@ -393,6 +404,29 @@ class MainWindow(QtWidgets.QMainWindow):
             self.resize(screen.availableGeometry().size())
         # Run the same path as pressing "R" once startup/init is complete.
         QtCore.QTimer.singleShot(0, self.editor.reset_mask)
+        QtCore.QTimer.singleShot(0, self.editor.setFocus)
+
+    def _install_shortcuts(self):
+        self._shortcuts = []
+        def _add(seq, fn):
+            sc = QtWidgets.QShortcut(QtGui.QKeySequence(seq), self)
+            sc.setContext(Qt.ApplicationShortcut)
+            sc.activated.connect(fn)
+            self._shortcuts.append(sc)
+
+        _add("M", self.editor.toggle_overlay_mode)
+        _add("T", self.editor.toggle_image_only_mode)
+        _add("R", self.editor.reset_mask)
+        _add("S", self.save_mask)
+        _add("Return", self.save_and_close)
+        _add("Enter", self.save_and_close)
+        _add("Ctrl+Z", self.editor.undo)
+        _add("Esc", self.close)
+        _add("Q", self.close)
+        _add("+", self.editor.zoom_in)
+        _add("=", self.editor.zoom_in)
+        _add("-", self.editor.zoom_out)
+        _add("_", self.editor.zoom_out)
 
     def _build_ui(self):
         central = QtWidgets.QWidget()
@@ -454,6 +488,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin.valueChanged.connect(self.slider.setValue)
         self.slider.valueChanged.connect(self.spin.setValue)
         tb.addWidget(self.spin)
+        self._install_shortcuts()
 
     def save_mask(self):
         cv2.imwrite(self.out_path, self.editor.mask)
@@ -483,6 +518,29 @@ class MaskEditorDialog(QtWidgets.QDialog):
             self.resize(int(avail.width() * 0.90), int(avail.height() * 0.90))
 
         QtCore.QTimer.singleShot(0, self.editor.reset_mask)
+        QtCore.QTimer.singleShot(0, self.editor.setFocus)
+
+    def _install_shortcuts(self):
+        self._shortcuts = []
+        def _add(seq, fn):
+            sc = QtWidgets.QShortcut(QtGui.QKeySequence(seq), self)
+            sc.setContext(Qt.ApplicationShortcut)
+            sc.activated.connect(fn)
+            self._shortcuts.append(sc)
+
+        _add("M", self.editor.toggle_overlay_mode)
+        _add("T", self.editor.toggle_image_only_mode)
+        _add("R", self.editor.reset_mask)
+        _add("S", self.save_mask)
+        _add("Return", self.save_and_close)
+        _add("Enter", self.save_and_close)
+        _add("Ctrl+Z", self.editor.undo)
+        _add("Esc", self.reject)
+        _add("Q", self.reject)
+        _add("+", self.editor.zoom_in)
+        _add("=", self.editor.zoom_in)
+        _add("-", self.editor.zoom_out)
+        _add("_", self.editor.zoom_out)
 
     def _build_ui(self):
         root = QtWidgets.QVBoxLayout(self)
@@ -552,6 +610,7 @@ class MaskEditorDialog(QtWidgets.QDialog):
         btn_cancel.clicked.connect(self.reject)
         btn_undo.clicked.connect(self.editor.undo)
         btn_reset.clicked.connect(self.editor.reset_mask)
+        self._install_shortcuts()
 
     def _flash_saved_feedback(self, ms=1400):
         if hasattr(self, "btn_save"):

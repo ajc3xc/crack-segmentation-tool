@@ -82,7 +82,7 @@ class CrackAnnotator(QtWidgets.QWidget):
         self._last_pair_error = None
 
         self._erase_timer = QtCore.QTimer()
-        self._erase_timer.timeout.connect(lambda: (self._pop_poly_point(), self.update()))
+        self._erase_timer.timeout.connect(self._erase_tick)
         self._erase_start_time = None
 
         self.readonly_midlines = {}
@@ -195,6 +195,28 @@ class CrackAnnotator(QtWidgets.QWidget):
         if self.polyline:
             self.polyline.pop()
 
+    def _undo_polyline_points(self, n=1):
+        removed = 0
+        for _ in range(max(1, int(n))):
+            if not self.polyline:
+                break
+            self.polyline.pop()
+            removed += 1
+        if not self.polyline:
+            self._is_drawing = False
+            self._start_idx = None
+        return removed
+
+    def _erase_tick(self):
+        if not self._is_drawing:
+            self._erase_timer.stop()
+            return
+        removed = self._undo_polyline_points(2)
+        if removed > 0:
+            self.update()
+        else:
+            self._erase_timer.stop()
+
     def _point_radius_screen(self):
         r = self.point_radius * (self.scale ** 0.5)
         return max(1, min(16, r))
@@ -203,7 +225,7 @@ class CrackAnnotator(QtWidgets.QWidget):
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Backspace, Qt.Key_Z):
             if self.polyline_mode and self._is_drawing and self.polyline:
-                self._pop_poly_point()
+                self._undo_polyline_points(2)
                 self.update()
                 return
         if event.key() == Qt.Key_Escape:
@@ -1726,17 +1748,12 @@ class CrackAnnotator(QtWidgets.QWidget):
             elif event.button() == Qt.RightButton:
                 if self._is_drawing:
                     self._erase_timer.stop()
-                    QtCore.QTimer.singleShot(500, lambda: (
-                        self._erase_timer.start(75)
+                    QtCore.QTimer.singleShot(250, lambda: (
+                        self._erase_timer.start(40)
                         if (QtWidgets.QApplication.mouseButtons() & Qt.RightButton and self._is_drawing)
                         else None
                     ))
-                    if len(self.polyline) > 1:
-                        self._pop_poly_point()
-                    else:
-                        self.polyline = []
-                        self._is_drawing = False
-                        self._start_idx = None
+                    self._undo_polyline_points(2)
                     self.update()
                 return
 
