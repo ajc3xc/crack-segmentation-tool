@@ -1393,6 +1393,122 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             fam["g33"] = float(fam.get("g33", 25.0))
             return fam
 
+        # ============================================================
+        # FAST METRICS MODE (early-draft quick evaluation)
+        # ============================================================
+        FAST_METRICS_MODE = True
+        FAST_IMAGE_INDICES = None
+        # FAST_IMAGE_INDICES = [21, 22, *range(60, 66)]  # optional subset
+
+        if FAST_METRICS_MODE:
+            print("[global-metrics] ⚡ FAST METRICS MODE")
+
+            FAST_EDGE = {
+                "window_half_size": 45,
+                "mu": 0.0,
+                "l": 5,
+                "p": 14,
+                "seg_mode": "new",
+            }
+
+            idxs_all = list(range(len(self.image_names)))
+
+            if FAST_IMAGE_INDICES:
+                apply_idxs = sorted(set(
+                    int(i) for i in FAST_IMAGE_INDICES
+                    if 0 <= int(i) < len(idxs_all)
+                ))
+                print(f"[fast] subset indices: {apply_idxs}")
+            else:
+                apply_idxs = idxs_all
+                print(f"[fast] full dataset ({len(apply_idxs)} images)")
+
+            orig_n = self.n
+            t_start = time.perf_counter()
+
+            try:
+                for t, idx in enumerate(apply_idxs, 1):
+                    base = os.path.splitext(os.path.basename(self.image_names[idx]))[0]
+                    ann_path = _ann_path(idx)
+
+                    if not os.path.exists(ann_path):
+                        print(f"[fast] ⚠ skip {base} - no JSON")
+                        continue
+                    if not _json_has_manual_midlines(ann_path):
+                        print(f"[fast] ⚠ skip {base} - no manual midlines")
+                        continue
+
+                    self.n = idx
+                    self.change_image()
+
+                    print(f"\n====== [fast] {t}/{len(apply_idxs)}: {base} ======")
+
+                    # ----------------------------
+                    # Snapshot sync
+                    # ----------------------------
+                    try:
+                        self._purge_metrics_for_current_image()
+                        self._sync_metrics_snapshot_from_authoring(
+                            refresh_combine=True,
+                            persist=True,
+                        )
+                    except Exception as e:
+                        print(f"[fast] snapshot sync failed: {e}")
+
+                    ann = self.annotation.get("annotations", {}) or {}
+                    atomic = ann.get("atomic_cracks", {}) or {}
+
+                    manual_ids = []
+                    for cid, cr in atomic.items():
+                        src = (cr.get("source") or "").lower()
+                        if src.startswith("auto") or src == "combined":
+                            continue
+                        mid = metrics._finite_xy(cr.get("midline", []))
+                        if len(mid) >= 2:
+                            manual_ids.append(cid)
+
+                    if not manual_ids:
+                        print(f"[fast] no manual cracks in {base}")
+                        continue
+
+                    # ----------------------------
+                    # Edge tracking (fixed params)
+                    # ----------------------------
+                    try:
+                        _ = self.run_edge_tracking_parallel(
+                            crack_ids=manual_ids,
+                            cpu_max_workers=edge_parallel_workers,
+                            edge_params_fixed=FAST_EDGE,
+                        )
+                    except Exception as e:
+                        print(f"[fast] edge tracking failed: {e}")
+
+                    # ----------------------------
+                    # Metrics (manual only)
+                    # ----------------------------
+                    try:
+                        self.compute_mask_and_width_metrics_for_image(
+                            display=False,
+                            export_supervision=True,
+                            include_auto=False,
+                        )
+                    except Exception as e:
+                        print(f"[fast] metrics failed: {e}")
+
+                # ----------------------------
+                # Dataset summary
+                # ----------------------------
+                self.summarize_dataset_metrics()
+
+            finally:
+                self.n = orig_n
+                self.change_image()
+
+            total = time.perf_counter() - t_start
+            print(f"[fast] ⏱ total runtime: {total:.2f}s")
+
+            return
+
         rs3_strategy_norm = str(rs3_strategy or "full").strip().lower()
         fixed_rs3_family = _resolve_fixed_rs3_family() if rs3_strategy_norm in {"default_only", "fixed"} else None
         rs3_g_variants_run = g_variants

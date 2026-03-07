@@ -35,6 +35,107 @@ def _finite_xy(arr):
             keep.append(i)
     return a[keep]
 
+def plot_greedy_branch_debug(
+    *,
+    atomics,
+    branches,
+    attach_orders,
+    endpoint_graph_deg,
+    connected_comp_size,
+    group_id,
+    debug_dir,
+):
+    """
+    Optional 2-panel debug plot for greedy branch construction.
+    """
+    if debug_dir is None:
+        return
+
+    has_junction = any(int(d) >= 3 for d in (endpoint_graph_deg or {}).values())
+    if not has_junction:
+        return
+
+    if int(connected_comp_size or 0) < 4:
+        return
+
+    if len(branches or []) < 2:
+        return
+
+    import os
+    import matplotlib.pyplot as plt
+
+    os.makedirs(debug_dir, exist_ok=True)
+    safe_gid = str(group_id).replace(os.sep, "_").replace("/", "_")
+    out_path = os.path.join(debug_dir, f"greedy_branches_group_{safe_gid}.png")
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6), dpi=200)
+
+    # Panel A: input topology
+    ax_a = axes[0]
+    for a in atomics:
+        S = np.asarray(a.get("poly", []), float)
+        if S.ndim == 2 and len(S) >= 2:
+            ax_a.plot(S[:, 0], S[:, 1], color="lightgray", linewidth=1.0)
+
+    junction_pts = [k for k, d in (endpoint_graph_deg or {}).items() if int(d) >= 3]
+    if junction_pts:
+        jp = np.asarray(junction_pts, float)
+        if jp.ndim == 2 and jp.shape[1] == 2:
+            ax_a.scatter(jp[:, 0], jp[:, 1], c="red", s=12)
+
+    ax_a.set_title("A - Atomic Crack Topology")
+    ax_a.set_aspect("equal", adjustable="box")
+
+    # Panel B: greedy result
+    ax_b = axes[1]
+    cmap = plt.get_cmap("tab10")
+    for b_idx, branch in enumerate(branches):
+        color = cmap(int(b_idx % 10))
+        for atomic_idx in branch:
+            S = np.asarray(atomics[atomic_idx]["poly"], float)
+            if S.ndim != 2 or len(S) < 2:
+                continue
+            ax_b.plot(S[:, 0], S[:, 1], color=color, linewidth=2.8)
+            mid = S[len(S) // 2]
+            order = attach_orders.get(int(atomic_idx), None)
+            if order is not None:
+                # Offset text slightly off the centerline so digits don't sit on top of the branch.
+                if len(S) >= 3:
+                    i = len(S) // 2
+                    v = S[min(i + 1, len(S) - 1)] - S[max(i - 1, 0)]
+                else:
+                    v = S[-1] - S[0]
+                n = np.array([-v[1], v[0]], float)
+                nn = float(np.linalg.norm(n))
+                if nn > 1e-9:
+                    n /= nn
+                else:
+                    n[:] = 0.0
+                off = 4.0 * n
+                ax_b.text(
+                    float(mid[0] + off[0]),
+                    float(mid[1] + off[1]),
+                    str(int(order)),
+                    color="black",
+                    fontsize=7,
+                    ha="center",
+                    va="center",
+                    zorder=50,
+                    bbox=dict(
+                        boxstyle="round,pad=0.1",
+                        facecolor="white",
+                        edgecolor="none",
+                        alpha=0.65,
+                    ),
+                )
+
+    ax_b.set_title("B - Greedy Branch Construction (numbers = attachment order)")
+    ax_b.set_aspect("equal", adjustable="box")
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=200)
+    plt.close(fig)
+
 
 '''def _split_lines(geom):
     if geom.is_empty: return []
@@ -587,17 +688,25 @@ def dominant_segments_from_group(
         return {"shape": [int(mask_u8.shape[0]), int(mask_u8.shape[1])], "packbits_b64": b64}
 
     # -----------------------------
-    # 1) collect atomics + endpoints
+    # 1) collect atomic segments
     # -----------------------------
-    atomics = []     # [(cid_str, S_user)]
-    endpoints = []   # [set((x,y), ...)]
+    atomics = []  # list of dicts: {"atomic_id", "poly", "length", "endpoints"}
 
     for m in members:
         cr = atomic.get(str(m), {}) or {}
-        midl = np.asarray(cr.get("midline", []), float)
-        if midl.ndim == 2 and len(midl) >= 2:
-            atomics.append((str(m), _finite_xy(midl)))
-            endpoints.append(get_user_endpoints(cr))
+        S = np.asarray(cr.get("midline", []), float)
+        if S.ndim == 2 and len(S) >= 2:
+            S = _finite_xy(S)
+            if S is None or len(S) < 2:
+                continue
+            atomics.append(
+                {
+                    "atomic_id": str(m),
+                    "poly": S,
+                    "length": float(_linestring_length(S)),
+                    "endpoints": get_user_endpoints(cr),
+                }
+            )
 
     if not atomics:
         return [], {"branches": [], "segments_meta": [], "bite": None}
@@ -662,19 +771,101 @@ def dominant_segments_from_group(
         crack_mask = None
 
     # -----------------------------
-    # 2) build branches in atomic space
+    # 2) build branches greedily in atomic space
     # -----------------------------
-    N = len(atomics)
-    adj = {i: set() for i in range(N)}
-    for i in range(N):
-        for j in range(i + 1, N):
-            if endpoints[i] & endpoints[j]:
-                adj[i].add(j)
-                adj[j].add(i)
+    def _endpoints(S):
+        return np.asarray(S[0], float), np.asarray(S[-1], float)
 
-    branches = []
+    def _pts_close(a, b, tol=1e-6):
+        return float(np.linalg.norm(a - b)) <= tol
+
+    unused = set(range(len(atomics)))
+    branches = []  # list[list[atomic indices]]
+    attach_orders = {}  # atomic_idx -> order within branch (1-based)
+
+    while unused:
+        # start new branch with longest remaining segment
+        start_idx = max(unused, key=lambda i: atomics[i]["length"])
+        unused.remove(start_idx)
+
+        branch = [start_idx]
+        attach_orders[int(start_idx)] = 1
+        order_in_branch = 1
+        S0 = atomics[start_idx]["poly"]
+        b_start, b_end = _endpoints(S0)
+
+        grew = True
+        while grew:
+            grew = False
+            best_j = None
+            best_len = -1.0
+            best_attach_mode = None  # ("start"/"end", flip_bool)
+
+            for j in list(unused):
+                Sj = atomics[j]["poly"]
+                j_start, j_end = _endpoints(Sj)
+
+                # try attach to branch end
+                if _pts_close(b_end, j_start):
+                    mode = ("end", False)
+                elif _pts_close(b_end, j_end):
+                    mode = ("end", True)
+                # try attach to branch start
+                elif _pts_close(b_start, j_end):
+                    mode = ("start", False)
+                elif _pts_close(b_start, j_start):
+                    mode = ("start", True)
+                else:
+                    continue
+
+                if atomics[j]["length"] > best_len:
+                    best_len = atomics[j]["length"]
+                    best_j = j
+                    best_attach_mode = mode
+
+            if best_j is not None:
+                side, flip = best_attach_mode
+                unused.remove(best_j)
+                branch.append(best_j)
+                order_in_branch += 1
+                attach_orders[int(best_j)] = int(order_in_branch)
+
+                Sj = atomics[best_j]["poly"]
+                if flip:
+                    Sj = Sj[::-1].copy()
+
+                j_start, j_end = _endpoints(Sj)
+                if side == "end":
+                    b_end = j_end
+                else:
+                    b_start = j_start
+
+                grew = True
+
+        branches.append(branch)
+
+    # --------------------------------------------------
+    # Optional greedy-branch construction debug plot
+    # --------------------------------------------------
+    endpoint_graph_deg = {}
+    for i, a in enumerate(atomics):
+        for pt in a.get("endpoints", set()) or set():
+            k = (float(pt[0]), float(pt[1]))
+            endpoint_graph_deg.setdefault(k, set()).add(i)
+    endpoint_graph_deg = {k: len(v) for k, v in endpoint_graph_deg.items()}
+
+    seg_adj = {i: set() for i in range(len(atomics))}
+    for i in range(len(atomics)):
+        ei = atomics[i].get("endpoints", set()) or set()
+        for j in range(i + 1, len(atomics)):
+            ej = atomics[j].get("endpoints", set()) or set()
+            if ei & ej:
+                seg_adj[i].add(j)
+                seg_adj[j].add(i)
+
+    comps = []
     seen = set()
-    for i in range(N):
+    for i in range(len(atomics)):
         if i in seen:
             continue
         stack = [i]
@@ -685,8 +876,19 @@ def dominant_segments_from_group(
                 continue
             seen.add(u)
             comp.append(u)
-            stack.extend(adj[u])
-        branches.append(comp)
+            stack.extend(seg_adj[u])
+        comps.append(comp)
+
+    connected_comp_size = len(comps[0]) if len(comps) == 1 else 0
+    plot_greedy_branch_debug(
+        atomics=atomics,
+        branches=branches,
+        attach_orders=attach_orders,
+        endpoint_graph_deg=endpoint_graph_deg,
+        connected_comp_size=connected_comp_size,
+        group_id=debug_tag,
+        debug_dir=debug_dir,
+    )
 
     # -----------------------------
     # 3) per-branch user length + seg lists
@@ -695,17 +897,18 @@ def dominant_segments_from_group(
     branch_user_segs = []        # list[list[(atomic_id, USER_polyline)]]
     branch_terr_segs = []        # list[list[polyline_piece]] (ONLY used for DT territory mode)
 
-    for atom_ids in branches:
+    for br in branches:
         total_len = 0.0
         user_segs = []
         terr_segs = []
 
-        for ai in atom_ids:
-            atomic_id, S_user = atomics[ai]
+        for idx in br:
+            atomic_id = atomics[idx]["atomic_id"]
+            S_user = atomics[idx]["poly"]
             if S_user is None or len(S_user) < 2:
                 continue
 
-            total_len += _linestring_length(S_user)
+            total_len += atomics[idx]["length"]
             user_segs.append((atomic_id, S_user))
 
             # Territory polylines only needed when we have a crack_mask to clip to
@@ -1045,6 +1248,21 @@ def dominant_segments_from_group(
     if primary_branch is not None:
         assert str(int(primary_branch)) not in bite_by_losing_branch_export
 
+    # -------------------------------------------------
+    # Branch territory export (AUTHORITATIVE for GT mask restriction)
+    # -------------------------------------------------
+    branch_territory_export = {}
+    for bi, terr in branch_terr_masks.items():
+        terr_u8 = (terr > 0).astype(np.uint8)
+        if not np.any(terr_u8):
+            continue
+        terr_crop = terr_u8[by0:by1, bx0:bx1].astype(np.uint8)
+        terr_blob = _pack_mask_b64(terr_crop)
+        branch_territory_export[str(int(bi))] = {
+            "shape": terr_blob["shape"],
+            "packbits_b64": terr_blob["packbits_b64"],
+        }
+
     
     meta = {
         "members": [str(m) for m in members],
@@ -1052,6 +1270,7 @@ def dominant_segments_from_group(
         "order": [int(b) for b in order],
         "branches": branch_stats,
         "segments_meta": segments_meta,
+        "branch_territory": branch_territory_export,
 
         # -------------------------------------------------
         # Bite metadata
@@ -1266,19 +1485,19 @@ def dominant_segments_from_group(
 
         legend_items = [
             Line2D([0], [0], color="white", lw=2, linestyle=(0, (1, 3)),
-                label="User midlines (only if clipped)"),
+                label="Clipped user midlines"),
 
             Line2D([0], [0], color="black", lw=3,
                 label="Kept midlines (branch-colored)"),
 
             Line2D([0], [0], color="red", lw=6, alpha=0.55,
-                label="Bite: mask dominance"),
+                label="Bite: mask"),
 
             Line2D([0], [0], color="#e67e22", lw=6, alpha=0.55,
-                label="Bite: territory dominance"),
+                label="Bite: territory"),
 
             Line2D([0], [0], color="#d16ba5", lw=6, alpha=0.55,
-                label="Bite: mask + territory dominance"),
+                label="Bite: mask + territory"),
 
             Line2D([0], [0], color="#0033cc", lw=1.5,
                 label="BBox"),
@@ -1286,9 +1505,11 @@ def dominant_segments_from_group(
         
         leg = ax.legend(
             handles=legend_items,
-            loc="lower right",
-            fontsize=8,
-            framealpha=0.9,
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.0),
+            borderaxespad=0.0,
+            fontsize=7,
+            framealpha=0.2,
         )
         leg.set_zorder(100)
 
@@ -1461,19 +1682,26 @@ def plot_branch_territory_debug_pre(
 
     legend_items = [
         Line2D([0], [0], color="white", lw=2, linestyle=(0, (1, 3)),
-               label="User midlines (only if clipped)"),
+               label="Clipped user midlines"),
         Line2D([0], [0], color="black", lw=3,
                label="Kept midlines (branch-colored)"),
         Line2D([0], [0], color="red", lw=6, alpha=0.55,
-               label="Bite: mask dominance"),
+               label="Bite: mask"),
         Line2D([0], [0], color="#e67e22", lw=6, alpha=0.55,
-               label="Bite: territory dominance"),
+               label="Bite: territory"),
         Line2D([0], [0], color="#d16ba5", lw=6, alpha=0.55,
-               label="Bite: mask + territory dominance"),
+               label="Bite: mask + territory"),
         Line2D([0], [0], color="#0033cc", lw=1.5, label="BBox"),
     ]
 
-    leg = ax.legend(handles=legend_items, loc="lower right", fontsize=8, framealpha=0.9)
+    leg = ax.legend(
+        handles=legend_items,
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0.0,
+        fontsize=7,
+        framealpha=0.2,
+    )
     leg.set_zorder(100)
 
     ax.set_title(f"{debug_tag} — PRE", fontsize=10)
@@ -2515,10 +2743,62 @@ def build_combined_crack_stateless(
             except Exception:
                 return None, None
 
+        def _branch_endpoint_degree_diag(segs_in, tol=2.0):
+            """
+            Cluster segment endpoints and report node degrees to detect non-chain branches.
+            """
+            endpoints = []
+            for si, S in enumerate(segs_in or []):
+                S = np.asarray(S, float)
+                if S.ndim != 2 or S.shape[1] != 2 or len(S) < 2:
+                    continue
+                endpoints.append((si, "start", np.asarray(S[0], float)))
+                endpoints.append((si, "end", np.asarray(S[-1], float)))
+
+            if len(endpoints) < 2:
+                return
+
+            clusters = []
+            for si, tag, p in endpoints:
+                assigned = False
+                for c in clusters:
+                    if float(np.linalg.norm(p - c["center"])) <= float(tol):
+                        c["items"].append((si, tag, p))
+                        P = np.vstack([it[2] for it in c["items"]])
+                        c["center"] = np.mean(P, axis=0)
+                        assigned = True
+                        break
+                if not assigned:
+                    clusters.append({"center": p.copy(), "items": [(si, tag, p)]})
+
+            deg = [len(c["items"]) for c in clusters]
+            odd = int(sum(1 for d in deg if (d % 2) == 1))
+            max_deg = int(max(deg)) if deg else 0
+            chain_like = bool(max_deg <= 2 and (odd == 0 or odd == 2))
+            nodes_preview = [
+                (
+                    round(float(c["center"][0]), 3),
+                    round(float(c["center"][1]), 3),
+                    int(len(c["items"])),
+                )
+                for c in clusters
+            ]
+            print(
+                f"[TOPO DEGREE] branch={branch_id} tol={float(tol):.2f} "
+                f"nodes={len(clusters)} odd={odd} max_deg={max_deg} chain_like={chain_like} "
+                f"node_degrees={nodes_preview[:8]}"
+            )
+            if not chain_like:
+                print(
+                    f"[TOPO DEGREE WARN] branch={branch_id} appears non-chain; "
+                    f"stitch may require teleport or fail in manual mode."
+                )
+
         # Debug endpoint drift vs declared user topology before stitching.
         if len(seg_list) >= 2:
             try:
                 print(f"[TOPO PRE-STITCH] branch={branch_id} n_segs={len(seg_list)}")
+                _branch_endpoint_degree_diag(seg_list, tol=2.0)
                 for i, S in enumerate(seg_list):
                     S = np.asarray(S, float)
                     mm = seg_meta_list[i] if i < len(seg_meta_list) and isinstance(seg_meta_list[i], dict) else {}

@@ -1380,11 +1380,25 @@ def save_mask_quadrilateral_debug_plot(
         raise ValueError(f"unexpected img_gray shape: {src.shape}")
 
     H, W = base.shape[:2]
+    sample_stride = 10
 
     # ----------------------------
     # Left panel: polylines only
     # ----------------------------
     left = base.copy()
+    left_fill = left.copy()
+    for qi, q in enumerate(quads_xy or []):
+        if (qi % sample_stride) != 0:
+            continue
+        q = np.asarray(q, np.float32).reshape(-1, 2)
+        if q.shape != (4, 2):
+            continue
+        q[:, 0] = np.clip(q[:, 0], 0, W - 1)
+        q[:, 1] = np.clip(q[:, 1], 0, H - 1)
+        q_i = np.round(q).astype(np.int32).reshape(-1, 1, 2)
+        cv2.fillPoly(left_fill, [q_i], color=(120, 70, 255))
+    left = cv2.addWeighted(left_fill, 0.28, left, 0.72, 0.0)
+
     for arr, col in ((n1_xy, (0, 255, 255)), (n2_xy, (255, 255, 0))):
         if arr is None:
             continue
@@ -1413,6 +1427,17 @@ def save_mask_quadrilateral_debug_plot(
         cv2.fillPoly(overlay, [qi], color=(40, 180, 255))
         cv2.polylines(line, [qi], isClosed=True, color=(255, 90, 20), thickness=1, lineType=cv2.LINE_AA)
     right = cv2.addWeighted(overlay, 0.33, line, 0.67, 0.0)
+
+    def _legend_row(dst, x, y, color, text):
+        cv2.rectangle(dst, (x, y - 7), (x + 12, y + 5), color, thickness=-1)
+        cv2.putText(dst, text, (x + 18, y + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (235, 235, 235), 1, cv2.LINE_AA)
+
+    # Legends per panel so colors are self-explanatory.
+    _legend_row(left, 8, 30, (0, 255, 255), "n1 polyline")
+    _legend_row(left, 8, 48, (255, 255, 0), "n2 polyline")
+    _legend_row(left, 8, 66, (120, 70, 255), f"sampled quad fill (every {sample_stride})")
+    _legend_row(right, 8, 30, (40, 180, 255), "quad fill")
+    _legend_row(right, 8, 48, (255, 90, 20), "quad boundary")
 
     # Side-by-side canvas
     gap = np.full((H, 8, 3), 40, dtype=np.uint8)

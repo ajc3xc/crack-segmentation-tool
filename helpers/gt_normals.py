@@ -43,7 +43,10 @@ def export_gt_normals_for_image(
         try:
             # compute outward normals (from GT mask)
             (e1x, e1y, e2x, e2y, _), _ = normals_from_mask_for_midline(
-                ml, gt_mask_u8 > 0, step=step, max_radius=max_radius
+                ml,
+                gt_mask_u8 > 0,
+                max_radius=max_radius,
+                image_hw=image_hw,
             )
 
             for j in range(len(e1x)):

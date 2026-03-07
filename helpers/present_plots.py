@@ -1446,6 +1446,7 @@ def plot_from_cached_geometry(
             midline_xy_crop,
             gt_bin > 0,
             max_radius=50,
+            image_hw=gt_bin.shape[:2],
         )
 
         plot_gt_normals_on_gtbw(

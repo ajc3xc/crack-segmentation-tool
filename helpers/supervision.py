@@ -601,6 +601,19 @@ def _width_stability_stats(manual_widths, centered_widths):
         "centered_invalid_frac": float(1.0 - np.mean(vc)),
     }
 
+
+def _normals_diag_summary(diag, topk=4):
+    d = dict(diag) if isinstance(diag, dict) else {}
+    reasons = d.get("reasons", {}) if isinstance(d.get("reasons", {}), dict) else {}
+    reasons_sorted = sorted(reasons.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))
+    return {
+        "total": int(d.get("total", 0) or 0),
+        "valid": int(d.get("valid", 0) or 0),
+        "invalid": int(d.get("invalid", 0) or 0),
+        "invalid_frac": float(d.get("invalid_frac", 0.0) or 0.0),
+        "top_reasons": reasons_sorted[:max(1, int(topk))],
+    }
+
 def _geometry_disagreement_stats(manual_xy, centered_xy):
     """
     Sampling-agnostic geometric disagreement (bidirectional NN + robust Hausdorff).
@@ -887,9 +900,10 @@ def compute_centered_midline_and_normals(
     mid_xy,
     crack_mask_u8,
     territory_u8=None,
-    max_radius=50,
+    max_radius=60,
     domain_mode="terr_and_mask",
     snap_kwargs=None,
+    diag_out=None,
 ):
     """
     Center a polyline in DT domain and compute normals/widths on GT crack mask.
@@ -918,6 +932,8 @@ def compute_centered_midline_and_normals(
         centered,
         (np.asarray(crack_mask_u8) > 0),
         int(max_radius),
+        diagnostics=diag_out,
+        image_hw=np.asarray(crack_mask_u8).shape[:2],
     )
 
     normals = {
@@ -1604,10 +1620,19 @@ def export_gt_supervision_for_image(
 
         crack_mask = (cc_labels == lbl).astype(np.uint8)
 
+        manual_normals_diag = {}
         (e1x, e1y, e2x, e2y, widths), _ = normals_from_mask_for_midline(
             mid_xy,
             crack_mask > 0,
-            50
+            60,
+            diagnostics=manual_normals_diag,
+            image_hw=crack_mask.shape[:2],
+        )
+        diag_brief = _normals_diag_summary(manual_normals_diag)
+        print(
+            f"[GT_SUP NORMDBG] atomic {scid} manual total={diag_brief['total']} "
+            f"valid={diag_brief['valid']} invalid={diag_brief['invalid']} "
+            f"invalid_frac={diag_brief['invalid_frac']:.4f} top_reasons={diag_brief['top_reasons']}"
         )
 
         atomic_entry = {
@@ -1625,6 +1650,7 @@ def export_gt_supervision_for_image(
                 "width_px": _arr_to_list(widths),
             },
             "gt_widths": _arr_to_list(widths),
+            "gt_normals_diag": manual_normals_diag,
         }
 
         if enable_auto_centering:
@@ -1634,6 +1660,7 @@ def export_gt_supervision_for_image(
                 window_half_size=int(auto_centering_window_half_size),
                 dt_domain_u8=None,
             )
+            centered_normals_diag = {}
             centered_xy, centered_normals = compute_centered_midline_and_normals(
                 mid_xy=mid_xy,
                 crack_mask_u8=crack_mask,
@@ -1645,11 +1672,19 @@ def export_gt_supervision_for_image(
                     "step_px": float(auto_centering_step_px),
                     "keep_endpoints": True,
                 },
+                diag_out=centered_normals_diag,
+            )
+            cdiag_brief = _normals_diag_summary(centered_normals_diag)
+            print(
+                f"[GT_SUP NORMDBG] atomic {scid} centered total={cdiag_brief['total']} "
+                f"valid={cdiag_brief['valid']} invalid={cdiag_brief['invalid']} "
+                f"invalid_frac={cdiag_brief['invalid_frac']:.4f} top_reasons={cdiag_brief['top_reasons']}"
             )
 
             atomic_entry["midline_auto_centered"] = np.asarray(centered_xy, float).tolist()
             atomic_entry["gt_normals_auto_centered"] = centered_normals
             atomic_entry["gt_widths_auto_centered"] = centered_normals.get("width_px", [])
+            atomic_entry["gt_normals_auto_centered_diag"] = centered_normals_diag
             atomic_entry["auto_centering_meta"] = {
                 "enabled": True,
                 "domain_mode": str(auto_centering_domain_atomic),
@@ -1769,6 +1804,119 @@ def export_gt_supervision_for_image(
             gt_sup_diag["combined_skip_empty_after_canon"] += 1
             continue
         dom_meta["segments_meta"] = seg_meta
+
+        # -------------------------------------------------
+        # Build per-branch allowed GT masks from:
+        #   allowed_i = crack_mask - union(territory_j - bite_j) for j != i
+        # GT has no per-branch mask ownership; this only restricts where
+        # normals are allowed to exist.
+        # -------------------------------------------------
+        Hm, Wm = crack_mask.shape[:2]
+        global_mask = (crack_mask > 0).astype(np.uint8)
+
+        branch_order = dom_meta.get("order", []) or []
+        if not branch_order:
+            branch_order = sorted({
+                int(sm.get("branch_id", -1))
+                for sm in (seg_meta or [])
+                if int(sm.get("branch_id", -1)) >= 0
+            })
+
+        def _decode_packed_mask_local(blob, H, W):
+            """
+            Decode a packed cropped mask blob using the combined crack bbox.
+            Returns full-image uint8 mask.
+            """
+            full = np.zeros((H, W), np.uint8)
+            if not isinstance(blob, dict):
+                return full
+
+            bite_meta_local = dom_meta.get("bite", {}) if isinstance(dom_meta.get("bite", {}), dict) else {}
+            bbox = bite_meta_local.get("bbox", None)
+            if bbox is None or len(bbox) != 4:
+                return full
+
+            x0, y0, bw, bh = map(int, bbox)
+            shape = blob.get("shape", None)
+            b64 = blob.get("packbits_b64", None)
+            if shape is None or b64 is None:
+                return full
+
+            try:
+                import base64
+                raw = base64.b64decode(b64.encode("utf-8"))
+                bits = np.frombuffer(raw, dtype=np.uint8)
+                arr = np.unpackbits(bits)
+
+                hh = int(shape[0])
+                ww = int(shape[1])
+                n = hh * ww
+                if arr.size < n:
+                    arr = np.pad(arr, (0, n - arr.size), constant_values=0)
+
+                crop = arr[:n].reshape((hh, ww)).astype(np.uint8)
+
+                y1 = min(H, y0 + hh)
+                x1 = min(W, x0 + ww)
+                ch = max(0, y1 - y0)
+                cw = max(0, x1 - x0)
+
+                if ch > 0 and cw > 0:
+                    full[y0:y1, x0:x1] = crop[:ch, :cw]
+            except Exception:
+                pass
+
+            return full
+
+        # Territory per branch (full-image masks)
+        terr_meta = dom_meta.get("branch_territory", {}) if isinstance(dom_meta.get("branch_territory", {}), dict) else {}
+        branch_terr_masks = {}
+        for bi in branch_order:
+            bi_str = str(int(bi))
+            terr_blob = terr_meta.get(bi_str, {})
+            branch_terr_masks[int(bi)] = _decode_packed_mask_local(terr_blob, Hm, Wm)
+
+        # Bite per branch (full-image masks)
+        bite_meta = dom_meta.get("bite", {}) if isinstance(dom_meta.get("bite", {}), dict) else {}
+        bite_by_branch = bite_meta.get("by_losing_branch", {}) if isinstance(bite_meta.get("by_losing_branch", {}), dict) else {}
+
+        branch_bite_masks = {}
+        for bi in branch_order:
+            bi_str = str(int(bi))
+            bb = bite_by_branch.get(bi_str, {})
+            branch_bite_masks[int(bi)] = _decode_packed_mask_local(bb, Hm, Wm)
+
+        # Allowed mask per branch:
+        # remove only the surviving territory of OTHER branches
+        branch_allowed_masks = {}
+        for bi in branch_order:
+            bi = int(bi)
+            forbidden = np.zeros((Hm, Wm), np.uint8)
+            for sj in branch_order:
+                sj = int(sj)
+                if sj == bi:
+                    continue
+
+                terr_j = (branch_terr_masks.get(sj, np.zeros((Hm, Wm), np.uint8)) > 0).astype(np.uint8)
+                bite_j = (branch_bite_masks.get(sj, np.zeros((Hm, Wm), np.uint8)) > 0).astype(np.uint8)
+
+                # only forbid territory that branch sj still effectively owns
+                own_j = terr_j & (~bite_j.astype(bool))
+                forbidden |= own_j.astype(np.uint8)
+
+            allowed = global_mask & (~forbidden.astype(bool))
+            branch_allowed_masks[bi] = allowed.astype(np.uint8)
+
+        # Temporary sanity print for mask sizes
+        try:
+            for bi in branch_order:
+                bi = int(bi)
+                terr_px = int(np.count_nonzero(branch_terr_masks.get(bi, 0)))
+                bite_px = int(np.count_nonzero(branch_bite_masks.get(bi, 0)))
+                allow_px = int(np.count_nonzero(branch_allowed_masks.get(bi, 0)))
+                print(f"[GT_SUP MASKDBG] branch={bi} terr_px={terr_px} bite_px={bite_px} allow_px={allow_px}")
+        except Exception as _e:
+            print(f"[GT_SUP MASKDBG] failed: {_e}")
         
         # -------------------------------------------------
         # DEBUG: dominance bite as-written (RAW, no decode)
@@ -1792,9 +1940,27 @@ def export_gt_supervision_for_image(
         # Compute GT normals per segment
         # -------------------------------------------------
         e1x_list, e1y_list, e2x_list, e2y_list, w_list = [], [], [], [], []
-        for S in segs:
+        per_seg_manual_normals_diag = []
+        for si, S in enumerate(segs):
+            seg_diag = {}
+            bi = int(seg_meta[si].get("branch_id", -1)) if si < len(seg_meta) else -1
+            mask_use = branch_allowed_masks.get(
+                bi,
+                (crack_mask > 0).astype(np.uint8),
+            )
             (e1x, e1y, e2x, e2y, widths), _ = normals_from_mask_for_midline(
-                S, crack_mask > 0, 50
+                S,
+                mask_use > 0,
+                max_radius=50,
+                diagnostics=seg_diag,
+                image_hw=mask_use.shape[:2],
+            )
+            per_seg_manual_normals_diag.append(seg_diag)
+            sdiag_brief = _normals_diag_summary(seg_diag)
+            print(
+                f"[GT_SUP NORMDBG] combined {ccid} seg={si} manual total={sdiag_brief['total']} "
+                f"valid={sdiag_brief['valid']} invalid={sdiag_brief['invalid']} "
+                f"invalid_frac={sdiag_brief['invalid_frac']:.4f} top_reasons={sdiag_brief['top_reasons']}"
             )
             e1x_list.append(e1x)
             e1y_list.append(e1y)
@@ -1832,6 +1998,7 @@ def export_gt_supervision_for_image(
             "gt_widths": [float(v) for arr in w_list for v in np.asarray(arr, float)],
             "midline_segments": [np.asarray(S, float).tolist() for S in segs],
             "dominance_meta": dom_meta,
+            "gt_normals_diag_per_segment": per_seg_manual_normals_diag,
         }
 
         if enable_auto_centering:
@@ -1841,7 +2008,8 @@ def export_gt_supervision_for_image(
             invalid_manual_masks = []
             invalid_center_masks = []
 
-            for S, w_manual in zip(segs, w_list):
+            per_seg_centered_normals_diag = []
+            for seg_i, (S, w_manual) in enumerate(zip(segs, w_list)):
                 S = np.asarray(S, float)
                 terr_i = build_territory_mask_from_polyline(
                     mid_xy=S,
@@ -1849,6 +2017,7 @@ def export_gt_supervision_for_image(
                     window_half_size=int(auto_centering_window_half_size),
                     dt_domain_u8=None,
                 )
+                cseg_diag = {}
                 centered_S, centered_normals = compute_centered_midline_and_normals(
                     mid_xy=S,
                     crack_mask_u8=crack_mask,
@@ -1860,6 +2029,14 @@ def export_gt_supervision_for_image(
                         "step_px": float(auto_centering_step_px),
                         "keep_endpoints": True,
                     },
+                    diag_out=cseg_diag,
+                )
+                per_seg_centered_normals_diag.append(cseg_diag)
+                csdiag_brief = _normals_diag_summary(cseg_diag)
+                print(
+                    f"[GT_SUP NORMDBG] combined {ccid} seg={seg_i} centered total={csdiag_brief['total']} "
+                    f"valid={csdiag_brief['valid']} invalid={csdiag_brief['invalid']} "
+                    f"invalid_frac={csdiag_brief['invalid_frac']:.4f} top_reasons={csdiag_brief['top_reasons']}"
                 )
 
                 centered_S = np.asarray(centered_S, float)
@@ -1896,6 +2073,7 @@ def export_gt_supervision_for_image(
                 "edge2_y": _pack_arrs_with_none_separators([_arr_to_list(a) for a in ce2y_list]),
                 "width_px": _pack_arrs_with_none_separators([_arr_to_list(a) for a in cw_list]),
             }
+            combined_entry["gt_normals_auto_centered_diag_per_segment"] = per_seg_centered_normals_diag
             combined_entry["gt_widths_auto_centered"] = [
                 float(v) for arr in cw_list for v in np.asarray(arr, float)
             ]

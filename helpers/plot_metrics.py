@@ -413,7 +413,12 @@ def plot_gt_normals_for_crack(crack: dict, gt_full_u8: np.ndarray,
         return
 
     mask_bin = (gt_full_u8 > 0).astype(np.uint8)
-    (e1x, e1y, e2x, e2y, _w), _ = normals_from_mask_for_midline(mid, mask_bin, max_radius=50)
+    (e1x, e1y, e2x, e2y, _w), _ = normals_from_mask_for_midline(
+        mid,
+        mask_bin,
+        max_radius=50,
+        image_hw=mask_bin.shape[:2],
+    )
     e1 = np.column_stack([e1x, e1y]).astype(float)
     e2 = np.column_stack([e2x, e2y]).astype(float)
     plot_gt_normals_on_gtbw(gt_full_u8, mid, None, e1, e2,
