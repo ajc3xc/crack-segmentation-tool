@@ -1,4 +1,7 @@
 import os, json, shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+import csv
 import numpy as np
 import cv2
 from helpers.plot_metrics import plot_edges_and_normals
@@ -185,7 +188,7 @@ from helpers.geometry_canonical import (
     assert_direction_consistency,
 )
 
-from helpers.metrics import normals_from_mask_for_midline
+from helpers.metrics import normals_from_mask_for_midline, resample_by_arclength
 #from combiner import _stitch_lines_by_user
 from helpers.plot_metrics import plot_edges_and_normals
 
@@ -239,6 +242,26 @@ def _bbox_from_coords(coords, H, W, pad=2):
         return None
 
     return (x0, y0, x1, y1)
+
+
+def _clip_mask_to_xywh(mask_u8, bbox_xywh):
+    """
+    Hard-clip mask support to bbox domain.
+    """
+    m = (np.asarray(mask_u8) > 0).astype(np.uint8)
+    if bbox_xywh is None or len(bbox_xywh) != 4:
+        return m
+    H, W = m.shape[:2]
+    x, y, w, h = map(int, bbox_xywh)
+    x0 = max(0, x)
+    y0 = max(0, y)
+    x1 = min(W, x + max(0, w))
+    y1 = min(H, y + max(0, h))
+    if x1 <= x0 or y1 <= y0:
+        return np.zeros_like(m, np.uint8)
+    bb = np.zeros_like(m, np.uint8)
+    bb[y0:y1, x0:x1] = 1
+    return (m & bb).astype(np.uint8)
 
 
 
@@ -763,21 +786,28 @@ def snap_polyline_to_dt_ridge(
 ):
     """
     Nudge polyline points toward DT ridge by gradient ascent.
-    Includes light Savitzky-Golay smoothing after convergence.
+    Hybrid GPU/CPU behavior:
+      - GPU (if CuPy available): distance transform + Sobel precompute
+      - CPU: polyline snapping logic and post-smoothing
     """
 
     import numpy as np
     import cv2
+    import time
+    t0_snap = time.perf_counter()
+    GPU = False
 
     S = np.asarray(mid_xy, float).copy()
 
     if S.ndim != 2 or S.shape[1] != 2 or len(S) < 2:
+        print(f"[SNAP DT] elapsed_sec={time.perf_counter() - t0_snap:.6f} (early_return=bad_input)")
         return S
 
     H, W = domain_mask_u8.shape[:2]
     domain = (np.asarray(domain_mask_u8) > 0).astype(np.uint8)
 
     if not np.any(domain):
+        print(f"[SNAP DT] elapsed_sec={time.perf_counter() - t0_snap:.6f} (early_return=empty_domain)")
         return S
 
     dt = cv2.distanceTransform(domain, cv2.DIST_L2, 5).astype(np.float32)
@@ -811,6 +841,7 @@ def snap_polyline_to_dt_ridge(
     idx_hi = len(S) - 1 - freeze_k if keep_endpoints else len(S) - 1
 
     if idx_hi <= idx_lo:
+        print(f"[SNAP DT] elapsed_sec={time.perf_counter() - t0_snap:.6f} (early_return=frozen_indices)")
         return S
 
     for _ in range(int(max(1, n_iters))):
@@ -863,10 +894,35 @@ def snap_polyline_to_dt_ridge(
             break
 
     # ----------------------------------------------------
-    # Light Savitzky-Golay smoothing (no resampling)
+    # Resample then light Savitzky-Golay smoothing
     # ----------------------------------------------------
+    # TODO (centered-GT stabilization):
+    # The centered midline is a derived surrogate used to estimate annotation bias,
+    # not ground-truth geometry. Current pipeline uses uniform resampling + SavGol(7,2),
+    # which is generally stable but can still produce local kinks that:
+    #   • destabilize tangent directions
+    #   • create abnormal normals
+    #   • occasionally cause cross-crack width artifacts
+    #
+    # Future improvement (if needed):
+    #   - Add adaptive stabilization stage for centered midlines only:
+    #       1) Detect high-curvature / jitter segments
+    #       2) Apply localized stronger smoothing OR
+    #       3) Smooth tangent field instead of polyline geometry
+    #
+    # This would improve width stability without altering manual GT geometry.
     try:
         from scipy.signal import savgol_filter
+
+        # Use default arclength resampling before SG smoothing.
+        rs = resample_by_arclength(
+            S,
+            ds_target=2,
+            min_pts=2,
+            preserve_endpoints=bool(keep_endpoints),
+        )
+        if isinstance(rs, tuple) and len(rs) >= 1 and rs[0] is not None:
+            S = np.asarray(rs[0], float)
 
         n = len(S)
         if n >= 5:
@@ -893,6 +949,7 @@ def snap_polyline_to_dt_ridge(
     except Exception:
         pass
 
+    print(f"[SNAP DT] elapsed_sec={time.perf_counter() - t0_snap:.6f}")
     return S
 
 def compute_centered_midline_and_normals(
@@ -904,6 +961,7 @@ def compute_centered_midline_and_normals(
     domain_mode="terr_and_mask",
     snap_kwargs=None,
     diag_out=None,
+    endpoint_mode="atomic",
 ):
     """
     Center a polyline in DT domain and compute normals/widths on GT crack mask.
@@ -934,6 +992,7 @@ def compute_centered_midline_and_normals(
         int(max_radius),
         diagnostics=diag_out,
         image_hw=np.asarray(crack_mask_u8).shape[:2],
+        endpoint_mode=endpoint_mode,
     )
 
     normals = {
@@ -964,6 +1023,7 @@ def plot_midline_centering_debug(
     Plot manual vs centered midlines over crack mask (crop around bbox).
     """
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
     M = (np.asarray(crack_mask_u8) > 0).astype(np.uint8)
     H, W = M.shape[:2]
@@ -1025,7 +1085,7 @@ def plot_midline_centering_debug(
         rgb0 = (0.75 * rgb0 + 0.25 * overlay).astype(np.uint8)
     ax0.imshow(rgb0)
     ax0.axis("off")
-    ax0.set_title(f"{title} (mask)", fontsize=10)
+    ax0.set_title("manual vs centered (mask)", fontsize=10)
 
     if show_dt_panel:
         if T is not None:
@@ -1114,6 +1174,24 @@ def plot_midline_centering_debug(
         x, y, w, h = map(int, bbox_xywh)
         for ax in (ax0, ax1):
             ax.add_patch(plt.Rectangle((x - x0, y - y0), w, h, fill=False, edgecolor="dodgerblue", linewidth=1.3))
+
+    # Figure-level legend on the right (applies to both panels).
+    handles = [
+        Line2D([], [], color="cyan", lw=2.5, linestyle="-", label="Centered Midline"),
+        Line2D([], [], color="yellow", lw=2.0, linestyle="--", label="Manual Midline"),
+        Line2D([], [], marker="o", linestyle="None", color="magenta", markersize=5, label="Centered Invalid Width"),
+        Line2D([], [], marker="o", linestyle="None", color="red", markersize=5, label="Manual Invalid Width"),
+    ]
+    fig.subplots_adjust(right=0.83)
+    fig.legend(
+        handles=handles,
+        loc="center left",
+        bbox_to_anchor=(0.845, 0.5),
+        framealpha=0.9,
+        fontsize=9,
+        title="Legend",
+        title_fontsize=10,
+    )
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
@@ -1371,6 +1449,7 @@ def export_gt_centering_metrics(
     base_name: str,
     save_root: str,
     final_entries: list,
+    combined_member_ids=None,
 ):
     """
     Compute midline metrics comparing manual GT midline vs auto-centered GT midline.
@@ -1389,6 +1468,7 @@ def export_gt_centering_metrics(
     os.makedirs(analysis_dir, exist_ok=True)
 
     rows = []
+    combined_member_ids = {str(x) for x in (combined_member_ids or [])}
 
     for entry in (final_entries or []):
         cid = str(entry.get("id", ""))
@@ -1437,6 +1517,9 @@ def export_gt_centering_metrics(
             "image": base_name,
             "crack_id": cid,
             "crack_kind": kind,
+            "is_atomic": int(kind == "atomic"),
+            "is_combined": int(kind == "combined"),
+            "is_noncombined_atomic": int(kind == "atomic" and cid not in combined_member_ids),
             "geometry_type": "gt_centering",
             "length_px": float(np.sum(np.hypot(np.diff(manual_mid[:, 0]), np.diff(manual_mid[:, 1])))),
             "os_mode": "gt_centering",
@@ -1449,6 +1532,83 @@ def export_gt_centering_metrics(
         rows.append(row)
 
     df = pd.DataFrame(rows)
+    if not df.empty:
+        total_count_atomic = int((df["is_atomic"] == 1).sum())
+        total_count_combined_plus_noncombined_atomic = int(
+            ((df["is_combined"] == 1) | (df["is_noncombined_atomic"] == 1)).sum()
+        )
+        total_length_atomic_px = float(df.loc[df["is_atomic"] == 1, "length_px"].sum())
+        total_length_combined_plus_noncombined_atomic_px = float(
+            df.loc[(df["is_combined"] == 1) | (df["is_noncombined_atomic"] == 1), "length_px"].sum()
+        )
+        df["total_count_atomic"] = total_count_atomic
+        df["total_count_combined_plus_noncombined_atomic"] = total_count_combined_plus_noncombined_atomic
+        df["total_length_atomic_px"] = total_length_atomic_px
+        df["total_length_combined_plus_noncombined_atomic_px"] = (
+            total_length_combined_plus_noncombined_atomic_px
+        )
+
+        # Length-weighted means for summary usage
+        def _length_weighted_means(sub_df, metric_cols):
+            if sub_df is None or sub_df.empty:
+                return {c: np.nan for c in metric_cols}
+            w_all = np.asarray(sub_df["length_px"], float)
+            out = {}
+            for c in metric_cols:
+                x = np.asarray(sub_df[c], float)
+                ok = np.isfinite(x) & np.isfinite(w_all) & (w_all > 0)
+                if np.any(ok):
+                    out[c] = float(np.sum(x[ok] * w_all[ok]) / np.sum(w_all[ok]))
+                else:
+                    out[c] = np.nan
+            return out
+
+        # Focus on core centering metrics + score for compact, stable summaries.
+        metric_cols = [
+            c for c in [
+                "score_mid",
+                "nn_mean_bidirectional",
+                "hausdorff_max",
+                "coverage_min",
+                "hausdorff_p95",
+                "frechet_discrete_ds",
+                "mean_tan_angle_error_deg",
+            ]
+            if c in df.columns
+        ]
+
+        df_atomic = df[df["is_atomic"] == 1].copy()
+        df_combo_plus_noncombo = df[(df["is_combined"] == 1) | (df["is_noncombined_atomic"] == 1)].copy()
+
+        w_atomic = _length_weighted_means(df_atomic, metric_cols)
+        w_combo = _length_weighted_means(df_combo_plus_noncombo, metric_cols)
+
+        # Add key weighted means as columns in the per-crack CSV for easy joins.
+        for c in metric_cols:
+            df[f"lwmean_atomic_{c}"] = float(w_atomic.get(c, np.nan))
+            df[f"lwmean_combined_plus_noncombined_atomic_{c}"] = float(w_combo.get(c, np.nan))
+
+        # Also emit a dedicated summary CSV.
+        summary_rows = []
+        summary_rows.append({
+            "image": base_name,
+            "group": "atomic",
+            "count": int(len(df_atomic)),
+            "total_length_px": float(df_atomic["length_px"].sum()) if not df_atomic.empty else 0.0,
+            **{f"lwmean_{c}": float(w_atomic.get(c, np.nan)) for c in metric_cols},
+        })
+        summary_rows.append({
+            "image": base_name,
+            "group": "combined_plus_noncombined_atomic",
+            "count": int(len(df_combo_plus_noncombo)),
+            "total_length_px": float(df_combo_plus_noncombo["length_px"].sum()) if not df_combo_plus_noncombo.empty else 0.0,
+            **{f"lwmean_{c}": float(w_combo.get(c, np.nan)) for c in metric_cols},
+        })
+
+        summary_csv = os.path.join(analysis_dir, "gt_centering_metrics_weighted_summary.csv")
+        pd.DataFrame(summary_rows).to_csv(summary_csv, index=False)
+        print(f"[GT_SUP] wrote weighted centering summary -> {summary_csv}")
+
     out_csv = os.path.join(analysis_dir, "gt_centering_metrics.csv")
     df.to_csv(out_csv, index=False)
     print(f"[GT_SUP] wrote centering metrics -> {out_csv}")
@@ -1521,6 +1681,14 @@ def export_gt_supervision_for_image(
         "combined_skip_no_dominant_segs": 0,
         "combined_skip_empty_after_canon": 0,
     }
+    timing_totals = {
+        "atomic_compute_sec": 0.0,
+        "noncombined_atomic_compute_sec": 0.0,
+        "atomic_centering_sec": 0.0,
+        "noncombined_atomic_centering_sec": 0.0,
+        "combined_compute_sec": 0.0,
+        "combined_centering_sec": 0.0,
+    }
 
     def _canonicalize_segments_with_meta(segs_in, meta_in, *, label):
         segs_valid = [np.asarray(s, float) for s in (segs_in or []) if s is not None and len(s) >= 2]
@@ -1572,7 +1740,8 @@ def export_gt_supervision_for_image(
     # =====================================================
     # 1) ATOMIC BEFORE MERGE  (USE USER mask_bbox ONLY)
     # =====================================================
-    for cid, cr in (atomic or {}).items():
+    atomic_jobs = []
+    for order_i, (cid, cr) in enumerate((atomic or {}).items()):
         gt_sup_diag["atomic_total"] += 1
         scid = str(cid)
 
@@ -1584,49 +1753,51 @@ def export_gt_supervision_for_image(
         if cinfo.get("flipped", False):
             print(f"[CANON][GT_SUP] atomic {scid} midline flipped to canonical direction")
 
-        # -------------------------------------------------
-        # REQUIRED: user-authored mask_bbox (xywh)
-        # -------------------------------------------------
         bb = cr.get("mask_bbox", None)
         if bb is None or not isinstance(bb, (list, tuple)) or len(bb) != 4:
             raise ValueError(
                 f"[GT_SUP] atomic {scid} missing or invalid user mask_bbox: {bb}"
             )
-
         x, y, w, h = map(int, bb)
         if w <= 0 or h <= 0:
             raise ValueError(
                 f"[GT_SUP] atomic {scid} has non-positive mask_bbox: {bb}"
             )
 
-        # Clamp ONLY for safety — semantics unchanged
-        #x = max(0, x)
-        #y = max(0, y)
-        #w = min(w, W - x)
-        #h = min(h, H - y)
-
-        if w <= 0 or h <= 0:
-            raise ValueError(
-                f"[GT_SUP] atomic {scid} bbox collapses after clamp: {bb}"
-            )
-
-        # -------------------------------------------------
-        # GT CC label ONLY for normals computation
-        # -------------------------------------------------
         lbl = _cc_label_for_midline(mid_xy, cc_labels)
         if lbl is None or lbl <= 0:
             gt_sup_diag["atomic_skip_no_cc_label"] += 1
             continue
 
         crack_mask = (cc_labels == lbl).astype(np.uint8)
+        crack_mask_clipped = _clip_mask_to_xywh(crack_mask, [int(x), int(y), int(w), int(h)])
+
+        atomic_jobs.append({
+            "order": int(order_i),
+            "scid": scid,
+            "mid_xy": np.asarray(mid_xy, float),
+            "bbox": [int(x), int(y), int(w), int(h)],
+            "crack_mask": crack_mask,
+            "crack_mask_clipped": crack_mask_clipped,
+        })
+
+    def _atomic_job_worker(job):
+        scid = str(job["scid"])
+        mid_xy = np.asarray(job["mid_xy"], float)
+        bb = list(job["bbox"])
+        crack_mask = np.asarray(job["crack_mask"], np.uint8)
+        crack_mask_clipped = np.asarray(job["crack_mask_clipped"], np.uint8)
+        t_atomic_compute0 = time.perf_counter()
+        atomic_center_sec = 0.0
 
         manual_normals_diag = {}
         (e1x, e1y, e2x, e2y, widths), _ = normals_from_mask_for_midline(
             mid_xy,
-            crack_mask > 0,
+            crack_mask_clipped > 0,
             60,
             diagnostics=manual_normals_diag,
-            image_hw=crack_mask.shape[:2],
+            image_hw=crack_mask_clipped.shape[:2],
+            endpoint_mode="atomic",
         )
         diag_brief = _normals_diag_summary(manual_normals_diag)
         print(
@@ -1639,8 +1810,7 @@ def export_gt_supervision_for_image(
             "id": scid,
             "kind": "atomic",
             "members": [],
-            # 🔴 STORE EXACTLY AS USER PROVIDED (xywh)
-            "mask_bbox": [int(x), int(y), int(w), int(h)],
+            "mask_bbox": [int(bb[0]), int(bb[1]), int(bb[2]), int(bb[3])],
             "midline": mid_xy.tolist(),
             "gt_normals": {
                 "edge1_x": _arr_to_list(e1x),
@@ -1652,18 +1822,20 @@ def export_gt_supervision_for_image(
             "gt_widths": _arr_to_list(widths),
             "gt_normals_diag": manual_normals_diag,
         }
+        atomic_compute_sec = float(time.perf_counter() - t_atomic_compute0)
 
         if enable_auto_centering:
+            t_center0 = time.perf_counter()
             terr = build_territory_mask_from_polyline(
                 mid_xy=mid_xy,
-                crack_mask_u8=crack_mask,
+                crack_mask_u8=crack_mask_clipped,
                 window_half_size=int(auto_centering_window_half_size),
                 dt_domain_u8=None,
             )
             centered_normals_diag = {}
             centered_xy, centered_normals = compute_centered_midline_and_normals(
                 mid_xy=mid_xy,
-                crack_mask_u8=crack_mask,
+                crack_mask_u8=crack_mask_clipped,
                 territory_u8=terr,
                 max_radius=50,
                 domain_mode=auto_centering_domain_atomic,
@@ -1673,6 +1845,7 @@ def export_gt_supervision_for_image(
                     "keep_endpoints": True,
                 },
                 diag_out=centered_normals_diag,
+                endpoint_mode="atomic",
             )
             cdiag_brief = _normals_diag_summary(centered_normals_diag)
             print(
@@ -1696,6 +1869,7 @@ def export_gt_supervision_for_image(
                 **_geometry_disagreement_stats(mid_xy, centered_xy),
                 **_width_stability_stats(widths, centered_normals.get("width_px", [])),
             }
+            atomic_center_sec += float(time.perf_counter() - t_center0)
 
             if auto_centering_debug:
                 manual_invalid = [~np.isfinite(np.asarray(widths, float))]
@@ -1713,6 +1887,24 @@ def export_gt_supervision_for_image(
                     invalid_center_masks=center_invalid,
                 )
 
+        return int(job["order"]), atomic_entry, float(atomic_compute_sec), float(atomic_center_sec)
+
+    max_workers = max(1, min(8, os.cpu_count() or 1))
+    atomic_results = {}
+    if atomic_jobs:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futs = [ex.submit(_atomic_job_worker, j) for j in atomic_jobs]
+            for fut in as_completed(futs):
+                oi, entry, atomic_compute_sec, atomic_center_sec = fut.result()
+                atomic_results[int(oi)] = entry
+                timing_totals["atomic_compute_sec"] += float(atomic_compute_sec)
+                timing_totals["atomic_centering_sec"] += float(atomic_center_sec)
+                if str(entry.get("id", "")) not in combined_flat:
+                    timing_totals["noncombined_atomic_compute_sec"] += float(atomic_compute_sec)
+                    timing_totals["noncombined_atomic_centering_sec"] += float(atomic_center_sec)
+
+    for oi in sorted(atomic_results.keys()):
+        atomic_entry = atomic_results[oi]
         final_entries.append(atomic_entry)
         gt_sup_diag["atomic_added"] += 1
         _cropped_preview(atomic_entry, gt_mask, original_image, atomic_crop_root)
@@ -1726,6 +1918,8 @@ def export_gt_supervision_for_image(
         if not members:
             gt_sup_diag["combined_skip_no_members"] += 1
             continue
+        t_combined_compute0 = time.perf_counter()
+        combined_plot_excluded_sec = 0.0
 
         # -------------------------------------------------
         # REQUIRED: union of USER-authored atomic bboxes (xywh)
@@ -1776,6 +1970,7 @@ def export_gt_supervision_for_image(
             continue
 
         crack_mask = (cc_labels == lbl).astype(np.uint8)
+        crack_mask_clipped = _clip_mask_to_xywh(crack_mask, [ux, uy, uw, uh])
 
         # -------------------------------------------------
         # Dominance-selected sub-midlines
@@ -1811,8 +2006,8 @@ def export_gt_supervision_for_image(
         # GT has no per-branch mask ownership; this only restricts where
         # normals are allowed to exist.
         # -------------------------------------------------
-        Hm, Wm = crack_mask.shape[:2]
-        global_mask = (crack_mask > 0).astype(np.uint8)
+        Hm, Wm = crack_mask_clipped.shape[:2]
+        global_mask = (crack_mask_clipped > 0).astype(np.uint8)
 
         branch_order = dom_meta.get("order", []) or []
         if not branch_order:
@@ -1922,6 +2117,7 @@ def export_gt_supervision_for_image(
         # DEBUG: dominance bite as-written (RAW, no decode)
         # -------------------------------------------------
         try:
+            t_plot0 = time.perf_counter()
             debug_plot_gt_sup_dominance_bite_packed(
                 base_name=base_name,
                 ccid=ccid,
@@ -1931,6 +2127,7 @@ def export_gt_supervision_for_image(
                 gt_mask=gt_mask,
                 out_dir=debug_dir,  # or sup_root, up to you
             )
+            combined_plot_excluded_sec += float(time.perf_counter() - t_plot0)
 
         except Exception as e:
             print(f"[GT_SUP DOMDBG] plot failed: {e}")
@@ -1939,14 +2136,19 @@ def export_gt_supervision_for_image(
         # -------------------------------------------------
         # Compute GT normals per segment
         # -------------------------------------------------
-        e1x_list, e1y_list, e2x_list, e2y_list, w_list = [], [], [], [], []
-        per_seg_manual_normals_diag = []
-        for si, S in enumerate(segs):
+        e1x_list = [None] * len(segs)
+        e1y_list = [None] * len(segs)
+        e2x_list = [None] * len(segs)
+        e2y_list = [None] * len(segs)
+        w_list = [None] * len(segs)
+        per_seg_manual_normals_diag = [None] * len(segs)
+
+        def _combined_seg_worker(si, S):
             seg_diag = {}
             bi = int(seg_meta[si].get("branch_id", -1)) if si < len(seg_meta) else -1
             mask_use = branch_allowed_masks.get(
                 bi,
-                (crack_mask > 0).astype(np.uint8),
+                (crack_mask_clipped > 0).astype(np.uint8),
             )
             (e1x, e1y, e2x, e2y, widths), _ = normals_from_mask_for_midline(
                 S,
@@ -1954,19 +2156,27 @@ def export_gt_supervision_for_image(
                 max_radius=50,
                 diagnostics=seg_diag,
                 image_hw=mask_use.shape[:2],
+                endpoint_mode="combined",
             )
-            per_seg_manual_normals_diag.append(seg_diag)
             sdiag_brief = _normals_diag_summary(seg_diag)
-            print(
-                f"[GT_SUP NORMDBG] combined {ccid} seg={si} manual total={sdiag_brief['total']} "
-                f"valid={sdiag_brief['valid']} invalid={sdiag_brief['invalid']} "
-                f"invalid_frac={sdiag_brief['invalid_frac']:.4f} top_reasons={sdiag_brief['top_reasons']}"
-            )
-            e1x_list.append(e1x)
-            e1y_list.append(e1y)
-            e2x_list.append(e2x)
-            e2y_list.append(e2y)
-            w_list.append(widths)
+            return si, e1x, e1y, e2x, e2y, widths, seg_diag, sdiag_brief
+
+        if segs:
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futs = [ex.submit(_combined_seg_worker, si, S) for si, S in enumerate(segs)]
+                for fut in as_completed(futs):
+                    si, e1x, e1y, e2x, e2y, widths, seg_diag, sdiag_brief = fut.result()
+                    print(
+                        f"[GT_SUP NORMDBG] combined {ccid} seg={si} manual total={sdiag_brief['total']} "
+                        f"valid={sdiag_brief['valid']} invalid={sdiag_brief['invalid']} "
+                        f"invalid_frac={sdiag_brief['invalid_frac']:.4f} top_reasons={sdiag_brief['top_reasons']}"
+                    )
+                    e1x_list[si] = e1x
+                    e1y_list[si] = e1y
+                    e2x_list[si] = e2x
+                    e2y_list[si] = e2y
+                    w_list[si] = widths
+                    per_seg_manual_normals_diag[si] = seg_diag
 
         packed_mid = _pack_segs_with_separators(segs)
 
@@ -2000,8 +2210,12 @@ def export_gt_supervision_for_image(
             "dominance_meta": dom_meta,
             "gt_normals_diag_per_segment": per_seg_manual_normals_diag,
         }
+        timing_totals["combined_compute_sec"] += float(
+            time.perf_counter() - t_combined_compute0 - combined_plot_excluded_sec
+        )
 
         if enable_auto_centering:
+            t_center_combined0 = time.perf_counter()
             centered_segs = []
             ce1x_list, ce1y_list, ce2x_list, ce2y_list, cw_list = [], [], [], [], []
             shift_all = []
@@ -2011,16 +2225,21 @@ def export_gt_supervision_for_image(
             per_seg_centered_normals_diag = []
             for seg_i, (S, w_manual) in enumerate(zip(segs, w_list)):
                 S = np.asarray(S, float)
+                bi = int(seg_meta[seg_i].get("branch_id", -1)) if seg_i < len(seg_meta) else -1
+                mask_use = branch_allowed_masks.get(
+                    bi,
+                    (crack_mask_clipped > 0).astype(np.uint8),
+                )
                 terr_i = build_territory_mask_from_polyline(
                     mid_xy=S,
-                    crack_mask_u8=crack_mask,
+                    crack_mask_u8=mask_use,
                     window_half_size=int(auto_centering_window_half_size),
                     dt_domain_u8=None,
                 )
                 cseg_diag = {}
                 centered_S, centered_normals = compute_centered_midline_and_normals(
                     mid_xy=S,
-                    crack_mask_u8=crack_mask,
+                    crack_mask_u8=mask_use,
                     territory_u8=terr_i,
                     max_radius=50,
                     domain_mode="terr_and_mask",
@@ -2030,6 +2249,7 @@ def export_gt_supervision_for_image(
                         "keep_endpoints": True,
                     },
                     diag_out=cseg_diag,
+                    endpoint_mode="combined",
                 )
                 per_seg_centered_normals_diag.append(cseg_diag)
                 csdiag_brief = _normals_diag_summary(cseg_diag)
@@ -2096,11 +2316,12 @@ def export_gt_supervision_for_image(
                     np.concatenate([np.asarray(a, float).reshape(-1) for a in cw_list]) if cw_list else [],
                 ),
             }
+            timing_totals["combined_centering_sec"] += float(time.perf_counter() - t_center_combined0)
 
             if auto_centering_debug:
                 terr_vis = build_territory_mask_for_segments(
                     segs=segs,
-                    crack_mask_u8=crack_mask,
+                    crack_mask_u8=crack_mask_clipped,
                     window_half_size=int(auto_centering_window_half_size),
                 )
                 out_dbg = os.path.join(auto_center_root, f"combined_{tag_name}_manual_vs_centered.png")
@@ -2123,6 +2344,65 @@ def export_gt_supervision_for_image(
     # =====================================================
     # 3) GLOBAL OVERVIEW
     # =====================================================
+    analysis_dir = os.path.join(sup_root, "analysis")
+    os.makedirs(analysis_dir, exist_ok=True)
+
+    compute_csv = os.path.join(analysis_dir, "gt_compute_timing.csv")
+    centering_csv = os.path.join(analysis_dir, "gt_centering_timing.csv")
+    combined_plus_noncombined_atomics_sec = float(
+        timing_totals["combined_compute_sec"] + timing_totals["noncombined_atomic_compute_sec"]
+    )
+    centering_total_sec = float(timing_totals["atomic_centering_sec"] + timing_totals["combined_centering_sec"])
+    combined_plus_noncombined_atomics_centering_sec = float(
+        timing_totals["combined_centering_sec"] + timing_totals["noncombined_atomic_centering_sec"]
+    )
+
+    with open(compute_csv, "w", newline="", encoding="utf-8") as f:
+        wcsv = csv.writer(f)
+        wcsv.writerow([
+            "image",
+            "atomic_compute_sec",
+            "noncombined_atomic_compute_sec",
+            "combined_compute_sec",
+            "combined_plus_noncombined_atomics_sec",
+        ])
+        wcsv.writerow([
+            base_name,
+            float(timing_totals["atomic_compute_sec"]),
+            float(timing_totals["noncombined_atomic_compute_sec"]),
+            float(timing_totals["combined_compute_sec"]),
+            float(combined_plus_noncombined_atomics_sec),
+        ])
+
+    with open(centering_csv, "w", newline="", encoding="utf-8") as f:
+        wcsv = csv.writer(f)
+        wcsv.writerow([
+            "image",
+            "atomic_centering_sec",
+            "noncombined_atomic_centering_sec",
+            "combined_centering_sec",
+            "combined_plus_noncombined_atomics_centering_sec",
+            "centering_total_sec",
+        ])
+        wcsv.writerow([
+            base_name,
+            float(timing_totals["atomic_centering_sec"]),
+            float(timing_totals["noncombined_atomic_centering_sec"]),
+            float(timing_totals["combined_centering_sec"]),
+            float(combined_plus_noncombined_atomics_centering_sec),
+            float(centering_total_sec),
+        ])
+
+    print(
+        f"[GT_SUP TIMING] atomic_compute_sec={timing_totals['atomic_compute_sec']:.4f} "
+        f"noncombined_atomic_compute_sec={timing_totals['noncombined_atomic_compute_sec']:.4f} "
+        f"combined_compute_sec={timing_totals['combined_compute_sec']:.4f} "
+        f"combined_plus_noncombined_atomics_sec={combined_plus_noncombined_atomics_sec:.4f} "
+        f"centering_total_sec={centering_total_sec:.4f}"
+    )
+    print(f"[GT_SUP TIMING] wrote {compute_csv}")
+    print(f"[GT_SUP TIMING] wrote {centering_csv}")
+
     if not final_entries:
         print(f"[GT_SUP DIAG] no final_entries produced: {gt_sup_diag}")
     else:
@@ -2145,6 +2425,7 @@ def export_gt_supervision_for_image(
             base_name=base_name,
             save_root=save_root,
             final_entries=final_entries,
+            combined_member_ids=combined_flat,
         )
 
     print(f"[GT_SUP] wrote JSON → {out_json}")

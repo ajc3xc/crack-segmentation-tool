@@ -1397,8 +1397,9 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         # FAST METRICS MODE (early-draft quick evaluation)
         # ============================================================
         FAST_METRICS_MODE = True
-        FAST_IMAGE_INDICES = None
-        # FAST_IMAGE_INDICES = [21, 22, *range(60, 66)]  # optional subset
+        #FAST_IMAGE_INDICES = None
+        #FAST_IMAGE_INDICES = [21, 22, *range(60, 66)]  # optional subset
+        FAST_IMAGE_INDICES = [41]
 
         if FAST_METRICS_MODE:
             print("[global-metrics] ⚡ FAST METRICS MODE")

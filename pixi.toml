@@ -22,6 +22,7 @@ scikit-image = "0.19.*"
 seaborn = "*"
 psutil = "*"
 hfm = "0.2.13.*"
+cupy = "13.*"
 
 # ==========================
 # CUDA + CuPy (GPU Support)
@@ -29,11 +30,11 @@ hfm = "0.2.13.*"
 
 [target.linux-64.dependencies]
 cudatoolkit = "11.8.*"
-cupy = "12.2.*"
+#cupy = "12.2.*"
 
 [target.win-64.dependencies]
 cudatoolkit = "11.8.*"
-cupy = "12.2.*"
+#cupy = "12.2.*"
 
 # ==========================
 # PyPI Packages

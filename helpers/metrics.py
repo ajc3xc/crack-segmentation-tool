@@ -605,18 +605,17 @@ def normals_from_mask_for_midline(
     radius_frac=0.10,
     align_thresh=0.90,
     ratio_thresh=2.0,
+    dt_radius_map=None,
+    radius_scale=2.2,
+    endpoint_frac=0.03,
+    align_reject_min=None,
+    endpoint_mode="atomic",
 ):
     """
-    Pixel-accurate version:
-    - Polygonizes the mask into exact pixel-boundary polygons using rasterio.
-    - Shifts coords by -0.5 so edges align with imshow pixel grid.
-    - Intersects midline normals with those polygons so endpoints lie exactly on the mask edge.
-    Robustified to avoid NaNs / zero-length edges.
+    Boundary-clipped normal extraction by vectorized ray marching on a binary mask.
+    For each point, march along +/- normal until first mask exit (or max radius).
     """
     import numpy as np
-    import shapely
-    from shapely.geometry import shape, LineString, Point, MultiPoint
-    import rasterio.features
 
     def _diag_init():
         return {
@@ -645,12 +644,6 @@ def normals_from_mask_for_midline(
         for k, v in extra.items():
             if isinstance(v, (int, float, str, bool)) or v is None:
                 item[k] = v
-            elif hasattr(v, "__len__"):
-                try:
-                    vv = np.asarray(v, float).reshape(-1).tolist()
-                    item[k] = [float(x) for x in vv[:6]]
-                except Exception:
-                    pass
         diag["examples"].append(item)
 
     def _finalize_diag():
@@ -662,375 +655,172 @@ def normals_from_mask_for_midline(
             diagnostics.clear()
             diagnostics.update(diag)
 
-    H, W = mask.shape
+    H, W = mask.shape[:2]
+    mask_bin = (np.asarray(mask) > 0)
 
-    # ------------------------------------------------------------
-    # Adaptive base radius (image-scale, no bbox boost)
-    # ------------------------------------------------------------
+    midline_xy = np.asarray(midline_xy, float)
+    if midline_xy.ndim != 2 or midline_xy.shape[1] != 2 or len(midline_xy) < 2:
+        n = len(midline_xy) if midline_xy.ndim > 0 else 0
+        widths_mask = np.full(n, np.nan, float)
+        _bump("bad_midline_shape")
+        _finalize_diag()
+        return (np.full(n, np.nan),) * 5, []
+
+    if not np.any(mask_bin):
+        N = len(midline_xy)
+        widths_mask = np.full(N, np.nan, float)
+        _bump("empty_mask_polygons")
+        _finalize_diag()
+        return (np.full(N, np.nan),) * 5, []
+
     if image_hw is not None and len(image_hw) == 2:
         H_img, W_img = int(image_hw[0]), int(image_hw[1])
     else:
         H_img, W_img = int(H), int(W)
 
-    base_radius = int(np.ceil(max(
-        max_radius,
-        float(radius_frac) * float(min(H_img, W_img))
+    base_radius = float(np.ceil(max(
+        float(max_radius),
+        float(radius_frac) * float(min(H_img, W_img)),
     )))
-    midline_xy = np.asarray(midline_xy, float)
-    if midline_xy.ndim != 2 or midline_xy.shape[1] != 2 or len(midline_xy) < 2:
-        n = len(midline_xy) if midline_xy.ndim > 0 else 0
-        diag["total"] = int(n)
-        diag["invalid"] = int(n)
-        diag["invalid_frac"] = 1.0 if n > 0 else 0.0
-        _bump("bad_midline_shape")
-        if isinstance(diagnostics, dict):
-            diagnostics.clear()
-            diagnostics.update(diag)
-        return (np.full(n, np.nan),) * 5, []
 
     # ---- tangent + normals ----
     try:
-        from cracktools.segmentation import (
-            compute_smooth_tangent_normals,
-            resolve_normal_pair_with_fallback,
-        )
+        from cracktools.segmentation import compute_smooth_tangent_normals
         _, nor = compute_smooth_tangent_normals(midline_xy[:, 0], midline_xy[:, 1])
+        nor = np.asarray(nor, float)
     except Exception:
-        resolve_normal_pair_with_fallback = None
         dx, dy = np.gradient(midline_xy[:, 0]), np.gradient(midline_xy[:, 1])
         nrm = np.hypot(dx, dy) + 1e-12
         tan = np.stack([dx / nrm, dy / nrm], axis=1)
         nor = np.stack([-tan[:, 1], tan[:, 0]], axis=1)
 
-    # ---- polygonize mask -> shapely polygons ----
-    mask_bin = (mask > 0).astype(np.uint8)
-    polygons = []
-    for geom, val in rasterio.features.shapes(mask_bin, mask=mask_bin):
-        if val == 1:
-            poly = shape(geom)
-            # shift by -0.5 so edges align with imshow pixel grid
-            poly = shapely.affinity.translate(poly, xoff=-0.5, yoff=-0.5)
-            polygons.append(poly)
-
-    if not polygons:
-        # empty mask: nothing we can do safely
-        N = len(midline_xy)
-        diag["total"] = int(N)
-        diag["invalid"] = int(N)
-        diag["invalid_frac"] = 1.0 if N > 0 else 0.0
-        _bump("empty_mask_polygons")
-        if isinstance(diagnostics, dict):
-            diagnostics.clear()
-            diagnostics.update(diag)
-        return (np.full(N, np.nan),) * 5, []
-
-    edges = [poly.boundary for poly in polygons]
-
-    # ---- helper: clamp midline point to nearest polygon boundary if outside ----
-    from math import inf
-
-    def clamp_to_polygon(p):
-        """Ensure p lies on/in the mask: returns closest point on any polygon boundary."""
-        P = Point(p[0], p[1])
-        # already inside some polygon
-        for poly in polygons:
-            if poly.contains(P) or poly.touches(P):
-                return np.asarray(p, float)
-
-        best = None
-        best_d = inf
-        for edge in edges:
-            # nearest point on this boundary
-            proj = edge.interpolate(edge.project(P))
-            d = proj.distance(P)
-            if d < best_d:
-                best_d = d
-                best = (proj.x, proj.y)
-
-        if best is None:
-            # fall back to original point (will be skipped later if invalid)
-            return np.asarray(p, float)
-        return np.asarray(best, float)
-
     N = len(midline_xy)
-    e1x = np.full(N, np.nan); e1y = np.full(N, np.nan)
-    e2x = np.full(N, np.nan); e2y = np.full(N, np.nan)
-    widths_mask = np.full(N, np.nan)
-    # For plausibility logic
-    _tmp_widths = np.full(N, np.nan)
-    _tmp_aligns = np.full(N, np.nan)
+    e1x = np.full(N, np.nan, float); e1y = np.full(N, np.nan, float)
+    e2x = np.full(N, np.nan, float); e2y = np.full(N, np.nan, float)
+    widths_mask = np.full(N, np.nan, float)
 
-    eps = 1e-6
+    eps = 1e-9
+    nlen = np.hypot(nor[:, 0], nor[:, 1])
+    good_n = np.isfinite(nlen) & (nlen > eps) & np.all(np.isfinite(nor), axis=1)
+    nor_u = np.zeros_like(nor, float)
+    nor_u[good_n] = nor[good_n] / nlen[good_n, None]
 
-    # ------------------------------------------------------------
-    # Width plausibility test (tiny-crack safe)
-    # ------------------------------------------------------------
-    def _width_is_plausible(i, widths, aligns):
-        widths = np.asarray(widths, float)
-        aligns = np.asarray(aligns, float)
-
-        Nw = len(widths)
-        if Nw == 0 or i < 0 or i >= Nw:
-            return False
-
-        w = widths[i]
-        a = aligns[i] if i < len(aligns) else np.nan
-        if not np.isfinite(w):
-            return False
-
-        align_ok = np.isfinite(a) and (a >= float(align_thresh))
-
-        if Nw < 5:
-            local_med = np.nanmedian(widths)
-        else:
-            half_window = max(1, int(0.02 * Nw))
-            lo = max(0, i - half_window)
-            hi = min(Nw, i + half_window + 1)
-            local_med = np.nanmedian(widths[lo:hi])
-
-        if not np.isfinite(local_med) or local_med <= 0:
-            return False
-
-        ratio_ok = (w / local_med) <= float(ratio_thresh)
-        return bool(align_ok and ratio_ok)
-
-    def _resolver_reject_reason(*, p, nvec, left_cands, right_cands):
-        """
-        Best-effort mirror of resolver gates so diagnostics can explain rejections.
-        """
-        eps_l = 1e-9
-        p = np.asarray(p, float).reshape(2)
-        nvec = np.asarray(nvec, float).reshape(2)
-        nlen_l = float(np.hypot(nvec[0], nvec[1]))
-        if not np.isfinite(nlen_l) or nlen_l <= eps_l:
-            return "resolver_bad_normal"
-        nvec = nvec / nlen_l
-
-        fallback_cap = float(np.clip(0.003 * float(np.sqrt(max(1.0, H * W))), 3.0, 5.0))
-
-        def _pick(cands):
-            if not cands:
-                return None
-            best = None
-            best_s = np.inf
-            for q in cands:
-                q = np.asarray(q, float).reshape(2)
-                if not np.all(np.isfinite(q)):
-                    continue
-                s = abs(float(np.dot([q[0] - p[0], q[1] - p[1]], nvec)))
-                if np.isfinite(s) and s < best_s:
-                    best_s = s
-                    best = (float(q[0]), float(q[1]))
-            return best
-
-        pa = _pick(left_cands)
-        pb = _pick(right_cands)
-
-        if pa is None:
-            qa = _nearest_boundary_on_side(-1)
-            if qa is None:
-                return "resolver_no_left_candidate"
-            da = float(np.hypot(float(qa[0]) - p[0], float(qa[1]) - p[1]))
-            if da > fallback_cap:
-                return "resolver_left_fallback_too_far"
-            pa = (float(qa[0]), float(qa[1]))
-
-        if pb is None:
-            qb = _nearest_boundary_on_side(+1)
-            if qb is None:
-                return "resolver_no_right_candidate"
-            db = float(np.hypot(float(qb[0]) - p[0], float(qb[1]) - p[1]))
-            if db > fallback_cap:
-                return "resolver_right_fallback_too_far"
-            pb = (float(qb[0]), float(qb[1]))
-
-        da = float(np.hypot(pa[0] - p[0], pa[1] - p[1]))
-        db = float(np.hypot(pb[0] - p[0], pb[1] - p[1]))
-        if da > 2.0 * float(base_radius) or db > 2.0 * float(base_radius):
-            return "resolver_over_max_dist"
-
-        v = np.asarray([pb[0] - pa[0], pb[1] - pa[1]], float)
-        w = float(np.hypot(v[0], v[1]))
-        if not np.isfinite(w) or w <= eps_l:
-            return "resolver_bad_span"
-        if w > 2.0 * float(base_radius):
-            return "resolver_span_too_long"
-
-        align = float(abs(np.dot(v / w, nvec)))
-        if align < 0.30:
-            return "resolver_low_normal_alignment"
-
-        return "resolver_unknown"
-
+    # Clamp starts to nearest in-mask pixel if needed.
+    pts = np.asarray(midline_xy, float).copy()
+    xi0 = np.clip(np.round(pts[:, 0]).astype(int), 0, W - 1)
+    yi0 = np.clip(np.round(pts[:, 1]).astype(int), 0, H - 1)
+    starts_inside = mask_bin[yi0, xi0]
     clamp_dists = []
-    for i, (p_raw, nvec) in enumerate(zip(midline_xy, nor)):
-        # basic sanity checks
-        if not np.all(np.isfinite(p_raw)) or not np.all(np.isfinite(nvec)):
+    if not np.all(starts_inside):
+        try:
+            from scipy.ndimage import distance_transform_edt
+            outside = ~mask_bin
+            _, inds = distance_transform_edt(outside, return_indices=True)
+            bad = np.where(~starts_inside)[0]
+            ny = inds[0, yi0[bad], xi0[bad]]
+            nx = inds[1, yi0[bad], xi0[bad]]
+            moved = np.hypot(pts[bad, 0] - nx.astype(float), pts[bad, 1] - ny.astype(float))
+            pts[bad, 0] = nx.astype(float)
+            pts[bad, 1] = ny.astype(float)
+            clamp_dists = moved[np.isfinite(moved) & (moved > 1e-9)].tolist()
+            if bad.size > 0:
+                diag["start_clamp_count"] = int(bad.size)
+        except Exception:
+            _bump("clamp_failed")
+
+    # Per-point radius (atomic-only endpoint taper on true tips).
+    radius_i = np.full(N, base_radius, float)
+    endpoint_mode = str(endpoint_mode or "atomic").strip().lower()
+    if endpoint_mode not in ("atomic", "combined", "none"):
+        endpoint_mode = "atomic"
+    if endpoint_mode == "atomic" and N >= 2:
+        taper_idx = [0, N - 1]
+        for ti in taper_idx:
+            if radius_i[ti] > 50.0:
+                radius_i[ti] *= 0.5
+            elif radius_i[ti] > (0.10 * float(min(H_img, W_img))):
+                radius_i[ti] *= 0.7
+        radius_i = np.maximum(radius_i, 8.0)
+
+    Rmax = int(max(1, int(np.ceil(float(np.nanmax(radius_i))))))
+    r = np.arange(0.0, float(Rmax) + 1.0, 1.0, dtype=float)  # (R,)
+
+    P = pts[:, None, :]          # (N,1,2)
+    Nrm = nor_u[:, None, :]      # (N,1,2)
+    rr = r[None, :, None]        # (1,R,1)
+
+    def _march(side_sign):
+        ray = P + float(side_sign) * rr * Nrm  # (N,R,2)
+        x = np.round(ray[:, :, 0]).astype(int)
+        y = np.round(ray[:, :, 1]).astype(int)
+        inb = (x >= 0) & (x < W) & (y >= 0) & (y < H)
+        xc = np.clip(x, 0, W - 1)
+        yc = np.clip(y, 0, H - 1)
+        inside = inb & mask_bin[yc, xc]
+        inside &= (r[None, :] <= radius_i[:, None] + 1e-9)
+
+        first_out = ~inside
+        exit_idx = np.argmax(first_out, axis=1)
+        never_exit = ~np.any(first_out, axis=1)
+        exit_idx[never_exit] = len(r) - 1
+        edge_idx = np.maximum(exit_idx - 1, 0)
+
+        has_inside = np.any(inside, axis=1)
+        ex = ray[np.arange(N), edge_idx, 0]
+        ey = ray[np.arange(N), edge_idx, 1]
+        return np.stack([ex, ey], axis=1), has_inside
+
+    e_pos, ok_pos = _march(+1.0)
+    e_neg, ok_neg = _march(-1.0)
+
+    valid = good_n & ok_pos & ok_neg
+
+    if not np.all(good_n):
+        for i in np.where(~good_n)[0][:int(debug_max_examples)]:
             _bump("nonfinite_point_or_normal")
-            _add_example(i, "nonfinite_point_or_normal", p_raw=p_raw, nvec=nvec)
-            continue
+            _add_example(int(i), "nonfinite_point_or_normal")
+    miss_side = (~ok_pos) | (~ok_neg)
+    if np.any(miss_side):
+        for i in np.where(miss_side & good_n)[0][:int(debug_max_examples)]:
+            _bump("side_march_failed")
+            _add_example(int(i), "side_march_failed", pos_ok=bool(ok_pos[i]), neg_ok=bool(ok_neg[i]))
 
-        nlen = float(np.hypot(nvec[0], nvec[1]))
-        if nlen < eps:
-            # direction is undefined here; skip
-            _bump("near_zero_normal")
-            _add_example(i, "near_zero_normal", nlen=float(nlen))
-            continue
-        nvec = nvec / nlen
+    widths = np.linalg.norm(e_pos - e_neg, axis=1)
+    valid &= np.isfinite(widths) & (widths > 1e-6)
 
-        # clamp midline point to polygon if it's outside
-        p = clamp_to_polygon(p_raw)
-        clamp_dist = float(np.hypot(float(p[0]) - float(p_raw[0]), float(p[1]) - float(p_raw[1])))
-        if np.isfinite(clamp_dist) and clamp_dist > 1e-9:
-            clamp_dists.append(clamp_dist)
-        if not np.all(np.isfinite(p)):
-            _bump("clamp_nonfinite")
-            _add_example(i, "clamp_nonfinite", p_raw=p_raw, p=p)
-            continue
+    # Optional DT-based guard.
+    if dt_radius_map is not None:
+        try:
+            dtr = np.asarray(dt_radius_map, float)
+            xi = np.clip(np.round(pts[:, 0]).astype(int), 0, W - 1)
+            yi = np.clip(np.round(pts[:, 1]).astype(int), 0, H - 1)
+            rloc = dtr[yi, xi]
+            bad_terr = valid & np.isfinite(rloc) & (rloc > 0) & (widths > (float(radius_scale) * (2.0 * rloc)))
+            if np.any(bad_terr):
+                valid[bad_terr] = False
+                for i in np.where(bad_terr)[0][:int(debug_max_examples)]:
+                    _bump("territory_radius_exceeded")
+                    _add_example(int(i), "territory_radius_exceeded", width=float(widths[i]), rloc=float(rloc[i]))
+        except Exception:
+            _bump("dt_radius_guard_failed")
 
-        # ------------------------------------------------------------
-        # Adaptive radius with plausibility bypass
-        # ------------------------------------------------------------
-        radius_i = int(base_radius)
-        if i > 0 and np.isfinite(_tmp_widths[i - 1]):
-            if _width_is_plausible(i - 1, _tmp_widths, _tmp_aligns):
-                radius_i = int(max(radius_i, np.ceil(base_radius * 2.0)))
+    # Optional alignment guard.
+    if align_reject_min is not None:
+        span = e_pos - e_neg
+        sl = np.linalg.norm(span, axis=1)
+        align = np.full(N, np.nan, float)
+        g = np.isfinite(sl) & (sl > 1e-9) & np.all(np.isfinite(Nrm[:, 0, :]), axis=1)
+        align[g] = np.abs(np.sum((span[g] / sl[g, None]) * Nrm[g, 0, :], axis=1))
+        bad_align = valid & ((~np.isfinite(align)) | (align < float(align_reject_min)))
+        if np.any(bad_align):
+            valid[bad_align] = False
+            for i in np.where(bad_align)[0][:int(debug_max_examples)]:
+                _bump("low_alignment_reject")
+                _add_example(int(i), "low_alignment_reject", align=float(align[i]) if np.isfinite(align[i]) else None)
 
-        # build long ray
-        A = (p[0] - radius_i * nvec[0], p[1] - radius_i * nvec[1])
-        B = (p[0] + radius_i * nvec[0], p[1] + radius_i * nvec[1])
-        if not (np.all(np.isfinite(A)) and np.all(np.isfinite(B))):
-            _bump("ray_nonfinite")
-            _add_example(i, "ray_nonfinite", A=A, B=B)
-            continue
-
-        ray = LineString([A, B])
-
-        hits = []
-        for edge in edges:
-            inter = edge.intersection(ray)
-            if inter.is_empty:
-                continue
-            if isinstance(inter, Point):
-                hits.append((inter.x, inter.y))
-            elif isinstance(inter, MultiPoint):
-                for g in inter.geoms:
-                    hits.append((g.x, g.y))
-            elif inter.geom_type == "LineString":
-                coords = np.asarray(inter.coords, float)
-                if len(coords) >= 1:
-                    hits.append(tuple(coords[0]))
-                if len(coords) >= 2:
-                    hits.append(tuple(coords[-1]))
-
-        if len(hits) < 2:
-            # cannot define a width here
-            _bump("lt2_intersections")
-            _add_example(i, "lt2_intersections", n_hits=int(len(hits)), clamp_dist=float(clamp_dist))
-            continue
-
-        # remove exact duplicates among hits
-        hits_arr = np.asarray(hits, float)
-        hits_arr = np.unique(hits_arr, axis=0)
-        if len(hits_arr) < 2:
-            _bump("lt2_unique_intersections")
-            _add_example(i, "lt2_unique_intersections", n_hits_unique=int(len(hits_arr)))
-            continue
-        hits = [tuple(h) for h in hits_arr]
-
-        # project hits along the normal direction
-        dists = [np.dot([hx - p[0], hy - p[1]], nvec) for (hx, hy) in hits]
-
-        # classify as "left" (negative side) / "right" (positive side)
-        left_pts  = [(hx, hy, d) for (hx, hy), d in zip(hits, dists) if d < -eps]
-        right_pts = [(hx, hy, d) for (hx, hy), d in zip(hits, dists) if d > eps]
-
-        left_cands = [(hx, hy) for (hx, hy, _) in left_pts]
-        right_cands = [(hx, hy) for (hx, hy, _) in right_pts]
-
-        def _nearest_boundary_on_side(side_sign):
-            P = Point(p[0], p[1])
-            best = None
-            best_dist = np.inf
-            for edge in edges:
-                proj = edge.interpolate(edge.project(P))
-                q = (float(proj.x), float(proj.y))
-                dside = float(np.dot([q[0] - p[0], q[1] - p[1]], nvec))
-                if side_sign < 0 and dside >= -eps:
-                    continue
-                if side_sign > 0 and dside <= eps:
-                    continue
-                dist = float(np.hypot(q[0] - p[0], q[1] - p[1]))
-                if np.isfinite(dist) and dist < best_dist:
-                    best_dist = dist
-                    best = q
-            return best
-
-        if resolve_normal_pair_with_fallback is not None:
-            pair = resolve_normal_pair_with_fallback(
-                p=p,
-                nvec=nvec,
-                cand_a=left_cands,
-                cand_b=right_cands,
-                fallback_a=lambda: _nearest_boundary_on_side(-1),
-                fallback_b=lambda: _nearest_boundary_on_side(+1),
-                score_a=lambda q: abs(float(np.dot([q[0] - p[0], q[1] - p[1]], nvec))),
-                score_b=lambda q: abs(float(np.dot([q[0] - p[0], q[1] - p[1]], nvec))),
-                max_dist=float(radius_i),
-                max_dist_mult=2.0,
-                scale_ref=float(np.sqrt(max(1.0, H * W))),
-                fallback_min_px=3.0,
-                fallback_max_px=5.0,
-                fallback_scale=0.003,
-                normal_align_min=0.30,
-                span_max_mult=2.0,
-            )
-            if pair is None:
-                _bump("pair_resolver_reject")
-                rr = _resolver_reject_reason(
-                    p=p,
-                    nvec=nvec,
-                    left_cands=left_cands,
-                    right_cands=right_cands,
-                )
-                _bump(rr)
-                _add_example(
-                    i,
-                    rr,
-                    left_n=int(len(left_cands)),
-                    right_n=int(len(right_cands)),
-                    clamp_dist=float(clamp_dist),
-                    radius_i=int(radius_i),
-                )
-                continue
-            (lp, rp, _, _, w) = pair
-            # store width + alignment for plausibility checks
-            _tmp_widths[i] = float(w)
-            v = np.asarray([rp[0] - lp[0], rp[1] - lp[1]], float)
-            vn = np.hypot(v[0], v[1])
-            if np.isfinite(vn) and vn > eps:
-                _tmp_aligns[i] = float(abs(np.dot(v / vn, nvec)))
-        else:
-            if not left_pts or not right_pts:
-                _bump("missing_side_points")
-                _add_example(i, "missing_side_points", left_n=int(len(left_pts)), right_n=int(len(right_pts)))
-                continue
-            lp, _ = min((((hx, hy), abs(d)) for (hx, hy, d) in left_pts), key=lambda t: t[1])
-            rp, _ = min((((hx, hy), abs(d)) for (hx, hy, d) in right_pts), key=lambda t: t[1])
-            w = float(np.hypot(rp[0] - lp[0], rp[1] - lp[1]))
-            if not np.isfinite(w) or w < eps:
-                _bump("bad_width")
-                _add_example(i, "bad_width", w=float(w))
-                continue
-            _tmp_widths[i] = float(w)
-            v = np.asarray([rp[0] - lp[0], rp[1] - lp[1]], float)
-            vn = np.hypot(v[0], v[1])
-            if np.isfinite(vn) and vn > eps:
-                _tmp_aligns[i] = float(abs(np.dot(v / vn, nvec)))
-
-        e1x[i], e1y[i] = lp
-        e2x[i], e2y[i] = rp
-        widths_mask[i] = w
+    e1x[valid], e1y[valid] = e_pos[valid, 0], e_pos[valid, 1]
+    e2x[valid], e2y[valid] = e_neg[valid, 0], e_neg[valid, 1]
+    widths_mask[valid] = widths[valid]
 
     if clamp_dists:
         dd = np.asarray(clamp_dists, float)
@@ -1038,8 +828,12 @@ def normals_from_mask_for_midline(
         diag["clamp_moved_mean_px"] = float(np.mean(dd))
         diag["clamp_moved_max_px"] = float(np.max(dd))
 
+    # Lightweight compatibility diagnostics with prior schema.
+    if int(np.sum(np.isfinite(widths_mask))) == 0 and not diag["reasons"]:
+        _bump("all_invalid")
+
     _finalize_diag()
-    return (e1x, e1y, e2x, e2y, widths_mask), polygons
+    return (e1x, e1y, e2x, e2y, widths_mask), []
 
 # -------------------- lightweight cache for mask-normals ----------------------
 _NORMALS_CACHE = {}  # key: (mask_sha1, midline_sha1) -> (e1x,e1y,e2x,e2y,w_mask)

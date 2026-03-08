@@ -228,13 +228,14 @@ from shapely.geometry import LineString, Point
 
 ###################################################################################
 # Normal Projection Edge Correspondence, by Adam Camerer
-def compute_tangent_normals(x, y):
+'''def compute_tangent_normals(x, y):
     dx = np.gradient(x)
     dy = np.gradient(y)
     norm = np.sqrt(dx**2 + dy**2) + 1e-10
     tangent = np.stack([dx / norm, dy / norm], axis=1)
     normal = np.stack([-dy / norm, dx / norm], axis=1)
     return tangent, normal
+'''
 
 ###################################################################################
 from shapely.geometry import LineString, Point, MultiPoint
@@ -242,7 +243,54 @@ from shapely.ops import nearest_points
 import numpy as np
 from scipy.signal import savgol_filter
 
-def compute_smooth_tangent_normals(x, y, window=7, poly=2):
+def _smooth_tangent_angles(tangent, window=9, poly=2):
+    """
+    Smooth tangent directions in angle space.
+
+    This stabilizes the derivative field (normals) without
+    altering crack geometry.
+
+    Rationale:
+    - Derivatives amplify pixel noise
+    - Angle-domain smoothing preserves curvature better than XY smoothing
+    """
+    import numpy as np
+    from scipy.signal import savgol_filter
+
+    tangent = np.asarray(tangent, float)
+    if tangent.ndim != 2 or tangent.shape[1] != 2:
+        return tangent
+
+    n = len(tangent)
+    if n < 5:
+        return tangent
+
+    # Ensure unit vectors
+    mag = np.linalg.norm(tangent, axis=1, keepdims=True) + 1e-12
+    t = tangent / mag
+
+    # Convert to angle representation
+    theta = np.arctan2(t[:, 1], t[:, 0])
+    theta = np.unwrap(theta)  # avoid discontinuities
+
+    # Window must be odd
+    k = int(window)
+    if k % 2 == 0:
+        k += 1
+    k = max(5, min(k, n - (1 - n % 2)))
+
+    if 5 <= k <= n:
+        try:
+            theta = savgol_filter(theta, k, poly, mode="interp")
+        except Exception:
+            pass
+
+    # Rebuild unit tangent vectors
+    t_s = np.stack([np.cos(theta), np.sin(theta)], axis=1)
+    return t_s
+
+
+def compute_smooth_tangent_normals(x, y, window=7, poly=2, angle_smooth=True):
     """
     Compute C^0-smoothed tangents/normals along a polyline:
       - Optional Savitzky–Golay smoothing of coordinates (auto-odd window).
@@ -290,6 +338,20 @@ def compute_smooth_tangent_normals(x, y, window=7, poly=2):
 
     mag = np.hypot(dx_ds, dy_ds) + 1e-12
     tangent = np.stack([dx_ds / mag, dy_ds / mag], axis=1)
+
+    # NOTE:
+    # We apply light Savitzky-Golay smoothing to tangent angles
+    # (not coordinates) to stabilize normal orientation.
+    #
+    # This reduces derivative noise without altering crack geometry.
+    # Window size (~9 px at 1 px sampling) is below feature scale and
+    # preserves genuine curvature.
+    #
+    # TODO: Consider curvature-adaptive smoothing for highly kinked
+    #       centered-midlines (human annotation bias correction).
+    if angle_smooth:
+        tangent = _smooth_tangent_angles(tangent, window=9, poly=2)
+
     normal = np.stack([-tangent[:,1], tangent[:,0]], axis=1)
 
     # --- enforce sign continuity on normals
