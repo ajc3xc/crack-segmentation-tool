@@ -2193,6 +2193,21 @@ class CrackUtils:
                 found = next((c for c in candidates if os.path.isfile(c)), None)
                 if found:
                     self.mask_baseline_img_paths[method_name] = found
+            print(
+                f"[BASELINE change_image] image={base_name} "
+                f"mask_root={self.mask_baseline_superfolder} "
+                f"method_dirs={len(self.mask_baseline_method_folders)} "
+                f"found_masks={len(self.mask_baseline_img_paths)}"
+            )
+            if self.mask_baseline_method_folders:
+                print(
+                    f"[BASELINE change_image] methods={ [os.path.basename(p) for p in self.mask_baseline_method_folders] }"
+                )
+            if self.mask_baseline_img_paths:
+                for _m, _p in sorted(self.mask_baseline_img_paths.items()):
+                    print(f"[BASELINE change_image] found method={_m} path={_p}")
+            else:
+                print(f"[BASELINE change_image] no baseline mask found for image={base_name}")
         else:
             self.mask_baseline_root = None
 

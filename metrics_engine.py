@@ -1012,6 +1012,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             """
             out = {}
             if not baseline_root or not os.path.isdir(baseline_root):
+                print(f"[BASELINE MASK LOAD] invalid root: {baseline_root}")
                 return out
 
             for method in sorted(os.listdir(baseline_root)):
@@ -1021,10 +1022,18 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
                 mask_path = os.path.join(method_dir, image_name + ".png")
                 if not os.path.exists(mask_path):
+                    print(
+                        f"[BASELINE MASK LOAD] image={image_name} method={method} "
+                        f"status=missing expected={mask_path}"
+                    )
                     continue
 
                 mask = cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)
                 if mask is None:
+                    print(
+                        f"[BASELINE MASK LOAD] image={image_name} method={method} "
+                        f"status=read_failed path={mask_path}"
+                    )
                     continue
 
                 if mask.ndim == 3:
@@ -1032,10 +1041,23 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
                 mask = (mask > 0).astype(np.uint8)
                 if mask.shape != (H, W):
+                    print(
+                        f"[BASELINE MASK LOAD] image={image_name} method={method} "
+                        f"status=resize from={mask.shape} to={(H, W)} path={mask_path}"
+                    )
                     mask = cv2.resize(mask, (W, H), interpolation=cv2.INTER_NEAREST)
                     mask = (mask > 0).astype(np.uint8)
 
                 out[str(method)] = mask
+                print(
+                    f"[BASELINE MASK LOAD] image={image_name} method={method} "
+                    f"status=loaded nnz={int(np.count_nonzero(mask))} path={mask_path}"
+                )
+
+            print(
+                f"[BASELINE MASK LOAD] image={image_name} loaded_methods={len(out)} "
+                f"methods={sorted(list(out.keys()))}"
+            )
 
             return out
 

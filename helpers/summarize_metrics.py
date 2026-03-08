@@ -119,8 +119,13 @@ def _list_image_metric_dirs(metrics_root: str) -> List[str]:
     if not os.path.isdir(metrics_root):
         return []
     out = []
+    # HARD-CODED TEMP FILTER:
+    # Set to False (or comment this line) to include folders containing "_".
+    SKIP_DIRS_WITH_UNDERSCORE = True
     for name in sorted(os.listdir(metrics_root)):
         if name.startswith("_"):
+            continue
+        if SKIP_DIRS_WITH_UNDERSCORE and ("_" in name):
             continue
         p = os.path.join(metrics_root, name)
         if os.path.isdir(p):
