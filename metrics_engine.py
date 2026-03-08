@@ -2018,6 +2018,25 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                             gt_xy   = gt_mid[:, ::-1]                      # (x,y) → (row,col)
 
                             mm = compute_midline_metrics_baseline(pred_xy, gt_xy)
+                            nn = float(mm.get("nn_mean_bidirectional", np.nan))
+                            hd = float(mm.get("hausdorff_max", np.nan))
+                            cov = float(mm.get("coverage_min", np.nan))
+                            def _safe(x):
+                                return float(x) if np.isfinite(x) else 0.0
+
+                            score_mid = float(
+                                np.log1p(max(_safe(nn), 0.0))
+                                + 0.5 * np.log1p(max(_safe(hd), 0.0))
+                                + (1.0 - float(np.clip(_safe(cov), 0.0, 1.0)))
+                            )
+                            length_px = float(
+                                np.sum(
+                                    np.hypot(
+                                        np.diff(gt_mid[:, 0]),
+                                        np.diff(gt_mid[:, 1]),
+                                    )
+                                )
+                            ) if len(gt_mid) >= 2 else 0.0
 
                             midline_metric_rows = []
                             midline_metric_rows.append({
@@ -2030,8 +2049,10 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                                 "variant_global_id": -1,
                                 "os_mode": "baseline",
                                 "method": method,
+                                "length_px": length_px,
 
                                 # --- selection metrics ---
+                                "score_mid": score_mid,
                                 "nn_mean_bidirectional": mm.get("nn_mean_bidirectional"),
                                 "hausdorff_max": mm.get("hausdorff_max"),
                                 "coverage_min": mm.get("coverage_min"),

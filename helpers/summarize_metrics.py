@@ -385,11 +385,57 @@ def _aggregate_mask_metrics(
         if not total.empty:
             iou_col = next((c for c in ["iou_mean", "iou_manual_vs_gt_mean", "iou_auto_vs_gt_mean"] if c in total.columns), None)
             bf1_col = "boundary_f1_mean" if "boundary_f1_mean" in total.columns else None
+            def _pretty_variant(v: str) -> str:
+                s = str(v or "").strip()
+                sl = s.lower()
+                if sl.startswith("manual:"):
+                    return "manual"
+                if sl.startswith("auto:"):
+                    return "auto"
+                if sl.startswith("baseline:"):
+                    # Show baseline method name only (e.g., sam3, hrsegnet).
+                    p = s.split(":", 1)
+                    return p[1] if len(p) == 2 and p[1] else "baseline"
+                return s
+
+            def _variant_class(v: str) -> str:
+                sl = str(v or "").strip().lower()
+                if sl.startswith("manual:"):
+                    return "manual"
+                if sl.startswith("auto:"):
+                    return "auto"
+                if sl.startswith("baseline:"):
+                    return "baseline"
+                return "other"
+
+            var_labels = [_pretty_variant(v) for v in total["variant"].astype(str).tolist()]
+            cls_vals = [_variant_class(v) for v in total["variant"].astype(str).tolist()]
+            cls_color = {
+                "manual": "#1f77b4",
+                "auto": "#ff7f0e",
+                "baseline": "#2ca02c",
+                "other": "#7f7f7f",
+            }
+            var_colors = [cls_color.get(c, "#7f7f7f") for c in cls_vals]
+            legend_items = [
+                ("manual", cls_color["manual"]),
+                ("auto", cls_color["auto"]),
+                ("baseline", cls_color["baseline"]),
+            ]
+            legend_items = [x for x in legend_items if x[0] in set(cls_vals)]
+            def _find_col_ci_local(df_in: pd.DataFrame, target: str) -> Optional[str]:
+                t = str(target).strip().lower()
+                for cc in df_in.columns:
+                    if str(cc).strip().lower() == t:
+                        return cc
+                return None
             if iou_col:
                 out_png = os.path.join(out_dir, "dataset_mask_total_iou_by_variant.png")
                 _save_bar(
-                    total["variant"].astype(str).tolist(),
+                    var_labels,
                     total[iou_col].astype(float).tolist(),
+                    colors=var_colors,
+                    color_legend=legend_items,
                     out_png=out_png,
                     title="Dataset TOTAL IoU by variant",
                     ylabel="IoU",
@@ -398,13 +444,76 @@ def _aggregate_mask_metrics(
             if bf1_col:
                 out_png = os.path.join(out_dir, "dataset_mask_total_boundary_f1_by_variant.png")
                 _save_bar(
-                    total["variant"].astype(str).tolist(),
+                    var_labels,
                     total[bf1_col].astype(float).tolist(),
+                    colors=var_colors,
+                    color_legend=legend_items,
                     out_png=out_png,
                     title="Dataset TOTAL boundary F1 by variant",
                     ylabel="Boundary F1",
                 )
                 outputs["mask_total_bf1_png"] = out_png
+
+            # ASSD/HD95 comparison for manual vs sam3 vs hrsegnet.
+            assd_col = _find_col_ci_local(total, "ASSD_mean") or _find_col_ci_local(total, "assd_mean")
+            hd95_col = _find_col_ci_local(total, "HD95_mean") or _find_col_ci_local(total, "hd95_mean")
+            if assd_col is not None and hd95_col is not None and "variant" in total.columns:
+                t0 = total.copy()
+                t0["variant_l"] = t0["variant"].astype(str).str.lower()
+
+                def _pick_row(token: str):
+                    tok = str(token).strip().lower()
+                    m = t0["variant_l"].str.contains(tok, na=False)
+                    if not m.any():
+                        return None
+                    s = t0.loc[m].copy()
+                    # prefer TOTAL row with largest support if duplicates exist.
+                    if "n_rows" in s.columns:
+                        s["n_rows_num"] = pd.to_numeric(s["n_rows"], errors="coerce").fillna(0.0)
+                        s = s.sort_values("n_rows_num", ascending=False)
+                    return s.iloc[0]
+
+                picks = [
+                    ("manual", _pick_row("manual:")),
+                    ("sam3", _pick_row("baseline:sam3")),
+                    ("hrsegnet", _pick_row("baseline:hrsegnet")),
+                ]
+                labels = []
+                assd_vals = []
+                hd95_vals = []
+                for lab, row in picks:
+                    if row is None:
+                        continue
+                    a = float(pd.to_numeric(row.get(assd_col, np.nan), errors="coerce"))
+                    h = float(pd.to_numeric(row.get(hd95_col, np.nan), errors="coerce"))
+                    if not (np.isfinite(a) and np.isfinite(h)):
+                        continue
+                    labels.append(lab)
+                    assd_vals.append(a)
+                    hd95_vals.append(h)
+
+                if labels:
+                    cmap = {"manual": "#4c78a8", "sam3": "#f28e2b", "hrsegnet": "#2ca02c"}
+                    bar_cols = [cmap.get(x, "#777777") for x in labels]
+                    x = np.arange(len(labels), dtype=float)
+                    fig, axes = plt.subplots(1, 2, figsize=(8.8, 4.2), dpi=180, sharex=True)
+                    axes[0].bar(x, assd_vals, color=bar_cols, alpha=0.88)
+                    axes[0].set_title("ASSD")
+                    axes[0].set_ylabel("ASSD")
+                    axes[0].grid(axis="y", alpha=0.2)
+                    axes[1].bar(x, hd95_vals, color=bar_cols, alpha=0.88)
+                    axes[1].set_title("HD95")
+                    axes[1].set_ylabel("HD95")
+                    axes[1].grid(axis="y", alpha=0.2)
+                    for ax in axes:
+                        ax.set_xticks(x)
+                        ax.set_xticklabels(labels, rotation=20, ha="right")
+                    fig.suptitle("Dataset Mask Error Comparison: manual vs sam3 vs hrsegnet", fontsize=11, fontweight="bold")
+                    plt.tight_layout()
+                    out_png = os.path.join(out_dir, "dataset_mask_assd_hd95_manual_sam3_hrsegnet.png")
+                    fig.savefig(out_png, bbox_inches="tight")
+                    plt.close(fig)
+                    outputs["mask_assd_hd95_compare_png"] = out_png
 
     _log(verbose, f"[summarize] mask metrics rows={len(all_df)}")
     return outputs
@@ -517,6 +626,96 @@ def _aggregate_width_metrics(
         fig.savefig(out_png, bbox_inches="tight")
         plt.close(fig)
 
+    def _plot_metric_box_by_method(
+        *,
+        df_plot: pd.DataFrame,
+        metric_col: str,
+        out_png: str,
+        title: str,
+        max_methods: int = 20,
+    ) -> None:
+        if metric_col not in df_plot.columns:
+            return
+        local_df = df_plot.copy()
+        if "method_name" not in local_df.columns:
+            if {"method_family", "baseline_method", "midline_type"}.issubset(local_df.columns):
+                mf = local_df["method_family"].astype(str)
+                bm = local_df["baseline_method"].astype(str)
+                mt = local_df["midline_type"].astype(str)
+                local_df["method_name"] = np.where(
+                    mf.str.lower().eq("baseline"),
+                    bm.where(bm.str.len() > 0, "baseline"),
+                    mt.where(mt.str.len() > 0, "model"),
+                )
+            else:
+                return
+        local_df[metric_col] = pd.to_numeric(local_df[metric_col], errors="coerce")
+        local_df = local_df[np.isfinite(local_df[metric_col].to_numpy(float))]
+        if local_df.empty:
+            return
+
+        # Keep top methods by count for readability.
+        order = (
+            local_df.groupby("method_name", dropna=False)[metric_col]
+            .size()
+            .sort_values(ascending=False)
+            .head(int(max_methods))
+            .index.astype(str)
+            .tolist()
+        )
+        local_df = local_df[local_df["method_name"].astype(str).isin(order)].copy()
+        if local_df.empty:
+            return
+        # Order by median error (lower is better).
+        med_order = (
+            local_df.groupby("method_name", dropna=False)[metric_col]
+            .median()
+            .sort_values(ascending=True)
+            .index.astype(str)
+            .tolist()
+        )
+        local_df["method_name"] = pd.Categorical(local_df["method_name"].astype(str), categories=med_order, ordered=True)
+
+        fig_w = max(9.0, 0.55 * len(med_order))
+        fig, ax = plt.subplots(figsize=(fig_w, 5.0), dpi=180)
+        parts = ax.boxplot(
+            [local_df.loc[local_df["method_name"] == m, metric_col].to_numpy(float) for m in med_order],
+            labels=med_order,
+            patch_artist=True,
+            showfliers=True,
+            medianprops=dict(color="black", linewidth=1.2),
+            whiskerprops=dict(color="#555555"),
+            capprops=dict(color="#555555"),
+            flierprops=dict(marker="o", markersize=3, alpha=0.5, markerfacecolor="#888888", markeredgecolor="#888888"),
+        )
+        # Color by source class.
+        cls_map = {}
+        for m in med_order:
+            g = local_df.loc[local_df["method_name"] == m]
+            if g.empty:
+                cls_map[m] = "auto"
+                continue
+            mf0 = str(g.get("method_family", pd.Series([""])).astype(str).iloc[0]).lower() if "method_family" in g.columns else ""
+            mt0 = str(g.get("midline_type", pd.Series([""])).astype(str).iloc[0]).lower() if "midline_type" in g.columns else ""
+            cls_map[m] = "baseline" if mf0 == "baseline" else ("manual" if mt0 == "manual" else "auto")
+        for box, m in zip(parts["boxes"], med_order):
+            box.set_facecolor(COLOR_MAP.get(cls_map.get(m, "auto"), "#4c78a8"))
+            box.set_alpha(0.65)
+
+        ax.set_ylabel(metric_col)
+        ax.set_title(title)
+        ax.set_xticklabels(med_order, rotation=35, ha="right", fontsize=8)
+        ax.grid(axis="y", alpha=0.2)
+        legend_handles = [
+            Patch(facecolor=COLOR_MAP["manual"], edgecolor="none", label="manual"),
+            Patch(facecolor=COLOR_MAP["auto"], edgecolor="none", label="auto"),
+            Patch(facecolor=COLOR_MAP["baseline"], edgecolor="none", label="baseline"),
+        ]
+        ax.legend(handles=legend_handles, loc="best", fontsize=8, framealpha=0.9)
+        plt.tight_layout()
+        fig.savefig(out_png, bbox_inches="tight")
+        plt.close(fig)
+
     for img_dir in image_dirs:
         image = os.path.basename(img_dir)
         for p in glob.glob(os.path.join(img_dir, "**", "*_width_summary_*.csv"), recursive=True):
@@ -623,6 +822,64 @@ def _aggregate_width_metrics(
     grouped.to_csv(grp_csv, index=False)
     outputs["width_summary_grouped_csv"] = grp_csv
 
+    # Split width error view: atomic vs combined+noncombined_atomic in two columns.
+    def _normalize_width_crack_group(v: str) -> str:
+        s = str(v or "").strip().lower()
+        if s == "atomic":
+            return "atomic"
+        if ("combined" in s) and ("noncombined" in s) and ("atomic" in s):
+            return "combined_plus_noncombined_atomic"
+        return ""
+
+    split_df = grouped.copy()
+    split_df["crack_group"] = split_df["crack_type"].map(_normalize_width_crack_group)
+    split_df = split_df[split_df["crack_group"].astype(str).str.len() > 0].copy()
+    if not split_df.empty:
+        idx_cols = ["method_name", "midline_type", "method_family", "baseline_method", "source_class"]
+        idx_cols = [c for c in idx_cols if c in split_df.columns]
+        out_parts = []
+        if "mae_px_mean" in split_df.columns:
+            piv_mae = (
+                split_df.pivot_table(
+                    index=idx_cols,
+                    columns="crack_group",
+                    values="mae_px_mean",
+                    aggfunc="mean",
+                )
+                .reset_index()
+                .rename(
+                    columns={
+                        "atomic": "mae_atomic_error",
+                        "combined_plus_noncombined_atomic": "mae_combined_plus_noncombined_atomic_error",
+                    }
+                )
+            )
+            out_parts.append(piv_mae)
+        if "rmse_px_mean" in split_df.columns:
+            piv_rmse = (
+                split_df.pivot_table(
+                    index=idx_cols,
+                    columns="crack_group",
+                    values="rmse_px_mean",
+                    aggfunc="mean",
+                )
+                .reset_index()
+                .rename(
+                    columns={
+                        "atomic": "rmse_atomic_error",
+                        "combined_plus_noncombined_atomic": "rmse_combined_plus_noncombined_atomic_error",
+                    }
+                )
+            )
+            out_parts.append(piv_rmse)
+        if out_parts:
+            split_out = out_parts[0]
+            for nxt in out_parts[1:]:
+                split_out = split_out.merge(nxt, on=idx_cols, how="outer")
+            split_csv = os.path.join(out_dir, "dataset_width_error_split.csv")
+            split_out.to_csv(split_csv, index=False)
+            outputs["width_error_split_csv"] = split_csv
+
     mae_col = "mae_px_mean" if "mae_px_mean" in grouped.columns else None
     rmse_col = "rmse_px_mean" if "rmse_px_mean" in grouped.columns else None
     total_grouped = grouped[grouped["crack_type"].astype(str).str.upper() == "TOTAL"].copy()
@@ -642,6 +899,14 @@ def _aggregate_width_metrics(
                   else "Dataset width MAE by method (mean + IQR + outliers)",
         )
         outputs["width_mae_png"] = out_png
+        out_png_box = os.path.join(out_dir, "dataset_width_mae_box_by_method.png")
+        _plot_metric_box_by_method(
+            df_plot=all_df if total_grouped.empty else all_df[all_df["crack_type"].astype(str).str.upper() == "TOTAL"].copy(),
+            metric_col="mae_px",
+            out_png=out_png_box,
+            title="Dataset width MAE by method (box+whisker)",
+        )
+        outputs["width_mae_box_png"] = out_png_box
 
     if rmse_col:
         # Keep canonical filename, but with richer uncertainty display.
@@ -655,6 +920,14 @@ def _aggregate_width_metrics(
                   else "Dataset width RMSE by method (mean + IQR + outliers)",
         )
         outputs["width_rmse_png"] = out_png
+        out_png_box = os.path.join(out_dir, "dataset_width_rmse_box_by_method.png")
+        _plot_metric_box_by_method(
+            df_plot=all_df if total_grouped.empty else all_df[all_df["crack_type"].astype(str).str.upper() == "TOTAL"].copy(),
+            metric_col="rmse_px",
+            out_png=out_png_box,
+            title="Dataset width RMSE by method (box+whisker)",
+        )
+        outputs["width_rmse_box_png"] = out_png_box
 
     # Additional distribution-aware plots: mean bar + IQR + outlier dots.
     # separate distribution plot files removed; canonical by_method plots include IQR/outliers
@@ -670,6 +943,8 @@ def _aggregate_midline_metrics(
     verbose: bool,
 ) -> Dict[str, str]:
     outputs = {}
+    EXCLUDE_SKEL_BASELINE_METHODS = True
+    MIDLINE_DEBUG = True
     frames = []
     for img_dir in image_dirs:
         image = os.path.basename(img_dir)
@@ -691,8 +966,46 @@ def _aggregate_midline_metrics(
         return outputs
 
     all_df = pd.concat(frames, ignore_index=True)
+    if MIDLINE_DEBUG:
+        try:
+            dbg_cols = [c for c in ["image", "crack_type", "geometry_type", "method_family", "baseline_method", "midline_type"] if c in all_df.columns]
+            dbg_csv = os.path.join(out_dir, "dataset_midline_debug_all_rows_raw.csv")
+            all_df.loc[:, dbg_cols + [c for c in ["score_mid", "length_px", "source_relpath"] if c in all_df.columns]].to_csv(dbg_csv, index=False)
+            _log(verbose, f"[midline-debug] wrote raw rows -> {dbg_csv}")
+            if "method_family" in all_df.columns:
+                _log(verbose, f"[midline-debug] raw method_family counts:\n{all_df['method_family'].astype(str).value_counts(dropna=False).to_string()}")
+        except Exception as e:
+            _log(verbose, f"[midline-debug] raw dump failed: {e}")
     if "midline_type" not in all_df.columns:
         all_df["midline_type"] = all_df["midline_type_path"]
+
+    # Fallback safety net: ensure score_mid exists and is finite enough for ranking.
+    if ("score_mid" not in all_df.columns) or all_df["score_mid"].isna().any():
+        nn = pd.to_numeric(all_df.get("nn_mean_bidirectional"), errors="coerce")
+        hd = pd.to_numeric(all_df.get("hausdorff_max"), errors="coerce")
+        cov = pd.to_numeric(all_df.get("coverage_min"), errors="coerce")
+        nn = nn.fillna(0.0)
+        hd = hd.fillna(0.0)
+        cov = cov.fillna(0.0)
+        all_df["score_mid"] = (
+            np.log1p(np.maximum(nn.to_numpy(float), 0.0))
+            + 0.5 * np.log1p(np.maximum(hd.to_numpy(float), 0.0))
+            + (1.0 - np.clip(cov.to_numpy(float), 0.0, 1.0))
+        )
+
+    if EXCLUDE_SKEL_BASELINE_METHODS and {"method_family", "baseline_method"}.issubset(all_df.columns):
+        m_skel = (
+            all_df["method_family"].astype(str).str.lower().eq("baseline")
+            & all_df["baseline_method"].astype(str).str.lower().str.startswith("skel_")
+        )
+        if m_skel.any():
+            all_df = all_df.loc[~m_skel].copy()
+            if MIDLINE_DEBUG:
+                _log(verbose, f"[midline-debug] dropped skel_ baseline rows: {int(np.count_nonzero(m_skel.to_numpy(dtype=bool)))}")
+
+    if all_df.empty:
+        return outputs
+
     all_csv = os.path.join(out_dir, "dataset_midline_metrics_all.csv")
     all_df.to_csv(all_csv, index=False)
     outputs["midline_all_csv"] = all_csv
@@ -731,6 +1044,145 @@ def _aggregate_midline_metrics(
                 ylabel="score_mid",
             )
             outputs["midline_score_png"] = out_png
+
+    # RS3-style dataset midline score ranking (lower is better),
+    # focused on combined crack metrics when available.
+    if "score_mid" in all_df.columns:
+        d0 = all_df.copy()
+        if MIDLINE_DEBUG:
+            try:
+                if {"method_family", "baseline_method"}.issubset(d0.columns):
+                    m_base = d0["method_family"].astype(str).str.lower().eq("baseline")
+                    _log(verbose, f"[midline-debug] pre-score filter baseline rows={int(np.count_nonzero(m_base.to_numpy(dtype=bool)))}")
+            except Exception:
+                pass
+        d0["score_mid"] = pd.to_numeric(d0["score_mid"], errors="coerce")
+        finite_mask = np.isfinite(d0["score_mid"].to_numpy(float))
+        if MIDLINE_DEBUG:
+            try:
+                if "method_family" in d0.columns:
+                    m_base = d0["method_family"].astype(str).str.lower().eq("baseline")
+                    n_base = int(np.count_nonzero(m_base.to_numpy(dtype=bool)))
+                    n_base_finite = int(np.count_nonzero((m_base & finite_mask).to_numpy(dtype=bool)))
+                    _log(verbose, f"[midline-debug] baseline finite score_mid rows={n_base_finite}/{n_base}")
+            except Exception:
+                pass
+        d0 = d0[finite_mask]
+        if not d0.empty:
+            if "length_px" in d0.columns:
+                ww = pd.to_numeric(d0["length_px"], errors="coerce").fillna(0.0).to_numpy(float)
+                d0["_w"] = np.where(np.isfinite(ww) & (ww > 0), ww, 1.0)
+            else:
+                d0["_w"] = 1.0
+
+            if {"method_family", "baseline_method", "midline_type"}.issubset(d0.columns):
+                mf = d0["method_family"].astype(str)
+                bm = d0["baseline_method"].astype(str)
+                mt = d0["midline_type"].astype(str)
+                d0["method_name"] = np.where(
+                    mf.str.lower().eq("baseline"),
+                    bm.where(bm.str.len() > 0, "baseline"),
+                    mt.where(mt.str.len() > 0, "model"),
+                )
+            else:
+                d0["method_name"] = "unknown"
+
+            def _src_class(row):
+                if str(row.get("method_family", "")).lower() == "baseline":
+                    return "baseline"
+                if str(row.get("midline_type", "")).lower() == "manual":
+                    return "manual"
+                return "auto"
+
+            d0["source_class"] = d0.apply(_src_class, axis=1)
+
+            # Prefer combined for this ranking view; fallback to all crack types.
+            if "crack_type" in d0.columns:
+                # Include all combined-like labels (e.g., combined, combined_plus_noncombined_atomic).
+                m_comb = d0["crack_type"].astype(str).str.lower().str.contains("combined", na=False)
+                d_rank_src = d0.loc[m_comb].copy() if m_comb.any() else d0.copy()
+                if MIDLINE_DEBUG:
+                    try:
+                        if "method_family" in d0.columns:
+                            m_base = d0["method_family"].astype(str).str.lower().eq("baseline")
+                            n_base_all = int(np.count_nonzero(m_base.to_numpy(dtype=bool)))
+                            n_base_comb = int(np.count_nonzero((m_base & m_comb).to_numpy(dtype=bool)))
+                            _log(verbose, f"[midline-debug] baseline rows in combined-like set={n_base_comb}/{n_base_all}")
+                    except Exception:
+                        pass
+            else:
+                d_rank_src = d0.copy()
+
+            if MIDLINE_DEBUG:
+                try:
+                    dbg_rank_csv = os.path.join(out_dir, "dataset_midline_debug_rank_input.csv")
+                    dbg_cols = [c for c in ["image", "method_family", "baseline_method", "midline_type", "crack_type", "geometry_type", "score_mid", "length_px", "_w", "source_relpath"] if c in d_rank_src.columns]
+                    d_rank_src.loc[:, dbg_cols].to_csv(dbg_rank_csv, index=False)
+                    _log(verbose, f"[midline-debug] wrote rank-input rows -> {dbg_rank_csv}")
+                except Exception as e:
+                    _log(verbose, f"[midline-debug] rank-input dump failed: {e}")
+
+            key_cols = ["method_name", "geometry_type", "source_class"]
+            key_cols = [c for c in key_cols if c in d_rank_src.columns]
+            rank_rows = []
+            for key, g in d_rank_src.groupby(key_cols, dropna=False):
+                s = pd.to_numeric(g["score_mid"], errors="coerce").to_numpy(float)
+                w = pd.to_numeric(g["_w"], errors="coerce").to_numpy(float)
+                ok = np.isfinite(s) & np.isfinite(w) & (w > 0)
+                if not np.any(ok):
+                    continue
+                key_vals = key if isinstance(key, tuple) else (key,)
+                row = {k: v for k, v in zip(key_cols, key_vals)}
+                row.update(
+                    {
+                        "score_mid_wmean": float(np.average(s[ok], weights=w[ok])),
+                        "score_mid_mean": float(np.mean(s[ok])),
+                        "n_rows": int(np.count_nonzero(ok)),
+                        "weight_sum": float(np.sum(w[ok])),
+                    }
+                )
+                rank_rows.append(row)
+
+            if rank_rows:
+                rank_df = pd.DataFrame(rank_rows).sort_values("score_mid_wmean", ascending=True)
+                rank_csv = os.path.join(out_dir, "dataset_midline_score_ranked.csv")
+                rank_df.to_csv(rank_csv, index=False)
+                outputs["midline_score_ranked_csv"] = rank_csv
+                if MIDLINE_DEBUG:
+                    try:
+                        if "source_class" in rank_df.columns:
+                            _log(verbose, f"[midline-debug] ranked source_class counts:\n{rank_df['source_class'].astype(str).value_counts(dropna=False).to_string()}")
+                    except Exception:
+                        pass
+
+                top = rank_df.head(20).copy()
+                top["label"] = top.apply(
+                    lambda r: f"{r.get('method_name', 'unknown')}|{r.get('geometry_type', 'unknown')}",
+                    axis=1,
+                )
+                color_map = {"manual": "#d62728", "auto": "#1f77b4", "baseline": "#2ca02c"}
+                colors = [color_map.get(str(c), "#4c78a8") for c in top["source_class"].astype(str).tolist()]
+                fig_w = max(10.0, 0.55 * len(top))
+                fig, ax = plt.subplots(figsize=(fig_w, 5.0), dpi=180)
+                x = np.arange(len(top), dtype=float)
+                vals = top["score_mid_wmean"].astype(float).to_numpy(float)
+                ax.bar(x, vals, color=colors, alpha=0.88)
+                ax.set_xticks(x)
+                ax.set_xticklabels(top["label"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
+                ax.set_ylabel("score_mid_wmean")
+                ax.set_title("Dataset Midline RS3-Style Score (combined, lower is better)")
+                ax.grid(axis="y", alpha=0.2)
+                legend_handles = [
+                    Patch(facecolor=color_map["manual"], edgecolor="none", label="manual"),
+                    Patch(facecolor=color_map["auto"], edgecolor="none", label="auto"),
+                    Patch(facecolor=color_map["baseline"], edgecolor="none", label="baseline"),
+                ]
+                ax.legend(handles=legend_handles, loc="best", framealpha=0.9, fontsize=8)
+                plt.tight_layout()
+                out_png = os.path.join(out_dir, "dataset_midline_score_ranked.png")
+                fig.savefig(out_png, bbox_inches="tight")
+                plt.close(fig)
+                outputs["midline_score_ranked_png"] = out_png
 
     _log(verbose, f"[summarize] midline rows={len(all_df)}")
     return outputs
@@ -945,6 +1397,7 @@ def _aggregate_edge_rs3_selection(
 
     # Edge family aggregation across images
     edge_frames = []
+    edge_all_frames = []
     for img_dir in image_dirs:
         image = os.path.basename(img_dir)
         p = os.path.join(img_dir, "edge_sweep_family_agg.csv")
@@ -954,6 +1407,12 @@ def _aggregate_edge_rs3_selection(
         d = df.copy()
         d["image"] = image
         edge_frames.append(d)
+        p_all = os.path.join(img_dir, "edge_sweep_all.csv")
+        df_all = _safe_read_csv(p_all)
+        if df_all is not None:
+            da = df_all.copy()
+            da["image"] = image
+            edge_all_frames.append(da)
 
     if edge_frames:
         edge_df = pd.concat(edge_frames, ignore_index=True)
@@ -992,22 +1451,116 @@ def _aggregate_edge_rs3_selection(
                 axis=1,
             )
             out_png = os.path.join(out_dir, "dataset_edge_family_scores.png")
-            fig_w = max(9.5, 0.55 * len(top))
-            fig, ax = plt.subplots(figsize=(fig_w, 5.0), dpi=180)
-            vals = top["edge_score_wmean_mean"].astype(float).tolist()
-            x = np.arange(len(vals), dtype=float)
-            modes = top["param_seg_mode"].astype(str).str.lower().tolist()
-            colors = ["#f28e2b" if m == "old" else "#4c78a8" for m in modes]  # old=orange, new=blue
-            ax.bar(x, vals, color=colors, alpha=0.9)
+
+            # Optional decomposition from edge_sweep_all.csv:
+            # edge_score ~= (1-boundary_f1) + 0.50*(ASSD/med) + 0.25*(HD95/med)
+            # medians are computed per image to mirror image-level sweep summaries.
+            decomp_df = pd.DataFrame()
+            if edge_all_frames:
+                try:
+                    raw_all = pd.concat(edge_all_frames, ignore_index=True)
+                    need_cols = fam_cols + ["image", "boundary_f1", "ASSD", "HD95", "global_weight"]
+                    if all(c in raw_all.columns for c in need_cols):
+                        decomp_rows = []
+                        for image, gi in raw_all.groupby("image", dropna=False):
+                            g = gi.copy()
+                            g["boundary_f1"] = pd.to_numeric(g["boundary_f1"], errors="coerce")
+                            g["ASSD"] = pd.to_numeric(g["ASSD"], errors="coerce")
+                            g["HD95"] = pd.to_numeric(g["HD95"], errors="coerce")
+                            g["global_weight"] = pd.to_numeric(g["global_weight"], errors="coerce").fillna(1.0)
+                            assd_med = float(np.nanmedian(g["ASSD"].to_numpy(float))) + 1e-9
+                            hd95_med = float(np.nanmedian(g["HD95"].to_numpy(float))) + 1e-9
+                            g["comp_boundary"] = 1.0 - g["boundary_f1"]
+                            g["comp_assd"] = 0.50 * (g["ASSD"] / assd_med)
+                            g["comp_hd95"] = 0.25 * (g["HD95"] / hd95_med)
+                            for key, gf in g.groupby(fam_cols, dropna=False):
+                                w = pd.to_numeric(gf["global_weight"], errors="coerce").to_numpy(float)
+                                w = np.where(np.isfinite(w) & (w > 0), w, 0.0)
+                                if not np.any(w > 0):
+                                    continue
+                                b = pd.to_numeric(gf["comp_boundary"], errors="coerce").to_numpy(float)
+                                a = pd.to_numeric(gf["comp_assd"], errors="coerce").to_numpy(float)
+                                h = pd.to_numeric(gf["comp_hd95"], errors="coerce").to_numpy(float)
+                                ok_b = np.isfinite(b) & np.isfinite(w) & (w > 0)
+                                ok_a = np.isfinite(a) & np.isfinite(w) & (w > 0)
+                                ok_h = np.isfinite(h) & np.isfinite(w) & (w > 0)
+                                if not (np.any(ok_b) and np.any(ok_a) and np.any(ok_h)):
+                                    continue
+                                decomp_rows.append(
+                                    {
+                                        "image": image,
+                                        **dict(zip(fam_cols, key)),
+                                        "comp_boundary_wmean": float(np.average(b[ok_b], weights=w[ok_b])),
+                                        "comp_assd_wmean": float(np.average(a[ok_a], weights=w[ok_a])),
+                                        "comp_hd95_wmean": float(np.average(h[ok_h], weights=w[ok_h])),
+                                    }
+                                )
+                        if decomp_rows:
+                            decomp_raw = pd.DataFrame(decomp_rows)
+                            decomp_df = (
+                                decomp_raw.groupby(fam_cols, dropna=False)
+                                .agg(
+                                    comp_boundary_wmean_mean=("comp_boundary_wmean", "mean"),
+                                    comp_assd_wmean_mean=("comp_assd_wmean", "mean"),
+                                    comp_hd95_wmean_mean=("comp_hd95_wmean", "mean"),
+                                )
+                                .reset_index()
+                            )
+                except Exception as e:
+                    _log(verbose, f"[summarize] edge score decomposition failed: {e}")
+
+            top_plot = top.merge(decomp_df, on=fam_cols, how="left") if not decomp_df.empty else top.copy()
+            fig_w = max(10.0, 0.60 * len(top_plot))
+            fig, ax = plt.subplots(figsize=(fig_w, 5.2), dpi=180)
+            x = np.arange(len(top_plot), dtype=float)
+            total_vals = pd.to_numeric(top_plot["edge_score_wmean_mean"], errors="coerce").to_numpy(float)
+            modes = top_plot["param_seg_mode"].astype(str).str.lower().tolist()
+            mode_edge = ["#39b54a" if m == "old" else "#1f77b4" for m in modes]  # old=brighter green, new=blue
+
+            has_decomp = all(
+                c in top_plot.columns
+                for c in ["comp_boundary_wmean_mean", "comp_assd_wmean_mean", "comp_hd95_wmean_mean"]
+            )
+            if has_decomp:
+                cb = pd.to_numeric(top_plot["comp_boundary_wmean_mean"], errors="coerce").to_numpy(float)
+                ca = pd.to_numeric(top_plot["comp_assd_wmean_mean"], errors="coerce").to_numpy(float)
+                ch = pd.to_numeric(top_plot["comp_hd95_wmean_mean"], errors="coerce").to_numpy(float)
+                cb = np.where(np.isfinite(cb), cb, 0.0)
+                ca = np.where(np.isfinite(ca), ca, 0.0)
+                ch = np.where(np.isfinite(ch), ch, 0.0)
+                bars1 = ax.bar(x, cb, color="#e15759", alpha=0.85, label="boundary term")
+                bars2 = ax.bar(x, ca, bottom=cb, color="#b07aa1", alpha=0.85, label="ASSD term")
+                bars3 = ax.bar(x, ch, bottom=(cb + ca), color="#f28e2b", alpha=0.85, label="HD95 term")
+                # Mode overlay: colored outlines on stacked bars.
+                for i in range(len(x)):
+                    for bar in (bars1[i], bars2[i], bars3[i]):
+                        bar.set_edgecolor(mode_edge[i])
+                        bar.set_linewidth(2.6)
+                ax.plot(x, total_vals, "o", color="black", markersize=4, label="edge_score_wmean_mean")
+            else:
+                ax.bar(x, total_vals, color="#4c78a8", alpha=0.85)
+                for i, p in enumerate(ax.patches):
+                    p.set_edgecolor(mode_edge[i])
+                    p.set_linewidth(2.6)
+                ax.plot(x, total_vals, "o", color="black", markersize=4, label="edge_score_wmean_mean")
+
             ax.set_xticks(x)
-            ax.set_xticklabels(top["label"].tolist(), rotation=65, ha="right", fontsize=8)
-            ax.set_ylabel("edge_score_wmean")
-            ax.set_title("Dataset edge family score (lower is better)")
+            ax.set_xticklabels(top_plot["label"].tolist(), rotation=65, ha="right", fontsize=8)
+            ax.set_ylabel("edge score / components")
+            ax.set_title("Dataset edge family score decomposition (lower is better)")
             ax.grid(axis="y", alpha=0.2)
             legend_handles = [
-                Patch(facecolor="#4c78a8", edgecolor="none", label="new"),
-                Patch(facecolor="#f28e2b", edgecolor="none", label="old"),
+                Patch(facecolor="#1f77b4", edgecolor="none", label="mode=new (outline)"),
+                Patch(facecolor="#39b54a", edgecolor="none", label="mode=old (outline)"),
             ]
+            if has_decomp:
+                legend_handles = [
+                    Patch(facecolor="#e15759", edgecolor="none", label="boundary term"),
+                    Patch(facecolor="#b07aa1", edgecolor="none", label="ASSD term"),
+                    Patch(facecolor="#f28e2b", edgecolor="none", label="HD95 term"),
+                    Patch(facecolor="#1f77b4", edgecolor="none", label="mode=new (outline)"),
+                    Patch(facecolor="#39b54a", edgecolor="none", label="mode=old (outline)"),
+                ]
             ax.legend(handles=legend_handles, loc="lower right", framealpha=0.9, fontsize=8)
             plt.tight_layout()
             fig.savefig(out_png, bbox_inches="tight")
@@ -1133,7 +1686,7 @@ def _aggregate_baseline_timings(
                 num_cols,
                 vals,
                 out_png=out_png,
-                title="Baseline timing components (mean)",
+                title="Width Baseline Timing Components (mean)",
                 ylabel="seconds",
                 rotate=40,
             )
@@ -1572,7 +2125,7 @@ def _aggregate_gt_centering_weighted_summaries(
                 ax.set_xticks(x)
                 ax.set_xticklabels(labels)
                 ax.set_ylabel("lwmean_score_mid")
-                ax.set_title("GT Centering RS3 Score: Atomic vs Combined")
+                ax.set_title("GT Centering RS3 Score (lower is better): Atomic vs Combined")
                 ax.grid(axis="y", alpha=0.2)
                 plt.tight_layout()
                 out_png = os.path.join(plot_dir, "gt_centering_weighted_score_mid_atomic_vs_combined.png")
