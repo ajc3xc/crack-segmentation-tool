@@ -1026,19 +1026,26 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
     skel_graph = graph_longest_path_prune(skel_raw).astype(bool)
     timings["skeleton_graph_s"] = float(time.perf_counter() - t0)
 
-    baseline_artifacts: Dict[str, Dict[str, np.ndarray]] = {}
+    geometry_baselines: Dict[str, Dict[str, np.ndarray]] = {}
+    width_baselines: Dict[str, Dict[str, np.ndarray]] = {}
 
-    def _add_baseline(name: str, width_map: np.ndarray, skel_mask: np.ndarray) -> None:
-        baseline_artifacts[name] = {
+    def _add_geometry(name: str, skel_mask: np.ndarray) -> None:
+        geometry_baselines[name] = {
+            "skeleton": np.asarray(skel_mask, dtype=bool),
+            "support_mask": np.asarray(skel_mask, dtype=np.uint8),
+        }
+
+    def _add_width(name: str, width_map: np.ndarray, skel_mask: np.ndarray) -> None:
+        width_baselines[name] = {
             "width_map": np.asarray(width_map, dtype=np.float32),
             "support_mask": np.asarray(skel_mask, dtype=np.uint8),
             "skeleton": np.asarray(skel_mask, dtype=bool),
         }
 
     # Skeleton-only baselines
-    _add_baseline("skel_mat_raw", np.zeros_like(dist_map, dtype=np.float32), skel_raw)
-    _add_baseline("skel_mat_dse", np.zeros_like(dist_map, dtype=np.float32), skel_dse)
-    _add_baseline("skel_graph_longest_path", np.zeros_like(dist_map, dtype=np.float32), skel_graph)
+    _add_geometry("skel_mat_raw", skel_raw)
+    _add_geometry("skel_mat_dse", skel_dse)
+    _add_geometry("skel_graph_longest_path", skel_graph)
 
     # --------------------------------------------------
     # Stage C: width baselines
@@ -1046,12 +1053,12 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
     # 1) MAT width (raw MAT skeleton, DT*2)
     w_mat = np.zeros_like(dist_map, dtype=np.float32)
     w_mat[skel_raw] = dist_map[skel_raw] * 2.0
-    _add_baseline("mat_width_raw", w_mat, skel_raw)
+    _add_width("mat_width_raw", w_mat, skel_raw)
 
     # 2) MAT width on DSE skeleton (DT*2)
     w_mat_dse = np.zeros_like(dist_map, dtype=np.float32)
     w_mat_dse[skel_dse] = dist_map[skel_dse] * 2.0
-    _add_baseline("mat_width_dse", w_mat_dse, skel_dse)
+    _add_width("mat_width_dse", w_mat_dse, skel_dse)
 
     # 3) PCA width (DSE skeleton)
     t0 = time.perf_counter()
@@ -1063,7 +1070,7 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
         min_points=int(cfg["pca_min_points"]),
     )
     timings["pca_width_dse_s"] = float(time.perf_counter() - t0)
-    _add_baseline("pca_width_dse", w_pca_dse, skel_dse)
+    _add_width("pca_width_dse", w_pca_dse, skel_dse)
 
     # 4) ESD width (DSE skeleton)
     t0 = time.perf_counter()
@@ -1075,7 +1082,7 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
         min_points=int(cfg["pca_min_points"]),
     )
     timings["esd_width_dse_s"] = float(time.perf_counter() - t0)
-    _add_baseline("esd_width_dse", w_esd_dse, skel_dse)
+    _add_width("esd_width_dse", w_esd_dse, skel_dse)
 
     # 5) EOB width (DSE skeleton)
     t0 = time.perf_counter()
@@ -1087,7 +1094,7 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
         min_points=int(cfg["pca_min_points"]),
     )
     timings["eob_width_dse_s"] = float(time.perf_counter() - t0)
-    _add_baseline("eob_width_dse", w_eob_dse, skel_dse)
+    _add_width("eob_width_dse", w_eob_dse, skel_dse)
 
     # Optional stress baseline intentionally disabled:
     # strict graph skeleton is retained for geometry-only comparison.
@@ -1113,28 +1120,55 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
         "eob_width_dse": f"EOB Width (DSE, {int(min_area_px)}px)",
     }
 
+    saved_geometry_methods: List[str] = []
+    saved_width_methods: List[str] = []
+
     for method in methods:
-        rec = baseline_artifacts.get(method)
-        if rec is None:
-            continue
-        outp = os.path.join(img_out_root, method, "width_map.npz")
-        meta = {
-            "method": method,
-            "ok": True,
-            "H": H,
-            "W": W,
-            "crack_px": crack_px,
-            "min_area_px": int(min_area_px),
-        }
-        _save_npz(
-            outp,
-            width_map=rec["width_map"],
-            support_mask=rec["support_mask"],
-            skel=rec["skeleton"],
-            meta=meta,
-        )
-        if make_plots and method in ("mat_width_raw", "mat_width_dse", "pca_width_dse", "esd_width_dse", "eob_width_dse"):
-            panels.append((method_label.get(method, method), rec["width_map"], rec["support_mask"], method))
+        if method in width_baselines:
+            rec = width_baselines[method]
+            outp = os.path.join(img_out_root, method, "width_map.npz")
+            meta = {
+                "method": method,
+                "ok": True,
+                "H": H,
+                "W": W,
+                "crack_px": crack_px,
+                "min_area_px": int(min_area_px),
+                "baseline_type": "width",
+            }
+            _save_npz(
+                outp,
+                width_map=rec["width_map"],
+                support_mask=rec["support_mask"],
+                skel=rec["skeleton"],
+                meta=meta,
+            )
+            saved_width_methods.append(str(method))
+            if make_plots and method in ("mat_width_raw", "mat_width_dse", "pca_width_dse", "esd_width_dse", "eob_width_dse"):
+                panels.append((method_label.get(method, method), rec["width_map"], rec["support_mask"], method))
+
+        elif method in geometry_baselines:
+            rec = geometry_baselines[method]
+            outp = os.path.join(img_out_root, method, "geometry.npz")
+            meta = {
+                "method": method,
+                "ok": True,
+                "H": H,
+                "W": W,
+                "crack_px": crack_px,
+                "min_area_px": int(min_area_px),
+                "geometry_only": True,
+                "baseline_type": "geometry",
+            }
+            # Keep payload schema stable: geometry files still carry width_map (all zeros).
+            _save_npz(
+                outp,
+                width_map=np.zeros((H, W), dtype=np.float32),
+                support_mask=rec["support_mask"],
+                skel=rec["skeleton"],
+                meta=meta,
+            )
+            saved_geometry_methods.append(str(method))
 
     # --------------------------------------------------
     # Geometry-only and width overview plots
@@ -1142,8 +1176,8 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
     if make_plots:
         geoms = []
         for method in ("skel_mat_raw", "skel_mat_dse", "skel_graph_longest_path"):
-            if method in baseline_artifacts:
-                geoms.append((method_label[method], baseline_artifacts[method]["skeleton"]))
+            if method in geometry_baselines:
+                geoms.append((method_label[method], geometry_baselines[method]["skeleton"]))
         if geoms:
             plot_geometry_comparison(
                 os.path.join(img_out_root, "geometry_comparison.png"),
@@ -1167,6 +1201,10 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
         "H": H,
         "W": W,
         "crack_px": crack_px,
+        "n_geometry_methods_saved": int(len(saved_geometry_methods)),
+        "n_width_methods_saved": int(len(saved_width_methods)),
+        "geometry_methods_saved": json.dumps(saved_geometry_methods),
+        "width_methods_saved": json.dumps(saved_width_methods),
         "total_s": float(t1_total - t0_total),
         **timings,
     }
@@ -1266,7 +1304,9 @@ def replot_from_saved_npz(
             skeletonize_geom = skeletonize(bw).astype(bool)
 
             for method in load_methods:
-                npz_path = os.path.join(img_out_root, method, "width_map.npz")
+                npz_path_width = os.path.join(img_out_root, method, "width_map.npz")
+                npz_path_geom = os.path.join(img_out_root, method, "geometry.npz")
+                npz_path = npz_path_width if os.path.isfile(npz_path_width) else npz_path_geom
                 if not os.path.isfile(npz_path):
                     continue
                 try:
@@ -1278,7 +1318,8 @@ def replot_from_saved_npz(
                     print(f"[replot] failed to load {npz_path}: {e}")
                     continue
 
-                panels.append((method_label.get(method, method), wmap, supp, method))
+                if npz_path == npz_path_width:
+                    panels.append((method_label.get(method, method), wmap, supp, method))
 
                 if method == "skel_mat_raw":
                     geoms.append(("MAT Raw", skel))
@@ -2232,6 +2273,32 @@ def main():
     timings_csv = os.path.join(OUT_DIR, "width_baseline_timings.csv")
     res_df.to_csv(timings_csv, index=False)
     print("[width_baseline_creator] wrote:", timings_csv)
+
+    # Separate inventory CSVs (easy to inspect / ablate).
+    inv_cols = [
+        "stem",
+        "path",
+        "H",
+        "W",
+        "crack_px",
+        "n_geometry_methods_saved",
+        "n_width_methods_saved",
+        "geometry_methods_saved",
+        "width_methods_saved",
+    ]
+    inv_cols = [c for c in inv_cols if c in res_df.columns]
+    if inv_cols:
+        inv_df = res_df[inv_cols].copy()
+        geom_csv = os.path.join(OUT_DIR, "width_baseline_geometry_inventory.csv")
+        width_csv = os.path.join(OUT_DIR, "width_baseline_width_inventory.csv")
+        inv_df[
+            [c for c in ("stem", "path", "H", "W", "crack_px", "n_geometry_methods_saved", "geometry_methods_saved") if c in inv_df.columns]
+        ].to_csv(geom_csv, index=False)
+        inv_df[
+            [c for c in ("stem", "path", "H", "W", "crack_px", "n_width_methods_saved", "width_methods_saved") if c in inv_df.columns]
+        ].to_csv(width_csv, index=False)
+        print("[width_baseline_creator] wrote:", geom_csv)
+        print("[width_baseline_creator] wrote:", width_csv)
 
     # ---- summary stats (committee-friendly) ----
     weight = res_df["crack_px"].fillna(0).astype(float)

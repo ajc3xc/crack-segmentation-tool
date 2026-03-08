@@ -7990,13 +7990,32 @@ def compare_widths_for_aligned_cracks(
         print("[WIDTH DEBUG] no finite diffs")
         return rows, midline_metric_rows
 
-    vmin, vmax = np.percentile(all_d, [5, 95])
+    '''vmin, vmax = np.percentile(all_d, [5, 95])
     vmin = min(float(vmin), 0.0)
     vmax = max(float(vmax), 0.0)
     if vmax <= vmin:
         vmax = vmin + 1e-6
 
     norm = TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
+    cmap = plt.get_cmap("coolwarm")'''
+    from matplotlib.colors import TwoSlopeNorm, Normalize
+
+    p5, p95 = np.percentile(all_d, [5, 95])
+    vmin = float(p5)
+    vmax = float(p95)
+
+    # Expand slightly if degenerate
+    if vmax - vmin < 1e-9:
+        vmax = vmin + 1e-6
+
+    # Decide normalization type
+    if vmin < 0.0 and vmax > 0.0:
+        # Proper diverging distribution
+        norm = TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
+    else:
+        # One-sided distribution → linear scale
+        norm = Normalize(vmin=vmin, vmax=vmax)
+
     cmap = plt.get_cmap("coolwarm")
 
     # ---- plot colored width-diff segments ----

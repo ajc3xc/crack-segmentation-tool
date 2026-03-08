@@ -239,7 +239,7 @@ def plot_widths_colormap_on_crop(
     if n < 2:
         return
 
-    _wdbg(f"start n={n} bg_shape={gt_vs_manual_rgb.shape}")
+    #_wdbg(f"start n={n} bg_shape={gt_vs_manual_rgb.shape}")
 
     e1  = e1[:n]
     e2  = e2[:n]
@@ -270,7 +270,7 @@ def plot_widths_colormap_on_crop(
     if not runs:
         return
 
-    _wdbg(f"finite_runs={len(runs)}")
+    #_wdbg(f"finite_runs={len(runs)}")
 
     # ------------------------------------------------------------
     # GLOBAL width scale (0 → max width)
@@ -295,21 +295,21 @@ def plot_widths_colormap_on_crop(
 
     H, W = gt_vs_manual_rgb.shape[:2]
 
-    _wdbg("figure:create:start")
+    #_wdbg("figure:create:start")
     fig, ax = plt.subplots(figsize=(7, 7), dpi=320)
-    _wdbg("figure:create:done")
+    #_wdbg("figure:create:done")
 
     # ---- background ----
-    _wdbg(f"imshow:start H={H} W={W}")
+    #_wdbg(f"imshow:start H={H} W={W}")
     ax.imshow(gt_vs_manual_rgb[..., ::-1], interpolation="bilinear")
-    _wdbg("imshow:done")
+    #_wdbg("imshow:done")
 
     # ------------------------------------------------------------
     # Plot each segment independently
     # ------------------------------------------------------------
     total_line_segments = 0
     for run_idx, (i0, i1) in enumerate(runs):
-        _wdbg(f"run[{run_idx}] prep:start len={i1 - i0}")
+        #_wdbg(f"run[{run_idx}] prep:start len={i1 - i0}")
         coords = mid[i0:i1].copy()
         widths = np.linalg.norm(e1[i0:i1] - e2[i0:i1], axis=1)
 
@@ -320,11 +320,11 @@ def plot_widths_colormap_on_crop(
         if len(coords) < 2:
             continue
 
-        _wdbg(f"run[{run_idx}] smooth:start n={len(widths)}")
+        #_wdbg(f"run[{run_idx}] smooth:start n={len(widths)}")
         widths_smooth = gaussian_filter1d(
             widths.astype(float), sigma=1.2, mode="nearest"
         )
-        _wdbg(f"run[{run_idx}] smooth:done n={len(widths_smooth)}")
+        #_wdbg(f"run[{run_idx}] smooth:done n={len(widths_smooth)}")
 
         # Remove only consecutive duplicates
         dxy = np.diff(coords, axis=0)
@@ -337,12 +337,12 @@ def plot_widths_colormap_on_crop(
         if len(coords) < 2:
             continue
 
-        _wdbg(f"run[{run_idx}] colors:start n={len(widths_smooth)}")
+        #_wdbg(f"run[{run_idx}] colors:start n={len(widths_smooth)}")
         colors = cmap(norm(widths_smooth))
-        _wdbg(f"run[{run_idx}] colors:done n={len(colors)}")
+        #_wdbg(f"run[{run_idx}] colors:done n={len(colors)}")
 
         n_seg = max(0, len(coords) - 1)
-        _wdbg(f"run[{run_idx}] draw_segments:start n={n_seg}")
+        #_wdbg(f"run[{run_idx}] draw_segments:start n={n_seg}")
         if n_seg > 0:
             # Much faster than issuing hundreds of individual ax.plot() calls,
             # especially on large images when multiple workers render in parallel.
@@ -356,9 +356,9 @@ def plot_widths_colormap_on_crop(
             )
             ax.add_collection(lc)
         total_line_segments += n_seg
-        _wdbg(f"run[{run_idx}] draw_segments:done n={n_seg}")
+        #_wdbg(f"run[{run_idx}] draw_segments:done n={n_seg}")
 
-    _wdbg(f"line_segments_drawn total={total_line_segments}")
+    #_wdbg(f"line_segments_drawn total={total_line_segments}")
 
     # ---- optional geodesic edges ----
     if track_e1 is not None and len(track_e1) > 1:
@@ -373,9 +373,9 @@ def plot_widths_colormap_on_crop(
     # ---- colorbar with explicit ticks ----
     sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    _wdbg("colorbar:create:start")
+    #_wdbg("colorbar:create:start")
     cb = plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.02)
-    _wdbg("colorbar:create:done")
+    #_wdbg("colorbar:create:done")
     cb.set_label("Estimated width (px)", fontsize=10, fontweight="bold")
 
     # Keep automatic ticks, but ensure endpoints are present & labeled
@@ -435,7 +435,7 @@ def plot_widths_colormap_on_crop(
         Patch(facecolor=(1, 0, 0), edgecolor="gray", label="GT only"),
     ])
 
-    _wdbg("legend:create:start")
+    #_wdbg("legend:create:start")
     leg = ax.legend(
         handles=handles,
         loc="lower right",
@@ -447,7 +447,7 @@ def plot_widths_colormap_on_crop(
         title="Legend",
         title_fontsize=11,
     )
-    _wdbg("legend:create:done")
+    #_wdbg("legend:create:done")
 
     plt.setp(leg.get_title(), color="blue", fontweight="bold")
     for t in leg.get_texts():
@@ -456,18 +456,18 @@ def plot_widths_colormap_on_crop(
     ax.set_xlim(0, W)
     ax.set_ylim(H, 0)
     ax.axis("off")
-    _wdbg("tight_layout:start")
+    #_wdbg("tight_layout:start")
     plt.tight_layout(pad=0)
-    _wdbg("tight_layout:done")
+    #_wdbg("tight_layout:done")
 
     if out_png:
-        _wdbg(f"savefig:start out={out_png}")
+        #_wdbg(f"savefig:start out={out_png}")
         fig.savefig(out_png, dpi=320, bbox_inches="tight", pad_inches=0)
-        _wdbg("savefig:done")
+        #_wdbg("savefig:done")
 
-    _wdbg("close_fig:start")
+    #_wdbg("close_fig:start")
     plt.close(fig)
-    _wdbg("done")
+    #_wdbg("done")
 
 def save_cropped_overlay(img_full_bgr, bbox, mask_or_rgb, out_png, margin=0):
     x, y, w, h = map(int, bbox)

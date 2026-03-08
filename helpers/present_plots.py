@@ -2859,7 +2859,16 @@ def plot_width_distribution_report(
                 plt.bar(x_pos + (j - (len(hues) - 1) / 2) * width, y, width=width, label=h)
 
             plt.xticks(x_pos, xs, rotation=20, ha="right")
-            plt.legend(loc="best", frameon=False)
+            leg = plt.legend(
+                loc="lower right",
+                frameon=True,
+                framealpha=0.5,
+                facecolor="white",
+                edgecolor="none",
+            )
+            if leg is not None:
+                for txt in leg.get_texts():
+                    txt.set_alpha(1.0)
 
         plt.ylabel(ylabel)
         plt.title(title)

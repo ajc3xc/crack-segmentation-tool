@@ -1399,7 +1399,11 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         FAST_METRICS_MODE = True
         #FAST_IMAGE_INDICES = None
         #FAST_IMAGE_INDICES = [21, 22, *range(60, 66)]  # optional subset
-        FAST_IMAGE_INDICES = [41]
+        FAST_IMAGE_INDICES = [41,97]
+        # FAST edge-sweep toggle:
+        # True  -> run per-image edge sweep + best-family selection in fast mode
+        # False -> skip sweep and use FAST_EDGE directly
+        FAST_RUN_EDGE_SWEEP = True
 
         if FAST_METRICS_MODE:
             print("[global-metrics] ⚡ FAST METRICS MODE")
@@ -1411,6 +1415,10 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                 "p": 14,
                 "seg_mode": "new",
             }
+            fast_calib_dir = os.path.join(self.save_folder, "metrics", "_calibration_fast")
+            os.makedirs(fast_calib_dir, exist_ok=True)
+            fast_edge_family_rows = []
+            fast_edge_sweep_rows = []
 
             idxs_all = list(range(len(self.image_names)))
 
@@ -1426,6 +1434,12 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
 
             orig_n = self.n
             t_start = time.perf_counter()
+            t_snapshot_total = 0.0
+            t_edge_sweep_total = 0.0
+            t_edge_tracking_total = 0.0
+            t_metrics_total = 0.0
+            t_summary_total = 0.0
+            t_fast_export_total = 0.0
 
             try:
                 for t, idx in enumerate(apply_idxs, 1):
@@ -1447,6 +1461,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                     # ----------------------------
                     # Snapshot sync
                     # ----------------------------
+                    t0_snapshot = time.perf_counter()
                     try:
                         self._purge_metrics_for_current_image()
                         self._sync_metrics_snapshot_from_authoring(
@@ -1455,6 +1470,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                         )
                     except Exception as e:
                         print(f"[fast] snapshot sync failed: {e}")
+                    t_snapshot_total += (time.perf_counter() - t0_snapshot)
 
                     ann = self.annotation.get("annotations", {}) or {}
                     atomic = ann.get("atomic_cracks", {}) or {}
@@ -1473,20 +1489,85 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                         continue
 
                     # ----------------------------
+                    # Optional edge sweep in FAST mode
+                    # ----------------------------
+                    edge_params_for_image = dict(FAST_EDGE)
+                    if FAST_RUN_EDGE_SWEEP:
+                        t0_edge_sweep = time.perf_counter()
+                        try:
+                            edge_packs = {}
+                            for cid in manual_ids:
+                                df_sweep = self.sweep_edges_with_executor(
+                                    cid,
+                                    grid=edge_grid,
+                                    max_workers=cpu_max_workers,
+                                )
+                                if df_sweep is not None and not df_sweep.empty:
+                                    edge_packs[cid] = df_sweep
+                                    try:
+                                        dsw = df_sweep.copy()
+                                        dsw["image"] = str(base)
+                                        dsw["crack_id"] = str(cid)
+                                        fast_edge_sweep_rows.append(dsw)
+                                    except Exception:
+                                        pass
+
+                            if edge_packs:
+                                sel = self.select_best_edge_family_across_subcracks(edge_packs)
+                                edge_params_for_image, sel_bundle = _normalize_edge_selection(sel)
+                                score = _score_edge_family_for_image(edge_packs, edge_params_for_image)
+                                fast_edge_family_rows.append(
+                                    {
+                                        "image": base,
+                                        "edge_score_wmean": float(score) if np.isfinite(score) else np.nan,
+                                        **edge_params_for_image,
+                                    }
+                                )
+                                try:
+                                    with open(
+                                        os.path.join(fast_calib_dir, f"{base}_edge_global_best_family_fast.json"),
+                                        "w",
+                                        encoding="utf-8",
+                                    ) as f:
+                                        json.dump(
+                                            {
+                                                "image": base,
+                                                "edge_score_wmean": float(score) if np.isfinite(score) else None,
+                                                "params": edge_params_for_image,
+                                                "per_crack_geom_count": int(
+                                                    len((sel_bundle or {}).get("per_crack_geom", {}) or {})
+                                                ),
+                                            },
+                                            f,
+                                            indent=2,
+                                        )
+                                except Exception as _e:
+                                    print(f"[fast] could not write edge fast-family json for {base}: {_e}")
+                            else:
+                                print(f"[fast] edge sweep produced no usable packs in {base}; using FAST_EDGE")
+                        except Exception as e:
+                            print(f"[fast] edge sweep/selection failed in {base}: {e}")
+                            edge_params_for_image = dict(FAST_EDGE)
+                        t_edge_sweep_total += (time.perf_counter() - t0_edge_sweep)
+
+                    # ----------------------------
                     # Edge tracking (fixed params)
                     # ----------------------------
+                    t0_edge_tracking = time.perf_counter()
                     try:
                         _ = self.run_edge_tracking_parallel(
                             crack_ids=manual_ids,
                             cpu_max_workers=edge_parallel_workers,
-                            edge_params_fixed=FAST_EDGE,
+                            edge_params_fixed=edge_params_for_image,
                         )
                     except Exception as e:
                         print(f"[fast] edge tracking failed: {e}")
+                    t_edge_tracking_total += (time.perf_counter() - t0_edge_tracking)
 
                     # ----------------------------
                     # Metrics (manual only)
                     # ----------------------------
+                    t0_metrics = time.perf_counter()
                     try:
                         self.compute_mask_and_width_metrics_for_image(
                             display=False,
@@ -1495,11 +1576,111 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                         )
                     except Exception as e:
                         print(f"[fast] metrics failed: {e}")
+                    t_metrics_total += (time.perf_counter() - t0_metrics)
 
                 # ----------------------------
                 # Dataset summary
                 # ----------------------------
+                t0_summary = time.perf_counter()
                 self.summarize_dataset_metrics()
+                t_summary_total += (time.perf_counter() - t0_summary)
+
+                # Optional FAST edge-family summaries.
+                t0_fast_export = time.perf_counter()
+                if fast_edge_family_rows:
+                    try:
+                        df_fast = pd.DataFrame(fast_edge_family_rows)
+                        out_csv = os.path.join(fast_calib_dir, "fast_edge_families_by_image.csv")
+                        df_fast.to_csv(out_csv, index=False)
+                        print(f"[fast] wrote edge family summary -> {out_csv}")
+
+                        fam_cols = ["window_half_size", "mu", "l", "p", "seg_mode"]
+                        if all(c in df_fast.columns for c in fam_cols):
+                            if "edge_score_wmean" in df_fast.columns and np.isfinite(pd.to_numeric(df_fast["edge_score_wmean"], errors="coerce")).any():
+                                rank = (
+                                    df_fast.groupby(fam_cols, dropna=False)
+                                    .agg(
+                                        n_images=("image", "nunique"),
+                                        n_rows=("image", "size"),
+                                        edge_score_wmean_mean=("edge_score_wmean", "mean"),
+                                        edge_score_wmean_median=("edge_score_wmean", "median"),
+                                    )
+                                    .reset_index()
+                                    .sort_values("edge_score_wmean_mean", ascending=True)
+                                )
+                            else:
+                                rank = (
+                                    df_fast.groupby(fam_cols, dropna=False)
+                                    .agg(
+                                        n_images=("image", "nunique"),
+                                        n_rows=("image", "size"),
+                                    )
+                                    .reset_index()
+                                    .sort_values(["n_images", "n_rows"], ascending=False)
+                                )
+                            rank_csv = os.path.join(fast_calib_dir, "fast_edge_family_ranked.csv")
+                            rank.to_csv(rank_csv, index=False)
+                            print(f"[fast] wrote edge family ranking -> {rank_csv}")
+                    except Exception as e:
+                        print(f"[fast] edge-family summary export failed: {e}")
+
+                # Optional sweep-level rollups (more comprehensive than selected-only summary).
+                if fast_edge_sweep_rows:
+                    try:
+                        df_sweep_all = pd.concat(fast_edge_sweep_rows, ignore_index=True)
+                        all_rows_csv = os.path.join(fast_calib_dir, "fast_edge_sweep_all_rows.csv")
+                        df_sweep_all.to_csv(all_rows_csv, index=False)
+                        print(f"[fast] wrote edge sweep rows -> {all_rows_csv}")
+
+                        fam_cols = [
+                            "param_window_half_size",
+                            "param_mu",
+                            "param_l",
+                            "param_p",
+                            "param_seg_mode",
+                        ]
+                        fam_cols = [c for c in fam_cols if c in df_sweep_all.columns]
+                        if fam_cols:
+                            agg_spec = {
+                                "n_rows": ("image", "size"),
+                                "n_images": ("image", "nunique"),
+                                "n_cracks": ("crack_id", "nunique"),
+                            }
+                            if "edge_score" in df_sweep_all.columns:
+                                agg_spec.update({
+                                    "edge_score_mean": ("edge_score", "mean"),
+                                    "edge_score_median": ("edge_score", "median"),
+                                })
+                            if "boundary_f1" in df_sweep_all.columns:
+                                agg_spec.update({
+                                    "boundary_f1_mean": ("boundary_f1", "mean"),
+                                    "boundary_f1_median": ("boundary_f1", "median"),
+                                })
+                            if "iou" in df_sweep_all.columns:
+                                agg_spec.update({
+                                    "iou_mean": ("iou", "mean"),
+                                    "iou_median": ("iou", "median"),
+                                })
+
+                            df_grouped = (
+                                df_sweep_all
+                                .groupby(fam_cols, dropna=False)
+                                .agg(**agg_spec)
+                                .reset_index()
+                            )
+                            if "edge_score_mean" in df_grouped.columns:
+                                df_grouped = df_grouped.sort_values("edge_score_mean", ascending=True)
+                            elif "boundary_f1_mean" in df_grouped.columns:
+                                df_grouped = df_grouped.sort_values("boundary_f1_mean", ascending=False)
+                            else:
+                                df_grouped = df_grouped.sort_values(["n_images", "n_rows"], ascending=False)
+
+                            grouped_csv = os.path.join(fast_calib_dir, "fast_edge_sweep_family_grouped.csv")
+                            df_grouped.to_csv(grouped_csv, index=False)
+                            print(f"[fast] wrote edge sweep grouped summary -> {grouped_csv}")
+                    except Exception as e:
+                        print(f"[fast] edge sweep rollup export failed: {e}")
+                t_fast_export_total += (time.perf_counter() - t0_fast_export)
 
             finally:
                 self.n = orig_n
@@ -1507,6 +1688,15 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
 
             total = time.perf_counter() - t_start
             print(f"[fast] ⏱ total runtime: {total:.2f}s")
+            print(
+                "[fast] ⏱ section breakdown (sec): "
+                f"snapshot_sync={t_snapshot_total:.2f}, "
+                f"edge_sweep={t_edge_sweep_total:.2f}, "
+                f"edge_tracking={t_edge_tracking_total:.2f}, "
+                f"metrics={t_metrics_total:.2f}, "
+                f"summary={t_summary_total:.2f}, "
+                f"fast_exports={t_fast_export_total:.2f}"
+            )
 
             return
 
@@ -2831,10 +3021,21 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
 if __name__ == "__main__":
     from time import time
     _force_pyqt5_qt_plugin_paths()
+    try:
+        # Ensure Windows taskbar groups this app with our custom icon.
+        if sys.platform.startswith("win"):
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "cracktool.app.mainwindow"
+            )
+    except Exception as e:
+        print(f"[ICON] warning: failed to set AppUserModelID: {e}")
+
     app = QtWidgets.QApplication(sys.argv)
     try:
         app_root = os.path.dirname(os.path.abspath(__file__))
         icon_candidates = [
+            os.path.join(app_root, "images", "6.png"),
             os.path.join(app_root, "cracktools", "Picture2.png"),
             os.path.join(app_root, "images", "TUe_logo.png"),
             os.path.join(app_root, "images", "TUe_logo.ico"),

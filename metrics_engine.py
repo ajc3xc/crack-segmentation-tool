@@ -2191,6 +2191,16 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     width_baseline_maps = load_width_baseline_widthmaps_for_image(width_baseline_root)
                     print("[BASELINE DEBUG] loaded methods:", list(width_baseline_maps.keys()))
 
+                    # Geometry-only baseline methods (skeleton masks) do not carry
+                    # valid width maps for width evaluation.
+                    if isinstance(width_baseline_maps, dict) and width_baseline_maps:
+                        width_baseline_maps = {
+                            str(k): v
+                            for k, v in width_baseline_maps.items()
+                            if not str(k).lower().startswith("skel_")
+                        }
+                        print("[BASELINE DEBUG] width-eval methods (filtered):", list(width_baseline_maps.keys()))
+
                     if width_baseline_maps:
                         _run_one_mode(
                             variant_id="baseline",

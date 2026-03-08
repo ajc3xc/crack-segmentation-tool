@@ -2916,12 +2916,14 @@ def build_combined_crack_stateless(
             used.add(0)
 
             while len(used) < len(segs):
-                cur_pt = np.asarray(chain[-1][-1], float)
+                cur_end = np.asarray(chain[-1][-1], float)
+                cur_start = np.asarray(chain[0][0], float)
 
                 best_j = None
                 best_dist = float("inf")
                 best_oriented = None
                 best_flipped = False
+                best_action = None  # "append" or "prepend"
 
                 for j, sj in enumerate(segs):
                     if j in used:
@@ -2931,35 +2933,66 @@ def build_combined_crack_stateless(
                     a = sj[0]
                     b = sj[-1]
 
-                    d0 = float(np.linalg.norm(cur_pt - a))
-                    d1 = float(np.linalg.norm(cur_pt - b))
+                    # Append candidates: connect chain end -> candidate start
+                    d_app_as_is = float(np.linalg.norm(cur_end - a))
+                    d_app_rev = float(np.linalg.norm(cur_end - b))
 
-                    if d0 < best_dist:
-                        best_dist = d0
+                    if d_app_as_is < best_dist:
+                        best_dist = d_app_as_is
                         best_j = j
                         best_oriented = sj
                         best_flipped = False
+                        best_action = "append"
 
-                    if d1 < best_dist:
-                        best_dist = d1
+                    if d_app_rev < best_dist:
+                        best_dist = d_app_rev
                         best_j = j
                         best_oriented = sj[::-1].copy()
                         best_flipped = True
+                        best_action = "append"
+
+                    # Prepend candidates: connect candidate end -> chain start
+                    d_pre_as_is = float(np.linalg.norm(b - cur_start))
+                    d_pre_rev = float(np.linalg.norm(a - cur_start))
+
+                    if d_pre_as_is < best_dist:
+                        best_dist = d_pre_as_is
+                        best_j = j
+                        best_oriented = sj
+                        best_flipped = False
+                        best_action = "prepend"
+
+                    if d_pre_rev < best_dist:
+                        best_dist = d_pre_rev
+                        best_j = j
+                        best_oriented = sj[::-1].copy()
+                        best_flipped = True
+                        best_action = "prepend"
 
                 if best_j is None:
                     break
 
                 try:
-                    join_dist = float(np.linalg.norm(np.asarray(chain[-1][-1], float) - np.asarray(best_oriented[0], float)))
+                    if best_action == "prepend":
+                        join_dist = float(
+                            np.linalg.norm(np.asarray(best_oriented[-1], float) - np.asarray(chain[0][0], float))
+                        )
+                    else:
+                        join_dist = float(
+                            np.linalg.norm(np.asarray(chain[-1][-1], float) - np.asarray(best_oriented[0], float))
+                        )
                     print(
                         f"[STITCH JOIN DBG] branch={branch_id} append_j={best_j} "
                         f"best_dist={float(best_dist):.3f} join_dist={join_dist:.3f} "
-                        f"flipped={best_flipped} mode={mode} is_auto={bool(is_auto)}"
+                        f"flipped={best_flipped} action={best_action} mode={mode} is_auto={bool(is_auto)}"
                     )
                 except Exception as _e:
                     print(f"[STITCH JOIN DBG] branch={branch_id} failed: {_e}")
 
-                chain.append(best_oriented)
+                if best_action == "prepend":
+                    chain.insert(0, best_oriented)
+                else:
+                    chain.append(best_oriented)
                 used.add(best_j)
 
             if len(used) != len(segs):
