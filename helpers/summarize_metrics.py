@@ -1160,6 +1160,15 @@ def _aggregate_midline_metrics(
                     lambda r: f"{r.get('method_name', 'unknown')}|{r.get('geometry_type', 'unknown')}",
                     axis=1,
                 )
+                top["label"] = (
+                    top["label"]
+                    .astype(str)
+                    .str.replace("|baseline", "", regex=False)
+                    .str.replace("|derived", "", regex=False)
+                    .str.replace("|auto", "", regex=False)
+                    .str.replace("||", "|", regex=False)
+                    .str.strip("|")
+                )
                 color_map = {"manual": "#d62728", "auto": "#1f77b4", "baseline": "#2ca02c"}
                 colors = [color_map.get(str(c), "#4c78a8") for c in top["source_class"].astype(str).tolist()]
                 fig_w = max(10.0, 0.55 * len(top))
@@ -1257,6 +1266,17 @@ def _aggregate_timing_metrics(
                 ylabel="seconds",
             )
             outputs[f"{stage_tag}_components_png"] = out_png
+            # Sum version (total seconds across dataset).
+            vals_sum = [float(pd.to_numeric(all_df[c], errors="coerce").sum()) for c in key_cols]
+            out_png_sum = os.path.join(out_dir, f"sum_dataset_{stage_tag}_components.png")
+            _save_bar(
+                key_cols,
+                vals_sum,
+                out_png=out_png_sum,
+                title="Edge-Tracking Stage Timing Components (sum)",
+                ylabel="total seconds",
+            )
+            outputs[f"sum_{stage_tag}_components_png"] = out_png_sum
             if WRITE_LEGACY_TIMINGS_CORE_ALIASES:
                 legacy_out_png = os.path.join(out_dir, "dataset_timings_core_components.png")
                 _save_bar(
@@ -1267,6 +1287,15 @@ def _aggregate_timing_metrics(
                     ylabel="seconds",
                 )
                 outputs["timings_core_components_png"] = legacy_out_png
+                legacy_out_png_sum = os.path.join(out_dir, "sum_dataset_timings_core_components.png")
+                _save_bar(
+                    key_cols,
+                    vals_sum,
+                    out_png=legacy_out_png_sum,
+                    title="Edge-Tracking Stage Timing Components (sum)",
+                    ylabel="total seconds",
+                )
+                outputs["sum_timings_core_components_png"] = legacy_out_png_sum
 
         _log(verbose, f"[summarize] {stage_tag} rows={len(all_df)}")
 
@@ -1691,6 +1720,25 @@ def _aggregate_baseline_timings(
                 rotate=40,
             )
             outputs["baseline_timings_components_png"] = out_png
+            vals_sum = [float(pd.to_numeric(all_df[c], errors="coerce").sum()) for c in num_cols]
+            out_png_sum = os.path.join(out_dir, "sum_dataset_baseline_timings_components.png")
+            _save_bar(
+                num_cols,
+                vals_sum,
+                out_png=out_png_sum,
+                title="Width Baseline Timing Components (sum)",
+                ylabel="total seconds",
+                rotate=40,
+            )
+            outputs["sum_baseline_timings_components_png"] = out_png_sum
+            out_csv_sum = os.path.join(out_dir, "sum_dataset_baseline_timings_components.csv")
+            pd.DataFrame(
+                {
+                    "component": [str(c) for c in num_cols],
+                    "total_sec": [float(v) for v in vals_sum],
+                }
+            ).to_csv(out_csv_sum, index=False)
+            outputs["sum_baseline_timings_components_csv"] = out_csv_sum
 
             weight_col = "crack_px" if "crack_px" in all_df.columns else None
             w_all = (
@@ -2145,6 +2193,7 @@ def _plot_dataset_full_timing_overview(
     outputs: Dict[str, str] = {}
 
     rows = []
+    rows_sum = []
 
     # Baseline segmentation timing components.
     p_base = os.path.join(out_dir, "dataset_baseline_timings_rollup.csv")
@@ -2168,6 +2217,13 @@ def _plot_dataset_full_timing_overview(
                     "value_sec": float(pd.to_numeric(r.get("weighted_mean_sec", np.nan), errors="coerce")),
                 }
             )
+            rows_sum.append(
+                {
+                    "category": b_cat,
+                    "label": b_label,
+                    "value_sec": float(pd.to_numeric(r.get("total_sec", np.nan), errors="coerce")),
+                }
+            )
 
     # GT supervision timings (atomic/combined normals + centering).
     p_sup = os.path.join(out_dir, "dataset_gt_supervision_timings.csv")
@@ -2185,6 +2241,13 @@ def _plot_dataset_full_timing_overview(
                     "category": "gt_supervision",
                     "label": f"{stage}:{mode}",
                     "value_sec": float(pd.to_numeric(r.get("weighted_mean_sec", np.nan), errors="coerce")),
+                }
+            )
+            rows_sum.append(
+                {
+                    "category": "gt_supervision",
+                    "label": f"{stage}:{mode}",
+                    "value_sec": float(pd.to_numeric(r.get("total_sec", np.nan), errors="coerce")),
                 }
             )
 
@@ -2212,6 +2275,8 @@ def _plot_dataset_full_timing_overview(
             else:
                 val = float(np.nanmean(per_row))
             rows.append({"category": "edge_pipeline_total", "label": f"{sup}:total_pipeline", "value_sec": val})
+            val_sum = float(np.nansum(per_row))
+            rows_sum.append({"category": "edge_pipeline_total", "label": f"{sup}:total_pipeline", "value_sec": val_sum})
 
     if not rows:
         return outputs
@@ -2225,6 +2290,15 @@ def _plot_dataset_full_timing_overview(
     out_csv = os.path.join(out_dir, "dataset_timing_full_overview.csv")
     df.to_csv(out_csv, index=False)
     outputs["timing_full_overview_csv"] = out_csv
+
+    df_sum = pd.DataFrame(rows_sum)
+    df_sum = df_sum[np.isfinite(pd.to_numeric(df_sum["value_sec"], errors="coerce"))].copy()
+    if not df_sum.empty:
+        df_sum["value_sec"] = pd.to_numeric(df_sum["value_sec"], errors="coerce")
+        df_sum = df_sum.sort_values("value_sec", ascending=True).reset_index(drop=True)
+        out_csv_sum = os.path.join(out_dir, "sum_dataset_timing_full_overview.csv")
+        df_sum.to_csv(out_csv_sum, index=False)
+        outputs["sum_timing_full_overview_csv"] = out_csv_sum
 
     color_map = {
         "baseline_segmentation": "#2ca02c",  # green (hrsegnet/sam3 inference)
@@ -2250,6 +2324,25 @@ def _plot_dataset_full_timing_overview(
     fig.savefig(out_png, bbox_inches="tight")
     plt.close(fig)
     outputs["timing_full_overview_png"] = out_png
+    if not df_sum.empty:
+        colors_sum = [color_map.get(str(c), "#4c78a8") for c in df_sum["category"].astype(str)]
+        fig_w = max(9.5, 0.42 * len(df_sum))
+        fig, ax = plt.subplots(figsize=(fig_w, 4.8), dpi=180)
+        xs = np.arange(len(df_sum))
+        ax.bar(xs, df_sum["value_sec"].to_numpy(float), color=colors_sum, alpha=0.86)
+        ax.set_xticks(xs)
+        ax.set_xticklabels(df_sum["label"].astype(str).tolist(), rotation=40, ha="right", fontsize=8)
+        ax.set_ylabel("total sec")
+        ax.set_title("Dataset Full Timing Overview (sum)")
+        ax.grid(axis="y", alpha=0.2)
+        handles = [Patch(facecolor=v, edgecolor="none", label=k) for k, v in color_map.items() if k in set(df_sum["category"].astype(str))]
+        if handles:
+            ax.legend(handles=handles, loc="best", framealpha=0.9, fontsize=8)
+        plt.tight_layout()
+        out_png_sum = os.path.join(out_dir, "sum_dataset_timing_full_overview.png")
+        fig.savefig(out_png_sum, bbox_inches="tight")
+        plt.close(fig)
+        outputs["sum_timing_full_overview_png"] = out_png_sum
     _log(verbose, f"[summarize] wrote full timing overview rows={len(df)}")
     return outputs
 
