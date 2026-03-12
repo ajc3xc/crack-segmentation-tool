@@ -1368,6 +1368,41 @@ def _aggregate_timing_metrics(
             )
             outputs["runtime_total_png"] = out_png
 
+    # batch_timing.csv (per-image batch driver timing rows)
+    batch_frames = []
+    for img_dir in image_dirs:
+        image = os.path.basename(img_dir)
+        p = os.path.join(img_dir, "batch_timing.csv")
+        df = _safe_read_csv(p)
+        if df is None:
+            continue
+        d = df.copy()
+        if "image" not in d.columns:
+            d["image"] = image
+        batch_frames.append(d)
+    if batch_frames:
+        bdf = pd.concat(batch_frames, ignore_index=True)
+        out_csv = os.path.join(out_dir, "dataset_batch_timing_all.csv")
+        bdf.to_csv(out_csv, index=False)
+        outputs["batch_timing_all_csv"] = out_csv
+
+        if "total_image_s" in bdf.columns:
+            dd = (
+                bdf.groupby("image", as_index=False)["total_image_s"]
+                .mean()
+                .sort_values("total_image_s", ascending=True)
+            )
+            out_png = os.path.join(out_dir, "dataset_batch_runtime_by_image.png")
+            _save_bar(
+                dd["image"].astype(str).tolist(),
+                dd["total_image_s"].astype(float).tolist(),
+                out_png=out_png,
+                title="Batch Runtime by Image (mean)",
+                ylabel="seconds",
+                rotate=45,
+            )
+            outputs["batch_runtime_by_image_png"] = out_png
+
     return outputs
 
 
@@ -2278,27 +2313,25 @@ def _plot_dataset_full_timing_overview(
             val_sum = float(np.nansum(per_row))
             rows_sum.append({"category": "edge_pipeline_total", "label": f"{sup}:total_pipeline", "value_sec": val_sum})
 
-    if not rows:
-        return outputs
-
     df = pd.DataFrame(rows)
-    df = df[np.isfinite(pd.to_numeric(df["value_sec"], errors="coerce"))].copy()
-    if df.empty:
-        return outputs
-    df["value_sec"] = pd.to_numeric(df["value_sec"], errors="coerce")
-    df = df.sort_values("value_sec", ascending=True).reset_index(drop=True)
-    out_csv = os.path.join(out_dir, "dataset_timing_full_overview.csv")
-    df.to_csv(out_csv, index=False)
-    outputs["timing_full_overview_csv"] = out_csv
+    if not df.empty and "value_sec" in df.columns:
+        df = df[np.isfinite(pd.to_numeric(df["value_sec"], errors="coerce"))].copy()
+        if not df.empty:
+            df["value_sec"] = pd.to_numeric(df["value_sec"], errors="coerce")
+            df = df.sort_values("value_sec", ascending=True).reset_index(drop=True)
+            out_csv = os.path.join(out_dir, "dataset_timing_full_overview.csv")
+            df.to_csv(out_csv, index=False)
+            outputs["timing_full_overview_csv"] = out_csv
 
     df_sum = pd.DataFrame(rows_sum)
-    df_sum = df_sum[np.isfinite(pd.to_numeric(df_sum["value_sec"], errors="coerce"))].copy()
-    if not df_sum.empty:
-        df_sum["value_sec"] = pd.to_numeric(df_sum["value_sec"], errors="coerce")
-        df_sum = df_sum.sort_values("value_sec", ascending=True).reset_index(drop=True)
-        out_csv_sum = os.path.join(out_dir, "sum_dataset_timing_full_overview.csv")
-        df_sum.to_csv(out_csv_sum, index=False)
-        outputs["sum_timing_full_overview_csv"] = out_csv_sum
+    if not df_sum.empty and "value_sec" in df_sum.columns:
+        df_sum = df_sum[np.isfinite(pd.to_numeric(df_sum["value_sec"], errors="coerce"))].copy()
+        if not df_sum.empty:
+            df_sum["value_sec"] = pd.to_numeric(df_sum["value_sec"], errors="coerce")
+            df_sum = df_sum.sort_values("value_sec", ascending=True).reset_index(drop=True)
+            out_csv_sum = os.path.join(out_dir, "sum_dataset_timing_full_overview.csv")
+            df_sum.to_csv(out_csv_sum, index=False)
+            outputs["sum_timing_full_overview_csv"] = out_csv_sum
 
     color_map = {
         "baseline_segmentation": "#2ca02c",  # green (hrsegnet/sam3 inference)
@@ -2306,24 +2339,25 @@ def _plot_dataset_full_timing_overview(
         "gt_supervision": "#1f77b4",
         "edge_pipeline_total": "#d62728",
     }
-    colors = [color_map.get(str(c), "#4c78a8") for c in df["category"].astype(str)]
-    fig_w = max(9.5, 0.42 * len(df))
-    fig, ax = plt.subplots(figsize=(fig_w, 4.8), dpi=180)
-    xs = np.arange(len(df))
-    ax.bar(xs, df["value_sec"].to_numpy(float), color=colors, alpha=0.86)
-    ax.set_xticks(xs)
-    ax.set_xticklabels(df["label"].astype(str).tolist(), rotation=40, ha="right", fontsize=8)
-    ax.set_ylabel("weighted mean sec")
-    ax.set_title("Dataset Full Timing Overview")
-    ax.grid(axis="y", alpha=0.2)
-    handles = [Patch(facecolor=v, edgecolor="none", label=k) for k, v in color_map.items() if k in set(df["category"].astype(str))]
-    if handles:
-        ax.legend(handles=handles, loc="best", framealpha=0.9, fontsize=8)
-    plt.tight_layout()
-    out_png = os.path.join(out_dir, "dataset_timing_full_overview.png")
-    fig.savefig(out_png, bbox_inches="tight")
-    plt.close(fig)
-    outputs["timing_full_overview_png"] = out_png
+    if not df.empty:
+        colors = [color_map.get(str(c), "#4c78a8") for c in df["category"].astype(str)]
+        fig_w = max(9.5, 0.42 * len(df))
+        fig, ax = plt.subplots(figsize=(fig_w, 4.8), dpi=180)
+        xs = np.arange(len(df))
+        ax.bar(xs, df["value_sec"].to_numpy(float), color=colors, alpha=0.86)
+        ax.set_xticks(xs)
+        ax.set_xticklabels(df["label"].astype(str).tolist(), rotation=40, ha="right", fontsize=8)
+        ax.set_ylabel("weighted mean sec")
+        ax.set_title("Dataset Full Timing Overview")
+        ax.grid(axis="y", alpha=0.2)
+        handles = [Patch(facecolor=v, edgecolor="none", label=k) for k, v in color_map.items() if k in set(df["category"].astype(str))]
+        if handles:
+            ax.legend(handles=handles, loc="best", framealpha=0.9, fontsize=8)
+        plt.tight_layout()
+        out_png = os.path.join(out_dir, "dataset_timing_full_overview.png")
+        fig.savefig(out_png, bbox_inches="tight")
+        plt.close(fig)
+        outputs["timing_full_overview_png"] = out_png
     if not df_sum.empty:
         colors_sum = [color_map.get(str(c), "#4c78a8") for c in df_sum["category"].astype(str)]
         fig_w = max(9.5, 0.42 * len(df_sum))
@@ -2343,6 +2377,95 @@ def _plot_dataset_full_timing_overview(
         fig.savefig(out_png_sum, bbox_inches="tight")
         plt.close(fig)
         outputs["sum_timing_full_overview_png"] = out_png_sum
+
+    # Section-level timing distribution (box/whisker).
+    section_series: Dict[str, np.ndarray] = {}
+
+    # Batch per-image sections.
+    p_batch = os.path.join(out_dir, "dataset_batch_timing_all.csv")
+    df_batch = _safe_read_csv(p_batch)
+    if df_batch is not None and not df_batch.empty:
+        sec_map = {
+            "snapshot_sync_s": "batch:snapshot_sync",
+            "edge_sweep_s": "batch:edge_sweep",
+            "edge_parallel_s": "batch:edge_parallel",
+            "auto_variants_s": "batch:auto_rs3",
+            "metrics_s": "batch:mask_width_metrics",
+            "total_image_s": "batch:total_image",
+        }
+        for col, label in sec_map.items():
+            if col not in df_batch.columns:
+                continue
+            vals = pd.to_numeric(df_batch[col], errors="coerce").to_numpy(float)
+            vals = vals[np.isfinite(vals) & (vals >= 0)]
+            if vals.size:
+                section_series[label] = vals
+
+    # Edge pipeline per-crack sections (manual/auto).
+    p_edge_all = os.path.join(out_dir, "dataset_edge_tracking_stage_all.csv")
+    df_edge_all = _safe_read_csv(p_edge_all)
+    if df_edge_all is not None and not df_edge_all.empty and "supervision" in df_edge_all.columns:
+        for sup in ("manual", "auto"):
+            g = df_edge_all[df_edge_all["supervision"].astype(str) == sup].copy()
+            if g.empty:
+                continue
+            comp_cols = [c for c in ["edge_masks_sec", "edges_tracking_sec", "build_combined_sec"] if c in g.columns]
+            if sup == "auto":
+                comp_cols += [c for c in ["os_cost_sec", "midline_tracking_sec"] if c in g.columns]
+            if not comp_cols:
+                continue
+            arr = np.zeros(len(g), dtype=float)
+            for c in comp_cols:
+                arr += pd.to_numeric(g[c], errors="coerce").fillna(0.0).to_numpy(float)
+            arr = arr[np.isfinite(arr) & (arr >= 0)]
+            if arr.size:
+                section_series[f"edge:{sup}_pipeline"] = arr
+
+    # GT supervision sections (stage + mode).
+    p_sup_all = os.path.join(out_dir, "dataset_gt_supervision_timings_all.csv")
+    df_sup_all = _safe_read_csv(p_sup_all)
+    if df_sup_all is not None and not df_sup_all.empty and "sec" in df_sup_all.columns:
+        group_cols = [c for c in ["stage", "mode"] if c in df_sup_all.columns]
+        if group_cols:
+            for key, g in df_sup_all.groupby(group_cols, dropna=False):
+                vals = pd.to_numeric(g["sec"], errors="coerce").to_numpy(float)
+                vals = vals[np.isfinite(vals) & (vals >= 0)]
+                if vals.size == 0:
+                    continue
+                if isinstance(key, tuple):
+                    label = "gt:" + ":".join(str(x) for x in key)
+                else:
+                    label = f"gt:{key}"
+                section_series[label] = vals
+
+    if section_series:
+        labels = sorted(
+            section_series.keys(),
+            key=lambda k: float(np.nanmedian(section_series[k])) if len(section_series[k]) else np.inf,
+        )
+        data = [section_series[k] for k in labels]
+        fig_w = max(12.0, 0.55 * len(labels))
+        fig, ax = plt.subplots(figsize=(fig_w, 6.0), dpi=180)
+        bp = ax.boxplot(data, patch_artist=True, showfliers=False)
+        for patch, label in zip(bp["boxes"], labels):
+            if label.startswith("gt:"):
+                patch.set_facecolor("#1f77b4")
+            elif label.startswith("edge:"):
+                patch.set_facecolor("#d62728")
+            else:
+                patch.set_facecolor("#7f7f7f")
+            patch.set_alpha(0.80)
+        ax.set_xticks(np.arange(1, len(labels) + 1, dtype=float))
+        ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+        ax.set_ylabel("seconds")
+        ax.set_title("Timing Distribution by Section (box/whisker)")
+        ax.grid(axis="y", alpha=0.2)
+        plt.tight_layout()
+        out_box = os.path.join(out_dir, "dataset_timing_sections_boxplot.png")
+        fig.savefig(out_box, bbox_inches="tight")
+        plt.close(fig)
+        outputs["timing_sections_boxplot_png"] = out_box
+
     _log(verbose, f"[summarize] wrote full timing overview rows={len(df)}")
     return outputs
 

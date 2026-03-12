@@ -1410,6 +1410,44 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             fam["g33"] = float(fam.get("g33", 25.0))
             return fam
 
+        # Hard-coded controls for resumable batch runs.
+        SKIP_ALREADY_PROCESSED = True
+        PER_IMAGE_TIMING_FILE = "batch_timing.csv"
+
+        def _append_csv_row(path, row):
+            try:
+                new_df = pd.DataFrame([row])
+                if os.path.isfile(path):
+                    prev = pd.read_csv(path)
+                    out = pd.concat([prev, new_df], ignore_index=True)
+                else:
+                    out = new_df
+                out.to_csv(path, index=False)
+            except Exception as e:
+                print(f"[global-metrics] could not append CSV row -> {path}: {e}")
+
+        def _record_image_timing(calib_dir, img_dir, row):
+            _append_csv_row(os.path.join(img_dir, PER_IMAGE_TIMING_FILE), row)
+            _append_csv_row(os.path.join(calib_dir, "global_per_image_runtime.csv"), row)
+
+        def _is_already_processed(img_dir):
+            if not SKIP_ALREADY_PROCESSED:
+                return False
+            done_flag = os.path.join(img_dir, "DONE.ok")
+            timing_flag = os.path.join(img_dir, PER_IMAGE_TIMING_FILE)
+            return os.path.isfile(done_flag) and os.path.isfile(timing_flag)
+
+        def _collect_manual_ids(atomic):
+            out = []
+            for cid, cr in (atomic or {}).items():
+                src = (cr.get("source") or "").lower()
+                if src.startswith("auto") or src == "combined":
+                    continue
+                mid = metrics._finite_xy(cr.get("midline", []))
+                if len(mid) >= 2:
+                    out.append(cid)
+            return out
+
         # ============================================================
         # FAST METRICS MODE (early-draft quick evaluation)
         # ============================================================
@@ -1458,11 +1496,14 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             t_metrics_total = 0.0
             t_summary_total = 0.0
             t_fast_export_total = 0.0
+            per_image_times_fast = []
 
             try:
                 for t, idx in enumerate(apply_idxs, 1):
                     base = os.path.splitext(os.path.basename(self.image_names[idx]))[0]
                     ann_path = _ann_path(idx)
+                    img_dir = os.path.join(self.save_folder, "metrics", base)
+                    done_flag = os.path.join(img_dir, "DONE.ok")
 
                     if not os.path.exists(ann_path):
                         print(f"[fast] ⚠ skip {base} - no JSON")
@@ -1470,11 +1511,20 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                     if not _json_has_manual_midlines(ann_path):
                         print(f"[fast] ⚠ skip {base} - no manual midlines")
                         continue
+                    os.makedirs(img_dir, exist_ok=True)
+                    if _is_already_processed(img_dir):
+                        print(f"[fast] ✓ already done: {base}")
+                        continue
 
                     self.n = idx
                     self.change_image()
 
                     print(f"\n====== [fast] {t}/{len(apply_idxs)}: {base} ======")
+                    t_img_start = time.perf_counter()
+                    t_snapshot = 0.0
+                    t_edge_sweep = 0.0
+                    t_edge_tracking = 0.0
+                    t_metrics = 0.0
 
                     # ----------------------------
                     # Snapshot sync
@@ -1488,22 +1538,29 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                         )
                     except Exception as e:
                         print(f"[fast] snapshot sync failed: {e}")
-                    t_snapshot_total += (time.perf_counter() - t0_snapshot)
+                    t_snapshot = (time.perf_counter() - t0_snapshot)
+                    t_snapshot_total += t_snapshot
 
                     ann = self.annotation.get("annotations", {}) or {}
                     atomic = ann.get("atomic_cracks", {}) or {}
-
-                    manual_ids = []
-                    for cid, cr in atomic.items():
-                        src = (cr.get("source") or "").lower()
-                        if src.startswith("auto") or src == "combined":
-                            continue
-                        mid = metrics._finite_xy(cr.get("midline", []))
-                        if len(mid) >= 2:
-                            manual_ids.append(cid)
+                    manual_ids = _collect_manual_ids(atomic)
 
                     if not manual_ids:
                         print(f"[fast] no manual cracks in {base}")
+                        try:
+                            with open(os.path.join(img_dir, "status.json"), "w", encoding="utf-8") as f:
+                                json.dump(
+                                    {
+                                        "image": base,
+                                        "processed_cracks": [],
+                                        "mode": "fast",
+                                        "status": "skipped_no_manual_midlines",
+                                    },
+                                    f,
+                                    indent=2,
+                                )
+                        except Exception:
+                            pass
                         continue
 
                     # ----------------------------
@@ -1566,7 +1623,8 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                         except Exception as e:
                             print(f"[fast] edge sweep/selection failed in {base}: {e}")
                             edge_params_for_image = dict(FAST_EDGE)
-                        t_edge_sweep_total += (time.perf_counter() - t0_edge_sweep)
+                        t_edge_sweep = (time.perf_counter() - t0_edge_sweep)
+                        t_edge_sweep_total += t_edge_sweep
 
                     # ----------------------------
                     # Edge tracking (fixed params)
@@ -1580,7 +1638,8 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                         )
                     except Exception as e:
                         print(f"[fast] edge tracking failed: {e}")
-                    t_edge_tracking_total += (time.perf_counter() - t0_edge_tracking)
+                    t_edge_tracking = (time.perf_counter() - t0_edge_tracking)
+                    t_edge_tracking_total += t_edge_tracking
 
                     # ----------------------------
                     # Metrics (manual only)
@@ -1594,7 +1653,42 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                         )
                     except Exception as e:
                         print(f"[fast] metrics failed: {e}")
-                    t_metrics_total += (time.perf_counter() - t0_metrics)
+                    t_metrics = (time.perf_counter() - t0_metrics)
+                    t_metrics_total += t_metrics
+
+                    t_img = time.perf_counter() - t_img_start
+                    row = {
+                        "image": base,
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "mode": "fast",
+                        "total_image_s": round(t_img, 4),
+                        "snapshot_sync_s": round(t_snapshot, 4),
+                        "edge_sweep_s": round(t_edge_sweep, 4),
+                        "edge_parallel_s": round(t_edge_tracking, 4),
+                        "metrics_s": round(t_metrics, 4),
+                        "auto_variants_s": 0.0,
+                        "mask_build_s": 0.0,
+                        "supervision_s": 0.0,
+                        "rs3_enabled": False,
+                    }
+                    per_image_times_fast.append(row)
+                    _record_image_timing(fast_calib_dir, img_dir, row)
+                    try:
+                        with open(os.path.join(img_dir, "status.json"), "w", encoding="utf-8") as f:
+                            json.dump(
+                                {
+                                    "image": base,
+                                    "processed_cracks": list(manual_ids),
+                                    "mode": "fast",
+                                    "edge_params_used": edge_params_for_image,
+                                    "rs3_available": False,
+                                },
+                                f,
+                                indent=2,
+                            )
+                        open(done_flag, "a").close()
+                    except Exception as e:
+                        print(f"[fast] could not write DONE/status for {base}: {e}")
 
                 # ----------------------------
                 # Dataset summary
@@ -1703,6 +1797,16 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             finally:
                 self.n = orig_n
                 self.change_image()
+
+            if per_image_times_fast:
+                try:
+                    pd.DataFrame(per_image_times_fast).to_csv(
+                        os.path.join(fast_calib_dir, "global_per_image_runtime_latest_run.csv"),
+                        index=False,
+                    )
+                    print(f"[fast] 🕒 per-image runtimes logged ({len(per_image_times_fast)} images)")
+                except Exception as e:
+                    print(f"[fast] could not write latest per-image runtime CSV: {e}")
 
             total = time.perf_counter() - t_start
             print(f"[fast] ⏱ total runtime: {total:.2f}s")
@@ -2011,20 +2115,22 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
 
                 img_dir = os.path.join(self.save_folder, "metrics", base)
                 done_flag = os.path.join(img_dir, "DONE.ok")
+                os.makedirs(img_dir, exist_ok=True)
 
                 # ---- Skip already processed ----
-                if os.path.exists(done_flag):
+                if _is_already_processed(img_dir):
                     print(f"[apply] ✓ already done: {base}")
                     continue
 
                 # Load image
                 self.n = idx
                 self.change_image()
-                os.makedirs(img_dir, exist_ok=True)
+                t_snapshot = 0.0
 
                 # ----------------------------------------------------
                 # SNAPSHOT SYNC (CRITICAL FIX)
                 # ----------------------------------------------------
+                t_snapshot_start = time.perf_counter()
                 try:
                     self._purge_metrics_for_current_image()
                     self._sync_metrics_snapshot_from_authoring(
@@ -2033,6 +2139,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                     )
                 except Exception as e:
                     print(f"[apply] snapshot sync failed for {base}: {e}")
+                t_snapshot = time.perf_counter() - t_snapshot_start
 
                 print(f"\n====== [apply] {t}/{len(apply_idxs)}: {base} ======")
 
@@ -2056,14 +2163,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                 processed = []
                 rs3_available = False
                 include_auto_metrics = False
-                manual_ids = []
-                for cid, cr in atomic.items():
-                    src = (cr.get("source") or "").lower()
-                    if src.startswith("auto") or src == "combined":
-                        continue
-                    mid = metrics._finite_xy(cr.get("midline", []))
-                    if len(mid) >= 2:
-                        manual_ids.append(cid)
+                manual_ids = _collect_manual_ids(atomic)
 
                 # ====================================================
                 # MODE 1 — EDGE-ONLY
@@ -2104,10 +2204,6 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                     valid_ids = list(manual_ids)
 
                     auto_packs = {}
-
-                    # ====================================================
-                    # RUN RS3 AUTO VARIANTS (ONLY IF DATASET-LEVEL FAMILY EXISTS)
-                    # ====================================================
                     if rs3_available and valid_ids:
                         t_auto_start = time.perf_counter()
                         for cid in valid_ids:
@@ -2119,7 +2215,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                                     cpu_max_workers=cpu_max_workers,
                                     force_recompute=True,
                                     os_ablation=False,
-                                    smoke_test=False
+                                    smoke_test=False,
                                 )
                                 if pack:
                                     auto_packs[cid] = pack
@@ -2127,7 +2223,6 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                                 print(f"[apply] RS3 variant fail cid={cid}: {e}")
                         t_auto = time.perf_counter() - t_auto_start
 
-                        # ---- Apply global RS3 family to all packs of this image ----
                         try:
                             if auto_packs:
                                 apply_family_to_image(
@@ -2136,30 +2231,33 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                                     base_name=base,
                                     save_folder=self.save_folder,
                                 )
-                                t_edge_parallel_start = time.perf_counter()
-                                try:
-                                    _ = self.run_edge_tracking_parallel(
-                                        crack_ids=valid_ids,
-                                        cpu_max_workers=(edge_parallel_workers or cpu_max_workers),
-                                        edge_params_fixed=global_best_edge,
-                                        prefer_auto_best=True,
-                                    )
-                                    include_auto_metrics = True
-                                    processed = list(valid_ids)
-                                except Exception as ee:
-                                    print(f"[apply] auto-best edge tracking failed on {base}: {ee}")
-                                    include_auto_metrics = False
-                                t_edge_parallel = time.perf_counter() - t_edge_parallel_start
+                                include_auto_metrics = True
                         except Exception as e:
                             print(f"[apply] RS3 family apply fail on {base}: {e}")
                             rs3_available = False
                             auto_packs = {}
                             include_auto_metrics = False
-
                     else:
-                        print(f"[apply] ⚠ No global RS3 family — skipping auto midlines for {base}")
-                        auto_packs = {}
                         include_auto_metrics = False
+                        if not rs3_available:
+                            print(f"[apply] ⚠ No global RS3 family — running manual-only for {base}")
+
+                    # Shared edge-tracking stage for full mode:
+                    # auto preference is only enabled when RS3 packs were successfully applied.
+                    if valid_ids:
+                        t_edge_parallel_start = time.perf_counter()
+                        try:
+                            _ = self.run_edge_tracking_parallel(
+                                crack_ids=valid_ids,
+                                cpu_max_workers=(edge_parallel_workers or cpu_max_workers),
+                                edge_params_fixed=global_best_edge,
+                                prefer_auto_best=bool(include_auto_metrics),
+                            )
+                            processed = list(valid_ids)
+                        except Exception as ee:
+                            print(f"[apply] edge tracking failed on {base}: {ee}")
+                            include_auto_metrics = False
+                        t_edge_parallel = time.perf_counter() - t_edge_parallel_start
 
                     # ---- Final mask + width metrics ----
                     # Here we WANT manual vs auto (TOTAL/TOTAL_AUTO, combined vs combined_auto, etc.)
@@ -2182,15 +2280,19 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                 row = {
                     "image": base,
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "total_image_s": round(t_img, 2),
-                    "metrics_s": round(t_metrics, 2),
-                    "auto_variants_s": round(t_auto, 2),
+                    "total_image_s": round(t_img, 4),
+                    "snapshot_sync_s": round(t_snapshot, 4),
+                    "edge_sweep_s": 0.0,
+                    "metrics_s": round(t_metrics, 4),
+                    "auto_variants_s": round(t_auto, 4),
                     "mask_build_s": 0.0,   # merged inside compute_mask_and_width_metrics_for_image
                     "supervision_s": 0.0,  # done inside metrics function
-                    "edge_parallel_s": round(t_edge_parallel, 2),
+                    "edge_parallel_s": round(t_edge_parallel, 4),
                     "mode": ("edges_only" if edges_only else "full"),
+                    "rs3_enabled": bool(include_auto_metrics),
                 }
                 per_image_times.append(row)
+                _record_image_timing(calib_dir, img_dir, row)
 
                 try:
                     with open(os.path.join(img_dir, "status.json"), "w") as f:
@@ -2208,7 +2310,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             # ---- Write per-image runtime table ----
             if per_image_times:
                 df_times = pd.DataFrame(per_image_times)
-                df_times.to_csv(os.path.join(calib_dir, "global_per_image_runtime.csv"), index=False)
+                df_times.to_csv(os.path.join(calib_dir, "global_per_image_runtime_latest_run.csv"), index=False)
 
             # Final dataset-level summarization (cleanup now handled centrally
             # inside summarize_dataset_metrics()).
