@@ -1,0 +1,23 @@
+[workspace]
+authors = ["Adam Camerer <ajc3xc@umsystem.edu>"]
+channels = ["pytorch", "nvidia", "conda-forge"]
+channel-priority = "disabled"
+name = "depth_generator"
+platforms = ["win-64"]
+version = "0.1.0"
+
+[system-requirements]
+cuda = "12.1"
+
+[dependencies]
+python = "3.12.*"
+numpy = ">=1.26,<2"
+
+pytorch-gpu = "*"
+#pytorch-cuda = "*"
+torchvision = "*"
+
+[pypi-dependencies]
+awesome-depth-anything-3 = "*"
+addict = "*"
+opencv-python-headless = "*"
