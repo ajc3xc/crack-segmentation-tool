@@ -1952,7 +1952,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                             edge_params_fixed=global_best_edge,
                             cpu_max_workers=cpu_max_workers,
                             force_recompute=True,
-                            os_ablation=True,
+                            os_ablation=False,
                             smoke_test=False
                         )
                         if pack:
@@ -2118,7 +2118,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                                     edge_params_fixed=global_best_edge,
                                     cpu_max_workers=cpu_max_workers,
                                     force_recompute=True,
-                                    os_ablation=True,
+                                    os_ablation=False,
                                     smoke_test=False
                                 )
                                 if pack:
