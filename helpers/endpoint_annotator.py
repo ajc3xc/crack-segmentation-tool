@@ -66,6 +66,7 @@ class CrackAnnotator(QtWidgets.QWidget):
         self.polyline = []
         self._is_drawing = False
         self._start_idx = None
+        self._active_poly_regions = []
 
         self.midlines = {}
         if isinstance(initial_midlines, dict):
@@ -89,6 +90,7 @@ class CrackAnnotator(QtWidgets.QWidget):
         self.overlay_pixmap = None
         self.use_overlay = False
         self.overlay_toggle_cb = None
+        self._minimap_corner = "top_right"
 
         self.readonly_midlines = {}
         self.readonly_connections = []
@@ -173,6 +175,7 @@ class CrackAnnotator(QtWidgets.QWidget):
             self.polyline.clear()
             self._is_drawing = False
             self._start_idx = None
+            self._active_poly_regions = []
         self.polyline_mode = enabled
         if enabled:
             self.connecting_index = None
@@ -233,6 +236,24 @@ class CrackAnnotator(QtWidgets.QWidget):
                 self._undo_polyline_points(2)
                 self.update()
                 return
+        if event.key() == Qt.Key_M:
+            self._toggle_minimap_corner()
+            return
+        if event.key() in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+            step = 36.0
+            if event.modifiers() & Qt.ShiftModifier:
+                step = 80.0
+            if event.key() == Qt.Key_Left:
+                self.pan_x += step
+            elif event.key() == Qt.Key_Right:
+                self.pan_x -= step
+            elif event.key() == Qt.Key_Up:
+                self.pan_y += step
+            elif event.key() == Qt.Key_Down:
+                self.pan_y -= step
+            self._enforce_bounds()
+            self.update()
+            return
         if event.key() == Qt.Key_T:
             if callable(self.overlay_toggle_cb):
                 self.overlay_toggle_cb()
@@ -368,6 +389,57 @@ class CrackAnnotator(QtWidgets.QWidget):
                 return False
         return True
 
+    def _points_share_any_box(self, i1, i2, tol=0.0):
+        """True if both point indices lie in at least one common bounding box."""
+        if not self.boxes:
+            return True
+        if i1 < 0 or i2 < 0 or i1 >= len(self.points) or i2 >= len(self.points):
+            return False
+        x1, y1 = map(float, self.points[i1])
+        x2, y2 = map(float, self.points[i2])
+        for (xmin, ymin, xmax, ymax) in self.boxes:
+            if (
+                (xmin - tol) <= x1 <= (xmax + tol)
+                and (ymin - tol) <= y1 <= (ymax + tol)
+                and (xmin - tol) <= x2 <= (xmax + tol)
+                and (ymin - tol) <= y2 <= (ymax + tol)
+            ):
+                return True
+        return False
+
+    def _containing_boxes_for_point(self, x, y, tol=0.0):
+        """Return all bbox rectangles containing (x,y)."""
+        out = []
+        for (xmin, ymin, xmax, ymax) in (self.boxes or []):
+            if (
+                (xmin - tol) <= x <= (xmax + tol)
+                and (ymin - tol) <= y <= (ymax + tol)
+            ):
+                out.append((float(xmin), float(ymin), float(xmax), float(ymax)))
+        return out
+
+    def _poly_point_within_active_regions(self, p):
+        if not self._active_poly_regions:
+            return True
+        x, y = float(p[0]), float(p[1])
+        for xmin, ymin, xmax, ymax in self._active_poly_regions:
+            if xmin <= x <= xmax and ymin <= y <= ymax:
+                return True
+        return False
+
+    def _abort_active_polyline_out_of_bounds(self):
+        QMessageBox.warning(
+            self,
+            "Out of bounds",
+            "Polyline left the active bounding box of its start endpoint.\n"
+            "Current midline was reset.",
+        )
+        self.polyline.clear()
+        self._is_drawing = False
+        self._start_idx = None
+        self._active_poly_regions = []
+        self.update()
+
     # ---------- midlines ----------
     '''def _commit_midline(self, end_idx):
         start_idx = self._start_idx
@@ -427,6 +499,7 @@ class CrackAnnotator(QtWidgets.QWidget):
             self.polyline.clear()
             self._is_drawing = False
             self._start_idx = None
+            self._active_poly_regions = []
             self.update()
             return
 
@@ -486,39 +559,15 @@ class CrackAnnotator(QtWidgets.QWidget):
         poly = _trim_polyline_near_endpoint(poly, endpoint_idx=-1, radius=1)
 
         # -------------------------------------------------
-        # Enhanced shared-edge / overlap rule
+        # Final validation: endpoints must share at least one bbox
         # -------------------------------------------------
         if self.boxes:
-            tol = 1.0
-
-            def _boxes_containing_xy(x, y, tol=tol):
-                hits = []
-                for i, (xmin, ymin, xmax, ymax) in enumerate(self.boxes or []):
-                    if (xmin - tol) <= x <= (xmax + tol) and (ymin - tol) <= y <= (ymax + tol):
-                        hits.append(i)
-                return hits
-
-            def _intersection_rect(bi, bj):
-                xmin1, ymin1, xmax1, ymax1 = self.boxes[bi]
-                xmin2, ymin2, xmax2, ymax2 = self.boxes[bj]
-                oxmin, oymin = max(xmin1, xmin2), max(ymin1, ymin2)
-                oxmax, oymax = min(xmax1, xmax2), min(ymax1, ymax2)
-                return (oxmin, oymin, oxmax, oymax) if (oxmin <= oxmax and oymin <= oymax) else None
-
-            def _poly_inside_rect(poly, rect, tol=tol):
-                xmin, ymin, xmax, ymax = rect
-                for (x, y) in poly:
-                    x, y = float(x), float(y)
-                    if not ((xmin - tol) <= x <= (xmax + tol) and (ymin - tol) <= y <= (ymax + tol)):
-                        return False
-                return True
-
             sx, sy = self.points[start_idx]
             ex, ey = self.points[end_idx]
-            S = set(_boxes_containing_xy(float(sx), float(sy)))
-            E = set(_boxes_containing_xy(float(ex), float(ey)))
+            s_boxes = self._containing_boxes_for_point(float(sx), float(sy), tol=1.0)
+            e_boxes = self._containing_boxes_for_point(float(ex), float(ey), tol=1.0)
 
-            if not S or not E:
+            if not s_boxes or not e_boxes:
                 QMessageBox.warning(
                     self, "Out of bounds",
                     "An endpoint is outside all bounding boxes.\nCommit cancelled."
@@ -526,38 +575,19 @@ class CrackAnnotator(QtWidgets.QWidget):
                 self.polyline.clear()
                 self._is_drawing = False
                 self._start_idx = None
+                self._active_poly_regions = []
                 self.update()
                 return
 
-            shared = S & E
-            candidate_regions = []
-
-            # 1) Any shared box is valid if the entire polyline fits in it.
-            for bidx in sorted(shared):
-                candidate_regions.append(self.boxes[bidx])
-
-            # 2) If no shared-box fit, allow overlap regions between endpoint boxes.
-            if not candidate_regions:
-                for i in sorted(S):
-                    for j in sorted(E):
-                        rect = _intersection_rect(i, j)
-                        if rect is not None:
-                            candidate_regions.append(rect)
-
-            valid = False
-            for rect in candidate_regions:
-                if _poly_inside_rect(poly, rect, tol=tol):
-                    valid = True
-                    break
-
-            if (not candidate_regions) or (not valid):
+            if not set(s_boxes).intersection(set(e_boxes)):
                 QMessageBox.warning(
                     self, "Out of bounds",
-                    "The midline and both endpoints must lie inside a single valid box/overlap region.\nCommit cancelled."
+                    "Endpoints do not share a bounding box.\nCommit cancelled."
                 )
                 self.polyline.clear()
                 self._is_drawing = False
                 self._start_idx = None
+                self._active_poly_regions = []
                 self.update()
                 return
 
@@ -572,6 +602,7 @@ class CrackAnnotator(QtWidgets.QWidget):
         self.polyline.clear()
         self._is_drawing = False
         self._start_idx = None
+        self._active_poly_regions = []
         self.update()
 
     def add_midline_auto(self, i1, i2, poly):
@@ -676,7 +707,16 @@ class CrackAnnotator(QtWidgets.QWidget):
             ex, ey = self.points[i2]
             b1 = self._point_box_index(float(sx), float(sy))
             b2 = self._point_box_index(float(ex), float(ey))
-            if b1 is None or b2 is None or b1 != b2 or not self._poly_inside_box_index(poly, b1):
+            if b1 is None or b2 is None or b1 != b2:
+                QMessageBox.warning(
+                    self,
+                    "Out of bounds",
+                    f"Auto midline {key} endpoints do not share a bounding box.\n"
+                    "Connection was removed.",
+                )
+                if key in self.connections:
+                    self.connections.remove(key)
+                self.update()
                 return False
 
         self.midlines[key] = [(float(x), float(y)) for (x, y) in poly]
@@ -1322,11 +1362,22 @@ class CrackAnnotator(QtWidgets.QWidget):
                 )
 
         # --- points ---
+        readonly_point_idxs = set()
+        for (i1, i2) in self.readonly_connections:
+            readonly_point_idxs.update([i1, i2])
+        for (i1, i2) in self.readonly_midlines.keys():
+            readonly_point_idxs.update([i1, i2])
+
         for i, (x, y) in enumerate(self.points):
             x, y = apply_offset((x, y))
             center = QPointF(int(x * scale + xoff), int(y * scale + yoff))
-            brush = QColor(0, 200, 0) if i == self.hover_index or (
-                self.connection_mode and i == self.connecting_index) else QColor(200, 80, 80)
+            is_readonly = i in readonly_point_idxs
+            is_active = (i == self.hover_index) or (self.connection_mode and i == self.connecting_index)
+            if is_readonly:
+                # Saved/read-only endpoints: muted red, slightly brighter when hovered.
+                brush = QColor(205, 110, 110) if is_active else QColor(175, 90, 90)
+            else:
+                brush = QColor(0, 200, 0) if is_active else QColor(200, 80, 80)
             qp.setBrush(brush)
             qp.setPen(Qt.NoPen)
             # keep circle size constant on screen regardless of zoom
@@ -1361,6 +1412,98 @@ class CrackAnnotator(QtWidgets.QWidget):
                     QPointF(int(p1[0] * scale + xoff), int(p1[1] * scale + yoff)),
                     QPointF(int(p2[0] * scale + xoff), int(p2[1] * scale + yoff))
                 )
+
+        self._draw_minimap(qp)
+
+    def _toggle_minimap_corner(self):
+        self._minimap_corner = (
+            "bottom_right" if self._minimap_corner == "top_right" else "top_right"
+        )
+        self.update()
+
+    def _draw_minimap(self, qp: QPainter):
+        if self.image_pixmap is None:
+            return
+
+        cw = max(1, int(self.width()))
+        ch = max(1, int(self.height()))
+        iw = max(1, int(self.img_w))
+        ih = max(1, int(self.img_h))
+        if ch < 120 or cw < 180:
+            return
+
+        pad = 10
+        max_w = min(260, max(120, int(cw * 0.24)))
+        max_h = min(200, max(90, int(ch * 0.24)))
+        aspect = float(iw) / float(max(ih, 1))
+        mini_w = max_w
+        mini_h = int(round(mini_w / max(aspect, 1e-8)))
+        if mini_h > max_h:
+            mini_h = max_h
+            mini_w = int(round(mini_h * aspect))
+        mini_w = max(80, min(mini_w, cw - 2 * pad))
+        mini_h = max(60, min(mini_h, ch - 2 * pad))
+
+        x0 = cw - mini_w - pad
+        y0 = pad if self._minimap_corner == "top_right" else (ch - mini_h - pad)
+        x1 = x0 + mini_w
+        y1 = y0 + mini_h
+
+        mini_rect = QtCore.QRect(int(x0), int(y0), int(mini_w), int(mini_h))
+
+        # Minimap should always use the original image background.
+        # Build from raw image each paint so it cannot inherit overlay tint.
+        mini_pix = self.image_pixmap
+        try:
+            if self.orig_image is not None:
+                arr = self.orig_image
+                if len(arr.shape) == 3 and arr.shape[2] == 3:
+                    qmini = QImage(
+                        arr.data,
+                        arr.shape[1],
+                        arr.shape[0],
+                        arr.strides[0],
+                        QImage.Format_RGB888,
+                    ).copy()
+                    mini_pix = QPixmap.fromImage(qmini)
+        except Exception:
+            pass
+
+        qp.save()
+        qp.setBrush(Qt.NoBrush)
+        qp.drawPixmap(mini_rect, mini_pix)
+        qp.setPen(QPen(QColor(255, 255, 255), 1))
+        qp.drawRect(mini_rect)
+
+        s = max(1e-8, float(self.scale))
+        vx0 = (0.0 - float(self.pan_x)) / s
+        vy0 = (0.0 - float(self.pan_y)) / s
+        vx1 = (float(cw) - float(self.pan_x)) / s
+        vy1 = (float(ch) - float(self.pan_y)) / s
+        vx0 = float(max(0.0, min(float(iw), vx0)))
+        vy0 = float(max(0.0, min(float(ih), vy0)))
+        vx1 = float(max(0.0, min(float(iw), vx1)))
+        vy1 = float(max(0.0, min(float(ih), vy1)))
+        if vx1 < vx0:
+            vx0, vx1 = vx1, vx0
+        if vy1 < vy0:
+            vy0, vy1 = vy1, vy0
+
+        rx0 = x0 + int(round((vx0 / float(iw)) * mini_w))
+        ry0 = y0 + int(round((vy0 / float(ih)) * mini_h))
+        rx1 = x0 + int(round((vx1 / float(iw)) * mini_w))
+        ry1 = y0 + int(round((vy1 / float(ih)) * mini_h))
+        rx0 = int(max(x0, min(x1 - 1, rx0)))
+        ry0 = int(max(y0, min(y1 - 1, ry0)))
+        rx1 = int(max(rx0 + 1, min(x1, rx1)))
+        ry1 = int(max(ry0 + 1, min(y1, ry1)))
+        qp.setPen(QPen(QColor(0, 255, 255), 1))
+        qp.setBrush(Qt.NoBrush)
+        qp.drawRect(QtCore.QRect(int(rx0), int(ry0), int(rx1 - rx0), int(ry1 - ry0)))
+
+        qp.setPen(QPen(QColor(255, 255, 255), 1))
+        qp.drawText(int(x0 + 6), int(y1 - 6), "Minimap")
+        qp.restore()
 
     # ========= fit-to-view (center using float pan; keep widget = viewport size) =========
     def _fit_to_view(self):
@@ -1495,7 +1638,7 @@ class CrackAnnotator(QtWidgets.QWidget):
         old = float(self.scale)
         new = float(max(self._min_scale(), min(10.0, old * float(factor))))
         if abs(new - old) < 1e-9:
-            print("[ZOOM] Skipped (newâ‰ˆold)")
+            print("[ZOOM] Skipped (new ≈ old)")
             return
 
         if not self._sa:
@@ -1741,6 +1884,20 @@ class CrackAnnotator(QtWidgets.QWidget):
                     self._start_idx = point_i
                     sx, sy = self.points[self._start_idx]
                     self.polyline = [(float(sx), float(sy))]
+                    self._active_poly_regions = self._containing_boxes_for_point(float(sx), float(sy), tol=1.0)
+                    if self.boxes and (not self._active_poly_regions):
+                        QMessageBox.warning(
+                            self,
+                            "Out of bounds",
+                            "Start endpoint is not inside any bounding box.\n"
+                            "Cannot start manual polyline.",
+                        )
+                        self.polyline.clear()
+                        self._is_drawing = False
+                        self._start_idx = None
+                        self._active_poly_regions = []
+                        self.update()
+                        return
                     self._is_drawing = True
                     print(f"[PRESS] START midline from {self._start_idx} at {self.points[self._start_idx]}")
                     self.update()
@@ -1753,6 +1910,9 @@ class CrackAnnotator(QtWidgets.QWidget):
                         self._commit_midline(point_i)
                     elif point_i is None:
                         px, py = p
+                        if not self._poly_point_within_active_regions((px, py)):
+                            self._abort_active_polyline_out_of_bounds()
+                            return
                         self.polyline.append((float(px), float(py)))
                         print(f"[PRESS] Added polyline point: {self.polyline[-1]}")
                         self.update()
@@ -1784,6 +1944,13 @@ class CrackAnnotator(QtWidgets.QWidget):
             if not self.connection_mode:
                 if point_i is None:
                     px, py = self._clamp_xy_to_image(p[0], p[1], edge_snap_px=1.0)
+                    if self.boxes and (self._point_box_index(float(px), float(py)) is None):
+                        QMessageBox.warning(
+                            self,
+                            "Out of bounds",
+                            "Endpoint is outside all bounding boxes.\nPoint was not kept.",
+                        )
+                        return
                     self.points.append((px, py))
                     print(f"[PRESS] Added new point at ({px}, {py})")
                 else:
@@ -1800,7 +1967,17 @@ class CrackAnnotator(QtWidgets.QWidget):
                     elif self.connecting_index != point_i:
                         c = self._sorted(self.connecting_index, point_i)
                         if c not in self.connections and c not in self.readonly_connections:
-                            self.connections.append(c)
+                            if self._points_share_any_box(c[0], c[1], tol=1.0):
+                                self.connections.append(c)
+                            else:
+                                QMessageBox.warning(
+                                    self,
+                                    "Out of bounds",
+                                    "Connection endpoints do not share a bounding box.\n"
+                                    "Connection was removed.",
+                                )
+                                if c in self.connections and c not in self.readonly_connections:
+                                    self.connections.remove(c)
                         self.connecting_index = None
                     else:
                         self.connecting_index = None
@@ -1830,6 +2007,9 @@ class CrackAnnotator(QtWidgets.QWidget):
                 self._commit_midline(point_i)
                 return
             else:
+                if not self._poly_point_within_active_regions(p):
+                    self._abort_active_polyline_out_of_bounds()
+                    return
                 self._add_poly_point(p)
                 self.update()
                 return

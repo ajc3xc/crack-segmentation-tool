@@ -301,6 +301,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
 
         # Group by bbox (so OS/cost is reused per box)
         box_to_pairs = {}
+        dropped_pairs = []
         for (pair, src) in all_pairs:
             candidates = []
             for bbox in boxes:
@@ -314,6 +315,22 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                 _, chosen_bbox = min(candidates, key=lambda x: x[0])
                 key = tuple(chosen_bbox)
                 box_to_pairs.setdefault(key, []).append((pair, src))
+            else:
+                dropped_pairs.append((pair, src))
+
+        if dropped_pairs:
+            print("[PIPELINE] Skipping endpoint pairs with no corresponding bounding box:")
+            for (p0, p1), src in dropped_pairs:
+                print(f"  - source={src} pair={p0}->{p1}")
+
+        if not box_to_pairs:
+            QMessageBox.critical(
+                None,
+                "No Valid Endpoint Pairs",
+                "All selected endpoint pairs are outside bounding boxes.\n\n"
+                "Please draw/fix boxes so each crack pair is contained in at least one box.",
+            )
+            return
 
         errors = []
 

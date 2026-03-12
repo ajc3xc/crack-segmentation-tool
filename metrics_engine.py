@@ -712,8 +712,25 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             src = (cr.get("source") or "").lower()
             return src in ("manual", "manual_poly", "manual_midline")
 
+        def _has_valid_bbox(cr):
+            bb = (cr or {}).get("mask_bbox")
+            if not isinstance(bb, (list, tuple)) or len(bb) != 4:
+                return False
+            try:
+                _, _, w, h = map(int, bb)
+            except Exception:
+                return False
+            return w > 0 and h > 0
+
         atomic = {cid: cr for cid, cr in atomic_all.items() if _is_manual(cr)}
-        print(f"[DEBUG METRICS] using {len(atomic)} manual cracks for mask/width metrics")
+        atomic_missing_bbox = [str(cid) for cid, cr in atomic.items() if not _has_valid_bbox(cr)]
+        if atomic_missing_bbox:
+            print(
+                "[DEBUG METRICS] skipping manual cracks without valid mask_bbox: "
+                + ", ".join(atomic_missing_bbox)
+            )
+        atomic = {cid: cr for cid, cr in atomic.items() if _has_valid_bbox(cr)}
+        print(f"[DEBUG METRICS] using {len(atomic)} manual cracks for mask/width metrics (valid bbox only)")
 
         for cid, cr in atomic.items():
             try:
@@ -784,7 +801,10 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 )
                 if auto_cr["derived_midline"] is None:
                     auto_cr["derived_midline"] = auto_cr["midline"]
-                auto_atomic[scid] = auto_cr
+                if _has_valid_bbox(auto_cr):
+                    auto_atomic[scid] = auto_cr
+                else:
+                    print(f"[DEBUG METRICS] skipping auto cid={scid}: missing/invalid mask_bbox")
 
             print(f"[DEBUG METRICS] built {len(auto_atomic)} auto_best cracks for mask/width metrics")
             for cid, cr in auto_atomic.items():

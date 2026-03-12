@@ -629,77 +629,107 @@ class CrackUtils:
         return boxes
 
     def _rematch_crack_bboxes_to_boxes(self):
-        """
-        Rematch saved cracks to current user boxes (geometry-based, not box-id-based).
+        import numpy as np
 
-        Rules:
-        - Atomic crack chooses the box that covers the most endpoint pairs; tie -> smallest area.
-        - If no box matches, set mask_bbox=None and mask_crop=None.
-        - Combined crack bbox is union of member atomic bboxes; if none valid, set None.
-        """
         ann = self.annotation.setdefault("annotations", {})
         atomic = ann.setdefault("atomic_cracks", {})
         combined = ann.setdefault("combined_cracks", {})
-        boxes = self.get_all_bounding_boxes()
         box_dict = ann.get("box", {}) or {}
 
-        # Keep key -> bbox mapping for debug visibility.
+        # --- Build keyed boxes ---
         keyed_boxes = []
         for k, v in box_dict.items():
             try:
                 bb = v.get("bounding_box")
                 xs = [bb[0][0], bb[1][0]]
                 ys = [bb[0][1], bb[1][1]]
-                keyed_boxes.append((str(k), [min(xs), min(ys), max(xs), max(ys)]))
+                xmin, ymin, xmax, ymax = min(xs), min(ys), max(xs), max(ys)
+                area = max(1.0, float((xmax - xmin) * (ymax - ymin)))
+                keyed_boxes.append((str(k), np.array([xmin, ymin, xmax, ymax], float), area))
             except Exception:
                 continue
 
-        def _box_contains_pair(bb, p0, p1):
-            xmin, ymin, xmax, ymax = bb
-            return (
-                xmin <= p0[0] <= xmax and ymin <= p0[1] <= ymax and
-                xmin <= p1[0] <= xmax and ymin <= p1[1] <= ymax
-            )
+        # --- Geometry extraction ---
+        def _is_manual_crack(cr):
+            src = str(cr.get("source", "")).strip().lower()
+            return bool(cr.get("is_manual", False) or src in ("manual", "manual_poly"))
 
-        def _pair_list_for_crack(cr):
-            pairs = []
+        def _geometry_points(cr):
+            # Manual cracks -> trust full midline geometry when available.
+            if _is_manual_crack(cr):
+                mid = np.asarray(cr.get("midline", []), float)
+                if mid.ndim == 2 and len(mid) >= 2:
+                    return mid
+
+            # Otherwise use user points if present.
+            ups = cr.get("user_points", []) or []
+            if ups:
+                return np.asarray(ups, float)
+
+            # Auto cracks -> do not use midline for coverage.
+            return None
+
+        def _endpoints(cr):
+            # Prefer user-connected endpoints
             ups = cr.get("user_points", []) or []
             ucs = cr.get("user_connections", []) or []
             for conn in ucs:
-                if not isinstance(conn, (list, tuple)) or len(conn) < 2:
-                    continue
-                i0, i1 = conn[0], conn[1]
-                if 0 <= i0 < len(ups) and 0 <= i1 < len(ups):
-                    p0 = tuple(map(float, ups[i0]))
-                    p1 = tuple(map(float, ups[i1]))
-                    pairs.append((p0, p1))
-            if pairs:
-                return pairs
+                if isinstance(conn, (list, tuple)) and len(conn) >= 2:
+                    i0, i1 = conn[0], conn[1]
+                    if 0 <= i0 < len(ups) and 0 <= i1 < len(ups):
+                        return np.asarray(ups[i0], float), np.asarray(ups[i1], float)
 
+            # Fallback: midline endpoints
             mid = np.asarray(cr.get("midline", []), float)
             if mid.ndim == 2 and len(mid) >= 2:
-                return [(tuple(mid[0]), tuple(mid[-1]))]
-            return []
+                return mid[0], mid[-1]
 
+            return None, None
+
+        # --- Containment test (vectorized) ---
+        def _points_inside_box(points, bb):
+            xmin, ymin, xmax, ymax = bb
+            xs = points[:, 0]
+            ys = points[:, 1]
+            return (xs >= xmin) & (xs <= xmax) & (ys >= ymin) & (ys <= ymax)
+
+        # --- Box selection ---
         def _best_box_for_crack(cr):
-            pairs = _pair_list_for_crack(cr)
-            if not pairs or not keyed_boxes:
+            pts = _geometry_points(cr)
+            p0, p1 = _endpoints(cr)
+
+            if p0 is None or p1 is None or not keyed_boxes:
                 return None
+
+            # Endpoint-only fallback for cracks without trusted dense geometry.
+            if pts is None:
+                pts = np.vstack([p0, p1])
 
             best = None
-            for k, bb in keyed_boxes:
-                cover = sum(1 for (p0, p1) in pairs if _box_contains_pair(bb, p0, p1))
-                if cover <= 0:
-                    continue
+
+            for k, bb, area in keyed_boxes:
+                inside_mask = _points_inside_box(pts, bb)
+                coverage = float(np.count_nonzero(inside_mask)) / float(len(pts))
+
+                # Require endpoints inside for safety
                 xmin, ymin, xmax, ymax = bb
-                area = max(1.0, float((xmax - xmin) * (ymax - ymin)))
-                score = (cover, -area)  # maximize cover, then minimize area
+                ep_inside = (
+                    xmin <= p0[0] <= xmax and ymin <= p0[1] <= ymax and
+                    xmin <= p1[0] <= xmax and ymin <= p1[1] <= ymax
+                )
+
+                if not ep_inside or coverage <= 0.0:
+                    continue
+
+                score = (coverage, -area)
                 if best is None or score > best[0]:
-                    best = (score, k, bb, len(pairs))
+                    best = (score, k, bb, coverage)
+
             if best is None:
                 return None
-            _, k, bb, npairs = best
-            return {"box_key": k, "bbox_xyxy": bb, "pairs_total": npairs, "pairs_covered": best[0][0]}
+
+            _, k, bb, cov = best
+            return {"box_key": k, "bbox_xyxy": bb, "coverage": cov}
 
         def _to_xywh(bb):
             xmin, ymin, xmax, ymax = map(int, bb)
@@ -709,10 +739,11 @@ class CrackUtils:
                 return None
             return [xmin, ymin, w, h]
 
-        # --- atomic rematch ---
+        # --- Atomic rematch ---
         unmatched = 0
         for cid, cr in atomic.items():
             m = _best_box_for_crack(cr)
+
             if m is None:
                 cr["mask_bbox"] = None
                 cr["mask_crop"] = None
@@ -722,26 +753,25 @@ class CrackUtils:
 
             new_bb = _to_xywh(m["bbox_xyxy"])
             old_bb = cr.get("mask_bbox")
+
             if old_bb != new_bb:
                 cr["mask_bbox"] = new_bb
-                # Existing crop is in previous local frame; invalidate stale crop.
                 cr["mask_crop"] = None
                 print(
                     f"[bbox rematch][atomic {cid}] box_key={m['box_key']} "
-                    f"cover={m['pairs_covered']}/{m['pairs_total']} "
-                    f"bbox {old_bb} -> {new_bb} (mask_crop reset)"
+                    f"coverage={m['coverage']:.2f} bbox {old_bb} -> {new_bb} (mask_crop reset)"
                 )
             else:
                 print(
                     f"[bbox rematch][atomic {cid}] box_key={m['box_key']} "
-                    f"cover={m['pairs_covered']}/{m['pairs_total']} "
-                    f"bbox unchanged {new_bb}"
+                    f"coverage={m['coverage']:.2f} bbox unchanged {new_bb}"
                 )
 
-        # --- combined rematch from atomic members ---
+        # --- Combined rematch ---
         for ccid, cmb in combined.items():
             members = cmb.get("members", []) or []
             member_boxes = []
+
             for m in members:
                 acr = atomic.get(str(m), {}) or {}
                 bb = acr.get("mask_bbox")
@@ -753,13 +783,14 @@ class CrackUtils:
             if not member_boxes:
                 cmb["mask_bbox"] = None
                 cmb["mask_crop"] = None
-                print(f"[bbox rematch][combined {ccid}] UNMATCHED (no member bboxes) -> mask_bbox=None")
+                print(f"[bbox rematch][combined {ccid}] UNMATCHED -> mask_bbox=None")
                 continue
 
             x0 = min(b[0] for b in member_boxes)
             y0 = min(b[1] for b in member_boxes)
             x1 = max(b[2] for b in member_boxes)
             y1 = max(b[3] for b in member_boxes)
+
             new_bb = [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
 
             if cmb.get("mask_bbox") != new_bb:
@@ -770,7 +801,7 @@ class CrackUtils:
             else:
                 print(f"[bbox rematch][combined {ccid}] bbox unchanged {new_bb}")
 
-        print(f"[bbox rematch] atomic={len(atomic)} unmatched={unmatched} boxes={len(boxes)}")
+        print(f"[bbox rematch] atomic={len(atomic)} unmatched={unmatched} boxes={len(keyed_boxes)}")
 
     # --- moved verbatim ---
     def _debug_print_atomic_cracks(self, label):
@@ -3385,8 +3416,8 @@ class CrackUtils:
 
         hint = QLabel(
             "Editable: Auto/Manual in black/light-blue.     Read-only: Auto/Manual cracks in green — cant delete in editor, must delete segment in Delete Segmentations.\n"
-            "Click unconnected point in Connection Mode to create new point.        Hover and click in respective mode to delete.        Mousewheel/2-finger swipe = zoom in/out.        T: toggle overlay.\n"
-            "Manual: Left-hold on starting point → draw → finish on a different endpoint.       Backspace/Z or Right-hold for fast/slow deletion.       Shimmy: zoom in toward direction, zoom out slightly to move; image may distort until 1.0 scale."
+            "Click unconnected point in Connection Mode to create new point.        Hover and click in respective mode to delete.        Mousewheel/2-finger swipe = zoom in/out.        T: toggle overlay.        M: move minimap (top-right/bottom-right).        Arrow keys: pan view (Shift = faster).\n"
+            "Manual: Left-hold on starting point → draw → finish on a different endpoint.       Backspace/Z or Right-hold for fast/slow deletion."
         )
         layout.addWidget(hint)
 
@@ -4340,4 +4371,3 @@ class CrackUtils:
             traceback.print_exc()
             error(f"update_image_crop: {e}")
             self.update_os_button.setStyleSheet("background-color : red")
-

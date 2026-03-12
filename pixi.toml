@@ -22,18 +22,19 @@ scikit-image = "0.19.*"
 seaborn = "*"
 psutil = "*"
 hfm = "0.2.13.*"
-cupy = "13.*"
+cupy = "12.*"
+cudatoolkit = ">=11.8.0,<12"
 
 # ==========================
 # CUDA + CuPy (GPU Support)
 # ==========================
 
-[target.linux-64.dependencies]
-cudatoolkit = "11.8.*"
+#[target.linux-64.dependencies]
+#cudatoolkit = "11.8.*"
 #cupy = "12.2.*"
 
-[target.win-64.dependencies]
-cudatoolkit = "11.8.*"
+#[target.win-64.dependencies]
+#cudatoolkit = "11.8.*"
 #cupy = "12.2.*"
 
 # ==========================

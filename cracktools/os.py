@@ -1,6 +1,7 @@
 import numpy as np
 import scipy
 import cmath, math, sys
+import os
 import skimage
 import matplotlib.pyplot as plt
 import scipy.ndimage as ndi
@@ -25,6 +26,15 @@ try:
     from cupyx.scipy import ndimage as _cnd
     try:
         if _cp.cuda.runtime.getDeviceCount() > 0:
+            # CUDA 12.9 + some CuPy builds can fail with nvcc bf16/cpp-dialect errors.
+            # Default to CPU there unless explicitly overridden.
+            force_cupy = os.environ.get("CRACKTOOLS_FORCE_CUPY", "0") == "1"
+            rt_ver = int(_cp.cuda.runtime.runtimeGetVersion())
+            if (rt_ver >= 12090) and (not force_cupy):
+                raise RuntimeError(
+                    "CUDA runtime >= 12.9 detected; forcing CPU fallback "
+                    "(set CRACKTOOLS_FORCE_CUPY=1 to override)."
+                )
             CUPY_AVAILABLE = True
     except Exception:
         CUPY_AVAILABLE = False

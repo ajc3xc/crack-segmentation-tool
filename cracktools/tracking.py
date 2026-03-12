@@ -35,6 +35,13 @@ try:
     try:
         n_devices = cp.cuda.runtime.getDeviceCount()
         if n_devices > 0:
+            force_cupy = os.environ.get("CRACKTOOLS_FORCE_CUPY", "0") == "1"
+            rt_ver = int(cp.cuda.runtime.runtimeGetVersion())
+            if (rt_ver >= 12090) and (not force_cupy):
+                raise RuntimeError(
+                    "CUDA runtime >= 12.9 detected; forcing CPU fallback "
+                    "(set CRACKTOOLS_FORCE_CUPY=1 to override)."
+                )
             CUPY_AVAILABLE = True
 
             # -------------------------------
@@ -942,3 +949,4 @@ def fast_marching_with_fallback(
 
     print("All fast marching attempts failed.")
     raise last_exception
+
