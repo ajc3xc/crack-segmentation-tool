@@ -18,7 +18,6 @@ numpy = "1.26.*"
 scipy = "1.11.*"
 matplotlib = "3.8.*"
 scikit-image = "0.19.*"
-opencv = "4.11.*"
 
 seaborn = "*"
 psutil = "*"
@@ -51,7 +50,7 @@ agd = ">=0.2.16,<0.3"
 shapely = ">=2,<3"
 pandas = "*"
 rasterio = ">=1.3,<2"
-opencv-python = "*"
+opencv-python = ">=4.11.0.86, <5"
 
 # ==========================
 # Linux Qt Fix

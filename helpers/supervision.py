@@ -783,6 +783,7 @@ def snap_polyline_to_dt_ridge(
     keep_endpoints=True,
     freeze_k=3,
     debug=False,
+    dt_float=None,
 ):
     """
     Nudge polyline points toward DT ridge by gradient ascent.
@@ -810,7 +811,12 @@ def snap_polyline_to_dt_ridge(
         print(f"[SNAP DT] elapsed_sec={time.perf_counter() - t0_snap:.6f} (early_return=empty_domain)")
         return S
 
-    dt = cv2.distanceTransform(domain, cv2.DIST_L2, 5).astype(np.float32)
+    if dt_float is not None:
+        dt = np.asarray(dt_float, np.float32)
+        if dt.shape[:2] != domain.shape[:2]:
+            dt = cv2.distanceTransform(domain, cv2.DIST_L2, 5).astype(np.float32)
+    else:
+        dt = cv2.distanceTransform(domain, cv2.DIST_L2, 5).astype(np.float32)
     gx = cv2.Sobel(dt, cv2.CV_32F, 1, 0, ksize=int(grad_ksize))
     gy = cv2.Sobel(dt, cv2.CV_32F, 0, 1, ksize=int(grad_ksize))
 
@@ -952,49 +958,333 @@ def snap_polyline_to_dt_ridge(
     print(f"[SNAP DT] elapsed_sec={time.perf_counter() - t0_snap:.6f}")
     return S
 
-def compute_centered_midline_and_normals(
+def _compute_dt_for_domain(domain_u8):
+    t0 = time.perf_counter()
+    domain = (np.asarray(domain_u8) > 0).astype(np.uint8)
+    if domain.size == 0:
+        return np.zeros((0, 0), np.float32), np.zeros((0, 0), np.float32), {"compute_s": 0.0}
+    if not np.any(domain):
+        z = np.zeros(domain.shape[:2], np.float32)
+        return z, z, {"compute_s": float(time.perf_counter() - t0)}
+    dt = cv2.distanceTransform(domain, cv2.DIST_L2, 5).astype(np.float32)
+    mx = float(np.max(dt))
+    if mx > 1e-12:
+        dt_norm = dt / mx
+    else:
+        dt_norm = np.zeros_like(dt, dtype=np.float32)
+    return dt, dt_norm.astype(np.float32, copy=False), {"compute_s": float(time.perf_counter() - t0)}
+
+
+def _compute_dt_ridge_midline(mid_xy, domain_u8, dt_float, snap_kwargs):
+    t0 = time.perf_counter()
+    centered = snap_polyline_to_dt_ridge(
+        np.asarray(mid_xy, float),
+        (np.asarray(domain_u8) > 0).astype(np.uint8),
+        dt_float=dt_float,
+        **(snap_kwargs or {}),
+    )
+    return np.asarray(centered, float), {"snap_s": float(time.perf_counter() - t0)}
+
+
+def _extract_depth_crop_for_bbox_or_domain(
+    *,
+    domain_u8,
+    depth_full=None,
+    depth_crop=None,
+    depth_bbox_xywh=None,
+    full_image_hw=None,
+):
+    dom = (np.asarray(domain_u8) > 0)
+    target_h, target_w = dom.shape[:2]
+    if target_h <= 0 or target_w <= 0:
+        return None, {"reason": "empty_domain"}
+
+    src = None
+    source_name = "none"
+    if depth_crop is not None:
+        src = np.asarray(depth_crop)
+        source_name = "depth_crop"
+    elif depth_full is not None:
+        src = np.asarray(depth_full)
+        source_name = "depth_full"
+    else:
+        return None, {"reason": "missing_depth"}
+
+    if src.ndim == 3:
+        if src.shape[2] == 1:
+            src = src[:, :, 0]
+        else:
+            src = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+    src = np.squeeze(src)
+    if src.ndim != 2:
+        return None, {"reason": f"bad_depth_ndim:{src.ndim}"}
+
+    src = src.astype(np.float32, copy=False)
+    raw_shape = tuple(int(v) for v in src.shape[:2])
+    used_bbox_crop = False
+
+    if source_name == "depth_full" and depth_bbox_xywh is not None and len(depth_bbox_xywh) == 4:
+        x, y, w, h = [int(v) for v in depth_bbox_xywh]
+        Hs, Ws = src.shape[:2]
+        # Only bbox-crop when target looks like a local crack-domain crop.
+        # If target is full-frame (common in current GT supervision flow), use
+        # full depth alignment directly to avoid stretching a tiny bbox crop.
+        local_target = (
+            abs(int(target_h) - int(max(0, h))) <= 2
+            and abs(int(target_w) - int(max(0, w))) <= 2
+        )
+
+        if local_target:
+            if (
+                isinstance(full_image_hw, (list, tuple))
+                and len(full_image_hw) == 2
+                and int(full_image_hw[0]) > 0
+                and int(full_image_hw[1]) > 0
+            ):
+                Hf = int(full_image_hw[0])
+                Wf = int(full_image_hw[1])
+                sy = float(Hs) / float(Hf)
+                sx = float(Ws) / float(Wf)
+            else:
+                sy = 1.0
+                sx = 1.0
+
+            x0 = int(np.floor(float(x) * sx))
+            y0 = int(np.floor(float(y) * sy))
+            x1 = int(np.ceil(float(x + max(0, w)) * sx))
+            y1 = int(np.ceil(float(y + max(0, h)) * sy))
+
+            x0 = max(0, min(Ws, x0))
+            y0 = max(0, min(Hs, y0))
+            x1 = max(0, min(Ws, x1))
+            y1 = max(0, min(Hs, y1))
+
+            if x1 > x0 and y1 > y0:
+                crop = src[y0:y1, x0:x1]
+                if crop.size > 0:
+                    src = crop
+                    used_bbox_crop = True
+
+    resized = False
+    if src.shape[:2] != (target_h, target_w):
+        src = cv2.resize(src, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+        resized = True
+
+    return src.astype(np.float32, copy=False), {
+        "source": source_name,
+        "raw_shape": list(raw_shape),
+        "used_bbox_crop": bool(used_bbox_crop),
+        "aligned_shape": [int(target_h), int(target_w)],
+        "resized": bool(resized),
+    }
+
+
+def _compute_depth_recess_signal(depth_local_f32, domain_u8):
+    t0 = time.perf_counter()
+    dom = (np.asarray(domain_u8) > 0)
+    depth = np.asarray(depth_local_f32, np.float32)
+    if depth.ndim != 2 or not np.any(dom):
+        z = np.zeros_like(np.asarray(domain_u8, np.float32))
+        return z, z, {"compute_s": float(time.perf_counter() - t0), "reason": "invalid_depth_or_domain"}
+
+    z = depth.copy()
+    finite = np.isfinite(z)
+    if not np.any(finite):
+        z[:] = 0.0
+    else:
+        valid_dom = finite & dom
+        if np.any(valid_dom):
+            fill = float(np.nanmedian(z[valid_dom]))
+        else:
+            fill = float(np.nanmedian(z[finite]))
+        z[~finite] = fill
+
+    z_smooth = cv2.GaussianBlur(z, (0, 0), sigmaX=1.2, sigmaY=1.2)
+    z_bg = cv2.GaussianBlur(z_smooth, (0, 0), sigmaX=4.0, sigmaY=4.0)
+    recess = (z_bg - z_smooth).astype(np.float32, copy=False)
+
+    vals = recess[dom]
+    if vals.size > 0:
+        p10 = float(np.percentile(vals, 10))
+        p90 = float(np.percentile(vals, 90))
+        if abs(p10) > abs(p90):
+            recess = (-recess).astype(np.float32, copy=False)
+            vals = recess[dom]
+
+    depth_norm = np.zeros_like(z_smooth, dtype=np.float32)
+    dvals = z_smooth[dom]
+    if dvals.size > 0:
+        dmin = float(np.percentile(dvals, 2))
+        dmax = float(np.percentile(dvals, 98))
+        if np.isfinite(dmin) and np.isfinite(dmax) and dmax > dmin + 1e-9:
+            depth_norm = np.clip((z_smooth - dmin) / (dmax - dmin), 0.0, 1.0).astype(np.float32)
+
+    recess_norm = np.zeros_like(recess, dtype=np.float32)
+    rvals = recess[dom]
+    if rvals.size > 0:
+        rlo = float(np.percentile(rvals, 2))
+        rhi = float(np.percentile(rvals, 98))
+        if np.isfinite(rlo) and np.isfinite(rhi) and rhi > rlo + 1e-9:
+            recess_norm = np.clip((recess - rlo) / (rhi - rlo), 0.0, 1.0).astype(np.float32)
+
+    recess_norm[~dom] = 0.0
+    depth_norm[~dom] = 0.0
+    return depth_norm, recess_norm, {"compute_s": float(time.perf_counter() - t0)}
+
+
+def _build_depth_guided_costmap(domain_u8, dt_norm, recess_norm, *, alpha=0.55, beta=0.45, eps=1e-3):
+    t0 = time.perf_counter()
+    dom = (np.asarray(domain_u8) > 0)
+    dtn = np.clip(np.asarray(dt_norm, np.float32), 0.0, 1.0)
+    recn = np.clip(np.asarray(recess_norm, np.float32), 0.0, 1.0)
+
+    score = (float(alpha) * dtn + float(beta) * recn).astype(np.float32)
+    score[~dom] = 0.0
+
+    cost = np.full(score.shape, np.float32(1e9), dtype=np.float32)
+    if np.any(dom):
+        cost[dom] = (1.0 / (score[dom] + float(max(eps, 1e-9)))).astype(np.float32)
+
+    return cost, score, {
+        "compute_s": float(time.perf_counter() - t0),
+        "alpha": float(alpha),
+        "beta": float(beta),
+        "eps": float(max(eps, 1e-9)),
+    }
+
+
+def _closest_valid_xy_in_mask(xy, mask_bool):
+    if xy is None:
+        return None
+    m = np.asarray(mask_bool).astype(bool)
+    if m.ndim != 2 or not np.any(m):
+        return None
+
+    x = int(np.round(float(xy[0])))
+    y = int(np.round(float(xy[1])))
+    H, W = m.shape[:2]
+    if 0 <= x < W and 0 <= y < H and m[y, x]:
+        return (x, y)
+
+    ys, xs = np.where(m)
+    if xs.size == 0:
+        return None
+    dx = xs.astype(np.float32) - float(x)
+    dy = ys.astype(np.float32) - float(y)
+    idx = int(np.argmin(dx * dx + dy * dy))
+    return (int(xs[idx]), int(ys[idx]))
+
+
+def _compute_dijkstra_midline(mid_xy, costmap_f32, domain_u8):
+    t0 = time.perf_counter()
+    result_meta = {
+        "dijkstra_s": 0.0,
+        "backend": None,
+        "reason": None,
+        "path_cost": None,
+    }
+
+    S = np.asarray(mid_xy, float)
+    if S.ndim != 2 or S.shape[1] != 2 or len(S) < 2:
+        result_meta["reason"] = "bad_midline_input"
+        return None, result_meta
+
+    dom = (np.asarray(domain_u8) > 0)
+    if not np.any(dom):
+        result_meta["reason"] = "empty_domain"
+        return None, result_meta
+
+    start_xy = _closest_valid_xy_in_mask(S[0], dom)
+    end_xy = _closest_valid_xy_in_mask(S[-1], dom)
+    if start_xy is None or end_xy is None:
+        result_meta["reason"] = "no_valid_endpoints"
+        return None, result_meta
+
+    sx, sy = start_xy
+    ex, ey = end_xy
+    path_xy = None
+
+    try:
+        from skimage.graph import route_through_array
+
+        path_rc, total_cost = route_through_array(
+            np.asarray(costmap_f32, np.float32),
+            start=(int(sy), int(sx)),
+            end=(int(ey), int(ex)),
+            fully_connected=True,
+            geometric=True,
+        )
+        if path_rc:
+            path_xy = np.asarray([[float(c), float(r)] for r, c in path_rc], float)
+            result_meta["path_cost"] = float(total_cost)
+            result_meta["backend"] = "skimage.route_through_array"
+    except Exception as e:
+        result_meta["reason"] = f"dijkstra_failed:{type(e).__name__}"
+
+    if path_xy is None or len(path_xy) < 2:
+        result_meta["reason"] = result_meta["reason"] or "empty_path"
+        result_meta["dijkstra_s"] = float(time.perf_counter() - t0)
+        return None, result_meta
+
+    result_meta["dijkstra_s"] = float(time.perf_counter() - t0)
+    return path_xy, result_meta
+
+
+def _postprocess_midline_polyline(mid_xy, *, keep_endpoints=True):
+    S = np.asarray(mid_xy, float).copy()
+    if S.ndim != 2 or S.shape[1] != 2 or len(S) < 2:
+        return S
+
+    rs = resample_by_arclength(
+        S,
+        ds_target=2,
+        min_pts=2,
+        preserve_endpoints=bool(keep_endpoints),
+    )
+    if isinstance(rs, tuple) and len(rs) >= 1 and rs[0] is not None:
+        S = np.asarray(rs[0], float)
+
+    try:
+        from scipy.signal import savgol_filter
+
+        n = len(S)
+        if n >= 5:
+            window = 7 if n >= 7 else 5
+            if window % 2 == 0:
+                window += 1
+            xs = savgol_filter(S[:, 0], window, 2)
+            ys = savgol_filter(S[:, 1], window, 2)
+            S2 = S.copy()
+            S2[:, 0] = xs
+            S2[:, 1] = ys
+            if keep_endpoints and len(S2) >= 2:
+                S2[0] = S[0]
+                S2[-1] = S[-1]
+            S = S2
+    except Exception:
+        pass
+
+    return np.asarray(S, float)
+
+
+def _compute_normals_for_midline(
     *,
     mid_xy,
     crack_mask_u8,
-    territory_u8=None,
-    max_radius=60,
-    domain_mode="terr_and_mask",
-    snap_kwargs=None,
+    max_radius,
     diag_out=None,
     endpoint_mode="atomic",
 ):
-    """
-    Center a polyline in DT domain and compute normals/widths on GT crack mask.
-    """
-    if snap_kwargs is None:
-        snap_kwargs = {}
-
-    # Hard rule for centering: domain = crack & territory.
-    territory = territory_u8
-    if territory is None:
-        territory = (np.asarray(crack_mask_u8) > 0).astype(np.uint8)
-
-    domain_u8 = build_centering_domain_mask(
-        crack_mask_u8=crack_mask_u8,
-        territory_u8=territory,
-        mode="terr_and_mask",
-    )
-
-    centered = snap_polyline_to_dt_ridge(
-        np.asarray(mid_xy, float),
-        domain_u8,
-        **snap_kwargs,
-    )
-
+    t0 = time.perf_counter()
+    diag = diag_out if isinstance(diag_out, dict) else {}
     (e1x, e1y, e2x, e2y, widths), _ = normals_from_mask_for_midline(
-        centered,
+        np.asarray(mid_xy, float),
         (np.asarray(crack_mask_u8) > 0),
         int(max_radius),
-        diagnostics=diag_out,
+        diagnostics=diag,
         image_hw=np.asarray(crack_mask_u8).shape[:2],
         endpoint_mode=endpoint_mode,
     )
-
     normals = {
         "edge1_x": _arr_to_list(e1x),
         "edge1_y": _arr_to_list(e1y),
@@ -1002,7 +1292,181 @@ def compute_centered_midline_and_normals(
         "edge2_y": _arr_to_list(e2y),
         "width_px": _arr_to_list(widths),
     }
-    return centered, normals
+    return normals, diag, {"compute_s": float(time.perf_counter() - t0)}
+
+
+def compute_centered_midline_and_normals(
+    *,
+    mid_xy,
+    crack_mask_u8,
+    territory_u8=None,
+    domain_u8=None,
+    depth_full=None,
+    depth_crop=None,
+    depth_bbox_xywh=None,
+    full_image_hw=None,
+    max_radius=60,
+    domain_mode="terr_and_mask",
+    snap_kwargs=None,
+    depth_alpha=0.55,
+    depth_beta=0.45,
+    depth_eps=1e-3,
+    diag_out=None,
+    endpoint_mode="atomic",
+):
+    """
+    Compute centered DT-ridge and depth-guided centerlines + normals in one pass.
+    Returns explicit result families and separated timing/debug blobs.
+    """
+    if snap_kwargs is None:
+        snap_kwargs = {}
+
+    mask_u8 = (np.asarray(crack_mask_u8) > 0).astype(np.uint8)
+    territory = territory_u8
+    if territory is None:
+        territory = mask_u8
+
+    if domain_u8 is None:
+        domain = build_centering_domain_mask(
+            crack_mask_u8=mask_u8,
+            territory_u8=territory,
+            mode=str(domain_mode),
+        )
+    else:
+        domain = (np.asarray(domain_u8) > 0).astype(np.uint8)
+    if not np.any(domain):
+        domain = mask_u8.copy()
+
+    dt_float, dt_norm, t_dt = _compute_dt_for_domain(domain)
+    centered_xy, t_centered = _compute_dt_ridge_midline(
+        np.asarray(mid_xy, float),
+        domain,
+        dt_float,
+        snap_kwargs,
+    )
+
+    centered_normals_diag = diag_out if isinstance(diag_out, dict) else {}
+    centered_normals, centered_normals_diag, t_center_normals = _compute_normals_for_midline(
+        mid_xy=centered_xy,
+        crack_mask_u8=mask_u8,
+        max_radius=max_radius,
+        diag_out=centered_normals_diag,
+        endpoint_mode=endpoint_mode,
+    )
+
+    result = {
+        "centered_midline": np.asarray(centered_xy, float),
+        "centered_normals": centered_normals,
+        "depth_midline": None,
+        "depth_normals": None,
+        "centered_normals_diag": centered_normals_diag,
+        "depth_normals_diag": {},
+        "depth_cost_meta": {},
+        "debug": {
+            "domain_u8": (np.asarray(domain) > 0).astype(np.uint8),
+            "dt_norm": np.asarray(dt_norm, np.float32),
+            "depth_norm": None,
+            "recess_norm": None,
+            "depth_score": None,
+            "depth_costmap": None,
+        },
+        "timing": {
+            "dt": {
+                "compute_s": float(t_dt.get("compute_s", 0.0)),
+            },
+            "centered": {
+                "snap_s": float(t_centered.get("snap_s", 0.0)),
+            },
+            "depth": {
+                "depth_align_s": 0.0,
+                "recess_s": 0.0,
+                "costmap_s": 0.0,
+                "dijkstra_s": 0.0,
+                "postprocess_s": 0.0,
+            },
+            "normals": {
+                "centered_s": float(t_center_normals.get("compute_s", 0.0)),
+                "depth_s": 0.0,
+            },
+        },
+    }
+
+    t_depth_align0 = time.perf_counter()
+    depth_local, depth_align_meta = _extract_depth_crop_for_bbox_or_domain(
+        domain_u8=domain,
+        depth_full=depth_full,
+        depth_crop=depth_crop,
+        depth_bbox_xywh=depth_bbox_xywh,
+        full_image_hw=full_image_hw,
+    )
+    result["timing"]["depth"]["depth_align_s"] = float(time.perf_counter() - t_depth_align0)
+
+    if depth_local is None:
+        result["depth_cost_meta"] = {
+            "has_depth": False,
+            **(depth_align_meta if isinstance(depth_align_meta, dict) else {}),
+        }
+        return result
+
+    depth_norm, recess_norm, depth_sig_meta = _compute_depth_recess_signal(depth_local, domain)
+    result["timing"]["depth"]["recess_s"] = float(depth_sig_meta.get("compute_s", 0.0))
+
+    depth_cost, depth_score, cost_meta = _build_depth_guided_costmap(
+        domain,
+        dt_norm,
+        recess_norm,
+        alpha=float(depth_alpha),
+        beta=float(depth_beta),
+        eps=float(depth_eps),
+    )
+    result["timing"]["depth"]["costmap_s"] = float(cost_meta.get("compute_s", 0.0))
+
+    depth_path_raw, dijkstra_meta = _compute_dijkstra_midline(
+        np.asarray(mid_xy, float),
+        depth_cost,
+        domain,
+    )
+    result["timing"]["depth"]["dijkstra_s"] = float(dijkstra_meta.get("dijkstra_s", 0.0))
+
+    result["debug"]["depth_norm"] = np.asarray(depth_norm, np.float32)
+    result["debug"]["recess_norm"] = np.asarray(recess_norm, np.float32)
+    result["debug"]["depth_score"] = np.asarray(depth_score, np.float32)
+    result["debug"]["depth_costmap"] = np.asarray(depth_cost, np.float32)
+    result["depth_cost_meta"] = {
+        "has_depth": True,
+        **(depth_align_meta if isinstance(depth_align_meta, dict) else {}),
+        "cost_weights": {
+            "alpha": float(depth_alpha),
+            "beta": float(depth_beta),
+            "eps": float(max(depth_eps, 1e-9)),
+        },
+        "dijkstra": {
+            "backend": dijkstra_meta.get("backend"),
+            "reason": dijkstra_meta.get("reason"),
+            "path_cost": dijkstra_meta.get("path_cost"),
+        },
+    }
+
+    if depth_path_raw is None or len(depth_path_raw) < 2:
+        return result
+
+    t_post0 = time.perf_counter()
+    depth_mid = _postprocess_midline_polyline(depth_path_raw, keep_endpoints=True)
+    result["timing"]["depth"]["postprocess_s"] = float(time.perf_counter() - t_post0)
+
+    depth_normals_diag = {}
+    depth_normals, depth_normals_diag, t_depth_normals = _compute_normals_for_midline(
+        mid_xy=depth_mid,
+        crack_mask_u8=mask_u8,
+        max_radius=max_radius,
+        diag_out=depth_normals_diag,
+        endpoint_mode=endpoint_mode,
+    )
+    result["timing"]["normals"]["depth_s"] = float(t_depth_normals.get("compute_s", 0.0))
+    result["depth_midline"] = np.asarray(depth_mid, float)
+    result["depth_normals"] = depth_normals
+    result["depth_normals_diag"] = depth_normals_diag
+    return result
 
 def plot_midline_centering_debug(
     *,
@@ -1192,6 +1656,143 @@ def plot_midline_centering_debug(
         title="Legend",
         title_fontsize=10,
     )
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_depth_cost_diagnostic(
+    *,
+    out_path,
+    crack_mask_u8,
+    dt_norm,
+    recess_norm,
+    depth_score,
+    bbox_xywh=None,
+    title="Depth-guided cost diagnostics",
+):
+    import matplotlib.pyplot as plt
+
+    M = (np.asarray(crack_mask_u8) > 0).astype(np.uint8)
+    H, W = M.shape[:2]
+
+    if bbox_xywh is not None and len(bbox_xywh) == 4:
+        x, y, w, h = map(int, bbox_xywh)
+        pad = 25
+        x0 = max(0, x - pad)
+        y0 = max(0, y - pad)
+        x1 = min(W, x + w + pad)
+        y1 = min(H, y + h + pad)
+    else:
+        ys, xs = np.where(M > 0)
+        if xs.size:
+            pad = 25
+            x0 = max(0, int(xs.min()) - pad)
+            y0 = max(0, int(ys.min()) - pad)
+            x1 = min(W, int(xs.max()) + 1 + pad)
+            y1 = min(H, int(ys.max()) + 1 + pad)
+        else:
+            x0, y0, x1, y1 = 0, 0, W, H
+
+    dtv = np.asarray(dt_norm, np.float32)
+    recv = np.asarray(recess_norm, np.float32)
+    scv = np.asarray(depth_score, np.float32)
+    dtv = np.clip(dtv, 0.0, 1.0)
+    recv = np.clip(recv, 0.0, 1.0)
+    scv = np.clip(scv, 0.0, 1.0)
+
+    fig, axes = plt.subplots(1, 3, figsize=(14.0, 4.6), dpi=220, sharex=True, sharey=True)
+    ax0, ax1, ax2 = axes
+    ax0.imshow(dtv[y0:y1, x0:x1], cmap="magma")
+    ax1.imshow(recv[y0:y1, x0:x1], cmap="viridis")
+    ax2.imshow(scv[y0:y1, x0:x1], cmap="inferno")
+    ax0.set_title("DT ridge cue", fontsize=10)
+    ax1.set_title("Depth recess cue", fontsize=10)
+    ax2.set_title("Combined score", fontsize=10)
+    for ax in axes:
+        ax.axis("off")
+    fig.suptitle(title, fontsize=11)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_midline_depth_overlay_debug(
+    *,
+    out_path,
+    original_image,
+    crack_mask_u8,
+    manual_segs,
+    centered_segs,
+    depth_segs,
+    bbox_xywh=None,
+    title="Manual vs Centered vs Depth",
+):
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    img = np.asarray(original_image)
+    if img.ndim == 2:
+        img_rgb = np.stack([img] * 3, axis=-1)
+    else:
+        img_rgb = img.copy()
+
+    M = (np.asarray(crack_mask_u8) > 0).astype(np.uint8)
+    H, W = M.shape[:2]
+    if img_rgb.shape[:2] != (H, W):
+        img_rgb = cv2.resize(img_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
+
+    seg_overlay = np.zeros((H, W, 3), np.uint8)
+    seg_overlay[M > 0] = (40, 220, 40)
+    base = np.clip(0.7 * img_rgb.astype(np.float32) + 0.3 * seg_overlay.astype(np.float32), 0, 255).astype(np.uint8)
+
+    if bbox_xywh is not None and len(bbox_xywh) == 4:
+        x, y, w, h = map(int, bbox_xywh)
+        pad = 25
+        x0 = max(0, x - pad)
+        y0 = max(0, y - pad)
+        x1 = min(W, x + w + pad)
+        y1 = min(H, y + h + pad)
+    else:
+        ys, xs = np.where(M > 0)
+        if xs.size:
+            pad = 25
+            x0 = max(0, int(xs.min()) - pad)
+            y0 = max(0, int(ys.min()) - pad)
+            x1 = min(W, int(xs.max()) + 1 + pad)
+            y1 = min(H, int(ys.max()) + 1 + pad)
+        else:
+            x0, y0, x1, y1 = 0, 0, W, H
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.6, 6.6), dpi=220)
+    ax.imshow(base[y0:y1, x0:x1])
+    ax.axis("off")
+    ax.set_title(title, fontsize=10)
+
+    for S in (manual_segs or []):
+        S = np.asarray(S, float)
+        if S.ndim == 2 and len(S) >= 2:
+            ax.plot(S[:, 0] - x0, S[:, 1] - y0, color="yellow", lw=2.0, linestyle="--", zorder=4)
+    for S in (centered_segs or []):
+        S = np.asarray(S, float)
+        if S.ndim == 2 and len(S) >= 2:
+            ax.plot(S[:, 0] - x0, S[:, 1] - y0, color="cyan", lw=2.2, zorder=3)
+    for S in (depth_segs or []):
+        S = np.asarray(S, float)
+        if S.ndim == 2 and len(S) >= 2:
+            ax.plot(S[:, 0] - x0, S[:, 1] - y0, color="magenta", lw=2.2, zorder=5)
+
+    if bbox_xywh is not None and len(bbox_xywh) == 4:
+        x, y, w, h = map(int, bbox_xywh)
+        ax.add_patch(plt.Rectangle((x - x0, y - y0), w, h, fill=False, edgecolor="dodgerblue", linewidth=1.2))
+
+    handles = [
+        Line2D([], [], color="yellow", lw=2.0, linestyle="--", label="Manual"),
+        Line2D([], [], color="cyan", lw=2.2, linestyle="-", label="Centered"),
+        Line2D([], [], color="magenta", lw=2.2, linestyle="-", label="Depth-guided"),
+    ]
+    ax.legend(handles=handles, loc="lower right", fontsize=8, framealpha=0.9)
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
@@ -1452,11 +2053,15 @@ def export_gt_centering_metrics(
     combined_member_ids=None,
 ):
     """
-    Compute midline metrics comparing manual GT midline vs auto-centered GT midline.
+    Compute per-crack GT alignment metrics:
+      - manual vs centered (DT ridge)
+      - manual vs depth_distridge
 
     Outputs:
-      supervision/<image>/analysis/gt_centering_metrics.csv
-      supervision/<image>/analysis/diagnostics/*.png
+      - backward-compatible files under supervision/<image>/analysis
+      - separated files under:
+          supervision/<image>/gt_centering
+          supervision/<image>/depth_distridge
     """
     import os
     import numpy as np
@@ -1464,164 +2069,287 @@ def export_gt_centering_metrics(
     from helpers.metrics import compute_midline_metrics
     from helpers.present_plots import plot_rs3_midline_diagnostics
 
-    analysis_dir = os.path.join(save_root, "supervision", base_name, "analysis")
+    sup_img_dir = os.path.join(save_root, "supervision", base_name)
+    analysis_dir = os.path.join(sup_img_dir, "analysis")
+    gt_centering_dir = os.path.join(sup_img_dir, "gt_centering")
+    depth_distridge_dir = os.path.join(sup_img_dir, "depth_distridge")
     os.makedirs(analysis_dir, exist_ok=True)
+    os.makedirs(gt_centering_dir, exist_ok=True)
+    os.makedirs(depth_distridge_dir, exist_ok=True)
 
     rows = []
     combined_member_ids = {str(x) for x in (combined_member_ids or [])}
+
+    def _coerce_seg_list(entry, *, seg_keys=(), packed_keys=()):
+        for k in seg_keys:
+            val = entry.get(k, None)
+            if isinstance(val, list):
+                out = [np.asarray(s, float) for s in val if s is not None and len(s) >= 2]
+                if out:
+                    return out
+        for k in packed_keys:
+            val = entry.get(k, None)
+            if val is None:
+                continue
+            arr = np.asarray(val, float)
+            if arr.ndim == 2 and arr.shape[1] == 2 and len(arr) >= 2:
+                return [arr]
+            segs = _split_midline_packed(val)
+            segs = [np.asarray(s, float) for s in segs if s is not None and len(s) >= 2]
+            if segs:
+                return segs
+        return []
 
     for entry in (final_entries or []):
         cid = str(entry.get("id", ""))
         kind = str(entry.get("kind", "unknown"))
 
-        manual_mid = None
-        centered_mid = None
-
         if kind == "atomic":
             manual_mid = np.asarray(entry.get("midline", []), float)
-            centered_mid = np.asarray(entry.get("midline_auto_centered", []), float)
-
+            centered_mid = np.asarray(
+                entry.get("centered_midline", entry.get("midline_auto_centered", [])),
+                float,
+            )
+            depth_mid = np.asarray(
+                entry.get("depth_midline", entry.get("midline_depth_centered", [])),
+                float,
+            )
+            candidate_pairs = [
+                ("manual_vs_centered", "centered_gt", manual_mid, centered_mid),
+                ("manual_vs_depth_distridge", "centered_depth_gt", manual_mid, depth_mid),
+            ]
         elif kind == "combined":
-            segs_manual = entry.get("midline_segments", []) or []
-            segs_center = entry.get("midline_segments_auto_centered", []) or []
-
-            manual_parts = [np.asarray(s, float) for s in segs_manual if s is not None and len(s) >= 2]
-            center_parts = [np.asarray(s, float) for s in segs_center if s is not None and len(s) >= 2]
-
-            if manual_parts:
-                manual_mid = np.vstack(manual_parts)
-            if center_parts:
-                centered_mid = np.vstack(center_parts)
-
-        if (
-            manual_mid is None or centered_mid is None
-            or len(manual_mid) < 2
-            or len(centered_mid) < 2
-        ):
+            manual_parts = _coerce_seg_list(
+                entry,
+                seg_keys=("midline_segments",),
+                packed_keys=("midline",),
+            )
+            centered_parts = _coerce_seg_list(
+                entry,
+                seg_keys=("centered_midline_segments", "midline_segments_auto_centered"),
+                packed_keys=("centered_midline", "midline_auto_centered"),
+            )
+            depth_parts = _coerce_seg_list(
+                entry,
+                seg_keys=("depth_midline_segments",),
+                packed_keys=("depth_midline", "midline_depth_centered"),
+            )
+            manual_mid = np.vstack(manual_parts) if manual_parts else np.empty((0, 2), float)
+            centered_mid = np.vstack(centered_parts) if centered_parts else np.empty((0, 2), float)
+            depth_mid = np.vstack(depth_parts) if depth_parts else np.empty((0, 2), float)
+            candidate_pairs = [
+                ("manual_vs_centered", "centered_gt", manual_mid, centered_mid),
+                ("manual_vs_depth_distridge", "centered_depth_gt", manual_mid, depth_mid),
+            ]
+        else:
             continue
 
-        mm = compute_midline_metrics(
-            auto_xy=centered_mid,
-            man_xy=manual_mid,
-            tau=3.0,
-        )
+        for cmp_label, variant_id, manual_mid, other_mid in candidate_pairs:
+            if (
+                manual_mid is None or other_mid is None
+                or len(manual_mid) < 2
+                or len(other_mid) < 2
+            ):
+                continue
 
-        nn = float(mm.get("nn_mean_bidirectional", np.nan))
-        hd = float(mm.get("hausdorff_max", np.nan))
-        cov = float(mm.get("coverage_min", np.nan))
-        score_mid = np.nan
-        if np.isfinite(nn) and np.isfinite(hd) and np.isfinite(cov):
-            score_mid = float(np.log1p(max(nn, 0.0)) + 0.5 * np.log1p(max(hd, 0.0)) + (1.0 - float(np.clip(cov, 0.0, 1.0))))
+            mm = compute_midline_metrics(
+                auto_xy=other_mid,
+                man_xy=manual_mid,
+                tau=3.0,
+            )
 
-        row = {
-            "image": base_name,
-            "crack_id": cid,
-            "crack_kind": kind,
-            "is_atomic": int(kind == "atomic"),
-            "is_combined": int(kind == "combined"),
-            "is_noncombined_atomic": int(kind == "atomic" and cid not in combined_member_ids),
-            "geometry_type": "gt_centering",
-            "length_px": float(np.sum(np.hypot(np.diff(manual_mid[:, 0]), np.diff(manual_mid[:, 1])))),
-            "os_mode": "gt_centering",
-            "g11": np.nan,
-            "g22": np.nan,
-            "g33": np.nan,
-            "score_mid": score_mid,
-            **mm,
-        }
-        rows.append(row)
+            nn = float(mm.get("nn_mean_bidirectional", np.nan))
+            hd = float(mm.get("hausdorff_max", np.nan))
+            cov = float(mm.get("coverage_min", np.nan))
+            score_mid = np.nan
+            if np.isfinite(nn) and np.isfinite(hd) and np.isfinite(cov):
+                score_mid = float(
+                    np.log1p(max(nn, 0.0))
+                    + 0.5 * np.log1p(max(hd, 0.0))
+                    + (1.0 - float(np.clip(cov, 0.0, 1.0)))
+                )
 
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        total_count_atomic = int((df["is_atomic"] == 1).sum())
+            row = {
+                "image": base_name,
+                "crack_id": cid,
+                "crack_kind": kind,
+                "comparison_label": cmp_label,
+                "variant_id": variant_id,
+                "is_atomic": int(kind == "atomic"),
+                "is_combined": int(kind == "combined"),
+                "is_noncombined_atomic": int(kind == "atomic" and cid not in combined_member_ids),
+                "geometry_type": "gt_alignment",
+                "length_px": float(np.sum(np.hypot(np.diff(manual_mid[:, 0]), np.diff(manual_mid[:, 1])))),
+                "os_mode": variant_id,
+                "g11": np.nan,
+                "g22": np.nan,
+                "g33": np.nan,
+                "score_mid": score_mid,
+                **mm,
+            }
+            rows.append(row)
+
+    df_all = pd.DataFrame(rows)
+    if df_all.empty:
+        out_csv = os.path.join(analysis_dir, "gt_alignment_metrics.csv")
+        df_all.to_csv(out_csv, index=False)
+        centered_csv = os.path.join(analysis_dir, "gt_centering_metrics.csv")
+        df_all.to_csv(centered_csv, index=False)
+        depth_csv = os.path.join(analysis_dir, "gt_depth_distridge_metrics.csv")
+        df_all.to_csv(depth_csv, index=False)
+        df_all.to_csv(os.path.join(gt_centering_dir, "midline_metrics.csv"), index=False)
+        df_all.to_csv(os.path.join(gt_centering_dir, "weighted_summary.csv"), index=False)
+        df_all.to_csv(os.path.join(depth_distridge_dir, "midline_metrics.csv"), index=False)
+        df_all.to_csv(os.path.join(depth_distridge_dir, "weighted_summary.csv"), index=False)
+        print(f"[GT_SUP] wrote alignment metrics -> {out_csv}")
+        print(f"[GT_SUP] wrote centering metrics -> {centered_csv}")
+        print(f"[GT_SUP] wrote depth_distridge metrics -> {depth_csv}")
+        return df_all
+
+    def _length_weighted_means(sub_df, metric_cols):
+        if sub_df is None or sub_df.empty:
+            return {c: np.nan for c in metric_cols}
+        w_all = np.asarray(sub_df["length_px"], float)
+        out = {}
+        for c in metric_cols:
+            x = np.asarray(sub_df[c], float)
+            ok = np.isfinite(x) & np.isfinite(w_all) & (w_all > 0)
+            if np.any(ok):
+                out[c] = float(np.sum(x[ok] * w_all[ok]) / np.sum(w_all[ok]))
+            else:
+                out[c] = np.nan
+        return out
+
+    metric_cols = [
+        c for c in [
+            "score_mid",
+            "nn_mean_bidirectional",
+            "hausdorff_max",
+            "coverage_min",
+            "hausdorff_p95",
+            "frechet_discrete_ds",
+            "mean_tan_angle_error_deg",
+        ]
+        if c in df_all.columns
+    ]
+
+    summary_rows_all = []
+    for cmp_label, dcmp in df_all.groupby("comparison_label", dropna=False):
+        dcmp = dcmp.copy()
+        total_count_atomic = int((dcmp["is_atomic"] == 1).sum())
         total_count_combined_plus_noncombined_atomic = int(
-            ((df["is_combined"] == 1) | (df["is_noncombined_atomic"] == 1)).sum()
+            ((dcmp["is_combined"] == 1) | (dcmp["is_noncombined_atomic"] == 1)).sum()
         )
-        total_length_atomic_px = float(df.loc[df["is_atomic"] == 1, "length_px"].sum())
+        total_length_atomic_px = float(dcmp.loc[dcmp["is_atomic"] == 1, "length_px"].sum())
         total_length_combined_plus_noncombined_atomic_px = float(
-            df.loc[(df["is_combined"] == 1) | (df["is_noncombined_atomic"] == 1), "length_px"].sum()
+            dcmp.loc[(dcmp["is_combined"] == 1) | (dcmp["is_noncombined_atomic"] == 1), "length_px"].sum()
         )
-        df["total_count_atomic"] = total_count_atomic
-        df["total_count_combined_plus_noncombined_atomic"] = total_count_combined_plus_noncombined_atomic
-        df["total_length_atomic_px"] = total_length_atomic_px
-        df["total_length_combined_plus_noncombined_atomic_px"] = (
+        dcmp["total_count_atomic"] = total_count_atomic
+        dcmp["total_count_combined_plus_noncombined_atomic"] = total_count_combined_plus_noncombined_atomic
+        dcmp["total_length_atomic_px"] = total_length_atomic_px
+        dcmp["total_length_combined_plus_noncombined_atomic_px"] = (
             total_length_combined_plus_noncombined_atomic_px
         )
 
-        # Length-weighted means for summary usage
-        def _length_weighted_means(sub_df, metric_cols):
-            if sub_df is None or sub_df.empty:
-                return {c: np.nan for c in metric_cols}
-            w_all = np.asarray(sub_df["length_px"], float)
-            out = {}
-            for c in metric_cols:
-                x = np.asarray(sub_df[c], float)
-                ok = np.isfinite(x) & np.isfinite(w_all) & (w_all > 0)
-                if np.any(ok):
-                    out[c] = float(np.sum(x[ok] * w_all[ok]) / np.sum(w_all[ok]))
-                else:
-                    out[c] = np.nan
-            return out
-
-        # Focus on core centering metrics + score for compact, stable summaries.
-        metric_cols = [
-            c for c in [
-                "score_mid",
-                "nn_mean_bidirectional",
-                "hausdorff_max",
-                "coverage_min",
-                "hausdorff_p95",
-                "frechet_discrete_ds",
-                "mean_tan_angle_error_deg",
-            ]
-            if c in df.columns
-        ]
-
-        df_atomic = df[df["is_atomic"] == 1].copy()
-        df_combo_plus_noncombo = df[(df["is_combined"] == 1) | (df["is_noncombined_atomic"] == 1)].copy()
+        df_atomic = dcmp[dcmp["is_atomic"] == 1].copy()
+        df_combo_plus_noncombo = dcmp[(dcmp["is_combined"] == 1) | (dcmp["is_noncombined_atomic"] == 1)].copy()
 
         w_atomic = _length_weighted_means(df_atomic, metric_cols)
         w_combo = _length_weighted_means(df_combo_plus_noncombo, metric_cols)
 
-        # Add key weighted means as columns in the per-crack CSV for easy joins.
         for c in metric_cols:
-            df[f"lwmean_atomic_{c}"] = float(w_atomic.get(c, np.nan))
-            df[f"lwmean_combined_plus_noncombined_atomic_{c}"] = float(w_combo.get(c, np.nan))
+            dcmp[f"lwmean_atomic_{c}"] = float(w_atomic.get(c, np.nan))
+            dcmp[f"lwmean_combined_plus_noncombined_atomic_{c}"] = float(w_combo.get(c, np.nan))
 
-        # Also emit a dedicated summary CSV.
-        summary_rows = []
-        summary_rows.append({
+        summary_rows_all.append({
             "image": base_name,
+            "comparison_label": str(cmp_label),
             "group": "atomic",
             "count": int(len(df_atomic)),
             "total_length_px": float(df_atomic["length_px"].sum()) if not df_atomic.empty else 0.0,
             **{f"lwmean_{c}": float(w_atomic.get(c, np.nan)) for c in metric_cols},
         })
-        summary_rows.append({
+        summary_rows_all.append({
             "image": base_name,
+            "comparison_label": str(cmp_label),
             "group": "combined_plus_noncombined_atomic",
             "count": int(len(df_combo_plus_noncombo)),
             "total_length_px": float(df_combo_plus_noncombo["length_px"].sum()) if not df_combo_plus_noncombo.empty else 0.0,
             **{f"lwmean_{c}": float(w_combo.get(c, np.nan)) for c in metric_cols},
         })
 
-        summary_csv = os.path.join(analysis_dir, "gt_centering_metrics_weighted_summary.csv")
-        pd.DataFrame(summary_rows).to_csv(summary_csv, index=False)
-        print(f"[GT_SUP] wrote weighted centering summary -> {summary_csv}")
-
-    out_csv = os.path.join(analysis_dir, "gt_centering_metrics.csv")
-    df.to_csv(out_csv, index=False)
-    print(f"[GT_SUP] wrote centering metrics -> {out_csv}")
-
-    if not df.empty:
+        # Write diagnostics per comparison label (analysis + separated tracks).
         plot_rs3_midline_diagnostics(
-            df_all=df,
-            out_dir=os.path.join(analysis_dir, "diagnostics"),
+            df_all=dcmp,
+            out_dir=os.path.join(analysis_dir, "diagnostics", str(cmp_label)),
             selected_family=None,
-            title_suffix="GT Centering Audit",
+            title_suffix=f"GT Alignment Audit ({cmp_label})",
         )
+        if str(cmp_label) == "manual_vs_centered":
+            plot_rs3_midline_diagnostics(
+                df_all=dcmp,
+                out_dir=os.path.join(gt_centering_dir, "diagnostics"),
+                selected_family=None,
+                title_suffix="GT Centering Audit",
+            )
+        elif str(cmp_label) in {"manual_vs_depth_distridge", "manual_vs_depth"}:
+            plot_rs3_midline_diagnostics(
+                df_all=dcmp,
+                out_dir=os.path.join(depth_distridge_dir, "diagnostics"),
+                selected_family=None,
+                title_suffix="Depth DiStridge Audit",
+            )
 
-    return df
+    # New all-comparison files.
+    out_csv_all = os.path.join(analysis_dir, "gt_alignment_metrics.csv")
+    df_all.to_csv(out_csv_all, index=False)
+    print(f"[GT_SUP] wrote alignment metrics -> {out_csv_all}")
+
+    summary_csv_all = os.path.join(analysis_dir, "gt_alignment_metrics_weighted_summary.csv")
+    pd.DataFrame(summary_rows_all).to_csv(summary_csv_all, index=False)
+    print(f"[GT_SUP] wrote alignment weighted summary -> {summary_csv_all}")
+
+    # Backward-compatible centered-only files under analysis/.
+    df_centered = df_all[df_all["comparison_label"].astype(str) == "manual_vs_centered"].copy()
+    out_csv_centered = os.path.join(analysis_dir, "gt_centering_metrics.csv")
+    df_centered.to_csv(out_csv_centered, index=False)
+    print(f"[GT_SUP] wrote centering metrics -> {out_csv_centered}")
+
+    centered_summary_rows = [
+        r for r in summary_rows_all
+        if str(r.get("comparison_label", "")) == "manual_vs_centered"
+    ]
+    summary_csv_centered = os.path.join(analysis_dir, "gt_centering_metrics_weighted_summary.csv")
+    pd.DataFrame(centered_summary_rows).to_csv(summary_csv_centered, index=False)
+    print(f"[GT_SUP] wrote weighted centering summary -> {summary_csv_centered}")
+
+    # Depth-distridge explicit files under analysis/.
+    df_depth = df_all[
+        df_all["comparison_label"].astype(str).isin(["manual_vs_depth_distridge", "manual_vs_depth"])
+    ].copy()
+    out_csv_depth = os.path.join(analysis_dir, "gt_depth_distridge_metrics.csv")
+    df_depth.to_csv(out_csv_depth, index=False)
+    print(f"[GT_SUP] wrote depth_distridge metrics -> {out_csv_depth}")
+
+    depth_summary_rows = [
+        r for r in summary_rows_all
+        if str(r.get("comparison_label", "")) in {"manual_vs_depth_distridge", "manual_vs_depth"}
+    ]
+    summary_csv_depth = os.path.join(analysis_dir, "gt_depth_distridge_metrics_weighted_summary.csv")
+    pd.DataFrame(depth_summary_rows).to_csv(summary_csv_depth, index=False)
+    print(f"[GT_SUP] wrote weighted depth_distridge summary -> {summary_csv_depth}")
+
+    # Separated track folders.
+    df_centered.to_csv(os.path.join(gt_centering_dir, "midline_metrics.csv"), index=False)
+    pd.DataFrame(centered_summary_rows).to_csv(
+        os.path.join(gt_centering_dir, "weighted_summary.csv"), index=False
+    )
+    df_depth.to_csv(os.path.join(depth_distridge_dir, "midline_metrics.csv"), index=False)
+    pd.DataFrame(depth_summary_rows).to_csv(
+        os.path.join(depth_distridge_dir, "weighted_summary.csv"), index=False
+    )
+
+    return df_all
 
 
 # ============================================================
@@ -1637,6 +2365,7 @@ def export_gt_supervision_for_image(
     atomic: dict,
     combined_groups: dict | None,
     gt_mask: np.ndarray,
+    depth_full: np.ndarray | None = None,
     enable_auto_centering: bool = True,
     auto_centering_debug: bool = True,
     auto_centering_window_half_size: int = 50,
@@ -1688,7 +2417,52 @@ def export_gt_supervision_for_image(
         "noncombined_atomic_centering_sec": 0.0,
         "combined_compute_sec": 0.0,
         "combined_centering_sec": 0.0,
+        "dt_compute_s": 0.0,
+        "centered_snap_s": 0.0,
+        "depth_align_s": 0.0,
+        "depth_recess_s": 0.0,
+        "depth_costmap_s": 0.0,
+        "depth_dijkstra_s": 0.0,
+        "depth_postprocess_s": 0.0,
+        "normals_centered_s": 0.0,
+        "normals_depth_s": 0.0,
     }
+
+    def _sum_centering_seconds(timing_blob):
+        if not isinstance(timing_blob, dict):
+            return 0.0
+        dt = timing_blob.get("dt", {}) if isinstance(timing_blob.get("dt", {}), dict) else {}
+        ctr = timing_blob.get("centered", {}) if isinstance(timing_blob.get("centered", {}), dict) else {}
+        dep = timing_blob.get("depth", {}) if isinstance(timing_blob.get("depth", {}), dict) else {}
+        nrm = timing_blob.get("normals", {}) if isinstance(timing_blob.get("normals", {}), dict) else {}
+        return float(
+            float(dt.get("compute_s", 0.0) or 0.0)
+            + float(ctr.get("snap_s", 0.0) or 0.0)
+            + float(dep.get("depth_align_s", 0.0) or 0.0)
+            + float(dep.get("recess_s", 0.0) or 0.0)
+            + float(dep.get("costmap_s", 0.0) or 0.0)
+            + float(dep.get("dijkstra_s", 0.0) or 0.0)
+            + float(dep.get("postprocess_s", 0.0) or 0.0)
+            + float(nrm.get("centered_s", 0.0) or 0.0)
+            + float(nrm.get("depth_s", 0.0) or 0.0)
+        )
+
+    def _accumulate_timing_blob(timing_blob):
+        if not isinstance(timing_blob, dict):
+            return
+        dt = timing_blob.get("dt", {}) if isinstance(timing_blob.get("dt", {}), dict) else {}
+        ctr = timing_blob.get("centered", {}) if isinstance(timing_blob.get("centered", {}), dict) else {}
+        dep = timing_blob.get("depth", {}) if isinstance(timing_blob.get("depth", {}), dict) else {}
+        nrm = timing_blob.get("normals", {}) if isinstance(timing_blob.get("normals", {}), dict) else {}
+        timing_totals["dt_compute_s"] += float(dt.get("compute_s", 0.0) or 0.0)
+        timing_totals["centered_snap_s"] += float(ctr.get("snap_s", 0.0) or 0.0)
+        timing_totals["depth_align_s"] += float(dep.get("depth_align_s", 0.0) or 0.0)
+        timing_totals["depth_recess_s"] += float(dep.get("recess_s", 0.0) or 0.0)
+        timing_totals["depth_costmap_s"] += float(dep.get("costmap_s", 0.0) or 0.0)
+        timing_totals["depth_dijkstra_s"] += float(dep.get("dijkstra_s", 0.0) or 0.0)
+        timing_totals["depth_postprocess_s"] += float(dep.get("postprocess_s", 0.0) or 0.0)
+        timing_totals["normals_centered_s"] += float(nrm.get("centered_s", 0.0) or 0.0)
+        timing_totals["normals_depth_s"] += float(nrm.get("depth_s", 0.0) or 0.0)
 
     def _canonicalize_segments_with_meta(segs_in, meta_in, *, label):
         segs_valid = [np.asarray(s, float) for s in (segs_in or []) if s is not None and len(s) >= 2]
@@ -1790,6 +2564,7 @@ def export_gt_supervision_for_image(
         t_atomic_compute0 = time.perf_counter()
         atomic_center_sec = 0.0
 
+        t_manual_normals0 = time.perf_counter()
         manual_normals_diag = {}
         (e1x, e1y, e2x, e2y, widths), _ = normals_from_mask_for_midline(
             mid_xy,
@@ -1799,6 +2574,7 @@ def export_gt_supervision_for_image(
             image_hw=crack_mask_clipped.shape[:2],
             endpoint_mode="atomic",
         )
+        manual_normals_s = float(time.perf_counter() - t_manual_normals0)
         diag_brief = _normals_diag_summary(manual_normals_diag)
         print(
             f"[GT_SUP NORMDBG] atomic {scid} manual total={diag_brief['total']} "
@@ -1821,22 +2597,29 @@ def export_gt_supervision_for_image(
             },
             "gt_widths": _arr_to_list(widths),
             "gt_normals_diag": manual_normals_diag,
+            "timing": {
+                "manual": {
+                    "normals_s": float(manual_normals_s),
+                }
+            },
         }
         atomic_compute_sec = float(time.perf_counter() - t_atomic_compute0)
 
         if enable_auto_centering:
-            t_center0 = time.perf_counter()
             terr = build_territory_mask_from_polyline(
                 mid_xy=mid_xy,
                 crack_mask_u8=crack_mask_clipped,
                 window_half_size=int(auto_centering_window_half_size),
                 dt_domain_u8=None,
             )
-            centered_normals_diag = {}
-            centered_xy, centered_normals = compute_centered_midline_and_normals(
+            center_res = compute_centered_midline_and_normals(
                 mid_xy=mid_xy,
                 crack_mask_u8=crack_mask_clipped,
                 territory_u8=terr,
+                domain_u8=None,
+                depth_full=depth_full,
+                depth_bbox_xywh=bb,
+                full_image_hw=(int(H), int(W)),
                 max_radius=50,
                 domain_mode=auto_centering_domain_atomic,
                 snap_kwargs={
@@ -1844,20 +2627,62 @@ def export_gt_supervision_for_image(
                     "step_px": float(auto_centering_step_px),
                     "keep_endpoints": True,
                 },
-                diag_out=centered_normals_diag,
                 endpoint_mode="atomic",
             )
+            centered_xy = np.asarray(center_res.get("centered_midline", mid_xy), float)
+            centered_normals = center_res.get("centered_normals", {}) if isinstance(center_res.get("centered_normals", {}), dict) else {}
+            centered_normals_diag = center_res.get("centered_normals_diag", {})
+            if not isinstance(centered_normals_diag, dict):
+                centered_normals_diag = {}
+            depth_xy = center_res.get("depth_midline", None)
+            depth_normals = center_res.get("depth_normals", {})
+            if not isinstance(depth_normals, dict):
+                depth_normals = {}
+            depth_normals_diag = center_res.get("depth_normals_diag", {})
+            if not isinstance(depth_normals_diag, dict):
+                depth_normals_diag = {}
+            timing_blob = center_res.get("timing", {}) if isinstance(center_res.get("timing", {}), dict) else {}
+            atomic_center_sec += _sum_centering_seconds(timing_blob)
+
             cdiag_brief = _normals_diag_summary(centered_normals_diag)
             print(
                 f"[GT_SUP NORMDBG] atomic {scid} centered total={cdiag_brief['total']} "
                 f"valid={cdiag_brief['valid']} invalid={cdiag_brief['invalid']} "
                 f"invalid_frac={cdiag_brief['invalid_frac']:.4f} top_reasons={cdiag_brief['top_reasons']}"
             )
+            ddiag_brief = _normals_diag_summary(depth_normals_diag)
+            if depth_normals:
+                print(
+                    f"[GT_SUP NORMDBG] atomic {scid} depth total={ddiag_brief['total']} "
+                    f"valid={ddiag_brief['valid']} invalid={ddiag_brief['invalid']} "
+                    f"invalid_frac={ddiag_brief['invalid_frac']:.4f} top_reasons={ddiag_brief['top_reasons']}"
+                )
 
+            atomic_entry["centered_midline"] = np.asarray(centered_xy, float).tolist()
+            atomic_entry["centered_normals"] = centered_normals
             atomic_entry["midline_auto_centered"] = np.asarray(centered_xy, float).tolist()
             atomic_entry["gt_normals_auto_centered"] = centered_normals
             atomic_entry["gt_widths_auto_centered"] = centered_normals.get("width_px", [])
+            atomic_entry["centered_normals_diag"] = centered_normals_diag
             atomic_entry["gt_normals_auto_centered_diag"] = centered_normals_diag
+            atomic_entry["depth_cost_meta"] = center_res.get("depth_cost_meta", {})
+            atomic_entry["timing"]["dt"] = timing_blob.get("dt", {})
+            atomic_entry["timing"]["centered"] = timing_blob.get("centered", {})
+            atomic_entry["timing"]["depth"] = timing_blob.get("depth", {})
+            atomic_entry["timing"]["normals"] = timing_blob.get("normals", {})
+
+            depth_xy_arr = None
+            if depth_xy is not None:
+                dxy = np.asarray(depth_xy, float)
+                if dxy.ndim == 2 and len(dxy) >= 2:
+                    depth_xy_arr = dxy
+                    atomic_entry["depth_midline"] = dxy.tolist()
+                    atomic_entry["depth_normals"] = depth_normals
+                    atomic_entry["depth_normals_diag"] = depth_normals_diag
+                    atomic_entry["midline_depth_centered"] = dxy.tolist()
+                    atomic_entry["gt_normals_depth_centered"] = depth_normals
+                    atomic_entry["gt_widths_depth_centered"] = depth_normals.get("width_px", [])
+
             atomic_entry["auto_centering_meta"] = {
                 "enabled": True,
                 "domain_mode": str(auto_centering_domain_atomic),
@@ -1865,11 +2690,21 @@ def export_gt_supervision_for_image(
                     "n_iters": int(auto_centering_iters),
                     "step_px": float(auto_centering_step_px),
                 },
-                **_shift_stats(mid_xy, centered_xy),
-                **_geometry_disagreement_stats(mid_xy, centered_xy),
-                **_width_stability_stats(widths, centered_normals.get("width_px", [])),
+                "manual_vs_centered": {
+                    **_shift_stats(mid_xy, centered_xy),
+                    **_geometry_disagreement_stats(mid_xy, centered_xy),
+                    **_width_stability_stats(widths, centered_normals.get("width_px", [])),
+                },
+                "manual_vs_depth_distridge": (
+                    {
+                        **_shift_stats(mid_xy, depth_xy_arr),
+                        **_geometry_disagreement_stats(mid_xy, depth_xy_arr),
+                        **_width_stability_stats(widths, depth_normals.get("width_px", [])),
+                    }
+                    if depth_xy_arr is not None else None
+                ),
+                "depth_available": bool(depth_xy_arr is not None),
             }
-            atomic_center_sec += float(time.perf_counter() - t_center0)
 
             if auto_centering_debug:
                 manual_invalid = [~np.isfinite(np.asarray(widths, float))]
@@ -1887,6 +2722,39 @@ def export_gt_supervision_for_image(
                     invalid_center_masks=center_invalid,
                 )
 
+                debug_blob = center_res.get("debug", {}) if isinstance(center_res.get("debug", {}), dict) else {}
+                if (
+                    debug_blob.get("dt_norm") is not None
+                    and debug_blob.get("recess_norm") is not None
+                    and debug_blob.get("depth_score") is not None
+                ):
+                    out_cost = os.path.join(auto_center_root, f"atomic_{scid}_depth_cost_panel.png")
+                    plot_depth_cost_diagnostic(
+                        out_path=out_cost,
+                        crack_mask_u8=crack_mask_clipped,
+                        dt_norm=np.asarray(debug_blob.get("dt_norm"), np.float32),
+                        recess_norm=np.asarray(debug_blob.get("recess_norm"), np.float32),
+                        depth_score=np.asarray(debug_blob.get("depth_score"), np.float32),
+                        bbox_xywh=atomic_entry.get("mask_bbox"),
+                        title=f"atomic {scid}: depth-guided cost cues",
+                    )
+
+                if depth_xy_arr is not None:
+                    out_overlay = os.path.join(
+                        auto_center_root,
+                        f"atomic_{scid}_manual_vs_centered_vs_depth_distridge.png",
+                    )
+                    plot_midline_depth_overlay_debug(
+                        out_path=out_overlay,
+                        original_image=original_image,
+                        crack_mask_u8=crack_mask_clipped,
+                        manual_segs=[mid_xy],
+                        centered_segs=[np.asarray(centered_xy, float)],
+                        depth_segs=[depth_xy_arr],
+                        bbox_xywh=atomic_entry.get("mask_bbox"),
+                        title=f"atomic {scid}: manual vs centered vs depth_distridge",
+                    )
+
         return int(job["order"]), atomic_entry, float(atomic_compute_sec), float(atomic_center_sec)
 
     max_workers = max(1, min(8, os.cpu_count() or 1))
@@ -1899,6 +2767,7 @@ def export_gt_supervision_for_image(
                 atomic_results[int(oi)] = entry
                 timing_totals["atomic_compute_sec"] += float(atomic_compute_sec)
                 timing_totals["atomic_centering_sec"] += float(atomic_center_sec)
+                _accumulate_timing_blob(entry.get("timing", {}))
                 if str(entry.get("id", "")) not in combined_flat:
                     timing_totals["noncombined_atomic_compute_sec"] += float(atomic_compute_sec)
                     timing_totals["noncombined_atomic_centering_sec"] += float(atomic_center_sec)
@@ -2207,22 +3076,61 @@ def export_gt_supervision_for_image(
             },
             "gt_widths": [float(v) for arr in w_list for v in np.asarray(arr, float)],
             "midline_segments": [np.asarray(S, float).tolist() for S in segs],
+            "midline_segments_meta": [dict(m) for m in (seg_meta or [])],
             "dominance_meta": dom_meta,
             "gt_normals_diag_per_segment": per_seg_manual_normals_diag,
+            "timing": {
+                "manual": {},
+            },
         }
         timing_totals["combined_compute_sec"] += float(
             time.perf_counter() - t_combined_compute0 - combined_plot_excluded_sec
         )
 
         if enable_auto_centering:
-            t_center_combined0 = time.perf_counter()
             centered_segs = []
             ce1x_list, ce1y_list, ce2x_list, ce2y_list, cw_list = [], [], [], [], []
+            depth_segs = []
+            de1x_list, de1y_list, de2x_list, de2y_list, dw_list = [], [], [], [], []
             shift_all = []
+            depth_shift_all = []
             invalid_manual_masks = []
             invalid_center_masks = []
+            invalid_depth_masks = []
 
             per_seg_centered_normals_diag = []
+            per_seg_depth_normals_diag = []
+            depth_cost_meta_per_segment = []
+            depth_cost_debug_blobs = []
+
+            combined_timing_blob = {
+                "dt": {"compute_s": 0.0},
+                "centered": {"snap_s": 0.0},
+                "depth": {
+                    "depth_align_s": 0.0,
+                    "recess_s": 0.0,
+                    "costmap_s": 0.0,
+                    "dijkstra_s": 0.0,
+                    "postprocess_s": 0.0,
+                },
+                "normals": {
+                    "centered_s": 0.0,
+                    "depth_s": 0.0,
+                },
+            }
+
+            def _acc_nested_timing(dst, src):
+                if not (isinstance(dst, dict) and isinstance(src, dict)):
+                    return
+                for gk, gv in src.items():
+                    if isinstance(gv, dict):
+                        dst.setdefault(gk, {})
+                        for sk, sv in gv.items():
+                            try:
+                                dst[gk][sk] = float(dst[gk].get(sk, 0.0)) + float(sv or 0.0)
+                            except Exception:
+                                continue
+
             for seg_i, (S, w_manual) in enumerate(zip(segs, w_list)):
                 S = np.asarray(S, float)
                 bi = int(seg_meta[seg_i].get("branch_id", -1)) if seg_i < len(seg_meta) else -1
@@ -2236,21 +3144,33 @@ def export_gt_supervision_for_image(
                     window_half_size=int(auto_centering_window_half_size),
                     dt_domain_u8=None,
                 )
-                cseg_diag = {}
-                centered_S, centered_normals = compute_centered_midline_and_normals(
+                center_res = compute_centered_midline_and_normals(
                     mid_xy=S,
                     crack_mask_u8=mask_use,
                     territory_u8=terr_i,
+                    domain_u8=None,
+                    depth_full=depth_full,
+                    depth_bbox_xywh=[ux, uy, uw, uh],
+                    full_image_hw=(int(H), int(W)),
                     max_radius=50,
-                    domain_mode="terr_and_mask",
+                    domain_mode=auto_centering_domain_combined,
                     snap_kwargs={
                         "n_iters": int(auto_centering_iters),
                         "step_px": float(auto_centering_step_px),
                         "keep_endpoints": True,
                     },
-                    diag_out=cseg_diag,
                     endpoint_mode="combined",
                 )
+
+                _acc_nested_timing(combined_timing_blob, center_res.get("timing", {}))
+
+                centered_S = np.asarray(center_res.get("centered_midline", S), float)
+                centered_normals = center_res.get("centered_normals", {})
+                if not isinstance(centered_normals, dict):
+                    centered_normals = {}
+                cseg_diag = center_res.get("centered_normals_diag", {})
+                if not isinstance(cseg_diag, dict):
+                    cseg_diag = {}
                 per_seg_centered_normals_diag.append(cseg_diag)
                 csdiag_brief = _normals_diag_summary(cseg_diag)
                 print(
@@ -2259,13 +3179,57 @@ def export_gt_supervision_for_image(
                     f"invalid_frac={csdiag_brief['invalid_frac']:.4f} top_reasons={csdiag_brief['top_reasons']}"
                 )
 
-                centered_S = np.asarray(centered_S, float)
                 centered_segs.append(centered_S)
                 ce1x_list.append(np.asarray(centered_normals.get("edge1_x", []), float))
                 ce1y_list.append(np.asarray(centered_normals.get("edge1_y", []), float))
                 ce2x_list.append(np.asarray(centered_normals.get("edge2_x", []), float))
                 ce2y_list.append(np.asarray(centered_normals.get("edge2_y", []), float))
                 cw_list.append(np.asarray(centered_normals.get("width_px", []), float))
+
+                dseg = center_res.get("depth_midline", None)
+                dnorm = center_res.get("depth_normals", {})
+                if not isinstance(dnorm, dict):
+                    dnorm = {}
+                dseg_diag = center_res.get("depth_normals_diag", {})
+                if not isinstance(dseg_diag, dict):
+                    dseg_diag = {}
+                per_seg_depth_normals_diag.append(dseg_diag)
+                depth_cost_meta_per_segment.append(center_res.get("depth_cost_meta", {}))
+                ddebug = center_res.get("debug", {}) if isinstance(center_res.get("debug", {}), dict) else {}
+                if (
+                    ddebug.get("dt_norm") is not None
+                    and ddebug.get("recess_norm") is not None
+                    and ddebug.get("depth_score") is not None
+                ):
+                    depth_cost_debug_blobs.append((int(seg_i), ddebug, mask_use))
+
+                if dseg is not None:
+                    dseg = np.asarray(dseg, float)
+                if dseg is not None and dseg.ndim == 2 and len(dseg) >= 2:
+                    depth_segs.append(dseg)
+                    de1x_list.append(np.asarray(dnorm.get("edge1_x", []), float))
+                    de1y_list.append(np.asarray(dnorm.get("edge1_y", []), float))
+                    de2x_list.append(np.asarray(dnorm.get("edge2_x", []), float))
+                    de2y_list.append(np.asarray(dnorm.get("edge2_y", []), float))
+                    dw_list.append(np.asarray(dnorm.get("width_px", []), float))
+                    n_depth = min(len(S), len(dseg))
+                    if n_depth > 0:
+                        depth_shift_all.append(np.linalg.norm(dseg[:n_depth] - S[:n_depth], axis=1))
+                    invalid_depth_masks.append(~np.isfinite(np.asarray(dnorm.get("width_px", []), float)))
+                    dsdiag_brief = _normals_diag_summary(dseg_diag)
+                    print(
+                        f"[GT_SUP NORMDBG] combined {ccid} seg={seg_i} depth total={dsdiag_brief['total']} "
+                        f"valid={dsdiag_brief['valid']} invalid={dsdiag_brief['invalid']} "
+                        f"invalid_frac={dsdiag_brief['invalid_frac']:.4f} top_reasons={dsdiag_brief['top_reasons']}"
+                    )
+                else:
+                    depth_segs.append(None)
+                    de1x_list.append(np.asarray([], float))
+                    de1y_list.append(np.asarray([], float))
+                    de2x_list.append(np.asarray([], float))
+                    de2y_list.append(np.asarray([], float))
+                    dw_list.append(np.asarray([], float))
+                    invalid_depth_masks.append(np.asarray([], bool))
 
                 n = min(len(S), len(centered_S))
                 if n > 0:
@@ -2284,6 +3248,26 @@ def export_gt_supervision_for_image(
             else:
                 shift_meta = {"mean_shift_px": 0.0, "p95_shift_px": 0.0, "max_shift_px": 0.0}
 
+            if depth_shift_all:
+                d2 = np.concatenate(depth_shift_all)
+                depth_shift_meta = {
+                    "mean_shift_px": float(np.mean(d2)),
+                    "p95_shift_px": float(np.percentile(d2, 95)),
+                    "max_shift_px": float(np.max(d2)),
+                }
+            else:
+                depth_shift_meta = {"mean_shift_px": 0.0, "p95_shift_px": 0.0, "max_shift_px": 0.0}
+
+            combined_entry["centered_midline_segments"] = [np.asarray(S, float).tolist() for S in centered_segs]
+            combined_entry["centered_midline_segments_meta"] = [dict(m) for m in (seg_meta or [])]
+            combined_entry["centered_midline"] = _pack_segs_with_separators(centered_segs)
+            combined_entry["centered_normals"] = {
+                "edge1_x": _pack_arrs_with_none_separators([_arr_to_list(a) for a in ce1x_list]),
+                "edge1_y": _pack_arrs_with_none_separators([_arr_to_list(a) for a in ce1y_list]),
+                "edge2_x": _pack_arrs_with_none_separators([_arr_to_list(a) for a in ce2x_list]),
+                "edge2_y": _pack_arrs_with_none_separators([_arr_to_list(a) for a in ce2y_list]),
+                "width_px": _pack_arrs_with_none_separators([_arr_to_list(a) for a in cw_list]),
+            }
             combined_entry["midline_segments_auto_centered"] = [np.asarray(S, float).tolist() for S in centered_segs]
             combined_entry["midline_auto_centered"] = _pack_segs_with_separators(centered_segs)
             combined_entry["gt_normals_auto_centered"] = {
@@ -2293,30 +3277,94 @@ def export_gt_supervision_for_image(
                 "edge2_y": _pack_arrs_with_none_separators([_arr_to_list(a) for a in ce2y_list]),
                 "width_px": _pack_arrs_with_none_separators([_arr_to_list(a) for a in cw_list]),
             }
+            combined_entry["centered_normals_diag_per_segment"] = per_seg_centered_normals_diag
             combined_entry["gt_normals_auto_centered_diag_per_segment"] = per_seg_centered_normals_diag
             combined_entry["gt_widths_auto_centered"] = [
                 float(v) for arr in cw_list for v in np.asarray(arr, float)
             ]
+
+            valid_depth_idx = [
+                i for i, Sdep in enumerate(depth_segs)
+                if Sdep is not None and np.asarray(Sdep, float).ndim == 2 and len(np.asarray(Sdep, float)) >= 2
+            ]
+            if valid_depth_idx:
+                depth_valid_segs = [np.asarray(depth_segs[i], float) for i in valid_depth_idx]
+                depth_meta_valid = [dict(seg_meta[i]) if i < len(seg_meta) else {} for i in valid_depth_idx]
+                de1_valid = [de1x_list[i] for i in valid_depth_idx]
+                de1y_valid = [de1y_list[i] for i in valid_depth_idx]
+                de2_valid = [de2x_list[i] for i in valid_depth_idx]
+                de2y_valid = [de2y_list[i] for i in valid_depth_idx]
+                dw_valid = [dw_list[i] for i in valid_depth_idx]
+                combined_entry["depth_midline_segments"] = [np.asarray(S, float).tolist() for S in depth_valid_segs]
+                combined_entry["depth_midline_segments_meta"] = depth_meta_valid
+                combined_entry["depth_midline"] = _pack_segs_with_separators(depth_valid_segs)
+                combined_entry["depth_normals"] = {
+                    "edge1_x": _pack_arrs_with_none_separators([_arr_to_list(a) for a in de1_valid]),
+                    "edge1_y": _pack_arrs_with_none_separators([_arr_to_list(a) for a in de1y_valid]),
+                    "edge2_x": _pack_arrs_with_none_separators([_arr_to_list(a) for a in de2_valid]),
+                    "edge2_y": _pack_arrs_with_none_separators([_arr_to_list(a) for a in de2y_valid]),
+                    "width_px": _pack_arrs_with_none_separators([_arr_to_list(a) for a in dw_valid]),
+                }
+                combined_entry["depth_normals_diag_per_segment"] = [
+                    per_seg_depth_normals_diag[i] if i < len(per_seg_depth_normals_diag) else {}
+                    for i in valid_depth_idx
+                ]
+                combined_entry["midline_depth_centered"] = combined_entry["depth_midline"]
+                combined_entry["gt_normals_depth_centered"] = combined_entry["depth_normals"]
+                combined_entry["gt_widths_depth_centered"] = [
+                    float(v) for arr in dw_valid for v in np.asarray(arr, float)
+                ]
+
+            combined_entry["depth_cost_meta"] = {
+                "per_segment": depth_cost_meta_per_segment,
+            }
+
+            combined_entry["timing"]["dt"] = combined_timing_blob.get("dt", {})
+            combined_entry["timing"]["centered"] = combined_timing_blob.get("centered", {})
+            combined_entry["timing"]["depth"] = combined_timing_blob.get("depth", {})
+            combined_entry["timing"]["normals"] = combined_timing_blob.get("normals", {})
+            timing_totals["combined_centering_sec"] += _sum_centering_seconds(combined_timing_blob)
+            _accumulate_timing_blob(combined_timing_blob)
+
             manual_geom_parts = [np.asarray(S, float) for S in segs if S is not None and len(S) >= 2]
             center_geom_parts = [np.asarray(S, float) for S in centered_segs if S is not None and len(S) >= 2]
+            depth_geom_parts = [
+                np.asarray(S, float)
+                for S in (combined_entry.get("depth_midline_segments", []) or [])
+                if S is not None and len(S) >= 2
+            ]
             manual_geom_all = np.vstack(manual_geom_parts) if manual_geom_parts else np.empty((0, 2), float)
             center_geom_all = np.vstack(center_geom_parts) if center_geom_parts else np.empty((0, 2), float)
+            depth_geom_all = np.vstack(depth_geom_parts) if depth_geom_parts else np.empty((0, 2), float)
 
             combined_entry["auto_centering_meta"] = {
                 "enabled": True,
-                "domain_mode": "terr_and_mask",
+                "domain_mode": str(auto_centering_domain_combined),
                 "snap": {
                     "n_iters": int(auto_centering_iters),
                     "step_px": float(auto_centering_step_px),
                 },
-                **shift_meta,
-                **_geometry_disagreement_stats(manual_geom_all, center_geom_all),
-                **_width_stability_stats(
-                    np.concatenate([np.asarray(a, float).reshape(-1) for a in w_list]) if w_list else [],
-                    np.concatenate([np.asarray(a, float).reshape(-1) for a in cw_list]) if cw_list else [],
+                "manual_vs_centered": {
+                    **shift_meta,
+                    **_geometry_disagreement_stats(manual_geom_all, center_geom_all),
+                    **_width_stability_stats(
+                        np.concatenate([np.asarray(a, float).reshape(-1) for a in w_list]) if w_list else [],
+                        np.concatenate([np.asarray(a, float).reshape(-1) for a in cw_list]) if cw_list else [],
+                    ),
+                },
+                "manual_vs_depth_distridge": (
+                    {
+                        **depth_shift_meta,
+                        **_geometry_disagreement_stats(manual_geom_all, depth_geom_all),
+                        **_width_stability_stats(
+                            np.concatenate([np.asarray(a, float).reshape(-1) for a in w_list]) if w_list else [],
+                            np.concatenate([np.asarray(a, float).reshape(-1) for a in dw_list]) if dw_list else [],
+                        ),
+                    }
+                    if depth_geom_parts else None
                 ),
+                "depth_available": bool(depth_geom_parts),
             }
-            timing_totals["combined_centering_sec"] += float(time.perf_counter() - t_center_combined0)
 
             if auto_centering_debug:
                 terr_vis = build_territory_mask_for_segments(
@@ -2337,6 +3385,37 @@ def export_gt_supervision_for_image(
                     invalid_center_masks=invalid_center_masks,
                 )
 
+                for seg_i, dbg_blob, dbg_mask_use in depth_cost_debug_blobs:
+                    out_cost = os.path.join(
+                        auto_center_root,
+                        f"combined_{tag_name}_seg{int(seg_i)}_depth_cost_panel.png",
+                    )
+                    plot_depth_cost_diagnostic(
+                        out_path=out_cost,
+                        crack_mask_u8=dbg_mask_use,
+                        dt_norm=np.asarray(dbg_blob.get("dt_norm"), np.float32),
+                        recess_norm=np.asarray(dbg_blob.get("recess_norm"), np.float32),
+                        depth_score=np.asarray(dbg_blob.get("depth_score"), np.float32),
+                        bbox_xywh=combined_entry.get("mask_bbox"),
+                        title=f"combined {tag_name} seg{int(seg_i)}: depth-guided cost cues",
+                    )
+
+                if combined_entry.get("depth_midline_segments"):
+                    out_overlay = os.path.join(
+                        auto_center_root,
+                        f"combined_{tag_name}_manual_vs_centered_vs_depth_distridge.png",
+                    )
+                    plot_midline_depth_overlay_debug(
+                        out_path=out_overlay,
+                        original_image=original_image,
+                        crack_mask_u8=crack_mask_clipped,
+                        manual_segs=[np.asarray(S, float) for S in segs],
+                        centered_segs=centered_segs,
+                        depth_segs=[np.asarray(S, float) for S in (combined_entry.get("depth_midline_segments") or []) if S is not None and len(S) >= 2],
+                        bbox_xywh=combined_entry.get("mask_bbox"),
+                        title=f"combined {tag_name}: manual vs centered vs depth_distridge",
+                    )
+
         final_entries.append(combined_entry)
         gt_sup_diag["combined_added"] += 1
         _cropped_preview(combined_entry, gt_mask, original_image, combined_crop_root)
@@ -2345,7 +3424,11 @@ def export_gt_supervision_for_image(
     # 3) GLOBAL OVERVIEW
     # =====================================================
     analysis_dir = os.path.join(sup_root, "analysis")
+    gt_centering_dir = os.path.join(sup_root, "gt_centering")
+    depth_distridge_dir = os.path.join(sup_root, "depth_distridge")
     os.makedirs(analysis_dir, exist_ok=True)
+    os.makedirs(gt_centering_dir, exist_ok=True)
+    os.makedirs(depth_distridge_dir, exist_ok=True)
 
     compute_csv = os.path.join(analysis_dir, "gt_compute_timing.csv")
     centering_csv = os.path.join(analysis_dir, "gt_centering_timing.csv")
@@ -2383,9 +3466,88 @@ def export_gt_supervision_for_image(
             "combined_centering_sec",
             "combined_plus_noncombined_atomics_centering_sec",
             "centering_total_sec",
+            "dt_compute_s",
+            "centered_snap_s",
+            "depth_align_s",
+            "depth_recess_s",
+            "depth_costmap_s",
+            "depth_dijkstra_s",
+            "depth_postprocess_s",
+            "normals_centered_s",
+            "normals_depth_s",
         ])
         wcsv.writerow([
             base_name,
+            float(timing_totals["atomic_centering_sec"]),
+            float(timing_totals["noncombined_atomic_centering_sec"]),
+            float(timing_totals["combined_centering_sec"]),
+            float(combined_plus_noncombined_atomics_centering_sec),
+            float(centering_total_sec),
+            float(timing_totals["dt_compute_s"]),
+            float(timing_totals["centered_snap_s"]),
+            float(timing_totals["depth_align_s"]),
+            float(timing_totals["depth_recess_s"]),
+            float(timing_totals["depth_costmap_s"]),
+            float(timing_totals["depth_dijkstra_s"]),
+            float(timing_totals["depth_postprocess_s"]),
+            float(timing_totals["normals_centered_s"]),
+            float(timing_totals["normals_depth_s"]),
+        ])
+
+    # Split timing outputs by track for clearer interpretation.
+    centered_timing_csv = os.path.join(gt_centering_dir, "timing.csv")
+    with open(centered_timing_csv, "w", newline="", encoding="utf-8") as f:
+        wcsv = csv.writer(f)
+        wcsv.writerow([
+            "image",
+            "dt_compute_s",
+            "centered_snap_s",
+            "normals_centered_s",
+            "atomic_centering_sec",
+            "noncombined_atomic_centering_sec",
+            "combined_centering_sec",
+            "combined_plus_noncombined_atomics_centering_sec",
+            "centering_total_sec",
+        ])
+        wcsv.writerow([
+            base_name,
+            float(timing_totals["dt_compute_s"]),
+            float(timing_totals["centered_snap_s"]),
+            float(timing_totals["normals_centered_s"]),
+            float(timing_totals["atomic_centering_sec"]),
+            float(timing_totals["noncombined_atomic_centering_sec"]),
+            float(timing_totals["combined_centering_sec"]),
+            float(combined_plus_noncombined_atomics_centering_sec),
+            float(centering_total_sec),
+        ])
+
+    depth_timing_csv = os.path.join(depth_distridge_dir, "timing.csv")
+    with open(depth_timing_csv, "w", newline="", encoding="utf-8") as f:
+        wcsv = csv.writer(f)
+        wcsv.writerow([
+            "image",
+            "dt_compute_s",
+            "depth_align_s",
+            "depth_recess_s",
+            "depth_costmap_s",
+            "depth_dijkstra_s",
+            "depth_postprocess_s",
+            "normals_depth_s",
+            "atomic_centering_sec",
+            "noncombined_atomic_centering_sec",
+            "combined_centering_sec",
+            "combined_plus_noncombined_atomics_centering_sec",
+            "centering_total_sec",
+        ])
+        wcsv.writerow([
+            base_name,
+            float(timing_totals["dt_compute_s"]),
+            float(timing_totals["depth_align_s"]),
+            float(timing_totals["depth_recess_s"]),
+            float(timing_totals["depth_costmap_s"]),
+            float(timing_totals["depth_dijkstra_s"]),
+            float(timing_totals["depth_postprocess_s"]),
+            float(timing_totals["normals_depth_s"]),
             float(timing_totals["atomic_centering_sec"]),
             float(timing_totals["noncombined_atomic_centering_sec"]),
             float(timing_totals["combined_centering_sec"]),
@@ -2398,10 +3560,14 @@ def export_gt_supervision_for_image(
         f"noncombined_atomic_compute_sec={timing_totals['noncombined_atomic_compute_sec']:.4f} "
         f"combined_compute_sec={timing_totals['combined_compute_sec']:.4f} "
         f"combined_plus_noncombined_atomics_sec={combined_plus_noncombined_atomics_sec:.4f} "
-        f"centering_total_sec={centering_total_sec:.4f}"
+        f"centering_total_sec={centering_total_sec:.4f} "
+        f"dt_compute_s={timing_totals['dt_compute_s']:.4f} "
+        f"depth_dijkstra_s={timing_totals['depth_dijkstra_s']:.4f}"
     )
     print(f"[GT_SUP TIMING] wrote {compute_csv}")
     print(f"[GT_SUP TIMING] wrote {centering_csv}")
+    print(f"[GT_SUP TIMING] wrote {centered_timing_csv}")
+    print(f"[GT_SUP TIMING] wrote {depth_timing_csv}")
 
     if not final_entries:
         print(f"[GT_SUP DIAG] no final_entries produced: {gt_sup_diag}")

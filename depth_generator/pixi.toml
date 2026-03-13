@@ -12,6 +12,7 @@ cuda = "12.1"
 [dependencies]
 python = "3.12.*"
 numpy = ">=1.26,<2"
+opencv = ">=4.10,<5"
 
 pytorch-gpu = "*"
 #pytorch-cuda = "*"
@@ -20,4 +21,3 @@ torchvision = "*"
 [pypi-dependencies]
 awesome-depth-anything-3 = "*"
 addict = "*"
-opencv-python-headless = "*"

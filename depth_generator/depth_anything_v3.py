@@ -1,4 +1,5 @@
 import warnings
+print("importing torch")
 import torch
 import cv2
 import numpy as np
@@ -13,7 +14,7 @@ warnings.filterwarnings(
     category=SyntaxWarning,
     module=r"moviepy(\.|$)",
 )
-
+print("importing depth anything3")
 from depth_anything_3.api import DepthAnything3
 
 
@@ -83,7 +84,7 @@ timings = []
 for img_path in image_paths:
 
     name = img_path.stem
-    output_path = os.path.join(OUTPUT_DIR, name + "_depth.png")
+    output_path = os.path.join(OUTPUT_DIR, name + ".png")
 
     img = cv2.imread(str(img_path))
 

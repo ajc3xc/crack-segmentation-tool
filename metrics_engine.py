@@ -857,6 +857,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     atomic=atomic,
                     combined_groups=gt_combined,
                     gt_mask=gt_full,
+                    depth_full=getattr(self, "current_depth", None),
                 )
 
                 print(f"\n[DEBUG METRICS] GT supervision export completed for {base_name}\n")
@@ -2188,11 +2189,57 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 atomic_src=atomic_src,
             )
 
+            def _detect_gt_variant_availability(gt_sup_root_local):
+                import os
+                import json
+
+                out = {
+                    "centered_gt": False,
+                    "centered_depth_gt": False,
+                }
+                sup_json = os.path.join(gt_sup_root_local or "", "gt_supervision.json")
+                if not os.path.isfile(sup_json):
+                    return out
+                try:
+                    with open(sup_json, "r", encoding="utf-8") as f:
+                        sup = json.load(f)
+                except Exception:
+                    return out
+
+                for e in (sup.get("cracks") or []):
+                    if not isinstance(e, dict):
+                        continue
+                    if (
+                        e.get("centered_midline") is not None
+                        or e.get("midline_auto_centered") is not None
+                        or e.get("midline_segments_auto_centered") is not None
+                    ):
+                        out["centered_gt"] = True
+                    if (
+                        e.get("depth_midline") is not None
+                        or e.get("midline_depth_centered") is not None
+                        or e.get("depth_midline_segments") is not None
+                    ):
+                        out["centered_depth_gt"] = True
+                    if out["centered_gt"] and out["centered_depth_gt"]:
+                        break
+                return out
+
+            variant_ids = ["main"]
+            if str(midline_type or "").lower() == "manual":
+                gt_variants_avail = _detect_gt_variant_availability(gt_sup_root)
+                if gt_variants_avail.get("centered_gt", False):
+                    variant_ids.append("centered_gt")
+                if gt_variants_avail.get("centered_depth_gt", False):
+                    variant_ids.append("centered_depth_gt")
+                print(f"[WIDTH] GT variant availability: {gt_variants_avail}")
+
             variants = {
-                "main": {
+                str(vid): {
                     "atomic": atomic_src,
                     "combined": combined_aug,
                 }
+                for vid in variant_ids
             }
 
             ## ------------------------------------------------------------

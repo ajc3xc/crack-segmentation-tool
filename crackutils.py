@@ -843,6 +843,7 @@ class CrackUtils:
                             d.get("mask_folder", ""),
                             d.get("width_baseline_folder", ""),
                             d.get("mask_baseline_folder", ""),
+                            d.get("depth_folder", ""),
                             d.get("use_masks", False),
                             d.get("use_baselines", False),
                             d.get("last_image_name", ""),
@@ -850,10 +851,10 @@ class CrackUtils:
                         )
                 except Exception:
                     pass
-            return "", "", "", "", "", False, False, "", ""
+            return "", "", "", "", "", "", False, False, "", ""
 
         def save_last_folders(
-            img_folder, save_folder, mask_folder, width_baseline_folder, mask_baseline_folder,
+            img_folder, save_folder, mask_folder, width_baseline_folder, mask_baseline_folder, depth_folder,
             use_masks, use_baselines
         ):
             config_path = os.path.join(
@@ -874,6 +875,7 @@ class CrackUtils:
                         "mask_folder": mask_folder,
                         "width_baseline_folder": width_baseline_folder,
                         "mask_baseline_folder": mask_baseline_folder,
+                        "depth_folder": depth_folder,
                         "use_masks": use_masks,
                         "use_baselines": use_baselines,
                         "last_image_name": prev.get("last_image_name", ""),
@@ -891,6 +893,7 @@ class CrackUtils:
             default_mask_folder,
             default_width_baseline_folder,
             default_mask_baseline_folder,
+            default_depth_folder,
             default_use_masks,
             default_use_baselines,
             default_last_image_name,
@@ -902,6 +905,7 @@ class CrackUtils:
         mask_folder_init = getattr(self, "mask_folder", default_mask_folder)
         width_baseline_folder_init = getattr(self, "width_baseline_folder", default_width_baseline_folder)
         mask_baseline_folder_init = getattr(self, "mask_baseline_folder", default_mask_baseline_folder)
+        depth_folder_init = getattr(self, "depth_folder", default_depth_folder)
 
         use_masks_init = getattr(self, "use_masks", default_use_masks)
         use_baselines_init = getattr(self, "use_baselines", default_use_baselines)
@@ -963,6 +967,18 @@ class CrackUtils:
 
         use_mask_checkbox.toggled.connect(update_mask_row)
         update_mask_row()
+
+        # ------------------------------------------------------------
+        # Depth folder row (optional)
+        # ------------------------------------------------------------
+        depth_row = QHBoxLayout()
+        depth_label = QLabel("Depth folder:")
+        depth_folder_edit = QLineEdit(depth_folder_init)
+        depth_browse_btn = QPushButton("Browse...")
+        depth_row.addWidget(depth_label)
+        depth_row.addWidget(depth_folder_edit)
+        depth_row.addWidget(depth_browse_btn)
+        layout.addLayout(depth_row)
 
         # ------------------------------------------------------------
         # Use Baselines checkbox
@@ -1040,6 +1056,12 @@ class CrackUtils:
                 or mask_folder_edit.text()
             )
         )
+        depth_browse_btn.clicked.connect(
+            lambda: depth_folder_edit.setText(
+                QFileDialog.getExistingDirectory(dlg, "Select Depth Folder")
+                or depth_folder_edit.text()
+            )
+        )
         width_baseline_browse_btn.clicked.connect(
             lambda: width_baseline_folder_edit.setText(
                 QFileDialog.getExistingDirectory(dlg, "Select Baseline Folder")
@@ -1075,6 +1097,7 @@ class CrackUtils:
                 mask_folder = strip_quotes(mask_folder_edit.text().strip())
                 width_baseline_folder = strip_quotes(width_baseline_folder_edit.text().strip())
                 mask_baseline_folder = strip_quotes(mask_baseline_folder_edit.text().strip())
+                depth_folder = strip_quotes(depth_folder_edit.text().strip())
 
                 use_masks = use_mask_checkbox.isChecked()
                 use_baselines = use_baselines_checkbox.isChecked()
@@ -1089,6 +1112,12 @@ class CrackUtils:
                     QMessageBox.critical(
                         dlg, "Error",
                         "Please select a valid mask folder or uncheck 'Use Masks'."
+                    )
+                    continue
+                if depth_folder and not os.path.isdir(depth_folder):
+                    QMessageBox.critical(
+                        dlg, "Error",
+                        "Please select a valid depth folder or leave it empty."
                     )
                     continue
                 if use_baselines and not os.path.isdir(width_baseline_folder):
@@ -1116,13 +1145,14 @@ class CrackUtils:
         self.mask_folder = mask_folder if use_masks else ""
         self.width_baseline_folder = width_baseline_folder if use_baselines else ""
         self.mask_baseline_folder = mask_baseline_folder if use_baselines else ""
+        self.depth_folder = depth_folder
         self.mask_baseline_root = self.mask_baseline_folder
 
         self.use_masks = use_masks
         self.use_baselines = use_baselines
 
         save_last_folders(
-            img_folder, save_folder, mask_folder, width_baseline_folder, mask_baseline_folder,
+            img_folder, save_folder, mask_folder, width_baseline_folder, mask_baseline_folder, depth_folder,
             use_masks, use_baselines
         )
 
@@ -1168,6 +1198,40 @@ class CrackUtils:
         else:
             self.mask_names = []
             self.mask_map = {}
+
+        self.depth_names = []
+        self.depth_map = {}
+        if self.depth_folder and os.path.isdir(self.depth_folder):
+            self.depth_names = ct.tools.get_files(
+                folder=self.depth_folder,
+                formats=['png', 'npy', 'tif', 'tiff', 'jpg', 'jpeg', 'bmp'],
+                basename=False
+            )
+
+            ext_rank = {
+                ".npy": 0,
+                ".tif": 1,
+                ".tiff": 2,
+                ".png": 3,
+                ".bmp": 4,
+                ".jpg": 5,
+                ".jpeg": 6,
+            }
+
+            for f in sorted(self.depth_names):
+                stem = os.path.splitext(os.path.basename(f))[0]
+                ext = os.path.splitext(f)[1].lower()
+                rank = ext_rank.get(ext, 99)
+                prev = self.depth_map.get(stem, None)
+                if prev is None:
+                    self.depth_map[stem] = f
+                    continue
+                prev_ext = os.path.splitext(prev)[1].lower()
+                prev_rank = ext_rank.get(prev_ext, 99)
+                if rank < prev_rank:
+                    self.depth_map[stem] = f
+
+            print(f"{len(self.depth_names)} depth files loaded ({len(self.depth_map)} mapped)")
 
         for filename in self.image_names:
             self.files_list.addItem(os.path.basename(filename))
@@ -2143,6 +2207,35 @@ class CrackUtils:
                 ann_root["box"] = reindexed
             return changed
 
+        def _load_depth_map_from_path(depth_path):
+            """
+            Load a depth map from .npy or image file into a 2D float32 array.
+            No normalization is applied here.
+            """
+            if not depth_path or not os.path.isfile(depth_path):
+                return None
+            try:
+                ext = os.path.splitext(depth_path)[1].lower()
+                if ext == ".npy":
+                    arr = np.load(depth_path)
+                else:
+                    arr = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+                if arr is None:
+                    return None
+                arr = np.asarray(arr)
+                if arr.ndim == 3:
+                    if arr.shape[2] == 1:
+                        arr = arr[:, :, 0]
+                    else:
+                        arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+                if arr.ndim != 2:
+                    arr = np.squeeze(arr)
+                if arr.ndim != 2:
+                    return None
+                return arr.astype(np.float32, copy=False)
+            except Exception:
+                return None
+
         # ------------------------------------------------------------
 
         if not hasattr(self, "image_names") or not self.image_names:
@@ -2246,6 +2339,8 @@ class CrackUtils:
         self.current_mask = None
         self.current_gt_source_path = None
         self.current_modified_gt_path = None
+        self.current_depth = None
+        self.current_depth_path = None
         if getattr(self, "use_masks", False) and hasattr(self, "mask_map"):
             mask_path = self.mask_map.get(base_name)
             print(f"[DEBUG change_image] mask_path for {base_name}: {mask_path}")
@@ -2262,6 +2357,32 @@ class CrackUtils:
                     self.current_mask = self._load_binary_mask_from_path(mask_path)
             else:
                 print(f"[DEBUG change_image] No mask found for {base_name}")
+
+        # ---- DEPTH LOADING (optional external depth maps) ----
+        depth_path = None
+        if hasattr(self, "depth_map"):
+            depth_path = self.depth_map.get(base_name)
+        if depth_path is None and getattr(self, "depth_folder", ""):
+            # fallback direct probe in case map was not built
+            for ext in (".npy", ".tif", ".tiff", ".png", ".bmp", ".jpg", ".jpeg"):
+                cand = os.path.join(self.depth_folder, base_name + ext)
+                if os.path.isfile(cand):
+                    depth_path = cand
+                    break
+
+        if depth_path and os.path.isfile(depth_path):
+            depth_arr = _load_depth_map_from_path(depth_path)
+            if depth_arr is not None:
+                self.current_depth = depth_arr
+                self.current_depth_path = depth_path
+                print(
+                    f"[DEBUG change_image] depth loaded for {base_name}: "
+                    f"path={depth_path} shape={tuple(depth_arr.shape)} dtype={depth_arr.dtype}"
+                )
+            else:
+                print(f"[DEBUG change_image] depth load failed for {base_name}: {depth_path}")
+        else:
+            print(f"[DEBUG change_image] No depth found for {base_name}")
 
         im = self.original_image.copy()
         H, W = im.shape[:2]

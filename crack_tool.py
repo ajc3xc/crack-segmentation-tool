@@ -1451,10 +1451,10 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         # ============================================================
         # FAST METRICS MODE (early-draft quick evaluation)
         # ============================================================
-        FAST_METRICS_MODE = False
+        FAST_METRICS_MODE = True
         FAST_IMAGE_INDICES = None
         #FAST_IMAGE_INDICES = [21, 22, *range(60, 66)]  # optional subset
-        #FAST_IMAGE_INDICES = [41,97]
+        FAST_IMAGE_INDICES = [97]
         #FAST_IMAGE_INDICES = [110,97]
         # FAST edge-sweep toggle:
         # True  -> run per-image edge sweep + best-family selection in fast mode
@@ -2440,6 +2440,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             atomic=atomic,
             combined_groups=combined_groups,
             gt_mask=gt_mask,
+            depth_full=getattr(self, "current_depth", None),
         )
 
         print(f"[GT_SUP] Finished GT supervision export for {base_name}")

@@ -3513,6 +3513,24 @@ def compare_widths_for_aligned_cracks(
     variant_id = str(variant_id or "main").strip()
     file_tag = "main" if variant_id in ("", "main") else variant_id
 
+    def _normalize_gt_variant(v):
+        s = str(v or "main").strip().lower()
+        if s in {"centered_gt", "centered", "manual_vs_centered"}:
+            return "centered_gt"
+        if s in {
+            "centered_depth_gt",
+            "depth_gt",
+            "manual_vs_depth",
+            "manual_vs_depth_distridge",
+            "depth_distridge",
+            "depth",
+        }:
+            return "centered_depth_gt"
+        return "manual_gt"
+
+    gt_variant_key = _normalize_gt_variant(variant_id)
+    print(f"[WIDTH] variant_id={variant_id} -> gt_variant_key={gt_variant_key}")
+
     H, W = crack_mask.shape
     mask_bin = (crack_mask > 0).astype(np.uint8)
 
@@ -3847,23 +3865,54 @@ def compare_widths_for_aligned_cracks(
 
     def _get_gt_width_full(crack_obj, gt_entry_obj=None):
         """
-        Returns GT width vector from already-loaded payloads/supervision.
-        No mask-based recomputation here.
+        Returns GT width vector from payload/supervision with variant-aware preference.
         """
-        for src in (crack_obj, gt_entry_obj):
+        def _pick_width_from_src(src, *, direct_keys, normals_keys):
             if not isinstance(src, dict):
-                continue
-
-            for k in ("gt_widths", "gt_widths_auto_centered", "gt_width_px", "gt_width_px_auto_centered", "gruthw"):
+                return None
+            for k in direct_keys:
                 w = _coerce_gt_width_vec(src.get(k, None))
                 if w is not None:
                     return w
+            for nk in normals_keys:
+                nobj = src.get(nk, None)
+                if isinstance(nobj, dict):
+                    w = _coerce_gt_width_vec(nobj.get("width_px", None))
+                    if w is not None:
+                        return w
+            return None
 
-            gtn = src.get("gt_normals", None)
-            if isinstance(gtn, dict):
-                w = _coerce_gt_width_vec(gtn.get("width_px", None))
+        # Always prioritize supervision entry over predicted crack payload.
+        src_order = [gt_entry_obj, crack_obj]
+
+        if gt_variant_key == "centered_depth_gt":
+            for src in src_order:
+                w = _pick_width_from_src(
+                    src,
+                    direct_keys=("gt_widths_depth_centered", "gt_width_px_depth_centered"),
+                    normals_keys=("depth_normals", "gt_normals_depth_centered"),
+                )
                 if w is not None:
                     return w
+
+        if gt_variant_key in {"centered_gt", "centered_depth_gt"}:
+            for src in src_order:
+                w = _pick_width_from_src(
+                    src,
+                    direct_keys=("gt_widths_auto_centered", "gt_width_px_auto_centered"),
+                    normals_keys=("centered_normals", "gt_normals_auto_centered"),
+                )
+                if w is not None:
+                    return w
+
+        for src in src_order:
+            w = _pick_width_from_src(
+                src,
+                direct_keys=("gt_widths", "gt_widths_auto_centered", "gt_width_px", "gt_width_px_auto_centered", "gruthw"),
+                normals_keys=("gt_normals", "gt_normals_auto_centered"),
+            )
+            if w is not None:
+                return w
 
         return None
 
@@ -3881,13 +3930,22 @@ def compare_widths_for_aligned_cracks(
 
     def _get_gt_geom_full_atomic(gt_entry_obj):
         """
-        Atomic GT geometry stream (single polyline).
-        Preference:
-          1) midline_auto_centered
-          2) midline
+        Atomic GT geometry stream (single polyline), variant-aware.
         """
         if not isinstance(gt_entry_obj, dict):
             return None
+
+        if gt_variant_key == "centered_depth_gt":
+            for k in ("depth_midline", "midline_depth_centered"):
+                xy = _coerce_polyline_xy(gt_entry_obj.get(k, None))
+                if xy is not None and len(xy) >= 2:
+                    return np.asarray(xy, float)
+
+        if gt_variant_key in {"centered_gt", "centered_depth_gt"}:
+            for k in ("centered_midline", "midline_auto_centered"):
+                xy = _coerce_polyline_xy(gt_entry_obj.get(k, None))
+                if xy is not None and len(xy) >= 2:
+                    return np.asarray(xy, float)
 
         for k in ("midline_auto_centered", "midline"):
             xy = _coerce_polyline_xy(gt_entry_obj.get(k, None))
@@ -4158,18 +4216,36 @@ def compare_widths_for_aligned_cracks(
         if not isinstance(gt_entry_obj, dict):
             return [], []
 
-        # ------------------------------------------
-        # GT has NO derived geometry.
-        # For geom_name == "derived", reuse midline.
-        # ------------------------------------------
+        segs = []
+        meta = []
 
-        segs = [np.asarray(s, float) for s in (gt_entry_obj.get("midline_segments") or [])]
+        def _read_segs(seg_key, packed_key=None):
+            out = [np.asarray(s, float) for s in (gt_entry_obj.get(seg_key) or []) if s is not None and len(s) >= 2]
+            if out:
+                return out
+            if packed_key is not None and gt_entry_obj.get(packed_key) is not None:
+                return [np.asarray(s, float) for s in _split_on_nans(gt_entry_obj.get(packed_key)) if s is not None and len(s) >= 2]
+            return []
 
-        meta = (
-            gt_entry_obj.get("midline_segments_meta")
-            or gt_entry_obj.get("segments_meta")
-            or ((gt_entry_obj.get("dominance_meta") or {}).get("segments_meta") or [])
-        )
+        if gt_variant_key == "centered_depth_gt":
+            segs = _read_segs("depth_midline_segments", "depth_midline")
+            if not segs:
+                segs = _read_segs("depth_midline_segments", "midline_depth_centered")
+            meta = gt_entry_obj.get("depth_midline_segments_meta") or []
+
+        if not segs and gt_variant_key in {"centered_gt", "centered_depth_gt"}:
+            segs = _read_segs("centered_midline_segments", "centered_midline")
+            if not segs:
+                segs = _read_segs("midline_segments_auto_centered", "midline_auto_centered")
+            meta = gt_entry_obj.get("centered_midline_segments_meta") or gt_entry_obj.get("midline_segments_auto_centered_meta") or []
+
+        if not segs:
+            segs = _read_segs("midline_segments", "midline")
+            meta = (
+                gt_entry_obj.get("midline_segments_meta")
+                or gt_entry_obj.get("segments_meta")
+                or ((gt_entry_obj.get("dominance_meta") or {}).get("segments_meta") or [])
+            )
 
         if not isinstance(meta, list):
             meta = []
@@ -4657,7 +4733,7 @@ def compare_widths_for_aligned_cracks(
             ax.imshow(union, cmap="hot", interpolation="nearest", alpha=0.9)
 
             # Overlay stored midlines (GLOBAL → LOCAL)
-            segs = gt_entry.get("midline_segments") or []
+            segs, _ = _extract_gt_stream_segments_and_meta(gt_entry, "midline")
             for S in segs:
                 if S is None or len(S) < 2:
                     continue
@@ -4884,8 +4960,7 @@ def compare_widths_for_aligned_cracks(
         #   2) then prune to shared
         # ============================================================
         if gt_entry is not None:
-            gt_segs_all = gt_entry.get("midline_segments") or []
-            gt_meta_all = (gt_entry.get("dominance_meta", {}).get("segments_meta") or [])
+            gt_segs_all, gt_meta_all = _extract_gt_stream_segments_and_meta(gt_entry, "midline")
 
             print(
                 f"[STAGE2 DBG] cid={cid} GT segs={len(gt_segs_all)} "
@@ -5210,8 +5285,7 @@ def compare_widths_for_aligned_cracks(
 
             gt_dropped = []
             if gt_entry is not None:
-                gt_all = gt_entry.get("midline_segments") or []
-                gt_meta_all = (gt_entry.get("dominance_meta", {}) or {}).get("segments_meta") or []
+                gt_all, gt_meta_all = _extract_gt_stream_segments_and_meta(gt_entry, "midline")
 
                 if len(gt_all) == len(gt_meta_all):
                     for Sg, mg in zip(gt_all, gt_meta_all):
@@ -5421,12 +5495,8 @@ def compare_widths_for_aligned_cracks(
             print(f"[STAGE4] using gt_pruned_segs ({len(gt_plot_segs)}) for GT plot")
 
         # Fallback: raw GT midlines (only if Stage-2 GT missing)
-        elif isinstance(gt_entry, dict) and gt_entry.get("midline_segments"):
-            gt_plot_segs = gt_entry.get("midline_segments")
-            gt_plot_meta = (
-                (gt_entry.get("dominance_meta", {}) or {}).get("segments_meta")
-                or [{}] * len(gt_plot_segs)
-            )
+        elif isinstance(gt_entry, dict):
+            gt_plot_segs, gt_plot_meta = _extract_gt_stream_segments_and_meta(gt_entry, "midline")
             print(f"[STAGE4 WARN] falling back to RAW GT midlines ({len(gt_plot_segs)})")
 
         # Last-resort safety (should not happen)
@@ -5670,7 +5740,7 @@ def compare_widths_for_aligned_cracks(
         print(f"[STAGE4] cid={cid} PR bite bbox={pr_bbox} union_px={(0 if pr_union_local is None else int(pr_union_local.sum()))}")
 
         # Build seg lists for overlay:
-        gt_segs_for_plot = gt_entry.get("midline_segments") if isinstance(gt_entry, dict) else []
+        gt_segs_for_plot, _ = _extract_gt_stream_segments_and_meta(gt_entry, "midline")
         pr_segs_for_plot = pruned_segs if ("pruned_segs" in locals()) else []
 
         # ============================================================
