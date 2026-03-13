@@ -3511,24 +3511,8 @@ def compare_widths_for_aligned_cracks(
 
     # ---------------- variant tag (output isolation only) ----------------
     variant_id = str(variant_id or "main").strip()
-    file_tag = "main" if variant_id in ("", "main") else variant_id
-
-    def _normalize_gt_variant(v):
-        s = str(v or "main").strip().lower()
-        if s in {"centered_gt", "centered", "manual_vs_centered"}:
-            return "centered_gt"
-        if s in {
-            "centered_depth_gt",
-            "depth_gt",
-            "manual_vs_depth",
-            "manual_vs_depth_distridge",
-            "depth_distridge",
-            "depth",
-        }:
-            return "centered_depth_gt"
-        return "manual_gt"
-
-    gt_variant_key = _normalize_gt_variant(variant_id)
+    file_tag = "main"
+    gt_variant_key = "manual_gt"
     print(f"[WIDTH] variant_id={variant_id} -> gt_variant_key={gt_variant_key}")
 
     H, W = crack_mask.shape
@@ -3867,53 +3851,20 @@ def compare_widths_for_aligned_cracks(
         """
         Returns GT width vector from payload/supervision with variant-aware preference.
         """
-        def _pick_width_from_src(src, *, direct_keys, normals_keys):
+        for src in [gt_entry_obj, crack_obj]:
             if not isinstance(src, dict):
-                return None
-            for k in direct_keys:
-                w = _coerce_gt_width_vec(src.get(k, None))
-                if w is not None:
-                    return w
-            for nk in normals_keys:
-                nobj = src.get(nk, None)
-                if isinstance(nobj, dict):
-                    w = _coerce_gt_width_vec(nobj.get("width_px", None))
-                    if w is not None:
-                        return w
-            return None
+                continue
 
-        # Always prioritize supervision entry over predicted crack payload.
-        src_order = [gt_entry_obj, crack_obj]
-
-        if gt_variant_key == "centered_depth_gt":
-            for src in src_order:
-                w = _pick_width_from_src(
-                    src,
-                    direct_keys=("gt_widths_depth_centered", "gt_width_px_depth_centered"),
-                    normals_keys=("depth_normals", "gt_normals_depth_centered"),
-                )
+            if "gt_widths" in src:
+                w = _coerce_gt_width_vec(src.get("gt_widths", None))
                 if w is not None:
                     return w
 
-        if gt_variant_key in {"centered_gt", "centered_depth_gt"}:
-            for src in src_order:
-                w = _pick_width_from_src(
-                    src,
-                    direct_keys=("gt_widths_auto_centered", "gt_width_px_auto_centered"),
-                    normals_keys=("centered_normals", "gt_normals_auto_centered"),
-                )
+            gtn = src.get("gt_normals")
+            if isinstance(gtn, dict):
+                w = _coerce_gt_width_vec(gtn.get("width_px", None))
                 if w is not None:
                     return w
-
-        for src in src_order:
-            w = _pick_width_from_src(
-                src,
-                direct_keys=("gt_widths", "gt_widths_auto_centered", "gt_width_px", "gt_width_px_auto_centered", "gruthw"),
-                normals_keys=("gt_normals", "gt_normals_auto_centered"),
-            )
-            if w is not None:
-                return w
-
         return None
 
     def _polyline_length(xy):
@@ -3934,18 +3885,6 @@ def compare_widths_for_aligned_cracks(
         """
         if not isinstance(gt_entry_obj, dict):
             return None
-
-        if gt_variant_key == "centered_depth_gt":
-            for k in ("depth_midline", "midline_depth_centered"):
-                xy = _coerce_polyline_xy(gt_entry_obj.get(k, None))
-                if xy is not None and len(xy) >= 2:
-                    return np.asarray(xy, float)
-
-        if gt_variant_key in {"centered_gt", "centered_depth_gt"}:
-            for k in ("centered_midline", "midline_auto_centered"):
-                xy = _coerce_polyline_xy(gt_entry_obj.get(k, None))
-                if xy is not None and len(xy) >= 2:
-                    return np.asarray(xy, float)
 
         for k in ("midline_auto_centered", "midline"):
             xy = _coerce_polyline_xy(gt_entry_obj.get(k, None))
@@ -4227,25 +4166,12 @@ def compare_widths_for_aligned_cracks(
                 return [np.asarray(s, float) for s in _split_on_nans(gt_entry_obj.get(packed_key)) if s is not None and len(s) >= 2]
             return []
 
-        if gt_variant_key == "centered_depth_gt":
-            segs = _read_segs("depth_midline_segments", "depth_midline")
-            if not segs:
-                segs = _read_segs("depth_midline_segments", "midline_depth_centered")
-            meta = gt_entry_obj.get("depth_midline_segments_meta") or []
-
-        if not segs and gt_variant_key in {"centered_gt", "centered_depth_gt"}:
-            segs = _read_segs("centered_midline_segments", "centered_midline")
-            if not segs:
-                segs = _read_segs("midline_segments_auto_centered", "midline_auto_centered")
-            meta = gt_entry_obj.get("centered_midline_segments_meta") or gt_entry_obj.get("midline_segments_auto_centered_meta") or []
-
-        if not segs:
-            segs = _read_segs("midline_segments", "midline")
-            meta = (
-                gt_entry_obj.get("midline_segments_meta")
-                or gt_entry_obj.get("segments_meta")
-                or ((gt_entry_obj.get("dominance_meta") or {}).get("segments_meta") or [])
-            )
+        segs = _read_segs("midline_segments", "midline")
+        meta = (
+            gt_entry_obj.get("midline_segments_meta")
+            or gt_entry_obj.get("segments_meta")
+            or ((gt_entry_obj.get("dominance_meta") or {}).get("segments_meta") or [])
+        )
 
         if not isinstance(meta, list):
             meta = []
@@ -4439,21 +4365,24 @@ def compare_widths_for_aligned_cracks(
             segs = dsegs
             seg_meta = dmeta
 
-        e1, e2 = _get_edges(crack)
-        if len(e1) < 2 or len(e2) < 2:
-            continue
-        m_edge = min(len(e1), len(e2))
-        widths_geo = np.linalg.norm(e1[:m_edge] - e2[:m_edge], axis=1)
-
         derived_concat = (
             np.vstack([np.asarray(s, float) for s in dsegs if s is not None and len(s) >= 2])
             if dsegs else None
         )
 
+        e1, e2 = _get_edges(crack)
+        widths_geo = None
+        m_edge = min(len(e1), len(e2))
+        if m_edge >= 2:
+            widths_geo = np.linalg.norm(e1[:m_edge] - e2[:m_edge], axis=1)
+
         if isinstance(crack, dict) and "pred_widths" in crack:
             predw_full_any = np.asarray(crack["pred_widths"], float).reshape(-1)
         else:
             predw_full_any = _get_pred_width_full(crack, derived_concat, widths_geo)
+
+        if (len(e1) < 2 or len(e2) < 2) and (predw_full_any is None or np.asarray(predw_full_any).size < 2):
+            continue
 
 
         ##############################################

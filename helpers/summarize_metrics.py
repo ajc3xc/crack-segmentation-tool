@@ -1122,7 +1122,7 @@ def _aggregate_midline_metrics(
                 except Exception as e:
                     _log(verbose, f"[midline-debug] rank-input dump failed: {e}")
 
-            key_cols = ["method_name", "geometry_type", "source_class"]
+            key_cols = ["method_name", "source_class"]
             key_cols = [c for c in key_cols if c in d_rank_src.columns]
             rank_rows = []
             for key, g in d_rank_src.groupby(key_cols, dropna=False):
@@ -1144,7 +1144,19 @@ def _aggregate_midline_metrics(
                 rank_rows.append(row)
 
             if rank_rows:
-                rank_df = pd.DataFrame(rank_rows).sort_values("score_mid_wmean", ascending=True)
+                rank_df = pd.DataFrame(rank_rows)
+                if "method_name" in rank_df.columns:
+                    agg = {"score_mid_wmean": "min"}
+                    if "source_class" in rank_df.columns:
+                        agg["source_class"] = "first"
+                    if "score_mid_mean" in rank_df.columns:
+                        agg["score_mid_mean"] = "min"
+                    if "n_rows" in rank_df.columns:
+                        agg["n_rows"] = "sum"
+                    if "weight_sum" in rank_df.columns:
+                        agg["weight_sum"] = "sum"
+                    rank_df = rank_df.groupby("method_name", as_index=False).agg(agg)
+                rank_df = rank_df.sort_values("score_mid_wmean", ascending=True)
                 rank_csv = os.path.join(out_dir, "dataset_midline_score_ranked.csv")
                 rank_df.to_csv(rank_csv, index=False)
                 outputs["midline_score_ranked_csv"] = rank_csv
@@ -1156,19 +1168,7 @@ def _aggregate_midline_metrics(
                         pass
 
                 top = rank_df.head(20).copy()
-                top["label"] = top.apply(
-                    lambda r: f"{r.get('method_name', 'unknown')}|{r.get('geometry_type', 'unknown')}",
-                    axis=1,
-                )
-                top["label"] = (
-                    top["label"]
-                    .astype(str)
-                    .str.replace("|baseline", "", regex=False)
-                    .str.replace("|derived", "", regex=False)
-                    .str.replace("|auto", "", regex=False)
-                    .str.replace("||", "|", regex=False)
-                    .str.strip("|")
-                )
+                top["label"] = top.get("method_name", pd.Series(["unknown"] * len(top))).astype(str)
                 color_map = {"manual": "#d62728", "auto": "#1f77b4", "baseline": "#2ca02c"}
                 colors = [color_map.get(str(c), "#4c78a8") for c in top["source_class"].astype(str).tolist()]
                 fig_w = max(10.0, 0.55 * len(top))
@@ -1798,7 +1798,7 @@ def _aggregate_baseline_timings(
                     wmean_t = mean_t
                 roll_rows.append(
                     {
-                        "category": "baseline_segmentation",
+                        "category": "width_method",
                         "component": str(col),
                         "mean_sec": mean_t,
                         "weighted_mean_sec": wmean_t,
@@ -1860,7 +1860,7 @@ def _aggregate_baseline_timings(
             continue
         seg_rows.append(
             {
-                "category": "baseline_segmentation",
+                "category": "seg",
                 "component": f"inference_seconds:{method}",
                 "mean_sec": float(np.mean(sec)),
                 "weighted_mean_sec": float(np.mean(sec)),
@@ -1973,14 +1973,44 @@ def _aggregate_supervision_timings(
     all_df.to_csv(all_csv, index=False)
     outputs["gt_supervision_timings_all_csv"] = all_csv
 
+    # Optional per-image weights from edge-stage timing output.
+    # We prefer crack/length-like columns when available.
+    img_weight = {}
+    edge_csv = os.path.join(out_dir, "dataset_edge_tracking_stage_all.csv")
+    edge_df = _safe_read_csv(edge_csv)
+    if edge_df is not None and not edge_df.empty and "image" in edge_df.columns:
+        wcol = next((c for c in ["crack_px", "length_px", "finite_len_px"] if c in edge_df.columns), None)
+        if wcol is not None:
+            ew = edge_df[["image", wcol]].copy()
+            ew["image"] = ew["image"].astype(str)
+            ew[wcol] = pd.to_numeric(ew[wcol], errors="coerce")
+            ew = ew[np.isfinite(ew[wcol]) & (ew[wcol] > 0)]
+            if not ew.empty:
+                img_weight = ew.groupby("image", dropna=False)[wcol].sum().to_dict()
+
     roll_rows = []
     for (stage, mode, component), g in all_df.groupby(["stage", "mode", "component"], dropna=False):
-        vals = pd.to_numeric(g["sec"], errors="coerce").to_numpy(float)
-        vals = vals[np.isfinite(vals)]
-        if vals.size == 0:
+        vals_all = pd.to_numeric(g["sec"], errors="coerce").to_numpy(float)
+        imgs_all = g["image"].astype(str).to_numpy()
+        ok = np.isfinite(vals_all)
+        if not np.any(ok):
             continue
+        vals = vals_all[ok]
+        imgs = imgs_all[ok]
         mean_t = float(np.mean(vals))
         total_t = float(np.sum(vals))
+
+        # Length-weighted mean if weights are available; otherwise fallback to mean.
+        if img_weight:
+            ww = np.asarray([float(img_weight.get(im, np.nan)) for im in imgs], dtype=float)
+            okw = np.isfinite(ww) & (ww > 0)
+            if np.any(okw):
+                weighted_mean_t = float(np.sum(vals[okw] * ww[okw]) / np.sum(ww[okw]))
+            else:
+                weighted_mean_t = mean_t
+        else:
+            weighted_mean_t = mean_t
+
         roll_rows.append(
             {
                 "category": "gt_supervision",
@@ -1988,7 +2018,7 @@ def _aggregate_supervision_timings(
                 "mode": str(mode),
                 "component": str(component),
                 "mean_sec": mean_t,
-                "weighted_mean_sec": mean_t,
+                "weighted_mean_sec": weighted_mean_t,
                 "total_sec": total_t,
                 "count": int(vals.size),
             }
@@ -1998,6 +2028,38 @@ def _aggregate_supervision_timings(
         out_csv = os.path.join(out_dir, "dataset_gt_supervision_timings.csv")
         roll_df.to_csv(out_csv, index=False)
         outputs["gt_supervision_timings_csv"] = out_csv
+
+        # Core rows used in algorithm overview: atomic + final combined rows.
+        core_specs = [
+            ("gt_compute_atomic", "normals", "atomic_compute_sec"),
+            ("gt_compute_combined", "normals", "combined_plus_noncombined_atomics_sec"),
+            ("gt_centering_atomic", "centering", "atomic_centering_sec"),
+            ("gt_centering_combined", "centering", "combined_plus_noncombined_atomics_centering_sec"),
+        ]
+        core_rows = []
+        for method, stage, comp in core_specs:
+            sub = roll_df[
+                (roll_df["stage"].astype(str) == stage)
+                & (roll_df["component"].astype(str) == comp)
+            ]
+            if sub.empty:
+                continue
+            r0 = sub.iloc[0]
+            core_rows.append(
+                {
+                    "method": method,
+                    "stage": stage,
+                    "component": comp,
+                    "weighted_mean_sec": float(pd.to_numeric(r0.get("weighted_mean_sec"), errors="coerce")),
+                    "total_sec": float(pd.to_numeric(r0.get("total_sec"), errors="coerce")),
+                    "count": int(pd.to_numeric(r0.get("count"), errors="coerce")),
+                }
+            )
+        if core_rows:
+            core_csv = os.path.join(out_dir, "dataset_gt_supervision_core_timings.csv")
+            pd.DataFrame(core_rows).to_csv(core_csv, index=False)
+            outputs["gt_supervision_core_timings_csv"] = core_csv
+
         _log(verbose, f"[summarize] gt supervision timing rows={len(all_df)}")
 
     return outputs
@@ -2220,75 +2282,199 @@ def _aggregate_gt_centering_weighted_summaries(
     return outputs
 
 
+def _aggregate_gt_component_timings(
+    supervision_root: str,
+    out_dir: str,
+    *,
+    evaluated_images: Optional[set] = None,
+    verbose: bool = True,
+) -> Dict[str, str]:
+    outputs: Dict[str, str] = {}
+    if not supervision_root or not os.path.isdir(supervision_root):
+        return outputs
+
+    eval_set = {str(x) for x in (evaluated_images or set())}
+    center_files = glob.glob(os.path.join(supervision_root, "**", "gt_centering", "timing.csv"), recursive=True)
+    depth_files = glob.glob(os.path.join(supervision_root, "**", "depth_distridge", "timing.csv"), recursive=True)
+
+    def _collect(files: List[str]) -> pd.DataFrame:
+        frames = []
+        for p in files:
+            df = _safe_read_csv(p)
+            if df is None or df.empty:
+                continue
+            parts = os.path.normpath(p).split(os.sep)
+            image = "unknown"
+            if "supervision" in parts:
+                i = parts.index("supervision")
+                if i + 1 < len(parts):
+                    image = str(parts[i + 1])
+            if eval_set and image not in eval_set:
+                continue
+            d = df.copy()
+            if "image" not in d.columns:
+                d["image"] = image
+            d["source_file"] = p
+            frames.append(d)
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+
+    center_df = _collect(center_files)
+    depth_df = _collect(depth_files)
+
+    if not center_df.empty:
+        p = os.path.join(out_dir, "dataset_gt_centering_timing_all.csv")
+        center_df.to_csv(p, index=False)
+        outputs["dataset_gt_centering_timing_all_csv"] = p
+    if not depth_df.empty:
+        p = os.path.join(out_dir, "dataset_depth_distridge_timing_all.csv")
+        depth_df.to_csv(p, index=False)
+        outputs["dataset_depth_distridge_timing_all_csv"] = p
+
+    if not center_df.empty or not depth_df.empty:
+        _log(
+            verbose,
+            f"[summarize] gt component timings: gt_centering_rows={len(center_df)} depth_rows={len(depth_df)}",
+        )
+    return outputs
+
+
 def _plot_dataset_full_timing_overview(
     out_dir: str,
     *,
     verbose: bool = True,
-) -> Dict[str, str]:
-    outputs: Dict[str, str] = {}
+):
+    outputs = {}
 
-    rows = []
-    rows_sum = []
+    def _log(v, msg):
+        if v:
+            print(msg)
 
-    # Baseline segmentation timing components.
-    p_base = os.path.join(out_dir, "dataset_baseline_timings_rollup.csv")
-    df_base = _safe_read_csv(p_base)
+    def _safe_read(path):
+        try:
+            if os.path.isfile(path):
+                return pd.read_csv(path)
+        except Exception:
+            pass
+        return None
+
+    def _safe_num(v):
+        try:
+            n = float(pd.to_numeric(v, errors="coerce"))
+        except Exception:
+            n = np.nan
+        return n if np.isfinite(n) else np.nan
+
+    def _add(rows, method, sec, category):
+        v = _safe_num(sec)
+        if np.isfinite(v) and (v > 0):
+            rows.append({"method": str(method), "sec": float(v), "category": str(category)})
+
+    def _plot_algorithm_overview(method_rows, out_png, title):
+        if not method_rows:
+            return None
+        method_rows = sorted(method_rows, key=lambda x: x["sec"])
+        labels = [r["method"] for r in method_rows]
+        vals = [r["sec"] for r in method_rows]
+        colors = {
+            "baseline_seg": "#2ca02c",
+            "baseline_width": "#ff7f0e",
+            "manual": "#d62728",
+            "auto": "#9467bd",
+            "depth_distridge": "#17becf",
+            "gt_centering": "#1f77b4",
+            "gt_supervision": "#8c564b",
+            "gt_subtiming": "#7f7f7f",
+        }
+        bar_colors = [colors.get(r["category"], "#777777") for r in method_rows]
+        fig_w = max(9.0, 0.46 * len(labels))
+        fig, ax = plt.subplots(figsize=(fig_w, 4.2), dpi=180)
+        x = np.arange(len(labels))
+        ax.bar(x, vals, color=bar_colors)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
+        ax.set_ylabel("seconds")
+        ax.set_title(title)
+        ax.grid(axis="y", alpha=0.25)
+        present = []
+        for r in method_rows:
+            c = str(r.get("category", ""))
+            if c and c not in present:
+                present.append(c)
+        if present:
+            handles = [Patch(facecolor=colors.get(c, "#777777"), edgecolor="none", label=c) for c in present]
+            ax.legend(handles=handles, loc="best", framealpha=0.9, fontsize=8)
+        plt.tight_layout()
+        fig.savefig(out_png, bbox_inches="tight")
+        plt.close(fig)
+        return out_png
+
+    def _plot_components(df, cols, title, out_png):
+        if df is None or df.empty:
+            return None
+        labels = []
+        vals = []
+        for c in cols:
+            if c not in df.columns:
+                continue
+            v = _safe_num(pd.to_numeric(df[c], errors="coerce").mean())
+            if np.isfinite(v):
+                labels.append(str(c))
+                vals.append(float(v))
+        if not vals:
+            return None
+        fig_w = max(6.0, 0.65 * len(labels))
+        fig, ax = plt.subplots(figsize=(fig_w, 4.0), dpi=180)
+        x = np.arange(len(labels))
+        ax.bar(x, vals, color="#4c78a8")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
+        ax.set_ylabel("seconds")
+        ax.set_title(title)
+        ax.grid(axis="y", alpha=0.25)
+        plt.tight_layout()
+        fig.savefig(out_png, bbox_inches="tight")
+        plt.close(fig)
+        return out_png
+
+    def _plot_atomic_vs_combined(df, title, out_png):
+        if df is None or df.empty:
+            return None
+        atomic = _safe_num(pd.to_numeric(df.get("atomic_centering_sec"), errors="coerce").mean())
+        combined = _safe_num(pd.to_numeric(df.get("combined_centering_sec"), errors="coerce").mean())
+        if not (np.isfinite(atomic) or np.isfinite(combined)):
+            return None
+        vals = [float(atomic) if np.isfinite(atomic) else 0.0, float(combined) if np.isfinite(combined) else 0.0]
+        fig, ax = plt.subplots(figsize=(5.0, 4.0), dpi=180)
+        ax.bar(["atomic", "combined"], vals, color=["#f28e2b", "#4e79a7"])
+        ax.set_ylabel("seconds")
+        ax.set_title(title)
+        ax.grid(axis="y", alpha=0.25)
+        plt.tight_layout()
+        fig.savefig(out_png, bbox_inches="tight")
+        plt.close(fig)
+        return out_png
+
+    mean_rows = []
+    sum_rows = []
+
+    # Baseline segmentation + width algorithms from rollup.
+    df_base = _safe_read(os.path.join(out_dir, "dataset_baseline_timings_rollup.csv"))
     if df_base is not None and not df_base.empty:
         for _, r in df_base.iterrows():
             comp = str(r.get("component", ""))
-            # Prefer baseline method-like components.
-            if not any(k in comp for k in ("mat_", "pca_", "esd_", "eob_", "width", "inference_seconds:")):
-                continue
+            v_mean = _safe_num(r.get("weighted_mean_sec"))
+            v_sum = _safe_num(r.get("total_sec"))
             if comp.startswith("inference_seconds:"):
-                b_label = comp.split(":", 1)[1]
-                b_cat = "baseline_segmentation"
-            else:
-                b_label = comp
-                b_cat = "width_baseline"
-            rows.append(
-                {
-                    "category": b_cat,
-                    "label": b_label,
-                    "value_sec": float(pd.to_numeric(r.get("weighted_mean_sec", np.nan), errors="coerce")),
-                }
-            )
-            rows_sum.append(
-                {
-                    "category": b_cat,
-                    "label": b_label,
-                    "value_sec": float(pd.to_numeric(r.get("total_sec", np.nan), errors="coerce")),
-                }
-            )
+                _add(mean_rows, comp.split(":", 1)[1], v_mean, "baseline_seg")
+                _add(sum_rows, comp.split(":", 1)[1], v_sum, "baseline_seg")
+            elif any(k in comp for k in ("mat_", "pca_", "esd_", "eob_", "width", "skeleton_dse")):
+                _add(mean_rows, comp, v_mean, "baseline_width")
+                _add(sum_rows, comp, v_sum, "baseline_width")
 
-    # GT supervision timings (atomic/combined normals + centering).
-    p_sup = os.path.join(out_dir, "dataset_gt_supervision_timings.csv")
-    df_sup = _safe_read_csv(p_sup)
-    if df_sup is not None and not df_sup.empty:
-        for _, r in df_sup.iterrows():
-            stage = str(r.get("stage", ""))
-            mode = str(r.get("mode", ""))
-            if mode not in {"atomic", "combined"}:
-                continue
-            if stage not in {"normals", "centering"}:
-                continue
-            rows.append(
-                {
-                    "category": "gt_supervision",
-                    "label": f"{stage}:{mode}",
-                    "value_sec": float(pd.to_numeric(r.get("weighted_mean_sec", np.nan), errors="coerce")),
-                }
-            )
-            rows_sum.append(
-                {
-                    "category": "gt_supervision",
-                    "label": f"{stage}:{mode}",
-                    "value_sec": float(pd.to_numeric(r.get("total_sec", np.nan), errors="coerce")),
-                }
-            )
-
-    # Edge/manual-auto total timing from per-crack edge-tracking stage table.
-    p_edge = os.path.join(out_dir, "dataset_edge_tracking_stage_all.csv")
-    df_edge = _safe_read_csv(p_edge)
+    # Manual / auto pipeline from stage timing rows.
+    df_edge = _safe_read(os.path.join(out_dir, "dataset_edge_tracking_stage_all.csv"))
     if df_edge is not None and not df_edge.empty and "supervision" in df_edge.columns:
         weight_col = next((c for c in ["length_px", "finite_len_px", "crack_px"] if c in df_edge.columns), None)
         for sup in ("manual", "auto"):
@@ -2303,170 +2489,149 @@ def _plot_dataset_full_timing_overview(
             per_row = np.zeros(len(g), float)
             for c in comp_cols:
                 per_row += pd.to_numeric(g[c], errors="coerce").fillna(0.0).to_numpy(float)
+            total_sec = float(np.nansum(per_row))
             if weight_col:
                 w = pd.to_numeric(g[weight_col], errors="coerce").fillna(0.0).to_numpy(float)
                 ok = np.isfinite(per_row) & np.isfinite(w) & (w > 0)
-                val = float(np.sum(per_row[ok] * w[ok]) / np.sum(w[ok])) if np.any(ok) else float(np.nanmean(per_row))
+                mean_sec = float(np.sum(per_row[ok] * w[ok]) / np.sum(w[ok])) if np.any(ok) else float(np.nanmean(per_row))
             else:
-                val = float(np.nanmean(per_row))
-            rows.append({"category": "edge_pipeline_total", "label": f"{sup}:total_pipeline", "value_sec": val})
-            val_sum = float(np.nansum(per_row))
-            rows_sum.append({"category": "edge_pipeline_total", "label": f"{sup}:total_pipeline", "value_sec": val_sum})
+                mean_sec = float(np.nanmean(per_row))
+            _add(mean_rows, sup, mean_sec, sup)
+            _add(sum_rows, sup, total_sec, sup)
 
-    df = pd.DataFrame(rows)
-    if not df.empty and "value_sec" in df.columns:
-        df = df[np.isfinite(pd.to_numeric(df["value_sec"], errors="coerce"))].copy()
-        if not df.empty:
-            df["value_sec"] = pd.to_numeric(df["value_sec"], errors="coerce")
-            df = df.sort_values("value_sec", ascending=True).reset_index(drop=True)
-            out_csv = os.path.join(out_dir, "dataset_timing_full_overview.csv")
-            df.to_csv(out_csv, index=False)
-            outputs["timing_full_overview_csv"] = out_csv
-
-    df_sum = pd.DataFrame(rows_sum)
-    if not df_sum.empty and "value_sec" in df_sum.columns:
-        df_sum = df_sum[np.isfinite(pd.to_numeric(df_sum["value_sec"], errors="coerce"))].copy()
-        if not df_sum.empty:
-            df_sum["value_sec"] = pd.to_numeric(df_sum["value_sec"], errors="coerce")
-            df_sum = df_sum.sort_values("value_sec", ascending=True).reset_index(drop=True)
-            out_csv_sum = os.path.join(out_dir, "sum_dataset_timing_full_overview.csv")
-            df_sum.to_csv(out_csv_sum, index=False)
-            outputs["sum_timing_full_overview_csv"] = out_csv_sum
-
-    color_map = {
-        "baseline_segmentation": "#2ca02c",  # green (hrsegnet/sam3 inference)
-        "width_baseline": "#ff7f0e",         # orange (width baseline stages)
-        "gt_supervision": "#1f77b4",
-        "edge_pipeline_total": "#d62728",
-    }
-    if not df.empty:
-        colors = [color_map.get(str(c), "#4c78a8") for c in df["category"].astype(str)]
-        fig_w = max(9.5, 0.42 * len(df))
-        fig, ax = plt.subplots(figsize=(fig_w, 4.8), dpi=180)
-        xs = np.arange(len(df))
-        ax.bar(xs, df["value_sec"].to_numpy(float), color=colors, alpha=0.86)
-        ax.set_xticks(xs)
-        ax.set_xticklabels(df["label"].astype(str).tolist(), rotation=40, ha="right", fontsize=8)
-        ax.set_ylabel("weighted mean sec")
-        ax.set_title("Dataset Full Timing Overview")
-        ax.grid(axis="y", alpha=0.2)
-        handles = [Patch(facecolor=v, edgecolor="none", label=k) for k, v in color_map.items() if k in set(df["category"].astype(str))]
-        if handles:
-            ax.legend(handles=handles, loc="best", framealpha=0.9, fontsize=8)
-        plt.tight_layout()
-        out_png = os.path.join(out_dir, "dataset_timing_full_overview.png")
-        fig.savefig(out_png, bbox_inches="tight")
-        plt.close(fig)
-        outputs["timing_full_overview_png"] = out_png
-    if not df_sum.empty:
-        colors_sum = [color_map.get(str(c), "#4c78a8") for c in df_sum["category"].astype(str)]
-        fig_w = max(9.5, 0.42 * len(df_sum))
-        fig, ax = plt.subplots(figsize=(fig_w, 4.8), dpi=180)
-        xs = np.arange(len(df_sum))
-        ax.bar(xs, df_sum["value_sec"].to_numpy(float), color=colors_sum, alpha=0.86)
-        ax.set_xticks(xs)
-        ax.set_xticklabels(df_sum["label"].astype(str).tolist(), rotation=40, ha="right", fontsize=8)
-        ax.set_ylabel("total sec")
-        ax.set_title("Dataset Full Timing Overview (sum)")
-        ax.grid(axis="y", alpha=0.2)
-        handles = [Patch(facecolor=v, edgecolor="none", label=k) for k, v in color_map.items() if k in set(df_sum["category"].astype(str))]
-        if handles:
-            ax.legend(handles=handles, loc="best", framealpha=0.9, fontsize=8)
-        plt.tight_layout()
-        out_png_sum = os.path.join(out_dir, "sum_dataset_timing_full_overview.png")
-        fig.savefig(out_png_sum, bbox_inches="tight")
-        plt.close(fig)
-        outputs["sum_timing_full_overview_png"] = out_png_sum
-
-    # Section-level timing distribution (box/whisker).
-    section_series: Dict[str, np.ndarray] = {}
-
-    # Batch per-image sections.
-    p_batch = os.path.join(out_dir, "dataset_batch_timing_all.csv")
-    df_batch = _safe_read_csv(p_batch)
-    if df_batch is not None and not df_batch.empty:
-        sec_map = {
-            "snapshot_sync_s": "batch:snapshot_sync",
-            "edge_sweep_s": "batch:edge_sweep",
-            "edge_parallel_s": "batch:edge_parallel",
-            "auto_variants_s": "batch:auto_rs3",
-            "metrics_s": "batch:mask_width_metrics",
-            "total_image_s": "batch:total_image",
-        }
-        for col, label in sec_map.items():
-            if col not in df_batch.columns:
-                continue
-            vals = pd.to_numeric(df_batch[col], errors="coerce").to_numpy(float)
-            vals = vals[np.isfinite(vals) & (vals >= 0)]
-            if vals.size:
-                section_series[label] = vals
-
-    # Edge pipeline per-crack sections (manual/auto).
-    p_edge_all = os.path.join(out_dir, "dataset_edge_tracking_stage_all.csv")
-    df_edge_all = _safe_read_csv(p_edge_all)
-    if df_edge_all is not None and not df_edge_all.empty and "supervision" in df_edge_all.columns:
-        for sup in ("manual", "auto"):
-            g = df_edge_all[df_edge_all["supervision"].astype(str) == sup].copy()
+    # GT supervision timing rollup (dataset-level): explicit atomic/combined rows.
+    df_sup = _safe_read(os.path.join(out_dir, "dataset_gt_supervision_timings.csv"))
+    df_sup_core = _safe_read(os.path.join(out_dir, "dataset_gt_supervision_core_timings.csv"))
+    if df_sup_core is not None and not df_sup_core.empty:
+        for _, r in df_sup_core.iterrows():
+            _add(mean_rows, r.get("method"), r.get("weighted_mean_sec"), "gt_supervision")
+            _add(sum_rows, r.get("method"), r.get("total_sec"), "gt_supervision")
+    elif df_sup is not None and not df_sup.empty:
+        for method_name, stage_name, comp_name in [
+            ("gt_compute_atomic", "normals", "atomic_compute_sec"),
+            ("gt_compute_combined", "normals", "combined_plus_noncombined_atomics_sec"),
+            ("gt_centering_atomic", "centering", "atomic_centering_sec"),
+            ("gt_centering_combined", "centering", "combined_plus_noncombined_atomics_centering_sec"),
+        ]:
+            g = df_sup[
+                (df_sup["stage"].astype(str) == stage_name)
+                & (df_sup["component"].astype(str) == comp_name)
+            ]
             if g.empty:
                 continue
-            comp_cols = [c for c in ["edge_masks_sec", "edges_tracking_sec", "build_combined_sec"] if c in g.columns]
-            if sup == "auto":
-                comp_cols += [c for c in ["os_cost_sec", "midline_tracking_sec"] if c in g.columns]
-            if not comp_cols:
-                continue
-            arr = np.zeros(len(g), dtype=float)
-            for c in comp_cols:
-                arr += pd.to_numeric(g[c], errors="coerce").fillna(0.0).to_numpy(float)
-            arr = arr[np.isfinite(arr) & (arr >= 0)]
-            if arr.size:
-                section_series[f"edge:{sup}_pipeline"] = arr
+            r = g.iloc[0]
+            _add(mean_rows, method_name, r.get("weighted_mean_sec"), "gt_supervision")
+            _add(sum_rows, method_name, r.get("total_sec"), "gt_supervision")
 
-    # GT supervision sections (stage + mode).
-    p_sup_all = os.path.join(out_dir, "dataset_gt_supervision_timings_all.csv")
-    df_sup_all = _safe_read_csv(p_sup_all)
-    if df_sup_all is not None and not df_sup_all.empty and "sec" in df_sup_all.columns:
-        group_cols = [c for c in ["stage", "mode"] if c in df_sup_all.columns]
-        if group_cols:
-            for key, g in df_sup_all.groupby(group_cols, dropna=False):
-                vals = pd.to_numeric(g["sec"], errors="coerce").to_numpy(float)
-                vals = vals[np.isfinite(vals) & (vals >= 0)]
-                if vals.size == 0:
-                    continue
-                if isinstance(key, tuple):
-                    label = "gt:" + ":".join(str(x) for x in key)
-                else:
-                    label = f"gt:{key}"
-                section_series[label] = vals
-
-    if section_series:
-        labels = sorted(
-            section_series.keys(),
-            key=lambda k: float(np.nanmedian(section_series[k])) if len(section_series[k]) else np.inf,
+    # GT centering + depth distridge (dataset-level aggregations).
+    df_gt = _safe_read(os.path.join(out_dir, "dataset_gt_centering_timing_all.csv"))
+    if (df_gt is None) or df_gt.empty:
+        df_gt = _safe_read(os.path.join(out_dir, "gt_centering", "timing.csv"))
+    if df_gt is not None and not df_gt.empty:
+        _add(
+            mean_rows,
+            "gt_centering",
+            pd.to_numeric(df_gt.get("combined_centering_sec"), errors="coerce").mean(),
+            "gt_centering",
         )
-        data = [section_series[k] for k in labels]
-        fig_w = max(12.0, 0.55 * len(labels))
-        fig, ax = plt.subplots(figsize=(fig_w, 6.0), dpi=180)
-        bp = ax.boxplot(data, patch_artist=True, showfliers=False)
-        for patch, label in zip(bp["boxes"], labels):
-            if label.startswith("gt:"):
-                patch.set_facecolor("#1f77b4")
-            elif label.startswith("edge:"):
-                patch.set_facecolor("#d62728")
-            else:
-                patch.set_facecolor("#7f7f7f")
-            patch.set_alpha(0.80)
-        ax.set_xticks(np.arange(1, len(labels) + 1, dtype=float))
-        ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-        ax.set_ylabel("seconds")
-        ax.set_title("Timing Distribution by Section (box/whisker)")
-        ax.grid(axis="y", alpha=0.2)
-        plt.tight_layout()
-        out_box = os.path.join(out_dir, "dataset_timing_sections_boxplot.png")
-        fig.savefig(out_box, bbox_inches="tight")
-        plt.close(fig)
-        outputs["timing_sections_boxplot_png"] = out_box
+        _add(
+            sum_rows,
+            "gt_centering",
+            pd.to_numeric(
+                df_gt["centering_total_sec"] if "centering_total_sec" in df_gt.columns else df_gt.get("combined_centering_sec"),
+                errors="coerce",
+            ).sum(),
+            "gt_centering",
+        )
 
-    _log(verbose, f"[summarize] wrote full timing overview rows={len(df)}")
+    df_depth = _safe_read(os.path.join(out_dir, "dataset_depth_distridge_timing_all.csv"))
+    if (df_depth is None) or df_depth.empty:
+        df_depth = _safe_read(os.path.join(out_dir, "depth_distridge", "timing.csv"))
+    if df_depth is not None and not df_depth.empty:
+        _add(
+            mean_rows,
+            "depth_distridge",
+            pd.to_numeric(df_depth.get("combined_centering_sec"), errors="coerce").mean(),
+            "depth_distridge",
+        )
+        _add(
+            sum_rows,
+            "depth_distridge",
+            pd.to_numeric(
+                df_depth["centering_total_sec"] if "centering_total_sec" in df_depth.columns else df_depth.get("combined_centering_sec"),
+                errors="coerce",
+            ).sum(),
+            "depth_distridge",
+        )
+
+    if mean_rows:
+        out_mean_png = os.path.join(out_dir, "dataset_algorithm_timing_overview.png")
+        outputs["dataset_algorithm_timing_overview_png"] = _plot_algorithm_overview(
+            mean_rows,
+            out_mean_png,
+            "Dataset Algorithm Timing Overview",
+        )
+        out_mean_csv = os.path.join(out_dir, "dataset_algorithm_timing_overview.csv")
+        pd.DataFrame(mean_rows).sort_values("sec").to_csv(out_mean_csv, index=False)
+        outputs["dataset_algorithm_timing_overview_csv"] = out_mean_csv
+
+    if sum_rows:
+        out_sum_png = os.path.join(out_dir, "dataset_algorithm_timing_sum.png")
+        outputs["dataset_algorithm_timing_sum_png"] = _plot_algorithm_overview(
+            sum_rows,
+            out_sum_png,
+            "Dataset Algorithm Timing Sum",
+        )
+        out_sum_csv = os.path.join(out_dir, "dataset_algorithm_timing_sum.csv")
+        pd.DataFrame(sum_rows).sort_values("sec").to_csv(out_sum_csv, index=False)
+        outputs["dataset_algorithm_timing_sum_csv"] = out_sum_csv
+
+    # Segmentation-only and width/midline subset charts (mean metric).
+    if mean_rows:
+        df_mean = pd.DataFrame(mean_rows)
+        seg_subset = df_mean[df_mean["category"].isin(["baseline_seg", "manual", "auto"])].to_dict("records")
+        width_subset = df_mean[
+            df_mean["category"].isin(["baseline_width", "manual", "auto", "depth_distridge", "gt_centering"])
+        ].to_dict("records")
+        outputs["seg_chart"] = _plot_algorithm_overview(
+            seg_subset,
+            os.path.join(out_dir, "dataset_segmentation_timing.png"),
+            "Segmentation Timing",
+        )
+        outputs["width_chart"] = _plot_algorithm_overview(
+            width_subset,
+            os.path.join(out_dir, "dataset_width_methods_timing.png"),
+            "Width / Midline Methods Timing",
+        )
+        outputs["overview_chart"] = outputs.get("dataset_algorithm_timing_overview_png")
+
+    # Component charts
+    outputs["gt_centering_components_chart"] = _plot_components(
+        df_gt,
+        ["dt_compute_s", "centered_snap_s", "normals_centered_s"],
+        "Dataset GT Centering Components",
+        os.path.join(out_dir, "dataset_gt_centering_components.png"),
+    )
+    outputs["depth_distridge_components_chart"] = _plot_components(
+        df_depth,
+        ["depth_align_s", "depth_recess_s", "depth_costmap_s", "depth_dijkstra_s", "depth_postprocess_s", "normals_depth_s"],
+        "Dataset Depth Distridge Components",
+        os.path.join(out_dir, "dataset_depth_distridge_components.png"),
+    )
+
+    # Atomic vs combined charts
+    outputs["gt_centering_atomic_vs_combined_chart"] = _plot_atomic_vs_combined(
+        df_gt,
+        "GT Centering Atomic vs Combined",
+        os.path.join(out_dir, "dataset_gt_centering_atomic_vs_combined.png"),
+    )
+    outputs["depth_distridge_atomic_vs_combined_chart"] = _plot_atomic_vs_combined(
+        df_depth,
+        "Depth Distridge Atomic vs Combined",
+        os.path.join(out_dir, "dataset_depth_distridge_atomic_vs_combined.png"),
+    )
+
+    _log(verbose, f"[timing] mean_rows={len(mean_rows)} sum_rows={len(sum_rows)}")
     return outputs
 
 
@@ -2532,6 +2697,14 @@ def summarize_dataset_metrics(
         )
     )
     outputs.update(
+        _aggregate_gt_component_timings(
+            supervision_root=os.path.join(save_folder, "supervision"),
+            out_dir=out_dir,
+            evaluated_images=evaluated_images_set,
+            verbose=verbose,
+        )
+    )
+    outputs.update(
         _aggregate_gt_centering_weighted_summaries(
             save_folder=save_folder,
             out_dir=out_dir,
@@ -2554,6 +2727,55 @@ def summarize_dataset_metrics(
         )
     )
 
+    # Organize timing-related summary artifacts under a dedicated subfolder.
+    timing_dir = os.path.join(out_dir, "timing")
+    os.makedirs(timing_dir, exist_ok=True)
+
+    def _is_timing_output(k: str, p: str) -> bool:
+        kk = str(k).lower()
+        pp = str(p).lower()
+        base = os.path.basename(pp)
+        if "timing" in kk or "timings" in kk:
+            return True
+        if "timing" in base or "timings" in base:
+            return True
+        if kk in {
+            "seg_chart",
+            "width_chart",
+            "overview_chart",
+            "gt_centering_components_chart",
+            "depth_distridge_components_chart",
+            "gt_centering_atomic_vs_combined_chart",
+            "depth_distridge_atomic_vs_combined_chart",
+        }:
+            return True
+        return False
+
+    moved_outputs: Dict[str, str] = {}
+    for k, v in outputs.items():
+        if not isinstance(v, str):
+            continue
+        if not os.path.exists(v):
+            continue
+        if not _is_timing_output(k, v):
+            continue
+        try:
+            src_abs = os.path.abspath(v)
+            out_abs = os.path.abspath(out_dir)
+            if not src_abs.startswith(out_abs + os.sep):
+                continue
+            dst = os.path.join(timing_dir, os.path.basename(src_abs))
+            if os.path.abspath(dst) == src_abs:
+                continue
+            if os.path.exists(dst):
+                os.remove(dst)
+            import shutil
+            shutil.move(src_abs, dst)
+            moved_outputs[k] = dst
+        except Exception as e:
+            _log(verbose, f"[summarize] timing move failed for {k}: {e}")
+
+    outputs.update(moved_outputs)
     report["outputs"] = outputs
 
     report_json = os.path.join(out_dir, "dataset_summary_report.json")

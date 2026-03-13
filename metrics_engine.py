@@ -1755,6 +1755,334 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 }
             return out
 
+        def _build_depth_payload_from_gt_supervision(gt_sup_root_local):
+            """
+            Build depth_distridge evaluation payloads from existing gt_supervision.json.
+            Returns:
+                (atomic_dict, combined_dict)
+            """
+            import os
+            import json
+            import numpy as np
+
+            def _split_packed_xy(raw):
+                segs = []
+                cur = []
+                if raw is None:
+                    return segs
+                for p in (raw or []):
+                    try:
+                        x, y = p
+                    except Exception:
+                        x, y = None, None
+                    if x is None or y is None:
+                        if len(cur) >= 2:
+                            segs.append(np.asarray(cur, float))
+                        cur = []
+                        continue
+                    try:
+                        xf = float(x)
+                        yf = float(y)
+                    except Exception:
+                        continue
+                    if np.isfinite(xf) and np.isfinite(yf):
+                        cur.append([xf, yf])
+                if len(cur) >= 2:
+                    segs.append(np.asarray(cur, float))
+                return segs
+
+            def _pack_segs_with_nan(segs):
+                out = []
+                for i, S in enumerate(segs or []):
+                    arr = np.asarray(S, float)
+                    if arr.ndim != 2 or arr.shape[1] != 2 or len(arr) < 2:
+                        continue
+                    if i > 0:
+                        out.append([None, None])
+                    out.extend(arr.tolist())
+                return out
+
+            def _flatten_numeric_1d(raw):
+                out = []
+
+                def _rec(x):
+                    if x is None:
+                        return
+                    if isinstance(x, np.ndarray):
+                        if x.ndim == 0:
+                            try:
+                                v = float(x.item())
+                                if np.isfinite(v):
+                                    out.append(v)
+                            except Exception:
+                                pass
+                            return
+                        for vv in x.reshape(-1):
+                            _rec(vv)
+                        return
+                    if isinstance(x, (list, tuple)):
+                        for vv in x:
+                            _rec(vv)
+                        return
+                    try:
+                        v = float(x)
+                    except Exception:
+                        return
+                    if np.isfinite(v):
+                        out.append(v)
+
+                _rec(raw)
+                return out
+
+            def _normal_edge_points_from_normals(normals_obj):
+                if not isinstance(normals_obj, dict):
+                    return {}
+                e1x = normals_obj.get("edge1_x", []) or []
+                e1y = normals_obj.get("edge1_y", []) or []
+                e2x = normals_obj.get("edge2_x", []) or []
+                e2y = normals_obj.get("edge2_y", []) or []
+                n = min(len(e1x), len(e1y), len(e2x), len(e2y))
+                e1, e2 = [], []
+                for i in range(n):
+                    try:
+                        x1, y1 = float(e1x[i]), float(e1y[i])
+                        x2, y2 = float(e2x[i]), float(e2y[i])
+                    except Exception:
+                        continue
+                    if not (np.isfinite(x1) and np.isfinite(y1) and np.isfinite(x2) and np.isfinite(y2)):
+                        continue
+                    e1.append([x1, y1])
+                    e2.append([x2, y2])
+                if len(e1) < 2 or len(e2) < 2:
+                    return {}
+                return {"edge1": e1, "edge2": e2}
+
+            def _inflate_crop_to_full(mask_crop, bbox):
+                """
+                Convert local crop + bbox to full mask (smallest valid full mask).
+                bbox format: [x, y, w, h]
+                """
+                if mask_crop is None or bbox is None:
+                    return None
+                try:
+                    m = np.asarray(mask_crop)
+                    bx, by, bw, bh = map(int, bbox)
+                except Exception:
+                    return None
+                if m.ndim != 2 or m.size == 0:
+                    return None
+
+                m = m.astype(bool)
+                bx = max(0, bx)
+                by = max(0, by)
+                H = by + m.shape[0]
+                W = bx + m.shape[1]
+                full = np.zeros((H, W), dtype=bool)
+                y1 = by + m.shape[0]
+                x1 = bx + m.shape[1]
+                full[by:y1, bx:x1] = m
+                return full
+
+            def _as_bbox_xywh(bb):
+                if not (isinstance(bb, (list, tuple)) and len(bb) == 4):
+                    return None
+                try:
+                    x, y, w, h = map(int, bb)
+                except Exception:
+                    return None
+                if w <= 0 or h <= 0:
+                    return None
+                return [x, y, w, h]
+
+            def _bbox_from_segs(segs, pad=3):
+                pts = []
+                for S in (segs or []):
+                    arr = np.asarray(S, float)
+                    if arr.ndim != 2 or arr.shape[1] != 2 or len(arr) < 2:
+                        continue
+                    arr = arr[np.isfinite(arr).all(axis=1)]
+                    if len(arr) >= 2:
+                        pts.append(arr)
+                if not pts:
+                    return None
+                P = np.vstack(pts)
+                x0 = int(np.floor(np.min(P[:, 0]) - pad))
+                y0 = int(np.floor(np.min(P[:, 1]) - pad))
+                x1 = int(np.ceil(np.max(P[:, 0]) + pad))
+                y1 = int(np.ceil(np.max(P[:, 1]) + pad))
+                w = int(max(1, x1 - x0 + 1))
+                h = int(max(1, y1 - y0 + 1))
+                return [x0, y0, w, h]
+
+            def _crop_from_full_mask(full_u8, bbox_xywh):
+                bb = _as_bbox_xywh(bbox_xywh)
+                if bb is None:
+                    return None, None
+                x, y, w, h = bb
+                Hf, Wf = full_u8.shape[:2]
+                x0 = max(0, int(x))
+                y0 = max(0, int(y))
+                x1 = min(Wf, int(x + w))
+                y1 = min(Hf, int(y + h))
+                if x1 <= x0 or y1 <= y0:
+                    return None, None
+                crop = (np.asarray(full_u8[y0:y1, x0:x1]) > 0).astype(np.uint8)
+                return crop, [int(x0), int(y0), int(crop.shape[1]), int(crop.shape[0])]
+
+            sup_json = os.path.join(gt_sup_root_local or "", "gt_supervision.json")
+            if not os.path.isfile(sup_json):
+                print(f"[DEPTH PAYLOAD] missing supervision: {sup_json}")
+                return {}, {}
+
+            try:
+                with open(sup_json, "r", encoding="utf-8") as f:
+                    sup = json.load(f)
+            except Exception as e:
+                print(f"[DEPTH PAYLOAD] failed to read {sup_json}: {e}")
+                return {}, {}
+
+            cracks = sup.get("cracks", []) if isinstance(sup, dict) else []
+            if not isinstance(cracks, list):
+                return {}, {}
+
+            atomic_out = {}
+            combined_out = {}
+            masks_ok = 0
+
+            for c in cracks:
+                if not isinstance(c, dict):
+                    continue
+                kind = str(c.get("kind") or "").lower()
+                cid = str(c.get("id", "")).strip()
+                if not cid:
+                    continue
+
+                normals_obj = c.get("gt_normals_depth_centered")
+                if not isinstance(normals_obj, dict) or not normals_obj:
+                    normals_obj = c.get("depth_normals", {})
+                if not isinstance(normals_obj, dict):
+                    normals_obj = {}
+
+                normal_edges = _normal_edge_points_from_normals(normals_obj)
+                pred_widths = _flatten_numeric_1d(normals_obj.get("width_px", []))
+                pred_widths = [float(v) for v in pred_widths] if len(pred_widths) >= 2 else None
+                crop_u8 = None
+                safe_bbox = None
+                full_mask = None
+
+                raw_bbox = _as_bbox_xywh(c.get("mask_bbox"))
+                raw_crop = c.get("mask_crop")
+
+                if raw_crop is not None and raw_bbox is not None:
+                    crop_arr = np.asarray(raw_crop)
+                    if crop_arr.ndim == 2 and crop_arr.size > 0:
+                        crop_u8 = (crop_arr > 0).astype(np.uint8)
+                        full_mask = _inflate_crop_to_full(crop_u8, raw_bbox)
+                        bx = max(0, int(raw_bbox[0]))
+                        by = max(0, int(raw_bbox[1]))
+                        safe_bbox = [int(bx), int(by), int(crop_u8.shape[1]), int(crop_u8.shape[0])]
+
+                if (crop_u8 is None or safe_bbox is None) and raw_bbox is not None:
+                    crop_fallback, bbox_fallback = _crop_from_full_mask(gt_full, raw_bbox)
+                    if crop_fallback is not None and bbox_fallback is not None:
+                        crop_u8 = crop_fallback
+                        safe_bbox = bbox_fallback
+                        full_mask = _inflate_crop_to_full(crop_u8, safe_bbox)
+
+                if crop_u8 is None or safe_bbox is None:
+                    depth_mid_any = c.get("depth_midline", c.get("midline_depth_centered"))
+                    depth_segs_any = _split_packed_xy(depth_mid_any)
+                    bbox_mid = _bbox_from_segs(depth_segs_any, pad=3)
+                    if bbox_mid is not None:
+                        crop_fallback, bbox_fallback = _crop_from_full_mask(gt_full, bbox_mid)
+                        if crop_fallback is not None and bbox_fallback is not None:
+                            crop_u8 = crop_fallback
+                            safe_bbox = bbox_fallback
+                            full_mask = _inflate_crop_to_full(crop_u8, safe_bbox)
+
+                if crop_u8 is None or safe_bbox is None or full_mask is None:
+                    print(f"[DEPTH PAYLOAD] skip {kind}:{cid} missing/invalid mask artifacts after fallback")
+                    continue
+                masks_ok += 1
+
+                if kind == "atomic":
+                    depth_mid = c.get("depth_midline", c.get("midline_depth_centered"))
+                    depth_segs = _split_packed_xy(depth_mid)
+                    if not depth_segs:
+                        arr = np.asarray(depth_mid, float)
+                        if arr.ndim == 2 and arr.shape[1] == 2 and len(arr) >= 2:
+                            depth_segs = [arr]
+                    if not depth_segs:
+                        continue
+
+                    packed = _pack_segs_with_nan(depth_segs)
+                    ent = {
+                        "id": cid,
+                        "source": "depth_distridge",
+                        "midline": packed,
+                        "derived_midline": packed,
+                        "mask_bbox": safe_bbox,
+                        "mask_crop": crop_u8,
+                        "pred_mask": full_mask.astype(np.uint8),
+                        "members": c.get("members", []),
+                        "normal_edge_points": normal_edges,
+                    }
+                    if pred_widths is not None:
+                        ent["pred_widths"] = pred_widths
+                    atomic_out[cid] = ent
+                    continue
+
+                if kind == "combined":
+                    depth_segs = [
+                        np.asarray(S, float)
+                        for S in (c.get("depth_midline_segments") or [])
+                        if S is not None and len(S) >= 2
+                    ]
+                    if not depth_segs:
+                        depth_segs = _split_packed_xy(c.get("depth_midline", c.get("midline_depth_centered")))
+                    if not depth_segs:
+                        continue
+
+                    meta = c.get("depth_midline_segments_meta")
+                    if not isinstance(meta, list) or len(meta) != len(depth_segs):
+                        meta = [
+                            {"branch_id": int(i), "seg_idx": int(i)}
+                            for i in range(len(depth_segs))
+                        ]
+                    else:
+                        fixed = []
+                        for i, m in enumerate(meta):
+                            d = dict(m) if isinstance(m, dict) else {}
+                            d.setdefault("branch_id", int(i))
+                            d.setdefault("seg_idx", int(i))
+                            fixed.append(d)
+                        meta = fixed
+
+                    ent = {
+                        "id": cid,
+                        "source": "depth_distridge",
+                        "members": c.get("members", []),
+                        "mask_bbox": safe_bbox,
+                        "mask_crop": crop_u8,
+                        "pred_mask": full_mask.astype(np.uint8),
+                        "midline_segments": [np.asarray(S, float).tolist() for S in depth_segs],
+                        "midline_segments_meta": [dict(m) for m in meta],
+                        "derived_midline_segments": [np.asarray(S, float).tolist() for S in depth_segs],
+                        "derived_midline_segments_meta": [dict(m) for m in meta],
+                        "derived_midline": _pack_segs_with_nan(depth_segs),
+                        "normal_edge_points": normal_edges,
+                        "dominance_meta": c.get("dominance_meta"),
+                    }
+                    if pred_widths is not None:
+                        ent["pred_widths"] = pred_widths
+                    combined_out[cid] = ent
+
+            print(
+                f"[DEPTH PAYLOAD] built atomic={len(atomic_out)} combined={len(combined_out)} masks=OK({masks_ok}) "
+                f"from {sup_json}"
+            )
+            return atomic_out, combined_out
+
         # ------------------------------------------------------------------
         # WIDTH METRICS — TOTAL (atomic + combined merged)
         # ------------------------------------------------------------------
@@ -2189,51 +2517,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 atomic_src=atomic_src,
             )
 
-            def _detect_gt_variant_availability(gt_sup_root_local):
-                import os
-                import json
-
-                out = {
-                    "centered_gt": False,
-                    "centered_depth_gt": False,
-                }
-                sup_json = os.path.join(gt_sup_root_local or "", "gt_supervision.json")
-                if not os.path.isfile(sup_json):
-                    return out
-                try:
-                    with open(sup_json, "r", encoding="utf-8") as f:
-                        sup = json.load(f)
-                except Exception:
-                    return out
-
-                for e in (sup.get("cracks") or []):
-                    if not isinstance(e, dict):
-                        continue
-                    if (
-                        e.get("centered_midline") is not None
-                        or e.get("midline_auto_centered") is not None
-                        or e.get("midline_segments_auto_centered") is not None
-                    ):
-                        out["centered_gt"] = True
-                    if (
-                        e.get("depth_midline") is not None
-                        or e.get("midline_depth_centered") is not None
-                        or e.get("depth_midline_segments") is not None
-                    ):
-                        out["centered_depth_gt"] = True
-                    if out["centered_gt"] and out["centered_depth_gt"]:
-                        break
-                return out
-
             variant_ids = ["main"]
-            if str(midline_type or "").lower() == "manual":
-                gt_variants_avail = _detect_gt_variant_availability(gt_sup_root)
-                if gt_variants_avail.get("centered_gt", False):
-                    variant_ids.append("centered_gt")
-                if gt_variants_avail.get("centered_depth_gt", False):
-                    variant_ids.append("centered_depth_gt")
-                print(f"[WIDTH] GT variant availability: {gt_variants_avail}")
-
             variants = {
                 str(vid): {
                     "atomic": atomic_src,
@@ -2326,6 +2610,17 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     combined_src=combined_auto_for_width,
                     midline_type="auto"
                 )
+
+            # DEPTH_DISTRIDGE (from existing gt_supervision.json)
+            depth_atomic, depth_combined = _build_depth_payload_from_gt_supervision(gt_sup_root)
+            if depth_atomic or depth_combined:
+                _run_width_eval_total(
+                    atomic_src=depth_atomic,
+                    combined_src=depth_combined,
+                    midline_type="depth_distridge",
+                )
+            else:
+                print("[WIDTH] depth_distridge skipped: no depth payload in gt_supervision.json")
 
         except Exception as e:
             print(f"[DEBUG WIDTH] failed: {e}")

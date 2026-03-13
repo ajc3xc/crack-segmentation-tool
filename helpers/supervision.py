@@ -1413,8 +1413,8 @@ def compute_centered_midline_and_normals(
     max_radius=60,
     domain_mode="terr_and_mask",
     snap_kwargs=None,
-    depth_alpha=0.55,
-    depth_beta=0.45,
+    depth_alpha=0.5,
+    depth_beta=0.5,
     depth_eps=1e-3,
     diag_out=None,
     endpoint_mode="atomic",
@@ -1557,11 +1557,17 @@ def compute_centered_midline_and_normals(
         return result
 
     t_refine0 = time.perf_counter()
+    # Suppress small ridge bumps before Sobel-based subpixel correction.
+    depth_score_smooth = cv2.GaussianBlur(
+        np.asarray(depth_score, np.float32),
+        (0, 0),
+        1.0,
+    )
     depth_path_refined = _refine_path_sobel(
         depth_path_raw,
-        depth_score,
-        iterations=4,
-        step=0.35,
+        depth_score_smooth,
+        iterations=2,
+        step=0.15,
     )
     result["timing"]["depth"]["refine_s"] = float(time.perf_counter() - t_refine0)
 
@@ -2338,7 +2344,7 @@ def export_gt_centering_metrics(
                 df_all=dcmp,
                 out_dir=os.path.join(depth_distridge_dir, "diagnostics"),
                 selected_family=None,
-                title_suffix="Depth DiStridge Audit",
+                title_suffix="Depth DistRidge Audit",
             )
 
     # New all-comparison files.
