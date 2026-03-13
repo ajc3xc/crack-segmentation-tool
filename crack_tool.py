@@ -1454,7 +1454,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         FAST_METRICS_MODE = True
         FAST_IMAGE_INDICES = None
         #FAST_IMAGE_INDICES = [21, 22, *range(60, 66)]  # optional subset
-        FAST_IMAGE_INDICES = [97]
+        FAST_IMAGE_INDICES = [43]
         #FAST_IMAGE_INDICES = [110,97]
         # FAST edge-sweep toggle:
         # True  -> run per-image edge sweep + best-family selection in fast mode

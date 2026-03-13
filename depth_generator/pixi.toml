@@ -21,3 +21,4 @@ torchvision = "*"
 [pypi-dependencies]
 awesome-depth-anything-3 = "*"
 addict = "*"
+wslpath = "*"

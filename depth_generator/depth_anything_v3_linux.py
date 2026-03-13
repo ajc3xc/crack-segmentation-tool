@@ -1,5 +1,6 @@
 import warnings
-print("importing torch")
+import subprocess
+import platform
 import torch
 import cv2
 import numpy as np
@@ -8,6 +9,8 @@ import time
 import csv
 from pathlib import Path
 
+print("Importing torch")
+
 # Suppress moviepy warnings
 warnings.filterwarnings(
     "ignore",
@@ -15,15 +18,43 @@ warnings.filterwarnings(
     module=r"moviepy(\.|$)",
 )
 
-print("importing depth anything3")
+print("Importing depth anything3")
 from depth_anything_3.api import DepthAnything3
 
 
 # -------------------------------------------------
-# Hardcoded paths
+# Helper: Windows → WSL path conversion
+# -------------------------------------------------
+def wsl_convert(path):
+    """
+    Convert Windows path to WSL path if running in Linux.
+    """
+    if platform.system() == "Linux" and ":" in path:
+        try:
+            result = subprocess.check_output(
+                ["wslpath", "-u", path],
+                text=True
+            ).strip()
+            return result
+        except Exception:
+            return path
+    return path
+
+
+# -------------------------------------------------
+# Hardcoded paths (Windows format allowed)
 # -------------------------------------------------
 INPUT_DIR = r"C:\Users\13144\Documents\Masters_Thesis\datasets\SUT_Compressed\Original_Image"
 OUTPUT_DIR = r"C:\Users\13144\Documents\Masters_Thesis\datasets\SUT_Compressed\depth"
+
+
+# Convert paths if needed
+INPUT_DIR = wsl_convert(INPUT_DIR)
+OUTPUT_DIR = wsl_convert(OUTPUT_DIR)
+
+print("INPUT_DIR:", INPUT_DIR)
+print("OUTPUT_DIR:", OUTPUT_DIR)
+
 
 TIMING_PER_IMAGE = os.path.join(OUTPUT_DIR, "timing_per_image.csv")
 TIMING_SUMMARY = os.path.join(OUTPUT_DIR, "timing_summary.csv")
@@ -50,23 +81,6 @@ model = model.to(device)
 model.eval()
 
 print("Model running on:", next(model.parameters()).device)
-
-
-# -------------------------------------------------
-# Helper: compute valid inference size
-# -------------------------------------------------
-def compute_target_size(h, w, divisor=14):
-    short_side = min(h, w)
-    short_side = (short_side // divisor) * divisor
-    scale = short_side / min(h, w)
-
-    new_h = int(h * scale)
-    new_w = int(w * scale)
-
-    new_h = (new_h // divisor) * divisor
-    new_w = (new_w // divisor) * divisor
-
-    return new_h, new_w
 
 
 # -------------------------------------------------
@@ -112,38 +126,27 @@ for img_path in image_paths:
 
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    h, w = img_rgb.shape[:2]
-
-    # compute model input size
-    new_h, new_w = compute_target_size(h, w)
-
-    print(f"Running model at {new_h} x {new_w}")
-
-    img_resized = cv2.resize(img_rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
     start = time.perf_counter()
 
     with torch.inference_mode():
-        pred = model.inference([img_resized])
+        pred = model.inference([img_rgb])
 
     depth = pred.depth[0]
 
     if isinstance(depth, torch.Tensor):
         depth = depth.detach().cpu().numpy()
 
-    # upscale depth back to original resolution
-    depth = cv2.resize(depth, (w, h), interpolation=cv2.INTER_CUBIC)
-
     end = time.perf_counter()
 
     elapsed = end - start
 
 
-    # Normalize for visualization
+    # Normalize depth for visualization
     depth_norm = (depth - depth.min()) / (depth.max() - depth.min() + 1e-8)
     depth_vis = (depth_norm * 255).astype(np.uint8)
 
     cv2.imwrite(output_path, depth_vis)
+
 
     timings.append((img_path.name, elapsed))
 

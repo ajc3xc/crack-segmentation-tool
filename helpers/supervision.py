@@ -317,6 +317,7 @@ def _cropped_preview(entry, gt_mask_u8, original_image, out_dir):
     Generates:
         1) Canonical GT preview (manual only)
         2) Comparison preview (manual vs centered) if available
+        3) Comparison preview (manual vs depth_distridge) if available
 
     Manual GT remains authoritative.
     Centered GT is diagnostic only.
@@ -454,6 +455,58 @@ def _cropped_preview(entry, gt_mask_u8, original_image, out_dir):
             bbox=bbox_plot,
             out_png=out_cmp,
             title=f"{kind} {crack_id} - Manual vs Centered",
+        )
+
+    # C) Comparison preview (manual + depth_distridge)
+    depth_mid_segs = []
+    if entry.get("depth_midline_segments"):
+        depth_mid_segs = [
+            np.asarray(S, float)
+            for S in (entry.get("depth_midline_segments") or [])
+            if S is not None and len(S) >= 2
+        ]
+    else:
+        dm = entry.get("depth_midline", entry.get("midline_depth_centered"))
+        if dm is not None:
+            arr = np.asarray(dm, float)
+            if arr.ndim == 2 and len(arr) >= 2:
+                depth_mid_segs = [arr]
+            else:
+                depth_mid_segs = _split_midline_packed(dm)
+
+    if depth_mid_segs:
+        depth_mid_crop = [S - shift for S in depth_mid_segs]
+        depth_normals = entry.get("depth_normals")
+        if not isinstance(depth_normals, dict) or not depth_normals:
+            depth_normals = entry.get("gt_normals_depth_centered")
+        if not isinstance(depth_normals, dict):
+            depth_normals = {}
+
+        de1 = _split_xy_none_seps(
+            depth_normals.get("edge1_x", []),
+            depth_normals.get("edge1_y", []),
+        )
+        de2 = _split_xy_none_seps(
+            depth_normals.get("edge2_x", []),
+            depth_normals.get("edge2_y", []),
+        )
+        de1_crop = [S - shift for S in de1]
+        de2_crop = [S - shift for S in de2]
+
+        out_depth_cmp = os.path.join(out_dir, f"{kind}_{crack_id}_crop_compare_depth_distridge.png")
+        plot_edges_and_normals(
+            base_image=crop_img,
+            midline_segs=manual_mid_crop,
+            derived_midline_segs=depth_mid_crop,
+            edge1_segs=[],
+            edge2_segs=[],
+            norm1_segs=de1_crop,
+            norm2_segs=de2_crop,
+            sparsity=5,
+            gt_plot=False,
+            bbox=bbox_plot,
+            out_png=out_depth_cmp,
+            title=f"{kind} {crack_id} - Manual vs DepthDistridge",
         )
 # ============================================================
 # GLOBAL OVERVIEW (with legend + title)
@@ -1267,6 +1320,58 @@ def _postprocess_midline_polyline(mid_xy, *, keep_endpoints=True):
     return np.asarray(S, float)
 
 
+def _refine_path_sobel(path_xy, score_map, *, iterations=4, step=0.35):
+    """
+    Subpixel ridge refinement for a path using score-map Sobel gradients.
+    Endpoints are kept fixed.
+    """
+    path = np.asarray(path_xy, np.float32).copy()
+    score = np.asarray(score_map, np.float32)
+
+    if path.ndim != 2 or path.shape[1] != 2 or len(path) < 3:
+        return np.asarray(path_xy, float)
+    if score.ndim != 2:
+        return np.asarray(path_xy, float)
+
+    gx = cv2.Sobel(score, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(score, cv2.CV_32F, 0, 1, ksize=3)
+    h, w = score.shape
+
+    def bilinear(img, x, y):
+        x0 = int(np.clip(np.floor(x), 0, w - 1))
+        x1 = int(np.clip(x0 + 1, 0, w - 1))
+        y0 = int(np.clip(np.floor(y), 0, h - 1))
+        y1 = int(np.clip(y0 + 1, 0, h - 1))
+
+        dx = float(x) - float(x0)
+        dy = float(y) - float(y0)
+
+        v00 = img[y0, x0]
+        v10 = img[y0, x1]
+        v01 = img[y1, x0]
+        v11 = img[y1, x1]
+
+        return (
+            v00 * (1.0 - dx) * (1.0 - dy)
+            + v10 * dx * (1.0 - dy)
+            + v01 * (1.0 - dx) * dy
+            + v11 * dx * dy
+        )
+
+    for _ in range(max(0, int(iterations))):
+        for i in range(1, len(path) - 1):
+            x, y = float(path[i, 0]), float(path[i, 1])
+            gxi = float(bilinear(gx, x, y))
+            gyi = float(bilinear(gy, x, y))
+            g = np.array([gxi, gyi], dtype=np.float32)
+            n = float(np.linalg.norm(g)) + 1e-6
+            path[i] += float(step) * (g / n)
+            path[i, 0] = np.clip(path[i, 0], 0.0, float(w - 1))
+            path[i, 1] = np.clip(path[i, 1], 0.0, float(h - 1))
+
+    return np.asarray(path, float)
+
+
 def _compute_normals_for_midline(
     *,
     mid_xy,
@@ -1382,6 +1487,7 @@ def compute_centered_midline_and_normals(
                 "recess_s": 0.0,
                 "costmap_s": 0.0,
                 "dijkstra_s": 0.0,
+                "refine_s": 0.0,
                 "postprocess_s": 0.0,
             },
             "normals": {
@@ -1450,8 +1556,17 @@ def compute_centered_midline_and_normals(
     if depth_path_raw is None or len(depth_path_raw) < 2:
         return result
 
+    t_refine0 = time.perf_counter()
+    depth_path_refined = _refine_path_sobel(
+        depth_path_raw,
+        depth_score,
+        iterations=4,
+        step=0.35,
+    )
+    result["timing"]["depth"]["refine_s"] = float(time.perf_counter() - t_refine0)
+
     t_post0 = time.perf_counter()
-    depth_mid = _postprocess_midline_polyline(depth_path_raw, keep_endpoints=True)
+    depth_mid = _postprocess_midline_polyline(depth_path_refined, keep_endpoints=True)
     result["timing"]["depth"]["postprocess_s"] = float(time.perf_counter() - t_post0)
 
     depth_normals_diag = {}
@@ -1482,6 +1597,10 @@ def plot_midline_centering_debug(
     show_dt_panel=True,
     show_territory=True,
     territory_alpha=0.25,
+    compare_label="Centered Midline",
+    compare_color="cyan",
+    left_panel_title="manual vs centered (mask)",
+    right_panel_title="DT ridge view (domain)",
 ):
     """
     Plot manual vs centered midlines over crack mask (crop around bbox).
@@ -1549,7 +1668,7 @@ def plot_midline_centering_debug(
         rgb0 = (0.75 * rgb0 + 0.25 * overlay).astype(np.uint8)
     ax0.imshow(rgb0)
     ax0.axis("off")
-    ax0.set_title("manual vs centered (mask)", fontsize=10)
+    ax0.set_title(left_panel_title, fontsize=10)
 
     if show_dt_panel:
         if T is not None:
@@ -1565,7 +1684,7 @@ def plot_midline_centering_debug(
         # Pure magma for DT
         ax1.imshow(dt_crop, cmap="magma")
         ax1.axis("off")
-        ax1.set_title("DT ridge view (domain)", fontsize=10)
+        ax1.set_title(right_panel_title, fontsize=10)
 
         # Territory overlay as pure white alpha mask (no colormap)
         if show_territory and T is not None:
@@ -1589,7 +1708,7 @@ def plot_midline_centering_debug(
                 ax.plot(
                     S[:, 0] - x0,
                     S[:, 1] - y0,
-                    color="cyan",
+                    color=compare_color,
                     lw=2.5,
                     alpha=0.95,
                     zorder=2,
@@ -1641,11 +1760,13 @@ def plot_midline_centering_debug(
 
     # Figure-level legend on the right (applies to both panels).
     handles = [
-        Line2D([], [], color="cyan", lw=2.5, linestyle="-", label="Centered Midline"),
+        Line2D([], [], color=compare_color, lw=2.5, linestyle="-", label=str(compare_label)),
         Line2D([], [], color="yellow", lw=2.0, linestyle="--", label="Manual Midline"),
-        Line2D([], [], marker="o", linestyle="None", color="magenta", markersize=5, label="Centered Invalid Width"),
-        Line2D([], [], marker="o", linestyle="None", color="red", markersize=5, label="Manual Invalid Width"),
     ]
+    if invalid_center_masks is not None:
+        handles.append(Line2D([], [], marker="o", linestyle="None", color="magenta", markersize=5, label=f"{compare_label} Invalid Width"))
+    if invalid_manual_masks is not None:
+        handles.append(Line2D([], [], marker="o", linestyle="None", color="red", markersize=5, label="Manual Invalid Width"))
     fig.subplots_adjust(right=0.83)
     fig.legend(
         handles=handles,
@@ -1717,86 +1838,6 @@ def plot_depth_cost_diagnostic(
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
 
-
-def plot_midline_depth_overlay_debug(
-    *,
-    out_path,
-    original_image,
-    crack_mask_u8,
-    manual_segs,
-    centered_segs,
-    depth_segs,
-    bbox_xywh=None,
-    title="Manual vs Centered vs Depth",
-):
-    import matplotlib.pyplot as plt
-    from matplotlib.lines import Line2D
-
-    img = np.asarray(original_image)
-    if img.ndim == 2:
-        img_rgb = np.stack([img] * 3, axis=-1)
-    else:
-        img_rgb = img.copy()
-
-    M = (np.asarray(crack_mask_u8) > 0).astype(np.uint8)
-    H, W = M.shape[:2]
-    if img_rgb.shape[:2] != (H, W):
-        img_rgb = cv2.resize(img_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
-
-    seg_overlay = np.zeros((H, W, 3), np.uint8)
-    seg_overlay[M > 0] = (40, 220, 40)
-    base = np.clip(0.7 * img_rgb.astype(np.float32) + 0.3 * seg_overlay.astype(np.float32), 0, 255).astype(np.uint8)
-
-    if bbox_xywh is not None and len(bbox_xywh) == 4:
-        x, y, w, h = map(int, bbox_xywh)
-        pad = 25
-        x0 = max(0, x - pad)
-        y0 = max(0, y - pad)
-        x1 = min(W, x + w + pad)
-        y1 = min(H, y + h + pad)
-    else:
-        ys, xs = np.where(M > 0)
-        if xs.size:
-            pad = 25
-            x0 = max(0, int(xs.min()) - pad)
-            y0 = max(0, int(ys.min()) - pad)
-            x1 = min(W, int(xs.max()) + 1 + pad)
-            y1 = min(H, int(ys.max()) + 1 + pad)
-        else:
-            x0, y0, x1, y1 = 0, 0, W, H
-
-    fig, ax = plt.subplots(1, 1, figsize=(7.6, 6.6), dpi=220)
-    ax.imshow(base[y0:y1, x0:x1])
-    ax.axis("off")
-    ax.set_title(title, fontsize=10)
-
-    for S in (manual_segs or []):
-        S = np.asarray(S, float)
-        if S.ndim == 2 and len(S) >= 2:
-            ax.plot(S[:, 0] - x0, S[:, 1] - y0, color="yellow", lw=2.0, linestyle="--", zorder=4)
-    for S in (centered_segs or []):
-        S = np.asarray(S, float)
-        if S.ndim == 2 and len(S) >= 2:
-            ax.plot(S[:, 0] - x0, S[:, 1] - y0, color="cyan", lw=2.2, zorder=3)
-    for S in (depth_segs or []):
-        S = np.asarray(S, float)
-        if S.ndim == 2 and len(S) >= 2:
-            ax.plot(S[:, 0] - x0, S[:, 1] - y0, color="magenta", lw=2.2, zorder=5)
-
-    if bbox_xywh is not None and len(bbox_xywh) == 4:
-        x, y, w, h = map(int, bbox_xywh)
-        ax.add_patch(plt.Rectangle((x - x0, y - y0), w, h, fill=False, edgecolor="dodgerblue", linewidth=1.2))
-
-    handles = [
-        Line2D([], [], color="yellow", lw=2.0, linestyle="--", label="Manual"),
-        Line2D([], [], color="cyan", lw=2.2, linestyle="-", label="Centered"),
-        Line2D([], [], color="magenta", lw=2.2, linestyle="-", label="Depth-guided"),
-    ]
-    ax.legend(handles=handles, loc="lower right", fontsize=8, framealpha=0.9)
-
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    fig.savefig(out_path, bbox_inches="tight")
-    plt.close(fig)
 
 def _dom_mask_to_local_array(m, bw, bh):
     """
@@ -2742,17 +2783,20 @@ def export_gt_supervision_for_image(
                 if depth_xy_arr is not None:
                     out_overlay = os.path.join(
                         auto_center_root,
-                        f"atomic_{scid}_manual_vs_centered_vs_depth_distridge.png",
+                        f"atomic_{scid}_manual_vs_depth_distridge.png",
                     )
-                    plot_midline_depth_overlay_debug(
+                    plot_midline_centering_debug(
                         out_path=out_overlay,
-                        original_image=original_image,
                         crack_mask_u8=crack_mask_clipped,
                         manual_segs=[mid_xy],
-                        centered_segs=[np.asarray(centered_xy, float)],
-                        depth_segs=[depth_xy_arr],
+                        centered_segs=[depth_xy_arr],
+                        territory_u8=terr,
                         bbox_xywh=atomic_entry.get("mask_bbox"),
-                        title=f"atomic {scid}: manual vs centered vs depth_distridge",
+                        title=f"atomic {scid}: manual vs depth_distridge",
+                        compare_label="Depth Distridge Midline",
+                        compare_color="magenta",
+                        left_panel_title="manual vs depth_distridge (mask)",
+                        right_panel_title="DT ridge view (depth domain)",
                     )
 
         return int(job["order"]), atomic_entry, float(atomic_compute_sec), float(atomic_center_sec)
@@ -3403,17 +3447,20 @@ def export_gt_supervision_for_image(
                 if combined_entry.get("depth_midline_segments"):
                     out_overlay = os.path.join(
                         auto_center_root,
-                        f"combined_{tag_name}_manual_vs_centered_vs_depth_distridge.png",
+                        f"combined_{tag_name}_manual_vs_depth_distridge.png",
                     )
-                    plot_midline_depth_overlay_debug(
+                    plot_midline_centering_debug(
                         out_path=out_overlay,
-                        original_image=original_image,
                         crack_mask_u8=crack_mask_clipped,
                         manual_segs=[np.asarray(S, float) for S in segs],
-                        centered_segs=centered_segs,
-                        depth_segs=[np.asarray(S, float) for S in (combined_entry.get("depth_midline_segments") or []) if S is not None and len(S) >= 2],
+                        centered_segs=[np.asarray(S, float) for S in (combined_entry.get("depth_midline_segments") or []) if S is not None and len(S) >= 2],
+                        territory_u8=terr_vis,
                         bbox_xywh=combined_entry.get("mask_bbox"),
-                        title=f"combined {tag_name}: manual vs centered vs depth_distridge",
+                        title=f"combined {tag_name}: manual vs depth_distridge",
+                        compare_label="Depth Distridge Midline",
+                        compare_color="magenta",
+                        left_panel_title="manual vs depth_distridge (mask)",
+                        right_panel_title="DT ridge view (depth domain)",
                     )
 
         final_entries.append(combined_entry)
