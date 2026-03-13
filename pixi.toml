@@ -18,12 +18,14 @@ numpy = "1.26.*"
 scipy = "1.11.*"
 matplotlib = "3.8.*"
 scikit-image = "0.19.*"
+opencv = "4.11.*"
 
 seaborn = "*"
 psutil = "*"
 hfm = "0.2.13.*"
 cupy = "12.*"
 cudatoolkit = ">=11.8.0,<12"
+fontconfig = "*"
 
 # ==========================
 # CUDA + CuPy (GPU Support)
@@ -43,17 +45,18 @@ cudatoolkit = ">=11.8.0,<12"
 
 [pypi-dependencies]
 pyqt5 = ">=5.15.11,<6"
-opencv-contrib-python = ">=4.11,<5"
 plotly = ">=6,<7"
 scikit-fmm = "*"
 agd = ">=0.2.16,<0.3"
 shapely = ">=2,<3"
 pandas = "*"
 rasterio = ">=1.3,<2"
+opencv-python = "*"
 
 # ==========================
 # Linux Qt Fix
 # ==========================
 
 [target.linux-64.activation.env]
-QT_QPA_PLATFORM_PLUGIN_PATH = ".pixi/envs/default/lib/python3.11/site-packages/PyQt5/Qt5/plugins/platforms"
+QT_QPA_PLATFORM_PLUGIN_PATH = ".pixi/envs/default/plugins/platforms"
+XDG_RUNTIME_DIR = "/tmp"
