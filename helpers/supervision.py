@@ -2415,9 +2415,9 @@ def export_gt_supervision_for_image(
     depth_full: np.ndarray | None = None,
     enable_auto_centering: bool = True,
     auto_centering_debug: bool = True,
-    auto_centering_window_half_size: int = 50,
+    auto_centering_window_half_size: int = 75,
     auto_centering_iters: int = 30,
-    auto_centering_step_px: float = 0.35,
+    auto_centering_step_px: float = 0.3,
     auto_centering_domain_atomic: str = "terr_and_mask",
     auto_centering_domain_combined: str = "terr_and_mask",
 ):

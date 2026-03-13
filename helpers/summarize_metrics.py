@@ -11,6 +11,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
+import re
 
 plt.ioff()
 
@@ -113,6 +114,20 @@ def _save_bar(
     plt.tight_layout()
     plt.savefig(out_png)
     plt.close()
+
+
+def _display_timing_component_name(name: str) -> str:
+    s = str(name)
+    low = s.lower()
+    if low.startswith("shared_mat_gpu"):
+        return "medial_base"
+    if low.startswith("skeleton_dse"):
+        return "medial_dse"
+    if low.startswith("pca") or low.startswith("esd") or low.startswith("eob"):
+        s = s.replace("_width_dse", "_width")
+        s = s.replace("_dse", "")
+    s = re.sub(r"(_sec|_s)$", "", s)
+    return s
 
 
 def _list_image_metric_dirs(metrics_root: str) -> List[str]:
@@ -1744,10 +1759,11 @@ def _aggregate_baseline_timings(
             if pd.api.types.is_numeric_dtype(all_df[c]) and (c.endswith("_s") or c.endswith("_sec"))
         ]
         if num_cols:
+            disp_cols = [_display_timing_component_name(c) for c in num_cols]
             vals = [float(pd.to_numeric(all_df[c], errors="coerce").mean()) for c in num_cols]
             out_png = os.path.join(out_dir, "dataset_baseline_timings_components.png")
             _save_bar(
-                num_cols,
+                disp_cols,
                 vals,
                 out_png=out_png,
                 title="Width Baseline Timing Components (mean)",
@@ -1758,7 +1774,7 @@ def _aggregate_baseline_timings(
             vals_sum = [float(pd.to_numeric(all_df[c], errors="coerce").sum()) for c in num_cols]
             out_png_sum = os.path.join(out_dir, "sum_dataset_baseline_timings_components.png")
             _save_bar(
-                num_cols,
+                disp_cols,
                 vals_sum,
                 out_png=out_png_sum,
                 title="Width Baseline Timing Components (sum)",
@@ -1769,7 +1785,7 @@ def _aggregate_baseline_timings(
             out_csv_sum = os.path.join(out_dir, "sum_dataset_baseline_timings_components.csv")
             pd.DataFrame(
                 {
-                    "component": [str(c) for c in num_cols],
+                    "component": [str(c) for c in disp_cols],
                     "total_sec": [float(v) for v in vals_sum],
                 }
             ).to_csv(out_csv_sum, index=False)
@@ -2340,6 +2356,110 @@ def _aggregate_gt_component_timings(
     return outputs
 
 
+def _aggregate_depth_generation_timings(
+    *,
+    out_dir: str,
+    depth_timing_csv: Optional[str],
+    evaluated_images: Optional[set] = None,
+    verbose: bool = True,
+) -> Dict[str, str]:
+    outputs: Dict[str, str] = {}
+    if not depth_timing_csv or not os.path.isfile(depth_timing_csv):
+        return outputs
+
+    df = _safe_read_csv(depth_timing_csv)
+    if df is None or df.empty:
+        return outputs
+
+    # Accept common schemas from depth export.
+    img_col = "image" if "image" in df.columns else None
+    sec_col = "seconds" if "seconds" in df.columns else None
+    if img_col is None:
+        for c in df.columns:
+            if str(c).lower() in {"image_name", "filename", "file", "name"}:
+                img_col = c
+                break
+    if sec_col is None:
+        for c in df.columns:
+            if str(c).lower() in {"sec", "time_sec", "inference_seconds", "seconds"}:
+                sec_col = c
+                break
+    if img_col is None or sec_col is None:
+        _log(verbose, f"[summarize] depth generation timing csv missing required columns: {depth_timing_csv}")
+        return outputs
+
+    eval_set = {str(x) for x in (evaluated_images or set())}
+    d = df[[img_col, sec_col]].copy()
+    d["image"] = d[img_col].astype(str).apply(lambda s: os.path.splitext(os.path.basename(s))[0])
+    d["depth_generation_s"] = pd.to_numeric(d[sec_col], errors="coerce")
+    d = d[np.isfinite(d["depth_generation_s"])].copy()
+    if eval_set:
+        d = d[d["image"].isin(eval_set)].copy()
+    if d.empty:
+        return outputs
+
+    # Collapse duplicates per image if present.
+    d = d.groupby("image", dropna=False, as_index=False)["depth_generation_s"].mean()
+    d["source_file"] = depth_timing_csv
+
+    all_csv = os.path.join(out_dir, "dataset_depth_generation_timing_all.csv")
+    d.to_csv(all_csv, index=False)
+    outputs["dataset_depth_generation_timing_all_csv"] = all_csv
+
+    # Optional weights by image from edge-stage timing output.
+    weight_map = {}
+    edge_csv = os.path.join(out_dir, "dataset_edge_tracking_stage_all.csv")
+    edge_df = _safe_read_csv(edge_csv)
+    if edge_df is not None and not edge_df.empty and "image" in edge_df.columns:
+        wcol = next((c for c in ["crack_px", "length_px", "finite_len_px"] if c in edge_df.columns), None)
+        if wcol is not None:
+            ew = edge_df[["image", wcol]].copy()
+            ew["image"] = ew["image"].astype(str)
+            ew[wcol] = pd.to_numeric(ew[wcol], errors="coerce")
+            ew = ew[np.isfinite(ew[wcol]) & (ew[wcol] > 0)]
+            if not ew.empty:
+                weight_map = ew.groupby("image", dropna=False)[wcol].sum().to_dict()
+
+    vals = pd.to_numeric(d["depth_generation_s"], errors="coerce").to_numpy(float)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return outputs
+    mean_t = float(np.mean(vals))
+    total_t = float(np.sum(vals))
+
+    if weight_map:
+        ww = np.asarray([float(weight_map.get(im, np.nan)) for im in d["image"].astype(str).tolist()], dtype=float)
+        vv = pd.to_numeric(d["depth_generation_s"], errors="coerce").to_numpy(float)
+        ok = np.isfinite(vv) & np.isfinite(ww) & (ww > 0)
+        weighted_mean_t = float(np.sum(vv[ok] * ww[ok]) / np.sum(ww[ok])) if np.any(ok) else mean_t
+    else:
+        weighted_mean_t = mean_t
+
+    missing_count = 0
+    if eval_set:
+        missing_count = int(len(eval_set.difference(set(d["image"].astype(str).tolist()))))
+
+    roll_df = pd.DataFrame(
+        [
+            {
+                "category": "depth_generation",
+                "component": "depth_generation_s",
+                "mean_sec": mean_t,
+                "weighted_mean_sec": weighted_mean_t,
+                "total_sec": total_t,
+                "count": int(len(d)),
+                "missing_count": int(missing_count),
+            }
+        ]
+    )
+    roll_csv = os.path.join(out_dir, "dataset_depth_generation_timing_rollup.csv")
+    roll_df.to_csv(roll_csv, index=False)
+    outputs["dataset_depth_generation_timing_rollup_csv"] = roll_csv
+
+    _log(verbose, f"[summarize] depth generation timings matched={len(d)} missing={missing_count}")
+    return outputs
+
+
 def _plot_dataset_full_timing_overview(
     out_dir: str,
     *,
@@ -2366,10 +2486,13 @@ def _plot_dataset_full_timing_overview(
             n = np.nan
         return n if np.isfinite(n) else np.nan
 
-    def _add(rows, method, sec, category):
+    def _add(rows, method, sec, category, err=None):
         v = _safe_num(sec)
         if np.isfinite(v) and (v > 0):
-            rows.append({"method": str(method), "sec": float(v), "category": str(category)})
+            e = _safe_num(err)
+            if not np.isfinite(e) or e < 0:
+                e = 0.0
+            rows.append({"method": str(method), "sec": float(v), "category": str(category), "err": float(e)})
 
     def _plot_algorithm_overview(method_rows, out_png, title):
         if not method_rows:
@@ -2377,6 +2500,7 @@ def _plot_dataset_full_timing_overview(
         method_rows = sorted(method_rows, key=lambda x: x["sec"])
         labels = [r["method"] for r in method_rows]
         vals = [r["sec"] for r in method_rows]
+        errs = [max(0.0, float(pd.to_numeric(r.get("err", 0.0), errors="coerce") or 0.0)) for r in method_rows]
         colors = {
             "baseline_seg": "#2ca02c",
             "baseline_width": "#ff7f0e",
@@ -2392,6 +2516,16 @@ def _plot_dataset_full_timing_overview(
         fig, ax = plt.subplots(figsize=(fig_w, 4.2), dpi=180)
         x = np.arange(len(labels))
         ax.bar(x, vals, color=bar_colors)
+        ax.errorbar(
+            x,
+            vals,
+            yerr=np.asarray(errs, float),
+            fmt="none",
+            ecolor="black",
+            elinewidth=1.1,
+            capsize=3,
+            zorder=3,
+        )
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
         ax.set_ylabel("seconds")
@@ -2415,19 +2549,36 @@ def _plot_dataset_full_timing_overview(
             return None
         labels = []
         vals = []
+        errs = []
         for c in cols:
             if c not in df.columns:
                 continue
-            v = _safe_num(pd.to_numeric(df[c], errors="coerce").mean())
+            arr = pd.to_numeric(df[c], errors="coerce").to_numpy(float)
+            arr = arr[np.isfinite(arr)]
+            if arr.size == 0:
+                continue
+            v = _safe_num(np.mean(arr))
+            e = _safe_num(np.std(arr))
             if np.isfinite(v):
                 labels.append(str(c))
                 vals.append(float(v))
+                errs.append(float(e) if np.isfinite(e) and e > 0 else 0.0)
         if not vals:
             return None
         fig_w = max(6.0, 0.65 * len(labels))
         fig, ax = plt.subplots(figsize=(fig_w, 4.0), dpi=180)
         x = np.arange(len(labels))
         ax.bar(x, vals, color="#4c78a8")
+        ax.errorbar(
+            x,
+            vals,
+            yerr=np.asarray(errs, float),
+            fmt="none",
+            ecolor="black",
+            elinewidth=1.1,
+            capsize=3,
+            zorder=3,
+        )
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
         ax.set_ylabel("seconds")
@@ -2441,13 +2592,33 @@ def _plot_dataset_full_timing_overview(
     def _plot_atomic_vs_combined(df, title, out_png):
         if df is None or df.empty:
             return None
-        atomic = _safe_num(pd.to_numeric(df.get("atomic_centering_sec"), errors="coerce").mean())
-        combined = _safe_num(pd.to_numeric(df.get("combined_centering_sec"), errors="coerce").mean())
+        a_arr = pd.to_numeric(df.get("atomic_centering_sec"), errors="coerce").to_numpy(float)
+        c_arr = pd.to_numeric(df.get("combined_centering_sec"), errors="coerce").to_numpy(float)
+        a_arr = a_arr[np.isfinite(a_arr)]
+        c_arr = c_arr[np.isfinite(c_arr)]
+        atomic = _safe_num(np.mean(a_arr) if a_arr.size else np.nan)
+        combined = _safe_num(np.mean(c_arr) if c_arr.size else np.nan)
+        atomic_err = _safe_num(np.std(a_arr) if a_arr.size else 0.0)
+        combined_err = _safe_num(np.std(c_arr) if c_arr.size else 0.0)
         if not (np.isfinite(atomic) or np.isfinite(combined)):
             return None
         vals = [float(atomic) if np.isfinite(atomic) else 0.0, float(combined) if np.isfinite(combined) else 0.0]
+        errs = [
+            float(atomic_err) if np.isfinite(atomic_err) and atomic_err > 0 else 0.0,
+            float(combined_err) if np.isfinite(combined_err) and combined_err > 0 else 0.0,
+        ]
         fig, ax = plt.subplots(figsize=(5.0, 4.0), dpi=180)
         ax.bar(["atomic", "combined"], vals, color=["#f28e2b", "#4e79a7"])
+        ax.errorbar(
+            np.arange(2, dtype=float),
+            vals,
+            yerr=np.asarray(errs, float),
+            fmt="none",
+            ecolor="black",
+            elinewidth=1.1,
+            capsize=3,
+            zorder=3,
+        )
         ax.set_ylabel("seconds")
         ax.set_title(title)
         ax.grid(axis="y", alpha=0.25)
@@ -2462,16 +2633,69 @@ def _plot_dataset_full_timing_overview(
     # Baseline segmentation + width algorithms from rollup.
     df_base = _safe_read(os.path.join(out_dir, "dataset_baseline_timings_rollup.csv"))
     if df_base is not None and not df_base.empty:
+        df_base_all = _safe_read(os.path.join(out_dir, "dataset_baseline_timings_all.csv"))
+        base_wmean_shared = np.nan
+        base_wmean_skeleton = np.nan
+        base_sum_shared = np.nan
+        base_sum_skeleton = np.nan
+        for _, r in df_base.iterrows():
+            c0 = str(r.get("component", "")).lower()
+            if c0.startswith("shared_mat_gpu"):
+                base_wmean_shared = _safe_num(r.get("weighted_mean_sec"))
+                base_sum_shared = _safe_num(r.get("total_sec"))
+            elif c0.startswith("skeleton_dse"):
+                base_wmean_skeleton = _safe_num(r.get("weighted_mean_sec"))
+                base_sum_skeleton = _safe_num(r.get("total_sec"))
+
+        comp_err_mean = {}
+        comp_err_sum = {}
+        if df_base_all is not None and not df_base_all.empty:
+            for c in df_base_all.columns:
+                if c in df_base.columns or (str(c).endswith("_s") or str(c).endswith("_sec")):
+                    arr = pd.to_numeric(df_base_all[c], errors="coerce").to_numpy(float)
+                    arr = arr[np.isfinite(arr)]
+                    if arr.size:
+                        s = float(np.std(arr))
+                        comp_err_mean[str(c)] = s
+                        comp_err_sum[str(c)] = float(s * np.sqrt(arr.size))
+
+        def _err_by_prefix(err_map: dict, prefix: str) -> float:
+            p = str(prefix).lower()
+            for k, v in err_map.items():
+                if str(k).lower().startswith(p):
+                    try:
+                        return float(v)
+                    except Exception:
+                        return 0.0
+            return 0.0
+
         for _, r in df_base.iterrows():
             comp = str(r.get("component", ""))
             v_mean = _safe_num(r.get("weighted_mean_sec"))
             v_sum = _safe_num(r.get("total_sec"))
+            err_mean = float(comp_err_mean.get(comp, 0.0))
+            err_sum = float(comp_err_sum.get(comp, 0.0))
             if comp.startswith("inference_seconds:"):
-                _add(mean_rows, comp.split(":", 1)[1], v_mean, "baseline_seg")
-                _add(sum_rows, comp.split(":", 1)[1], v_sum, "baseline_seg")
+                _add(mean_rows, comp.split(":", 1)[1], v_mean, "baseline_seg", err_mean)
+                _add(sum_rows, comp.split(":", 1)[1], v_sum, "baseline_seg", err_sum)
             elif any(k in comp for k in ("mat_", "pca_", "esd_", "eob_", "width", "skeleton_dse")):
-                _add(mean_rows, comp, v_mean, "baseline_width")
-                _add(sum_rows, comp, v_sum, "baseline_width")
+                comp_low = comp.lower()
+                label = _display_timing_component_name(comp)
+                if any(k in comp_low for k in ("pca", "esd", "eob")):
+                    if np.isfinite(base_wmean_shared):
+                        v_mean = _safe_num(v_mean + base_wmean_shared)
+                        err_mean = float(np.sqrt((err_mean ** 2) + (_err_by_prefix(comp_err_mean, "shared_mat_gpu") ** 2)))
+                    if np.isfinite(base_wmean_skeleton):
+                        v_mean = _safe_num(v_mean + base_wmean_skeleton)
+                        err_mean = float(np.sqrt((err_mean ** 2) + (_err_by_prefix(comp_err_mean, "skeleton_dse") ** 2)))
+                    if np.isfinite(base_sum_shared):
+                        v_sum = _safe_num(v_sum + base_sum_shared)
+                        err_sum = float(np.sqrt((err_sum ** 2) + (_err_by_prefix(comp_err_sum, "shared_mat_gpu") ** 2)))
+                    if np.isfinite(base_sum_skeleton):
+                        v_sum = _safe_num(v_sum + base_sum_skeleton)
+                        err_sum = float(np.sqrt((err_sum ** 2) + (_err_by_prefix(comp_err_sum, "skeleton_dse") ** 2)))
+                _add(mean_rows, label, v_mean, "baseline_width", err_mean)
+                _add(sum_rows, label, v_sum, "baseline_width", err_sum)
 
     # Manual / auto pipeline from stage timing rows.
     df_edge = _safe_read(os.path.join(out_dir, "dataset_edge_tracking_stage_all.csv"))
@@ -2490,22 +2714,24 @@ def _plot_dataset_full_timing_overview(
             for c in comp_cols:
                 per_row += pd.to_numeric(g[c], errors="coerce").fillna(0.0).to_numpy(float)
             total_sec = float(np.nansum(per_row))
+            s = float(np.nanstd(per_row))
+            n = int(np.count_nonzero(np.isfinite(per_row)))
             if weight_col:
                 w = pd.to_numeric(g[weight_col], errors="coerce").fillna(0.0).to_numpy(float)
                 ok = np.isfinite(per_row) & np.isfinite(w) & (w > 0)
                 mean_sec = float(np.sum(per_row[ok] * w[ok]) / np.sum(w[ok])) if np.any(ok) else float(np.nanmean(per_row))
             else:
                 mean_sec = float(np.nanmean(per_row))
-            _add(mean_rows, sup, mean_sec, sup)
-            _add(sum_rows, sup, total_sec, sup)
+            _add(mean_rows, sup, mean_sec, sup, s)
+            _add(sum_rows, sup, total_sec, sup, float(s * np.sqrt(max(1, n))))
 
     # GT supervision timing rollup (dataset-level): explicit atomic/combined rows.
     df_sup = _safe_read(os.path.join(out_dir, "dataset_gt_supervision_timings.csv"))
     df_sup_core = _safe_read(os.path.join(out_dir, "dataset_gt_supervision_core_timings.csv"))
     if df_sup_core is not None and not df_sup_core.empty:
         for _, r in df_sup_core.iterrows():
-            _add(mean_rows, r.get("method"), r.get("weighted_mean_sec"), "gt_supervision")
-            _add(sum_rows, r.get("method"), r.get("total_sec"), "gt_supervision")
+            _add(mean_rows, r.get("method"), r.get("weighted_mean_sec"), "gt_supervision", 0.0)
+            _add(sum_rows, r.get("method"), r.get("total_sec"), "gt_supervision", 0.0)
     elif df_sup is not None and not df_sup.empty:
         for method_name, stage_name, comp_name in [
             ("gt_compute_atomic", "normals", "atomic_compute_sec"),
@@ -2520,19 +2746,27 @@ def _plot_dataset_full_timing_overview(
             if g.empty:
                 continue
             r = g.iloc[0]
-            _add(mean_rows, method_name, r.get("weighted_mean_sec"), "gt_supervision")
-            _add(sum_rows, method_name, r.get("total_sec"), "gt_supervision")
+            _add(mean_rows, method_name, r.get("weighted_mean_sec"), "gt_supervision", 0.0)
+            _add(sum_rows, method_name, r.get("total_sec"), "gt_supervision", 0.0)
 
     # GT centering + depth distridge (dataset-level aggregations).
     df_gt = _safe_read(os.path.join(out_dir, "dataset_gt_centering_timing_all.csv"))
     if (df_gt is None) or df_gt.empty:
         df_gt = _safe_read(os.path.join(out_dir, "gt_centering", "timing.csv"))
     if df_gt is not None and not df_gt.empty:
+        gt_mean_arr = pd.to_numeric(df_gt.get("combined_centering_sec"), errors="coerce").to_numpy(float)
+        gt_mean_arr = gt_mean_arr[np.isfinite(gt_mean_arr)]
+        gt_sum_arr = pd.to_numeric(
+            df_gt["centering_total_sec"] if "centering_total_sec" in df_gt.columns else df_gt.get("combined_centering_sec"),
+            errors="coerce",
+        ).to_numpy(float)
+        gt_sum_arr = gt_sum_arr[np.isfinite(gt_sum_arr)]
         _add(
             mean_rows,
             "gt_centering",
             pd.to_numeric(df_gt.get("combined_centering_sec"), errors="coerce").mean(),
             "gt_centering",
+            float(np.std(gt_mean_arr)) if gt_mean_arr.size else 0.0,
         )
         _add(
             sum_rows,
@@ -2542,27 +2776,73 @@ def _plot_dataset_full_timing_overview(
                 errors="coerce",
             ).sum(),
             "gt_centering",
+            float(np.std(gt_sum_arr) * np.sqrt(max(1, gt_sum_arr.size))) if gt_sum_arr.size else 0.0,
         )
 
     df_depth = _safe_read(os.path.join(out_dir, "dataset_depth_distridge_timing_all.csv"))
     if (df_depth is None) or df_depth.empty:
         df_depth = _safe_read(os.path.join(out_dir, "depth_distridge", "timing.csv"))
+    df_depth_gen = _safe_read(os.path.join(out_dir, "dataset_depth_generation_timing_all.csv"))
+    df_depth_gen_roll = _safe_read(os.path.join(out_dir, "dataset_depth_generation_timing_rollup.csv"))
     if df_depth is not None and not df_depth.empty:
+        dd = df_depth.copy()
+        if df_depth_gen is not None and not df_depth_gen.empty:
+            gmap = (
+                df_depth_gen[["image", "depth_generation_s"]]
+                .dropna()
+                .assign(image=lambda x: x["image"].astype(str))
+                .drop_duplicates(subset=["image"], keep="last")
+                .set_index("image")["depth_generation_s"]
+                .to_dict()
+            )
+            if "image" in dd.columns and gmap:
+                dd["depth_generation_s"] = dd["image"].astype(str).map(gmap)
+            else:
+                dd["depth_generation_s"] = np.nan
+        elif df_depth_gen_roll is not None and not df_depth_gen_roll.empty:
+            dd["depth_generation_s"] = pd.to_numeric(
+                df_depth_gen_roll.iloc[0].get("weighted_mean_sec", np.nan),
+                errors="coerce",
+            )
+        else:
+            dd["depth_generation_s"] = np.nan
+
+        if "centering_total_sec" in dd.columns:
+            dd["depth_total_with_generation_sec"] = (
+                pd.to_numeric(dd["centering_total_sec"], errors="coerce")
+                + pd.to_numeric(dd["depth_generation_s"], errors="coerce").fillna(0.0)
+            )
+        else:
+            dd["depth_total_with_generation_sec"] = pd.to_numeric(
+                dd.get("combined_centering_sec"), errors="coerce"
+            ) + pd.to_numeric(dd["depth_generation_s"], errors="coerce").fillna(0.0)
+
         _add(
             mean_rows,
             "depth_distridge",
-            pd.to_numeric(df_depth.get("combined_centering_sec"), errors="coerce").mean(),
+            pd.to_numeric(dd.get("depth_total_with_generation_sec"), errors="coerce").mean(),
             "depth_distridge",
+            float(np.nanstd(pd.to_numeric(dd.get("depth_total_with_generation_sec"), errors="coerce").to_numpy(float))),
         )
         _add(
             sum_rows,
             "depth_distridge",
             pd.to_numeric(
-                df_depth["centering_total_sec"] if "centering_total_sec" in df_depth.columns else df_depth.get("combined_centering_sec"),
+                dd["depth_total_with_generation_sec"],
                 errors="coerce",
             ).sum(),
             "depth_distridge",
+            float(
+                np.nanstd(pd.to_numeric(dd.get("depth_total_with_generation_sec"), errors="coerce").to_numpy(float))
+                * np.sqrt(max(1, int(np.isfinite(pd.to_numeric(dd.get("depth_total_with_generation_sec"), errors="coerce")).sum())))
+            ),
         )
+        dg_arr = pd.to_numeric(dd.get("depth_generation_s"), errors="coerce").to_numpy(float)
+        dg_arr = dg_arr[np.isfinite(dg_arr)]
+        if dg_arr.size:
+            _add(mean_rows, "depth_generation", float(np.mean(dg_arr)), "depth_distridge", float(np.std(dg_arr)))
+            _add(sum_rows, "depth_generation", float(np.sum(dg_arr)), "depth_distridge", float(np.std(dg_arr) * np.sqrt(dg_arr.size)))
+        df_depth = dd
 
     if mean_rows:
         out_mean_png = os.path.join(out_dir, "dataset_algorithm_timing_overview.png")
@@ -2614,7 +2894,15 @@ def _plot_dataset_full_timing_overview(
     )
     outputs["depth_distridge_components_chart"] = _plot_components(
         df_depth,
-        ["depth_align_s", "depth_recess_s", "depth_costmap_s", "depth_dijkstra_s", "depth_postprocess_s", "normals_depth_s"],
+        [
+            "depth_generation_s",
+            "depth_align_s",
+            "depth_recess_s",
+            "depth_costmap_s",
+            "depth_dijkstra_s",
+            "depth_postprocess_s",
+            "normals_depth_s",
+        ],
         "Dataset Depth Distridge Components",
         os.path.join(out_dir, "dataset_depth_distridge_components.png"),
     )
@@ -2640,6 +2928,7 @@ def summarize_dataset_metrics(
     *,
     out_dir: Optional[str] = None,
     baseline_roots: Optional[List[str]] = None,
+    depth_timing_csv: Optional[str] = None,
     verbose: bool = True,
 ) -> Dict[str, object]:
     """
@@ -2700,6 +2989,14 @@ def summarize_dataset_metrics(
         _aggregate_gt_component_timings(
             supervision_root=os.path.join(save_folder, "supervision"),
             out_dir=out_dir,
+            evaluated_images=evaluated_images_set,
+            verbose=verbose,
+        )
+    )
+    outputs.update(
+        _aggregate_depth_generation_timings(
+            out_dir=out_dir,
+            depth_timing_csv=depth_timing_csv,
             evaluated_images=evaluated_images_set,
             verbose=verbose,
         )

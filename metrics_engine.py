@@ -91,10 +91,18 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             if p and isinstance(p, str):
                 baseline_roots.append(p)
 
+        depth_timing_csv = None
+        depth_folder = getattr(self, "depth_folder", None)
+        if depth_folder and isinstance(depth_folder, str):
+            cand = os.path.join(depth_folder, "timing_per_image.csv")
+            if os.path.isfile(cand):
+                depth_timing_csv = cand
+
         report = _summarize_dataset_metrics(
             save_folder=self.save_folder,
             out_dir=out_dir,
             baseline_roots=baseline_roots,
+            depth_timing_csv=depth_timing_csv,
             verbose=True,
         )
 
