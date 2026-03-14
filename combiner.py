@@ -132,6 +132,14 @@ def plot_greedy_branch_debug(
     ax_b.set_title("B - Greedy Branch Construction (numbers = attachment order)")
     ax_b.set_aspect("equal", adjustable="box")
 
+    # Force image-style coordinates (y grows downward): low y at top, high y at bottom.
+    ya0, ya1 = ax_a.get_ylim()
+    if ya0 < ya1:
+        ax_a.set_ylim(ya1, ya0)
+    yb0, yb1 = ax_b.get_ylim()
+    if yb0 < yb1:
+        ax_b.set_ylim(yb1, yb0)
+
     plt.tight_layout()
     plt.savefig(out_path, dpi=200)
     plt.close(fig)
@@ -791,8 +799,12 @@ def dominant_segments_from_group(
         branch = [start_idx]
         attach_orders[int(start_idx)] = 1
         order_in_branch = 1
+
         S0 = atomics[start_idx]["poly"]
         b_start, b_end = _endpoints(S0)
+
+        # track every endpoint already used in the branch
+        branch_endpoints = [b_start.copy(), b_end.copy()]
 
         grew = True
         while grew:
@@ -805,11 +817,24 @@ def dominant_segments_from_group(
                 Sj = atomics[j]["poly"]
                 j_start, j_end = _endpoints(Sj)
 
+                # ------------------------------------------------
+                # LOOP PREVENTION:
+                # candidate must introduce exactly one new endpoint
+                # ------------------------------------------------
+                start_in = any(_pts_close(j_start, ep) for ep in branch_endpoints)
+                end_in   = any(_pts_close(j_end,   ep) for ep in branch_endpoints)
+
+                if start_in and end_in:
+                    # both endpoints already appear somewhere in branch
+                    # -> would close a cycle
+                    continue
+
                 # try attach to branch end
                 if _pts_close(b_end, j_start):
                     mode = ("end", False)
                 elif _pts_close(b_end, j_end):
                     mode = ("end", True)
+
                 # try attach to branch start
                 elif _pts_close(b_start, j_end):
                     mode = ("start", False)
@@ -827,6 +852,7 @@ def dominant_segments_from_group(
                 side, flip = best_attach_mode
                 unused.remove(best_j)
                 branch.append(best_j)
+
                 order_in_branch += 1
                 attach_orders[int(best_j)] = int(order_in_branch)
 
@@ -835,10 +861,14 @@ def dominant_segments_from_group(
                     Sj = Sj[::-1].copy()
 
                 j_start, j_end = _endpoints(Sj)
+
+                # update branch endpoints
                 if side == "end":
                     b_end = j_end
+                    branch_endpoints.append(j_end.copy())
                 else:
                     b_start = j_start
+                    branch_endpoints.append(j_start.copy())
 
                 grew = True
 
