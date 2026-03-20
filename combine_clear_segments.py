@@ -493,6 +493,16 @@ class CombineClearSegments(CrackUtils):
                     overlay = np.zeros_like(display)
                     overlay[m.astype(bool)] = color
                     display = cv2.addWeighted(display, 1, overlay, alpha, 0)
+                elif listwidget.item(i).isSelected():
+                    crack_id = items[i][1]
+                    crack = atomic_cracks.get(crack_id, {})
+                    midline = np.asarray(crack.get("midline", []), dtype=float)
+                    if midline.ndim == 2 and midline.shape[0] >= 2 and midline.shape[1] >= 2:
+                        pts = np.round(midline[:, :2]).astype(np.int32).reshape(-1, 1, 2)
+                        cv2.polylines(display, [pts], False, (0, 0, 255), 2, lineType=cv2.LINE_AA)
+                    elif midline.ndim == 2 and midline.shape[0] == 1 and midline.shape[1] >= 2:
+                        p = tuple(np.round(midline[0, :2]).astype(np.int32))
+                        cv2.circle(display, p, 2, (0, 0, 255), -1, lineType=cv2.LINE_AA)
             from PyQt5.QtGui import QImage, QPixmap
             qimage = QImage(display, display.shape[1], display.shape[0],
                             display.strides[0], QImage.Format_RGB888)

@@ -1279,6 +1279,12 @@ class CrackUtils:
 
     def previous_image(self):
         try:
+            if not hasattr(self, "image_names") or not self.image_names:
+                error("No images loaded. Please select a folder first.")
+                return
+            if not hasattr(self, "n") or self.n <= 0:
+                error("Already at the first image.")
+                return
             self.mid_pt = []
             self.end_points = []
             self.mask = []
