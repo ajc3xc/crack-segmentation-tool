@@ -12,6 +12,9 @@ __pycache__/
 *$py.class
 debug_compare/
 debug_failures/
+*ufhpc*
+*.npy
+depth.png
 
 # C extensions
 *.so

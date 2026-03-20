@@ -2,6 +2,9 @@ import torch
 import cv2
 import numpy as np
 import os
+import argparse
+from pathlib import Path
+import json
 
 print("torch loaded")
 
@@ -14,20 +17,74 @@ model = model.to(device).eval()
 
 print("Device:", device)
 
-img_path = r"C:\Users\13144\Documents\Masters_Thesis\datasets\SUT_1-Segmentation\Original_Image\1.jpg"
+def resolve_image_path(explicit_path: str | None) -> Path:
+    if explicit_path:
+        return Path(explicit_path).expanduser()
 
-img = cv2.imread(img_path)
+    # Try repo folder config first.
+    config_path = Path(__file__).resolve().parents[1] / "folder_config.json"
+    if config_path.exists():
+        try:
+            cfg = json.loads(config_path.read_text())
+            cfg_img_folder = cfg.get("img_folder")
+            if cfg_img_folder:
+                folder = Path(cfg_img_folder)
+                if folder.exists():
+                    jpgs = sorted(folder.glob("*.jpg"))
+                    if jpgs:
+                        return jpgs[0]
+        except Exception:
+            pass
+
+    # Fallback: first jpg under common local image directories.
+    repo_root = Path(__file__).resolve().parents[1]
+    for candidate_dir in [repo_root / "images", repo_root]:
+        jpgs = sorted(candidate_dir.glob("*.jpg"))
+        if jpgs:
+            return jpgs[0]
+
+    raise FileNotFoundError(
+        "No input image found. Pass one with --img /path/to/image.jpg "
+        "or set img_folder in folder_config.json."
+    )
+
+
+parser = argparse.ArgumentParser(description="Depth Anything v3 quick test")
+parser.add_argument(
+    "--img",
+    type=str,
+    default="/blue/cli2/a.camerer/crack_segmentation/SUT_Compressed/Original_Image/1.jpg",
+    help="Path to input image",
+)
+args = parser.parse_args()
+
+img_path = resolve_image_path(args.img)
+print(f"[INPUT] image path = {img_path}")
+
+img = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
+if img is None:
+    raise FileNotFoundError(
+        f"OpenCV could not read image: {img_path}. "
+        "Check that the path exists and the file is a valid image."
+    )
 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 H, W = img.shape[:2]
 print(f"[INPUT] shape = ({H}, {W})")
 
-process_res = max(H, W) // 2
+process_res = max(H, W)
 print(f"[INFO] process_res = {process_res}")
 
 try:
     with torch.inference_mode():
-        with torch.autocast(device_type="cuda", dtype=torch.float16):
+        if device.type == "cuda":
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                pred = model.inference(
+                    image=[img],
+                    process_res=process_res,
+                    process_res_method="upper_bound_resize"
+                )
+        else:
             pred = model.inference(
                 image=[img],
                 process_res=process_res,
