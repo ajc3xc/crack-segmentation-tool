@@ -1,4 +1,4 @@
-import os, json, shutil
+﻿import os, json, shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import csv
@@ -106,7 +106,7 @@ def export_all_supervision(*, atomic, combined, metrics_dir, original_image):
     with open(out_json, "w") as f:
         json.dump(sup_list, f)
 
-    print(f"[SUPERVISION] ✓ wrote → {out_json}")
+    print(f"[SUPERVISION] âœ“ wrote â†’ {out_json}")
 
 
 # --------------------------------------------
@@ -147,7 +147,7 @@ def _supervision_preview(entry, original_image, out_path):
     gt_rgb = np.stack([gt_vis]*3, axis=-1)
 
     # ---- call unified plot function ----
-    title = f"Ground truth crack normals — {entry['type']} {entry['id']}"
+    title = f"Ground truth crack normals â€” {entry['type']} {entry['id']}"
 
     plot_edges_and_normals(
         base_image=(gt_rgb * 255).astype(np.uint8),
@@ -161,7 +161,7 @@ def _supervision_preview(entry, original_image, out_path):
         title=title,
     )
 
-    print(f"[SUPERVISION] preview → {out_path}")
+    print(f"[SUPERVISION] preview â†’ {out_path}")
     
     
     
@@ -825,6 +825,224 @@ def build_centering_domain_mask(*, crack_mask_u8, territory_u8=None, mode="soft"
     if mode == "terr_or_mask":
         return (m | t).astype(np.uint8)
     return m
+def gaussian(img, sigma):
+    return cv2.GaussianBlur(np.asarray(img), (0, 0), sigmaX=float(sigma), sigmaY=float(sigma))
+
+
+def bilinear_sample(img, x, y):
+    arr = np.asarray(img)
+    h, w = arr.shape
+
+    x0 = np.clip(np.floor(x).astype(int), 0, w - 1)
+    y0 = np.clip(np.floor(y).astype(int), 0, h - 1)
+    x1 = np.clip(x0 + 1, 0, w - 1)
+    y1 = np.clip(y0 + 1, 0, h - 1)
+
+    dx = x - x0
+    dy = y - y0
+
+    v00 = arr[y0, x0]
+    v10 = arr[y0, x1]
+    v01 = arr[y1, x0]
+    v11 = arr[y1, x1]
+
+    return (
+        v00 * (1 - dx) * (1 - dy)
+        + v10 * dx * (1 - dy)
+        + v01 * (1 - dx) * dy
+        + v11 * dx * dy
+    )
+
+def compute_dt_gradient(dt, ksize=3):
+    k = int(ksize)
+    gx = cv2.Sobel(np.asarray(dt, np.float32), cv2.CV_32F, 1, 0, ksize=k)
+    gy = cv2.Sobel(np.asarray(dt, np.float32), cv2.CV_32F, 0, 1, ksize=k)
+    return gx, gy
+
+
+def smooth_polyline(
+    S,
+    *,
+    keep_endpoints=True,
+    freeze_k=3,
+    ds_target=2,
+    window=7,
+    poly=2,
+):
+    out = np.asarray(S, float).copy()
+    if out.ndim != 2 or out.shape[1] != 2 or len(out) < 2:
+        return np.asarray(S, float)
+
+    rs = resample_by_arclength(
+        out,
+        ds_target=float(ds_target),
+        min_pts=2,
+        preserve_endpoints=bool(keep_endpoints),
+    )
+    if isinstance(rs, tuple) and len(rs) >= 1 and rs[0] is not None:
+        out = np.asarray(rs[0], float)
+
+    try:
+        from scipy.signal import savgol_filter
+
+        n = len(out)
+        if n >= 5:
+            win = int(window)
+            if win > n:
+                win = n if (n % 2 == 1) else (n - 1)
+            if win < 5:
+                win = 5 if n >= 5 else win
+            if win % 2 == 0:
+                win = max(3, win - 1)
+            if win > int(poly):
+                xs = savgol_filter(out[:, 0], win, int(poly))
+                ys = savgol_filter(out[:, 1], win, int(poly))
+                out2 = out.copy()
+                out2[:, 0] = xs
+                out2[:, 1] = ys
+                if keep_endpoints and len(out2) >= 2:
+                    fk = int(max(1, freeze_k))
+                    fk = min(fk, len(out2) // 2 if len(out2) > 2 else 1)
+                    out2[:fk] = out[:fk]
+                    out2[-fk:] = out[-fk:]
+                out = out2
+    except Exception:
+        pass
+
+    return np.asarray(out, float)
+
+
+def _ridge_ascent_polyline(
+    S,
+    dt,
+    gx,
+    gy,
+    domain,
+    *,
+    n_iters,
+    step_px,
+    keep_endpoints,
+    freeze_k,
+):
+    out = np.asarray(S, float).copy()
+    H, W = np.asarray(domain).shape[:2]
+    dom = (np.asarray(domain) > 0)
+
+    fk = int(max(0, freeze_k))
+    idx_lo = fk if keep_endpoints else 0
+    idx_hi = len(out) - 1 - fk if keep_endpoints else len(out) - 1
+
+    if idx_hi <= idx_lo:
+        return out
+
+    for _ in range(int(max(1, n_iters))):
+
+        pts = out[idx_lo:idx_hi + 1]
+
+        x = pts[:, 0]
+        y = pts[:, 1]
+
+        # ---------------------------
+        # Domain check
+        # ---------------------------
+
+        xi = np.round(x).astype(int)
+        yi = np.round(y).astype(int)
+
+        valid = (
+            (xi >= 0) & (xi < W) &
+            (yi >= 0) & (yi < H)
+        )
+
+        valid &= dom[np.clip(yi, 0, H - 1), np.clip(xi, 0, W - 1)]
+
+        if not np.any(valid):
+            break
+
+        # ---------------------------
+        # Tangent
+        # ---------------------------
+
+        prev = out[idx_lo - 1:idx_hi]
+        nxt  = out[idx_lo + 1:idx_hi + 2]
+
+        t = nxt - prev
+
+        tn = np.linalg.norm(t, axis=1, keepdims=True) + 1e-12
+        t = t / tn
+
+        # ---------------------------
+        # Normal
+        # ---------------------------
+
+        n = np.stack([-t[:, 1], t[:, 0]], axis=1)
+
+        # ---------------------------
+        # Gradient sampling
+        # ---------------------------
+
+        gxi = bilinear_sample(gx, x, y)
+        gyi = bilinear_sample(gy, x, y)
+
+        g_proj = gxi * n[:, 0] + gyi * n[:, 1]
+
+        nonzero = np.abs(g_proj) > 1e-12
+        active = valid & nonzero
+
+        if not np.any(active):
+            break
+
+        # ---------------------------
+        # Step direction
+        # ---------------------------
+
+        sgn = np.sign(g_proj)
+        u = n * sgn[:, None]
+
+        xn = x + step_px * u[:, 0]
+        yn = y + step_px * u[:, 1]
+
+        # ---------------------------
+        # Candidate domain check
+        # ---------------------------
+
+        xi2 = np.round(xn).astype(int)
+        yi2 = np.round(yn).astype(int)
+
+        valid2 = (
+            (xi2 >= 0) & (xi2 < W) &
+            (yi2 >= 0) & (yi2 < H)
+        )
+
+        valid2 &= dom[np.clip(yi2, 0, H - 1), np.clip(xi2, 0, W - 1)]
+
+        active &= valid2
+
+        if not np.any(active):
+            break
+
+        # ---------------------------
+        # DT monotonicity check
+        # ---------------------------
+
+        dt0 = bilinear_sample(dt, x, y)
+        dt1 = bilinear_sample(dt, xn, yn)
+
+        accept = active & (dt1 >= dt0 - 1e-6)
+
+        if not np.any(accept):
+            break
+
+        # ---------------------------
+        # Apply updates
+        # ---------------------------
+
+        pts[accept, 0] = xn[accept]
+        pts[accept, 1] = yn[accept]
+
+        out[idx_lo:idx_hi + 1] = pts
+
+    return out
 
 def snap_polyline_to_dt_ridge(
     mid_xy,
@@ -845,11 +1063,7 @@ def snap_polyline_to_dt_ridge(
       - CPU: polyline snapping logic and post-smoothing
     """
 
-    import numpy as np
-    import cv2
-    import time
     t0_snap = time.perf_counter()
-    GPU = False
 
     S = np.asarray(mid_xy, float).copy()
 
@@ -857,7 +1071,6 @@ def snap_polyline_to_dt_ridge(
         print(f"[SNAP DT] elapsed_sec={time.perf_counter() - t0_snap:.6f} (early_return=bad_input)")
         return S
 
-    H, W = domain_mask_u8.shape[:2]
     domain = (np.asarray(domain_mask_u8) > 0).astype(np.uint8)
 
     if not np.any(domain):
@@ -870,143 +1083,29 @@ def snap_polyline_to_dt_ridge(
             dt = cv2.distanceTransform(domain, cv2.DIST_L2, 5).astype(np.float32)
     else:
         dt = cv2.distanceTransform(domain, cv2.DIST_L2, 5).astype(np.float32)
-    gx = cv2.Sobel(dt, cv2.CV_32F, 1, 0, ksize=int(grad_ksize))
-    gy = cv2.Sobel(dt, cv2.CV_32F, 0, 1, ksize=int(grad_ksize))
 
-    def _bilinear(img, x, y):
-        x0 = int(np.floor(x))
-        y0 = int(np.floor(y))
-        x0 = max(0, min(x0, W - 1))
-        y0 = max(0, min(y0, H - 1))
-        x1 = min(x0 + 1, W - 1)
-        y1 = min(y0 + 1, H - 1)
-        dx = float(x - x0)
-        dy = float(y - y0)
-        v00 = float(img[y0, x0]); v10 = float(img[y0, x1])
-        v01 = float(img[y1, x0]); v11 = float(img[y1, x1])
-        v0 = v00 * (1 - dx) + v10 * dx
-        v1 = v01 * (1 - dx) + v11 * dx
-        return v0 * (1 - dy) + v1 * dy
+    gx, gy = compute_dt_gradient(dt, ksize=int(grad_ksize))
 
-    def _allowed(x, y):
-        xi = int(round(x))
-        yi = int(round(y))
-        if xi < 0 or xi >= W or yi < 0 or yi >= H:
-            return False
-        return bool(domain[yi, xi])
+    S = _ridge_ascent_polyline(
+        S,
+        dt,
+        gx,
+        gy,
+        domain,
+        n_iters=n_iters,
+        step_px=step_px,
+        keep_endpoints=keep_endpoints,
+        freeze_k=freeze_k,
+    )
 
-    freeze_k = int(max(0, freeze_k))
-    idx_lo = freeze_k if keep_endpoints else 0
-    idx_hi = len(S) - 1 - freeze_k if keep_endpoints else len(S) - 1
-
-    if idx_hi <= idx_lo:
-        print(f"[SNAP DT] elapsed_sec={time.perf_counter() - t0_snap:.6f} (early_return=frozen_indices)")
-        return S
-
-    for _ in range(int(max(1, n_iters))):
-        moved = 0
-
-        for i in range(idx_lo, idx_hi + 1):
-            x = float(S[i, 0])
-            y = float(S[i, 1])
-
-            if not _allowed(x, y):
-                continue
-
-            # tangent
-            if i == 0:
-                t = S[1] - S[0]
-            elif i == len(S) - 1:
-                t = S[-1] - S[-2]
-            else:
-                t = S[i + 1] - S[i - 1]
-
-            tn = float(np.hypot(t[0], t[1])) + 1e-12
-            t = t / tn
-            nx, ny = -t[1], t[0]
-
-            gxi = _bilinear(gx, x, y)
-            gyi = _bilinear(gy, x, y)
-            g_proj = gxi * nx + gyi * ny
-
-            if abs(g_proj) < 1e-12:
-                continue
-
-            sgn = 1.0 if g_proj >= 0.0 else -1.0
-            ux, uy = sgn * nx, sgn * ny
-
-            dt0 = _bilinear(dt, x, y)
-            xn = x + float(step_px) * ux
-            yn = y + float(step_px) * uy
-
-            if not _allowed(xn, yn):
-                continue
-
-            dt1 = _bilinear(dt, xn, yn)
-
-            if dt1 >= dt0 - 1e-6:
-                S[i, 0] = xn
-                S[i, 1] = yn
-                moved += 1
-
-        if moved == 0:
-            break
-
-    # ----------------------------------------------------
-    # Resample then light Savitzky-Golay smoothing
-    # ----------------------------------------------------
-    # TODO (centered-GT stabilization):
-    # The centered midline is a derived surrogate used to estimate annotation bias,
-    # not ground-truth geometry. Current pipeline uses uniform resampling + SavGol(7,2),
-    # which is generally stable but can still produce local kinks that:
-    #   • destabilize tangent directions
-    #   • create abnormal normals
-    #   • occasionally cause cross-crack width artifacts
-    #
-    # Future improvement (if needed):
-    #   - Add adaptive stabilization stage for centered midlines only:
-    #       1) Detect high-curvature / jitter segments
-    #       2) Apply localized stronger smoothing OR
-    #       3) Smooth tangent field instead of polyline geometry
-    #
-    # This would improve width stability without altering manual GT geometry.
-    try:
-        from scipy.signal import savgol_filter
-
-        # Use default arclength resampling before SG smoothing.
-        rs = resample_by_arclength(
-            S,
-            ds_target=2,
-            min_pts=2,
-            preserve_endpoints=bool(keep_endpoints),
-        )
-        if isinstance(rs, tuple) and len(rs) >= 1 and rs[0] is not None:
-            S = np.asarray(rs[0], float)
-
-        n = len(S)
-        if n >= 5:
-            window = 5
-            if n >= 7:
-                window = 7
-            if window % 2 == 0:
-                window += 1
-
-            # preserve endpoints
-            S_smooth = S.copy()
-            xs = savgol_filter(S[:, 0], window, 2)
-            ys = savgol_filter(S[:, 1], window, 2)
-
-            S_smooth[:, 0] = xs
-            S_smooth[:, 1] = ys
-
-            if keep_endpoints:
-                S_smooth[:freeze_k] = S[:freeze_k]
-                S_smooth[-freeze_k:] = S[-freeze_k:]
-
-            S = S_smooth
-
-    except Exception:
-        pass
+    S = smooth_polyline(
+        S,
+        keep_endpoints=bool(keep_endpoints),
+        freeze_k=int(max(0, freeze_k)),
+        ds_target=2,
+        window=7,
+        poly=2,
+    )
 
     print(f"[SNAP DT] elapsed_sec={time.perf_counter() - t0_snap:.6f}")
     return S
@@ -1138,7 +1237,11 @@ def _compute_depth_recess_signal(depth_local_f32, domain_u8):
     depth = np.asarray(depth_local_f32, np.float32)
     if depth.ndim != 2 or not np.any(dom):
         z = np.zeros_like(np.asarray(domain_u8, np.float32))
-        return z, z, {"compute_s": float(time.perf_counter() - t0), "reason": "invalid_depth_or_domain"}
+        return z, z, {
+            "compute_s": float(time.perf_counter() - t0),
+            "reason": "invalid_depth_or_domain",
+            "sign_flipped": False,
+        }
 
     z = depth.copy()
     finite = np.isfinite(z)
@@ -1152,9 +1255,10 @@ def _compute_depth_recess_signal(depth_local_f32, domain_u8):
             fill = float(np.nanmedian(z[finite]))
         z[~finite] = fill
 
-    z_smooth = cv2.GaussianBlur(z, (0, 0), sigmaX=1.2, sigmaY=1.2)
-    z_bg = cv2.GaussianBlur(z_smooth, (0, 0), sigmaX=4.0, sigmaY=4.0)
+    z_smooth = gaussian(z, 1.2)
+    z_bg = gaussian(z_smooth, 4.0)
     recess = (z_bg - z_smooth).astype(np.float32, copy=False)
+    sign_flipped = False
 
     vals = recess[dom]
     if vals.size > 0:
@@ -1163,6 +1267,7 @@ def _compute_depth_recess_signal(depth_local_f32, domain_u8):
         if abs(p10) > abs(p90):
             recess = (-recess).astype(np.float32, copy=False)
             vals = recess[dom]
+            sign_flipped = True
 
     depth_norm = np.zeros_like(z_smooth, dtype=np.float32)
     dvals = z_smooth[dom]
@@ -1182,27 +1287,154 @@ def _compute_depth_recess_signal(depth_local_f32, domain_u8):
 
     recess_norm[~dom] = 0.0
     depth_norm[~dom] = 0.0
-    return depth_norm, recess_norm, {"compute_s": float(time.perf_counter() - t0)}
+    return depth_norm, recess_norm, {
+        "compute_s": float(time.perf_counter() - t0),
+        "sign_flipped": bool(sign_flipped),
+    }
 
 
-def _build_depth_guided_costmap(domain_u8, dt_norm, recess_norm, *, alpha=0.55, beta=0.45, eps=1e-3):
+METHOD_SPECS = {
+    "M1_dt": {
+        "label": "DT",
+        "use_geodesic": False,
+        "depth_mode": None,
+    },
+    "M2_dt_geo": {
+        "label": "DT + Geodesic",
+        "use_geodesic": True,
+        "depth_mode": None,
+    },
+    "M3_dt_geo_depth_local": {
+        "label": "DT + Geodesic + Local Depth",
+        "use_geodesic": True,
+        "depth_mode": "local",
+    },
+    "M4_dt_geo_depth_global": {
+        "label": "DT + Geodesic + Global Depth",
+        "use_geodesic": True,
+        "depth_mode": "global",
+    },
+}
+
+
+def _compute_geodesic_corridor_signal(mid_xy, domain_u8):
+    t0 = time.perf_counter()
+    dom = (np.asarray(domain_u8) > 0)
+    out = np.zeros_like(np.asarray(domain_u8, np.float32))
+    meta = {
+        "compute_s": 0.0,
+        "start_xy": None,
+        "end_xy": None,
+        "backend": "skimage.graph.MCP_Geometric",
+        "reason": None,
+    }
+    if dom.ndim != 2 or not np.any(dom):
+        meta["reason"] = "bad_domain"
+        meta["compute_s"] = float(time.perf_counter() - t0)
+        return out, meta
+
+    S = np.asarray(mid_xy, float)
+    if S.ndim != 2 or len(S) < 2:
+        meta["reason"] = "bad_midline_input"
+        meta["compute_s"] = float(time.perf_counter() - t0)
+        return out, meta
+
+    start_xy = _closest_valid_xy_in_mask(S[0], dom)
+    end_xy = _closest_valid_xy_in_mask(S[-1], dom)
+    meta["start_xy"] = [int(start_xy[0]), int(start_xy[1])] if start_xy is not None else None
+    meta["end_xy"] = [int(end_xy[0]), int(end_xy[1])] if end_xy is not None else None
+    if start_xy is None or end_xy is None:
+        meta["reason"] = "no_valid_endpoints"
+        meta["compute_s"] = float(time.perf_counter() - t0)
+        return out, meta
+
+    try:
+        from skimage.graph import MCP_Geometric
+
+        costs = np.where(dom, 1.0, np.inf).astype(np.float32)
+        mcp = MCP_Geometric(costs)
+        D_start, _ = mcp.find_costs([(int(start_xy[1]), int(start_xy[0]))])
+        D_end, _ = mcp.find_costs([(int(end_xy[1]), int(end_xy[0]))])
+
+        corridor = np.asarray(D_start, np.float32) + np.asarray(D_end, np.float32)
+        valid = dom & np.isfinite(corridor)
+        if np.any(valid):
+            vals = corridor[valid]
+            p2 = float(np.percentile(vals, 2))
+            p98 = float(np.percentile(vals, 98))
+            if np.isfinite(p2) and np.isfinite(p98) and p98 > p2 + 1e-9:
+                out = np.zeros_like(corridor, np.float32)
+                out[valid] = np.clip((corridor[valid] - p2) / (p98 - p2), 0.0, 1.0)
+            else:
+                out = np.zeros_like(corridor, np.float32)
+                out[valid] = 0.0
+        else:
+            meta["reason"] = "invalid_corridor"
+            out = np.zeros_like(dom, np.float32)
+    except Exception as e:
+        meta["reason"] = f"mcp_failed:{type(e).__name__}"
+        out = np.zeros_like(dom, np.float32)
+
+    meta["compute_s"] = float(time.perf_counter() - t0)
+    return out.astype(np.float32, copy=False), meta
+
+
+def _build_method_costmap(
+    domain_u8,
+    dt_norm,
+    *,
+    use_geodesic=False,
+    geodesic_norm=None,
+    recess_norm=None,
+    w_dt=1.0,
+    w_geo=1.0,
+    w_depth=1.0,
+    eps=1e-3,
+):
     t0 = time.perf_counter()
     dom = (np.asarray(domain_u8) > 0)
     dtn = np.clip(np.asarray(dt_norm, np.float32), 0.0, 1.0)
-    recn = np.clip(np.asarray(recess_norm, np.float32), 0.0, 1.0)
+    epsv = float(max(eps, 1e-9))
 
-    score = (float(alpha) * dtn + float(beta) * recn).astype(np.float32)
-    score[~dom] = 0.0
+    dt_term = np.zeros_like(dtn, dtype=np.float32)
+    dt_term[dom] = (1.0 / (epsv + dtn[dom])).astype(np.float32)
 
-    cost = np.full(score.shape, np.float32(1e9), dtype=np.float32)
-    if np.any(dom):
-        cost[dom] = (1.0 / (score[dom] + float(max(eps, 1e-9)))).astype(np.float32)
+    geo_term = None
+    if bool(use_geodesic) and geodesic_norm is not None:
+        geo = np.clip(np.asarray(geodesic_norm, np.float32), 0.0, 1.0)
+        geo_term = np.zeros_like(dtn, dtype=np.float32)
+        geo_term[dom] = geo[dom]
 
-    return cost, score, {
+    depth_term = None
+    if recess_norm is not None:
+        recn = np.clip(np.asarray(recess_norm, np.float32), 0.0, 1.0)
+        depth_term = np.zeros_like(dtn, dtype=np.float32)
+        depth_term[dom] = (1.0 / (epsv + recn[dom])).astype(np.float32)
+
+    combined = np.zeros_like(dtn, dtype=np.float32)
+    combined[dom] = float(w_dt) * dt_term[dom]
+    if geo_term is not None:
+        combined[dom] += float(w_geo) * geo_term[dom]
+    if depth_term is not None:
+        combined[dom] += float(w_depth) * depth_term[dom]
+
+    cost = np.full(dtn.shape, np.float32(1e9), dtype=np.float32)
+    cost[dom] = combined[dom]
+
+    score_debug = {
+        "dt_term": np.asarray(dt_term, np.float32),
+        "geo_term": None if geo_term is None else np.asarray(geo_term, np.float32),
+        "depth_term": None if depth_term is None else np.asarray(depth_term, np.float32),
+        "combined_cost": np.asarray(cost, np.float32),
+    }
+    return cost.astype(np.float32, copy=False), score_debug, {
         "compute_s": float(time.perf_counter() - t0),
-        "alpha": float(alpha),
-        "beta": float(beta),
-        "eps": float(max(eps, 1e-9)),
+        "w_dt": float(w_dt),
+        "w_geo": float(w_geo),
+        "w_depth": float(w_depth),
+        "use_geodesic": bool(use_geodesic),
+        "use_depth": bool(recess_norm is not None),
+        "eps": float(epsv),
     }
 
 
@@ -1284,40 +1516,14 @@ def _compute_dijkstra_midline(mid_xy, costmap_f32, domain_u8):
 
 
 def _postprocess_midline_polyline(mid_xy, *, keep_endpoints=True):
-    S = np.asarray(mid_xy, float).copy()
-    if S.ndim != 2 or S.shape[1] != 2 or len(S) < 2:
-        return S
-
-    rs = resample_by_arclength(
-        S,
+    return smooth_polyline(
+        mid_xy,
+        keep_endpoints=bool(keep_endpoints),
+        freeze_k=1,
         ds_target=2,
-        min_pts=2,
-        preserve_endpoints=bool(keep_endpoints),
+        window=7,
+        poly=2,
     )
-    if isinstance(rs, tuple) and len(rs) >= 1 and rs[0] is not None:
-        S = np.asarray(rs[0], float)
-
-    try:
-        from scipy.signal import savgol_filter
-
-        n = len(S)
-        if n >= 5:
-            window = 7 if n >= 7 else 5
-            if window % 2 == 0:
-                window += 1
-            xs = savgol_filter(S[:, 0], window, 2)
-            ys = savgol_filter(S[:, 1], window, 2)
-            S2 = S.copy()
-            S2[:, 0] = xs
-            S2[:, 1] = ys
-            if keep_endpoints and len(S2) >= 2:
-                S2[0] = S[0]
-                S2[-1] = S[-1]
-            S = S2
-    except Exception:
-        pass
-
-    return np.asarray(S, float)
 
 
 def _refine_path_sobel(path_xy, score_map, *, iterations=4, step=0.35):
@@ -1333,36 +1539,14 @@ def _refine_path_sobel(path_xy, score_map, *, iterations=4, step=0.35):
     if score.ndim != 2:
         return np.asarray(path_xy, float)
 
-    gx = cv2.Sobel(score, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(score, cv2.CV_32F, 0, 1, ksize=3)
+    gx, gy = compute_dt_gradient(score, ksize=3)
     h, w = score.shape
-
-    def bilinear(img, x, y):
-        x0 = int(np.clip(np.floor(x), 0, w - 1))
-        x1 = int(np.clip(x0 + 1, 0, w - 1))
-        y0 = int(np.clip(np.floor(y), 0, h - 1))
-        y1 = int(np.clip(y0 + 1, 0, h - 1))
-
-        dx = float(x) - float(x0)
-        dy = float(y) - float(y0)
-
-        v00 = img[y0, x0]
-        v10 = img[y0, x1]
-        v01 = img[y1, x0]
-        v11 = img[y1, x1]
-
-        return (
-            v00 * (1.0 - dx) * (1.0 - dy)
-            + v10 * dx * (1.0 - dy)
-            + v01 * (1.0 - dx) * dy
-            + v11 * dx * dy
-        )
 
     for _ in range(max(0, int(iterations))):
         for i in range(1, len(path) - 1):
             x, y = float(path[i, 0]), float(path[i, 1])
-            gxi = float(bilinear(gx, x, y))
-            gyi = float(bilinear(gy, x, y))
+            gxi = float(bilinear_sample(gx, x, y))
+            gyi = float(bilinear_sample(gy, x, y))
             g = np.array([gxi, gyi], dtype=np.float32)
             n = float(np.linalg.norm(g)) + 1e-6
             path[i] += float(step) * (g / n)
@@ -1400,7 +1584,220 @@ def _compute_normals_for_midline(
     return normals, diag, {"compute_s": float(time.perf_counter() - t0)}
 
 
-def compute_centered_midline_and_normals(
+def _run_single_midline_method(
+    *,
+    method_key,
+    method_spec,
+    mid_xy,
+    mask_u8,
+    domain_u8,
+    dt_norm,
+    depth_full=None,
+    depth_crop=None,
+    depth_bbox_xywh=None,
+    full_image_hw=None,
+    max_radius=60,
+    endpoint_mode="atomic",
+    dt_compute_s=0.0,
+    w_dt=1.0,
+    w_geo=1.0,
+    w_depth=1.0,
+    eps=1e-3,
+):
+    t0_method = time.perf_counter()
+    dom = (np.asarray(domain_u8) > 0).astype(np.uint8)
+    dtn = np.asarray(dt_norm, np.float32)
+    mid = np.asarray(mid_xy, float)
+
+    timing = {
+        "dt_compute_s": float(dt_compute_s),
+        "geodesic_s": 0.0,
+        "depth_align_s": 0.0,
+        "depth_recess_s": 0.0,
+        "costmap_s": 0.0,
+        "dijkstra_s": 0.0,
+        "refine_s": 0.0,
+        "postprocess_s": 0.0,
+        "normals_s": 0.0,
+        "total_s": 0.0,
+    }
+    out = {
+        "midline": None,
+        "normals": None,
+        "normals_diag": {},
+        "timing": timing,
+        "debug": {
+            "domain_u8": (np.asarray(dom) > 0).astype(np.uint8),
+            "dt_norm": np.asarray(dtn, np.float32),
+            "geodesic_norm": None,
+            "depth_norm": None,
+            "recess_norm": None,
+            "dt_term": None,
+            "geo_term": None,
+            "depth_term": None,
+            "costmap": None,
+            "score_for_refine": None,
+        },
+        "meta": {
+            "method_key": str(method_key),
+            "label": str(method_spec.get("label", method_key)),
+            "use_geodesic": bool(method_spec.get("use_geodesic", False)),
+            "depth_mode": method_spec.get("depth_mode", None),
+            "reason": None,
+        },
+    }
+
+    if dom.ndim != 2 or not np.any(dom):
+        out["meta"]["reason"] = "bad_domain"
+        timing["total_s"] = float(time.perf_counter() - t0_method)
+        return out
+    if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 2:
+        out["meta"]["reason"] = "bad_midline_input"
+        timing["total_s"] = float(time.perf_counter() - t0_method)
+        return out
+
+    geodesic_norm = None
+    geodesic_meta = {}
+    if bool(method_spec.get("use_geodesic", False)):
+        geodesic_norm, geodesic_meta = _compute_geodesic_corridor_signal(mid, dom)
+        timing["geodesic_s"] = float(geodesic_meta.get("compute_s", 0.0))
+        out["debug"]["geodesic_norm"] = np.asarray(geodesic_norm, np.float32)
+
+    depth_mode = method_spec.get("depth_mode", None)
+    depth_local = None
+    depth_align_meta = {}
+    if depth_mode == "local":
+        t_align0 = time.perf_counter()
+        if depth_crop is None:
+            timing["depth_align_s"] = float(time.perf_counter() - t_align0)
+            out["meta"]["reason"] = "missing_local_depth"
+            timing["total_s"] = float(time.perf_counter() - t0_method)
+            return out
+        depth_local = np.asarray(depth_crop)
+        if depth_local.ndim == 3:
+            if depth_local.shape[2] == 1:
+                depth_local = depth_local[:, :, 0]
+            else:
+                depth_local = cv2.cvtColor(depth_local, cv2.COLOR_BGR2GRAY)
+        depth_local = np.squeeze(depth_local)
+        if depth_local.ndim != 2:
+            timing["depth_align_s"] = float(time.perf_counter() - t_align0)
+            out["meta"]["reason"] = "bad_local_depth_ndim"
+            timing["total_s"] = float(time.perf_counter() - t0_method)
+            return out
+        depth_local = depth_local.astype(np.float32, copy=False)
+        resized = False
+        if depth_local.shape[:2] != dom.shape[:2]:
+            depth_local = cv2.resize(depth_local, (dom.shape[1], dom.shape[0]), interpolation=cv2.INTER_LINEAR)
+            resized = True
+        depth_align_meta = {
+            "source": "depth_crop",
+            "raw_shape": [int(depth_local.shape[0]), int(depth_local.shape[1])],
+            "aligned_shape": [int(dom.shape[0]), int(dom.shape[1])],
+            "resized": bool(resized),
+            "used_bbox_crop": False,
+        }
+        timing["depth_align_s"] = float(time.perf_counter() - t_align0)
+    elif depth_mode == "global":
+        t_align0 = time.perf_counter()
+        depth_local, depth_align_meta = _extract_depth_crop_for_bbox_or_domain(
+            domain_u8=dom,
+            depth_full=depth_full,
+            depth_crop=None,
+            depth_bbox_xywh=depth_bbox_xywh,
+            full_image_hw=full_image_hw,
+        )
+        timing["depth_align_s"] = float(time.perf_counter() - t_align0)
+        if depth_local is None:
+            out["meta"]["reason"] = "missing_global_depth"
+            out["meta"]["depth_align"] = depth_align_meta if isinstance(depth_align_meta, dict) else {}
+            timing["total_s"] = float(time.perf_counter() - t0_method)
+            return out
+
+    recess_norm = None
+    depth_norm = None
+    depth_sig_meta = {}
+    if depth_mode in ("local", "global"):
+        depth_norm, recess_norm, depth_sig_meta = _compute_depth_recess_signal(depth_local, dom)
+        timing["depth_recess_s"] = float(depth_sig_meta.get("compute_s", 0.0))
+        out["debug"]["depth_norm"] = np.asarray(depth_norm, np.float32)
+        out["debug"]["recess_norm"] = np.asarray(recess_norm, np.float32)
+
+    costmap, score_debug, cost_meta = _build_method_costmap(
+        dom,
+        dtn,
+        use_geodesic=bool(method_spec.get("use_geodesic", False)),
+        geodesic_norm=geodesic_norm,
+        recess_norm=recess_norm,
+        w_dt=float(w_dt),
+        w_geo=float(w_geo),
+        w_depth=float(w_depth),
+        eps=float(eps),
+    )
+    timing["costmap_s"] = float(cost_meta.get("compute_s", 0.0))
+
+    path_raw, dijkstra_meta = _compute_dijkstra_midline(mid, costmap, dom)
+    timing["dijkstra_s"] = float(dijkstra_meta.get("dijkstra_s", 0.0))
+    if path_raw is None or len(path_raw) < 2:
+        out["meta"]["reason"] = "empty_path"
+        out["meta"]["dijkstra"] = dijkstra_meta
+        out["debug"]["dt_term"] = score_debug.get("dt_term")
+        out["debug"]["geo_term"] = score_debug.get("geo_term")
+        out["debug"]["depth_term"] = score_debug.get("depth_term")
+        out["debug"]["costmap"] = np.asarray(costmap, np.float32)
+        timing["total_s"] = float(time.perf_counter() - t0_method)
+        return out
+
+    t_ref0 = time.perf_counter()
+    score_for_refine = np.zeros_like(costmap, dtype=np.float32)
+    dom_b = (np.asarray(dom) > 0)
+    score_for_refine[dom_b] = (1.0 / (np.asarray(costmap, np.float32)[dom_b] + float(max(eps, 1e-9)))).astype(np.float32)
+    score_ref_smooth = gaussian(np.asarray(score_for_refine, np.float32), 1.0)
+    path_refined = _refine_path_sobel(
+        path_raw,
+        score_ref_smooth,
+        iterations=2,
+        step=0.15,
+    )
+    timing["refine_s"] = float(time.perf_counter() - t_ref0)
+
+    t_post0 = time.perf_counter()
+    path_post = _postprocess_midline_polyline(path_refined, keep_endpoints=True)
+    timing["postprocess_s"] = float(time.perf_counter() - t_post0)
+    if path_post is None:
+        out["meta"]["reason"] = "empty_path"
+        timing["total_s"] = float(time.perf_counter() - t0_method)
+        return out
+
+    normals_diag = {}
+    normals, normals_diag, t_normals = _compute_normals_for_midline(
+        mid_xy=path_post,
+        crack_mask_u8=mask_u8,
+        max_radius=max_radius,
+        diag_out=normals_diag,
+        endpoint_mode=endpoint_mode,
+    )
+    timing["normals_s"] = float(t_normals.get("compute_s", 0.0))
+
+    out["midline"] = np.asarray(path_post, float)
+    out["normals"] = normals
+    out["normals_diag"] = normals_diag
+    out["debug"]["dt_term"] = score_debug.get("dt_term")
+    out["debug"]["geo_term"] = score_debug.get("geo_term")
+    out["debug"]["depth_term"] = score_debug.get("depth_term")
+    out["debug"]["costmap"] = np.asarray(costmap, np.float32)
+    out["debug"]["score_for_refine"] = np.asarray(score_for_refine, np.float32)
+    out["meta"]["reason"] = None
+    out["meta"]["depth_align"] = depth_align_meta if isinstance(depth_align_meta, dict) else {}
+    out["meta"]["depth_recess"] = depth_sig_meta if isinstance(depth_sig_meta, dict) else {}
+    out["meta"]["geodesic"] = geodesic_meta if isinstance(geodesic_meta, dict) else {}
+    out["meta"]["costmap"] = cost_meta if isinstance(cost_meta, dict) else {}
+    out["meta"]["dijkstra"] = dijkstra_meta if isinstance(dijkstra_meta, dict) else {}
+    timing["total_s"] = float(time.perf_counter() - t0_method)
+    return out
+
+
+def compute_midline_method_variants_and_normals(
     *,
     mid_xy,
     crack_mask_u8,
@@ -1413,15 +1810,18 @@ def compute_centered_midline_and_normals(
     max_radius=60,
     domain_mode="terr_and_mask",
     snap_kwargs=None,
-    depth_alpha=0.5,
-    depth_beta=0.5,
-    depth_eps=1e-3,
+    depth_alpha=0.5,  # backward-compatible alias for geodesic weight
+    depth_beta=0.5,   # backward-compatible alias for depth weight
+    depth_eps=1e-3,   # shared epsilon
+    w_dt=1.0,
+    w_geo=None,
+    w_depth=None,
     diag_out=None,
     endpoint_mode="atomic",
 ):
     """
-    Compute centered DT-ridge and depth-guided centerlines + normals in one pass.
-    Returns explicit result families and separated timing/debug blobs.
+    Compute M1-M4 midline variants (DT / DT+geo / DT+geo+local / DT+geo+global)
+    and normals in one pass.
     """
     if snap_kwargs is None:
         snap_kwargs = {}
@@ -1443,151 +1843,140 @@ def compute_centered_midline_and_normals(
         domain = mask_u8.copy()
 
     dt_float, dt_norm, t_dt = _compute_dt_for_domain(domain)
-    centered_xy, t_centered = _compute_dt_ridge_midline(
-        np.asarray(mid_xy, float),
-        domain,
-        dt_float,
-        snap_kwargs,
-    )
+    w_geo_eff = float(depth_alpha if w_geo is None else w_geo)
+    w_depth_eff = float(depth_beta if w_depth is None else w_depth)
 
-    centered_normals_diag = diag_out if isinstance(diag_out, dict) else {}
-    centered_normals, centered_normals_diag, t_center_normals = _compute_normals_for_midline(
-        mid_xy=centered_xy,
-        crack_mask_u8=mask_u8,
-        max_radius=max_radius,
-        diag_out=centered_normals_diag,
-        endpoint_mode=endpoint_mode,
-    )
+    methods = {}
+    for mkey, mspec in METHOD_SPECS.items():
+        if mspec.get("depth_mode") == "local":
+            d_crop = depth_crop
+            d_full = None
+        elif mspec.get("depth_mode") == "global":
+            d_crop = None
+            d_full = depth_full
+        else:
+            d_crop = None
+            d_full = None
+
+        methods[mkey] = _run_single_midline_method(
+            method_key=mkey,
+            method_spec=mspec,
+            mid_xy=np.asarray(mid_xy, float),
+            mask_u8=mask_u8,
+            domain_u8=domain,
+            dt_norm=dt_norm,
+            depth_full=d_full,
+            depth_crop=d_crop,
+            depth_bbox_xywh=depth_bbox_xywh,
+            full_image_hw=full_image_hw,
+            max_radius=max_radius,
+            endpoint_mode=endpoint_mode,
+            dt_compute_s=float(t_dt.get("compute_s", 0.0)),
+            w_dt=float(w_dt),
+            w_geo=float(w_geo_eff),
+            w_depth=float(w_depth_eff),
+            eps=float(depth_eps),
+        )
 
     result = {
-        "centered_midline": np.asarray(centered_xy, float),
-        "centered_normals": centered_normals,
-        "depth_midline": None,
-        "depth_normals": None,
-        "centered_normals_diag": centered_normals_diag,
-        "depth_normals_diag": {},
-        "depth_cost_meta": {},
-        "debug": {
+        "methods": methods,
+        "shared": {
             "domain_u8": (np.asarray(domain) > 0).astype(np.uint8),
+            "dt_float": np.asarray(dt_float, np.float32),
             "dt_norm": np.asarray(dt_norm, np.float32),
-            "depth_norm": None,
-            "recess_norm": None,
-            "depth_score": None,
-            "depth_costmap": None,
-        },
-        "timing": {
-            "dt": {
-                "compute_s": float(t_dt.get("compute_s", 0.0)),
-            },
-            "centered": {
-                "snap_s": float(t_centered.get("snap_s", 0.0)),
-            },
-            "depth": {
-                "depth_align_s": 0.0,
-                "recess_s": 0.0,
-                "costmap_s": 0.0,
-                "dijkstra_s": 0.0,
-                "refine_s": 0.0,
-                "postprocess_s": 0.0,
-            },
-            "normals": {
-                "centered_s": float(t_center_normals.get("compute_s", 0.0)),
-                "depth_s": 0.0,
-            },
         },
     }
+    return result
 
-    t_depth_align0 = time.perf_counter()
-    depth_local, depth_align_meta = _extract_depth_crop_for_bbox_or_domain(
-        domain_u8=domain,
+
+def compute_centered_midline_and_normals(
+    *,
+    mid_xy,
+    crack_mask_u8,
+    territory_u8=None,
+    domain_u8=None,
+    depth_full=None,
+    depth_crop=None,
+    depth_bbox_xywh=None,
+    full_image_hw=None,
+    max_radius=60,
+    domain_mode="terr_and_mask",
+    snap_kwargs=None,
+    depth_alpha=0.5,
+    depth_beta=0.5,
+    depth_eps=1e-3,
+    diag_out=None,
+    endpoint_mode="atomic",
+):
+    """
+    Backward-compatible wrapper around M1-M4 result family.
+    """
+    res = compute_midline_method_variants_and_normals(
+        mid_xy=mid_xy,
+        crack_mask_u8=crack_mask_u8,
+        territory_u8=territory_u8,
+        domain_u8=domain_u8,
         depth_full=depth_full,
         depth_crop=depth_crop,
         depth_bbox_xywh=depth_bbox_xywh,
         full_image_hw=full_image_hw,
-    )
-    result["timing"]["depth"]["depth_align_s"] = float(time.perf_counter() - t_depth_align0)
-
-    if depth_local is None:
-        result["depth_cost_meta"] = {
-            "has_depth": False,
-            **(depth_align_meta if isinstance(depth_align_meta, dict) else {}),
-        }
-        return result
-
-    depth_norm, recess_norm, depth_sig_meta = _compute_depth_recess_signal(depth_local, domain)
-    result["timing"]["depth"]["recess_s"] = float(depth_sig_meta.get("compute_s", 0.0))
-
-    depth_cost, depth_score, cost_meta = _build_depth_guided_costmap(
-        domain,
-        dt_norm,
-        recess_norm,
-        alpha=float(depth_alpha),
-        beta=float(depth_beta),
-        eps=float(depth_eps),
-    )
-    result["timing"]["depth"]["costmap_s"] = float(cost_meta.get("compute_s", 0.0))
-
-    depth_path_raw, dijkstra_meta = _compute_dijkstra_midline(
-        np.asarray(mid_xy, float),
-        depth_cost,
-        domain,
-    )
-    result["timing"]["depth"]["dijkstra_s"] = float(dijkstra_meta.get("dijkstra_s", 0.0))
-
-    result["debug"]["depth_norm"] = np.asarray(depth_norm, np.float32)
-    result["debug"]["recess_norm"] = np.asarray(recess_norm, np.float32)
-    result["debug"]["depth_score"] = np.asarray(depth_score, np.float32)
-    result["debug"]["depth_costmap"] = np.asarray(depth_cost, np.float32)
-    result["depth_cost_meta"] = {
-        "has_depth": True,
-        **(depth_align_meta if isinstance(depth_align_meta, dict) else {}),
-        "cost_weights": {
-            "alpha": float(depth_alpha),
-            "beta": float(depth_beta),
-            "eps": float(max(depth_eps, 1e-9)),
-        },
-        "dijkstra": {
-            "backend": dijkstra_meta.get("backend"),
-            "reason": dijkstra_meta.get("reason"),
-            "path_cost": dijkstra_meta.get("path_cost"),
-        },
-    }
-
-    if depth_path_raw is None or len(depth_path_raw) < 2:
-        return result
-
-    t_refine0 = time.perf_counter()
-    # Suppress small ridge bumps before Sobel-based subpixel correction.
-    depth_score_smooth = cv2.GaussianBlur(
-        np.asarray(depth_score, np.float32),
-        (0, 0),
-        1.0,
-    )
-    depth_path_refined = _refine_path_sobel(
-        depth_path_raw,
-        depth_score_smooth,
-        iterations=2,
-        step=0.15,
-    )
-    result["timing"]["depth"]["refine_s"] = float(time.perf_counter() - t_refine0)
-
-    t_post0 = time.perf_counter()
-    depth_mid = _postprocess_midline_polyline(depth_path_refined, keep_endpoints=True)
-    result["timing"]["depth"]["postprocess_s"] = float(time.perf_counter() - t_post0)
-
-    depth_normals_diag = {}
-    depth_normals, depth_normals_diag, t_depth_normals = _compute_normals_for_midline(
-        mid_xy=depth_mid,
-        crack_mask_u8=mask_u8,
         max_radius=max_radius,
-        diag_out=depth_normals_diag,
+        domain_mode=domain_mode,
+        snap_kwargs=snap_kwargs,
+        depth_alpha=depth_alpha,
+        depth_beta=depth_beta,
+        depth_eps=depth_eps,
+        diag_out=diag_out,
         endpoint_mode=endpoint_mode,
     )
-    result["timing"]["normals"]["depth_s"] = float(t_depth_normals.get("compute_s", 0.0))
-    result["depth_midline"] = np.asarray(depth_mid, float)
-    result["depth_normals"] = depth_normals
-    result["depth_normals_diag"] = depth_normals_diag
-    return result
+
+    methods = res.get("methods", {}) if isinstance(res, dict) else {}
+    m1 = methods.get("M1_dt", {}) if isinstance(methods.get("M1_dt", {}), dict) else {}
+    m3 = methods.get("M3_dt_geo_depth_local", {}) if isinstance(methods.get("M3_dt_geo_depth_local", {}), dict) else {}
+    m4 = methods.get("M4_dt_geo_depth_global", {}) if isinstance(methods.get("M4_dt_geo_depth_global", {}), dict) else {}
+    depth_pick = m4 if m4.get("midline") is not None else m3
+    shared = res.get("shared", {}) if isinstance(res.get("shared", {}), dict) else {}
+
+    out = {
+        "centered_midline": m1.get("midline"),
+        "centered_normals": m1.get("normals"),
+        "depth_midline": depth_pick.get("midline"),
+        "depth_normals": depth_pick.get("normals"),
+        "centered_normals_diag": m1.get("normals_diag", {}) or {},
+        "depth_normals_diag": depth_pick.get("normals_diag", {}) or {},
+        "depth_cost_meta": depth_pick.get("meta", {}) or {},
+        "debug": {
+            "domain_u8": shared.get("domain_u8"),
+            "dt_norm": shared.get("dt_norm"),
+            "depth_norm": depth_pick.get("debug", {}).get("depth_norm"),
+            "recess_norm": depth_pick.get("debug", {}).get("recess_norm"),
+            "depth_score": depth_pick.get("debug", {}).get("score_for_refine"),
+            "depth_costmap": depth_pick.get("debug", {}).get("costmap"),
+        },
+        "timing": {
+            "dt": {
+                "compute_s": float((m1.get("timing", {}) or {}).get("dt_compute_s", 0.0)),
+            },
+            "centered": {
+                "snap_s": float((m1.get("timing", {}) or {}).get("dijkstra_s", 0.0)),
+            },
+            "depth": {
+                "depth_align_s": float((depth_pick.get("timing", {}) or {}).get("depth_align_s", 0.0)),
+                "recess_s": float((depth_pick.get("timing", {}) or {}).get("depth_recess_s", 0.0)),
+                "costmap_s": float((depth_pick.get("timing", {}) or {}).get("costmap_s", 0.0)),
+                "dijkstra_s": float((depth_pick.get("timing", {}) or {}).get("dijkstra_s", 0.0)),
+                "refine_s": float((depth_pick.get("timing", {}) or {}).get("refine_s", 0.0)),
+                "postprocess_s": float((depth_pick.get("timing", {}) or {}).get("postprocess_s", 0.0)),
+            },
+            "normals": {
+                "centered_s": float((m1.get("timing", {}) or {}).get("normals_s", 0.0)),
+                "depth_s": float((depth_pick.get("timing", {}) or {}).get("normals_s", 0.0)),
+            },
+        },
+        "methods": methods,
+        "shared": shared,
+    }
+    return out
 
 def plot_midline_centering_debug(
     *,
@@ -1794,10 +2183,14 @@ def plot_depth_cost_diagnostic(
     out_path,
     crack_mask_u8,
     dt_norm,
-    recess_norm,
-    depth_score,
+    geodesic_norm=None,
+    recess_norm=None,
+    depth_score=None,
+    costmap=None,
     bbox_xywh=None,
-    title="Depth-guided cost diagnostics",
+    title="Cost diagnostics",
+    method_label="",
+    depth_label=None,
 ):
     import matplotlib.pyplot as plt
 
@@ -1823,23 +2216,48 @@ def plot_depth_cost_diagnostic(
             x0, y0, x1, y1 = 0, 0, W, H
 
     dtv = np.asarray(dt_norm, np.float32)
-    recv = np.asarray(recess_norm, np.float32)
-    scv = np.asarray(depth_score, np.float32)
     dtv = np.clip(dtv, 0.0, 1.0)
-    recv = np.clip(recv, 0.0, 1.0)
-    scv = np.clip(scv, 0.0, 1.0)
 
-    fig, axes = plt.subplots(1, 3, figsize=(14.0, 4.6), dpi=220, sharex=True, sharey=True)
-    ax0, ax1, ax2 = axes
-    ax0.imshow(dtv[y0:y1, x0:x1], cmap="magma")
-    ax1.imshow(recv[y0:y1, x0:x1], cmap="viridis")
-    ax2.imshow(scv[y0:y1, x0:x1], cmap="inferno")
-    ax0.set_title("DT ridge cue", fontsize=10)
-    ax1.set_title("Depth recess cue", fontsize=10)
-    ax2.set_title("Combined score", fontsize=10)
-    for ax in axes:
+    panels = [("DT cue", dtv, "magma")]
+    if geodesic_norm is not None:
+        gv = np.clip(np.asarray(geodesic_norm, np.float32), 0.0, 1.0)
+        panels.append(("Geodesic cue", gv, "viridis"))
+    if recess_norm is not None:
+        rv = np.clip(np.asarray(recess_norm, np.float32), 0.0, 1.0)
+        depth_tag = str(depth_label).strip().lower() if depth_label is not None else "depth"
+        panels.append((f"{depth_tag.capitalize()} depth recess cue", rv, "cividis"))
+    if depth_score is not None:
+        sv = np.clip(np.asarray(depth_score, np.float32), 0.0, 1.0)
+        panels.append(("Depth score", sv, "plasma"))
+    if costmap is not None:
+        cst = np.asarray(costmap, np.float32)
+        cst = np.where(np.isfinite(cst), cst, np.nan)
+        cvals = cst[np.isfinite(cst)]
+        if cvals.size > 0:
+            p2 = float(np.percentile(cvals, 2))
+            p98 = float(np.percentile(cvals, 98))
+            if np.isfinite(p2) and np.isfinite(p98) and p98 > p2 + 1e-9:
+                cst_norm = np.clip((cst - p2) / (p98 - p2), 0.0, 1.0)
+            else:
+                cst_norm = np.zeros_like(cst, np.float32)
+        else:
+            cst_norm = np.zeros_like(cst, np.float32)
+        panels.append(("Combined cost", cst_norm, "inferno"))
+
+    n = max(1, len(panels))
+    fig, axes = plt.subplots(1, n, figsize=(4.8 * n, 4.6), dpi=220, sharex=True, sharey=True)
+    if n == 1:
+        axes = [axes]
+
+    for ax, (label, arr, cmap) in zip(axes, panels):
+        ax.imshow(np.asarray(arr, np.float32)[y0:y1, x0:x1], cmap=cmap)
+        ax.set_title(label, fontsize=10)
         ax.axis("off")
-    fig.suptitle(title, fontsize=11)
+
+    supt = str(title)
+    if method_label:
+        supt = f"{supt} [{method_label}]"
+    fig.suptitle(supt, fontsize=11)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
@@ -2007,7 +2425,7 @@ def debug_plot_gt_sup_dominance_bite_packed(
     if not np.any(local_union):
         print(f"[GT_SUP DOMDBG] base={base_name} ccid={ccid} RAW LOCAL union is EMPTY")
         # still write a figure so you see placement context
-        # (this helps diagnose “bbox exists but union empty”)
+        # (this helps diagnose â€œbbox exists but union emptyâ€)
     # -----------------------------
     # 2) FULL placement on GT mask
     # -----------------------------
@@ -2081,7 +2499,7 @@ def debug_plot_gt_sup_dominance_bite_packed(
         if S.ndim == 2 and len(S) >= 2:
             axes[2].plot(S[:, 0] - zx0, S[:, 1] - zy0, color="cyan", lw=1.6)
 
-    fig.suptitle(f"GT dominance bite debug — base={base_name} ccid={ccid}", fontsize=11)
+    fig.suptitle(f"GT dominance bite debug â€” base={base_name} ccid={ccid}", fontsize=11)
 
     os.makedirs(out_dir, exist_ok=True)
     tag = f"ccid{ccid}_" + "_".join([str(m) for m in members])
@@ -2150,44 +2568,72 @@ def export_gt_centering_metrics(
     for entry in (final_entries or []):
         cid = str(entry.get("id", ""))
         kind = str(entry.get("kind", "unknown"))
+        method_variants = entry.get("method_variants", {}) if isinstance(entry.get("method_variants", {}), dict) else {}
+
+        method_cmp_specs = [
+            ("manual_vs_M1_dt", "M1_dt"),
+            ("manual_vs_M2_dt_geo", "M2_dt_geo"),
+            ("manual_vs_M3_dt_geo_depth_local", "M3_dt_geo_depth_local"),
+            ("manual_vs_M4_dt_geo_depth_global", "M4_dt_geo_depth_global"),
+        ]
 
         if kind == "atomic":
             manual_mid = np.asarray(entry.get("midline", []), float)
-            centered_mid = np.asarray(
-                entry.get("centered_midline", entry.get("midline_auto_centered", [])),
-                float,
-            )
-            depth_mid = np.asarray(
-                entry.get("depth_midline", entry.get("midline_depth_centered", [])),
-                float,
-            )
-            candidate_pairs = [
-                ("manual_vs_centered", "centered_gt", manual_mid, centered_mid),
-                ("manual_vs_depth_distridge", "centered_depth_gt", manual_mid, depth_mid),
-            ]
+            candidate_pairs = []
+            if method_variants:
+                for cmp_label, mkey in method_cmp_specs:
+                    mm = method_variants.get(mkey, {}) if isinstance(method_variants.get(mkey, {}), dict) else {}
+                    m_mid = mm.get("midline", None)
+                    m_arr = np.asarray(m_mid, float) if m_mid is not None else np.empty((0, 2), float)
+                    candidate_pairs.append((cmp_label, mkey, manual_mid, m_arr))
+            else:
+                centered_mid = np.asarray(
+                    entry.get("centered_midline", entry.get("midline_auto_centered", [])),
+                    float,
+                )
+                depth_mid = np.asarray(
+                    entry.get("depth_midline", entry.get("midline_depth_centered", [])),
+                    float,
+                )
+                candidate_pairs = [
+                    ("manual_vs_M1_dt", "M1_dt", manual_mid, centered_mid),
+                    ("manual_vs_M4_dt_geo_depth_global", "M4_dt_geo_depth_global", manual_mid, depth_mid),
+                ]
         elif kind == "combined":
             manual_parts = _coerce_seg_list(
                 entry,
                 seg_keys=("midline_segments",),
                 packed_keys=("midline",),
             )
-            centered_parts = _coerce_seg_list(
-                entry,
-                seg_keys=("centered_midline_segments", "midline_segments_auto_centered"),
-                packed_keys=("centered_midline", "midline_auto_centered"),
-            )
-            depth_parts = _coerce_seg_list(
-                entry,
-                seg_keys=("depth_midline_segments",),
-                packed_keys=("depth_midline", "midline_depth_centered"),
-            )
             manual_mid = np.vstack(manual_parts) if manual_parts else np.empty((0, 2), float)
-            centered_mid = np.vstack(centered_parts) if centered_parts else np.empty((0, 2), float)
-            depth_mid = np.vstack(depth_parts) if depth_parts else np.empty((0, 2), float)
-            candidate_pairs = [
-                ("manual_vs_centered", "centered_gt", manual_mid, centered_mid),
-                ("manual_vs_depth_distridge", "centered_depth_gt", manual_mid, depth_mid),
-            ]
+            candidate_pairs = []
+            if method_variants:
+                for cmp_label, mkey in method_cmp_specs:
+                    mm = method_variants.get(mkey, {}) if isinstance(method_variants.get(mkey, {}), dict) else {}
+                    parts = _coerce_seg_list(
+                        mm,
+                        seg_keys=("midline_segments",),
+                        packed_keys=("midline",),
+                    )
+                    m_mid = np.vstack(parts) if parts else np.empty((0, 2), float)
+                    candidate_pairs.append((cmp_label, mkey, manual_mid, m_mid))
+            else:
+                centered_parts = _coerce_seg_list(
+                    entry,
+                    seg_keys=("centered_midline_segments", "midline_segments_auto_centered"),
+                    packed_keys=("centered_midline", "midline_auto_centered"),
+                )
+                depth_parts = _coerce_seg_list(
+                    entry,
+                    seg_keys=("depth_midline_segments",),
+                    packed_keys=("depth_midline", "midline_depth_centered"),
+                )
+                centered_mid = np.vstack(centered_parts) if centered_parts else np.empty((0, 2), float)
+                depth_mid = np.vstack(depth_parts) if depth_parts else np.empty((0, 2), float)
+                candidate_pairs = [
+                    ("manual_vs_M1_dt", "M1_dt", manual_mid, centered_mid),
+                    ("manual_vs_M4_dt_geo_depth_global", "M4_dt_geo_depth_global", manual_mid, depth_mid),
+                ]
         else:
             continue
 
@@ -2235,6 +2681,18 @@ def export_gt_centering_metrics(
                 **mm,
             }
             rows.append(row)
+
+            # backward-compatible aliases
+            if str(cmp_label) == "manual_vs_M1_dt":
+                row2 = dict(row)
+                row2["comparison_label"] = "manual_vs_centered"
+                row2["variant_id"] = "centered_gt"
+                rows.append(row2)
+            if str(cmp_label) == "manual_vs_M4_dt_geo_depth_global":
+                row2 = dict(row)
+                row2["comparison_label"] = "manual_vs_depth_distridge"
+                row2["variant_id"] = "centered_depth_gt"
+                rows.append(row2)
 
     df_all = pd.DataFrame(rows)
     if df_all.empty:
@@ -2332,14 +2790,19 @@ def export_gt_centering_metrics(
             selected_family=None,
             title_suffix=f"GT Alignment Audit ({cmp_label})",
         )
-        if str(cmp_label) == "manual_vs_centered":
+        if str(cmp_label) in {"manual_vs_centered", "manual_vs_M1_dt"}:
             plot_rs3_midline_diagnostics(
                 df_all=dcmp,
                 out_dir=os.path.join(gt_centering_dir, "diagnostics"),
                 selected_family=None,
                 title_suffix="GT Centering Audit",
             )
-        elif str(cmp_label) in {"manual_vs_depth_distridge", "manual_vs_depth"}:
+        elif str(cmp_label) in {
+            "manual_vs_depth_distridge",
+            "manual_vs_depth",
+            "manual_vs_M3_dt_geo_depth_local",
+            "manual_vs_M4_dt_geo_depth_global",
+        }:
             plot_rs3_midline_diagnostics(
                 df_all=dcmp,
                 out_dir=os.path.join(depth_distridge_dir, "diagnostics"),
@@ -2413,6 +2876,7 @@ def export_gt_supervision_for_image(
     combined_groups: dict | None,
     gt_mask: np.ndarray,
     depth_full: np.ndarray | None = None,
+    depth_local_crops: dict | None = None,
     enable_auto_centering: bool = True,
     auto_centering_debug: bool = True,
     auto_centering_window_half_size: int = 75,
@@ -2478,6 +2942,14 @@ def export_gt_supervision_for_image(
     def _sum_centering_seconds(timing_blob):
         if not isinstance(timing_blob, dict):
             return 0.0
+        methods_blob = timing_blob.get("methods", {}) if isinstance(timing_blob.get("methods", {}), dict) else {}
+        if methods_blob:
+            s = 0.0
+            for _k, rec in methods_blob.items():
+                if not isinstance(rec, dict):
+                    continue
+                s += float(rec.get("total_s", 0.0) or 0.0)
+            return float(s)
         dt = timing_blob.get("dt", {}) if isinstance(timing_blob.get("dt", {}), dict) else {}
         ctr = timing_blob.get("centered", {}) if isinstance(timing_blob.get("centered", {}), dict) else {}
         dep = timing_blob.get("depth", {}) if isinstance(timing_blob.get("depth", {}), dict) else {}
@@ -2497,6 +2969,20 @@ def export_gt_supervision_for_image(
     def _accumulate_timing_blob(timing_blob):
         if not isinstance(timing_blob, dict):
             return
+        methods_blob = timing_blob.get("methods", {}) if isinstance(timing_blob.get("methods", {}), dict) else {}
+        if methods_blob:
+            m1 = methods_blob.get("M1_dt", {}) if isinstance(methods_blob.get("M1_dt", {}), dict) else {}
+            m4 = methods_blob.get("M4_dt_geo_depth_global", {}) if isinstance(methods_blob.get("M4_dt_geo_depth_global", {}), dict) else {}
+            timing_totals["dt_compute_s"] += float(m1.get("dt_compute_s", 0.0) or 0.0)
+            timing_totals["centered_snap_s"] += float(m1.get("dijkstra_s", 0.0) or 0.0)
+            timing_totals["depth_align_s"] += float(m4.get("depth_align_s", 0.0) or 0.0)
+            timing_totals["depth_recess_s"] += float(m4.get("depth_recess_s", 0.0) or 0.0)
+            timing_totals["depth_costmap_s"] += float(m4.get("costmap_s", 0.0) or 0.0)
+            timing_totals["depth_dijkstra_s"] += float(m4.get("dijkstra_s", 0.0) or 0.0)
+            timing_totals["depth_postprocess_s"] += float(m4.get("postprocess_s", 0.0) or 0.0)
+            timing_totals["normals_centered_s"] += float(m1.get("normals_s", 0.0) or 0.0)
+            timing_totals["normals_depth_s"] += float(m4.get("normals_s", 0.0) or 0.0)
+            return
         dt = timing_blob.get("dt", {}) if isinstance(timing_blob.get("dt", {}), dict) else {}
         ctr = timing_blob.get("centered", {}) if isinstance(timing_blob.get("centered", {}), dict) else {}
         dep = timing_blob.get("depth", {}) if isinstance(timing_blob.get("depth", {}), dict) else {}
@@ -2510,6 +2996,61 @@ def export_gt_supervision_for_image(
         timing_totals["depth_postprocess_s"] += float(dep.get("postprocess_s", 0.0) or 0.0)
         timing_totals["normals_centered_s"] += float(nrm.get("centered_s", 0.0) or 0.0)
         timing_totals["normals_depth_s"] += float(nrm.get("depth_s", 0.0) or 0.0)
+
+    method_style = {
+        "M1_dt": {"label": "DT", "compare_label": "M1 DT Midline", "color": "cyan"},
+        "M2_dt_geo": {"label": "DT + Geodesic", "compare_label": "M2 DT+Geo Midline", "color": "lime"},
+        "M3_dt_geo_depth_local": {"label": "DT + Geodesic + Local Depth", "compare_label": "M3 Local Depth Midline", "color": "magenta"},
+        "M4_dt_geo_depth_global": {"label": "DT + Geodesic + Global Depth", "compare_label": "M4 Global Depth Midline", "color": "orange"},
+    }
+
+    def _variant_to_json(m):
+        if not isinstance(m, dict):
+            return {"midline": None, "normals": None, "normals_diag": {}, "timing": {}, "meta": {"reason": "missing_method"}}
+        mid = m.get("midline", None)
+        mid_list = np.asarray(mid, float).tolist() if mid is not None else None
+        return {
+            "midline": mid_list,
+            "normals": m.get("normals", None),
+            "normals_diag": m.get("normals_diag", {}) if isinstance(m.get("normals_diag", {}), dict) else {},
+            "timing": m.get("timing", {}) if isinstance(m.get("timing", {}), dict) else {},
+            "meta": m.get("meta", {}) if isinstance(m.get("meta", {}), dict) else {},
+        }
+
+    def _legacy_timing_from_methods(methods):
+        m1 = methods.get("M1_dt", {}) if isinstance(methods.get("M1_dt", {}), dict) else {}
+        m4 = methods.get("M4_dt_geo_depth_global", {}) if isinstance(methods.get("M4_dt_geo_depth_global", {}), dict) else {}
+        return {
+            "dt": {"compute_s": float((m1.get("timing", {}) or {}).get("dt_compute_s", 0.0))},
+            "centered": {"snap_s": float((m1.get("timing", {}) or {}).get("dijkstra_s", 0.0))},
+            "depth": {
+                "depth_align_s": float((m4.get("timing", {}) or {}).get("depth_align_s", 0.0)),
+                "recess_s": float((m4.get("timing", {}) or {}).get("depth_recess_s", 0.0)),
+                "costmap_s": float((m4.get("timing", {}) or {}).get("costmap_s", 0.0)),
+                "dijkstra_s": float((m4.get("timing", {}) or {}).get("dijkstra_s", 0.0)),
+                "refine_s": float((m4.get("timing", {}) or {}).get("refine_s", 0.0)),
+                "postprocess_s": float((m4.get("timing", {}) or {}).get("postprocess_s", 0.0)),
+            },
+            "normals": {
+                "centered_s": float((m1.get("timing", {}) or {}).get("normals_s", 0.0)),
+                "depth_s": float((m4.get("timing", {}) or {}).get("normals_s", 0.0)),
+            },
+            "methods": {
+                k: (v.get("timing", {}) if isinstance(v, dict) else {})
+                for k, v in (methods or {}).items()
+            },
+        }
+
+    def _lookup_local_depth_for_atomic(atomic_id):
+        if not isinstance(depth_local_crops, dict):
+            return None
+        keys = [atomic_id, str(atomic_id)]
+        if str(atomic_id).isdigit():
+            keys.append(int(str(atomic_id)))
+        for k in keys:
+            if k in depth_local_crops:
+                return depth_local_crops.get(k)
+        return None
 
     def _canonicalize_segments_with_meta(segs_in, meta_in, *, label):
         segs_valid = [np.asarray(s, float) for s in (segs_in or []) if s is not None and len(s) >= 2]
@@ -2659,12 +3200,14 @@ def export_gt_supervision_for_image(
                 window_half_size=int(auto_centering_window_half_size),
                 dt_domain_u8=None,
             )
-            center_res = compute_centered_midline_and_normals(
+            local_depth_crop = _lookup_local_depth_for_atomic(scid)
+            method_res = compute_midline_method_variants_and_normals(
                 mid_xy=mid_xy,
                 crack_mask_u8=crack_mask_clipped,
                 territory_u8=terr,
                 domain_u8=None,
                 depth_full=depth_full,
+                depth_crop=local_depth_crop,
                 depth_bbox_xywh=bb,
                 full_image_hw=(int(H), int(W)),
                 max_radius=50,
@@ -2676,34 +3219,22 @@ def export_gt_supervision_for_image(
                 },
                 endpoint_mode="atomic",
             )
-            centered_xy = np.asarray(center_res.get("centered_midline", mid_xy), float)
-            centered_normals = center_res.get("centered_normals", {}) if isinstance(center_res.get("centered_normals", {}), dict) else {}
-            centered_normals_diag = center_res.get("centered_normals_diag", {})
-            if not isinstance(centered_normals_diag, dict):
-                centered_normals_diag = {}
-            depth_xy = center_res.get("depth_midline", None)
-            depth_normals = center_res.get("depth_normals", {})
-            if not isinstance(depth_normals, dict):
-                depth_normals = {}
-            depth_normals_diag = center_res.get("depth_normals_diag", {})
-            if not isinstance(depth_normals_diag, dict):
-                depth_normals_diag = {}
-            timing_blob = center_res.get("timing", {}) if isinstance(center_res.get("timing", {}), dict) else {}
-            atomic_center_sec += _sum_centering_seconds(timing_blob)
+            methods = method_res.get("methods", {}) if isinstance(method_res.get("methods", {}), dict) else {}
+            m1 = methods.get("M1_dt", {}) if isinstance(methods.get("M1_dt", {}), dict) else {}
+            m3 = methods.get("M3_dt_geo_depth_local", {}) if isinstance(methods.get("M3_dt_geo_depth_local", {}), dict) else {}
+            m4 = methods.get("M4_dt_geo_depth_global", {}) if isinstance(methods.get("M4_dt_geo_depth_global", {}), dict) else {}
+            depth_pick = m4 if m4.get("midline", None) is not None else m3
+            timing_blob = _legacy_timing_from_methods(methods)
+            atomic_center_sec += _sum_centering_seconds({"methods": {k: (v.get("timing", {}) if isinstance(v, dict) else {}) for k, v in methods.items()}})
 
-            cdiag_brief = _normals_diag_summary(centered_normals_diag)
-            print(
-                f"[GT_SUP NORMDBG] atomic {scid} centered total={cdiag_brief['total']} "
-                f"valid={cdiag_brief['valid']} invalid={cdiag_brief['invalid']} "
-                f"invalid_frac={cdiag_brief['invalid_frac']:.4f} top_reasons={cdiag_brief['top_reasons']}"
-            )
-            ddiag_brief = _normals_diag_summary(depth_normals_diag)
-            if depth_normals:
-                print(
-                    f"[GT_SUP NORMDBG] atomic {scid} depth total={ddiag_brief['total']} "
-                    f"valid={ddiag_brief['valid']} invalid={ddiag_brief['invalid']} "
-                    f"invalid_frac={ddiag_brief['invalid_frac']:.4f} top_reasons={ddiag_brief['top_reasons']}"
-                )
+            atomic_entry["method_variants"] = {
+                k: _variant_to_json(v)
+                for k, v in methods.items()
+            }
+
+            centered_xy = np.asarray(m1.get("midline", mid_xy), float)
+            centered_normals = m1.get("normals", {}) if isinstance(m1.get("normals", {}), dict) else {}
+            centered_normals_diag = m1.get("normals_diag", {}) if isinstance(m1.get("normals_diag", {}), dict) else {}
 
             atomic_entry["centered_midline"] = np.asarray(centered_xy, float).tolist()
             atomic_entry["centered_normals"] = centered_normals
@@ -2712,98 +3243,106 @@ def export_gt_supervision_for_image(
             atomic_entry["gt_widths_auto_centered"] = centered_normals.get("width_px", [])
             atomic_entry["centered_normals_diag"] = centered_normals_diag
             atomic_entry["gt_normals_auto_centered_diag"] = centered_normals_diag
-            atomic_entry["depth_cost_meta"] = center_res.get("depth_cost_meta", {})
+
+            atomic_entry["depth_midline_local"] = None
+            atomic_entry["depth_midline_global"] = None
+            if m3.get("midline", None) is not None:
+                atomic_entry["depth_midline_local"] = np.asarray(m3.get("midline"), float).tolist()
+            if m4.get("midline", None) is not None:
+                atomic_entry["depth_midline_global"] = np.asarray(m4.get("midline"), float).tolist()
+
+            if depth_pick.get("midline", None) is not None:
+                dxy = np.asarray(depth_pick.get("midline"), float)
+                depth_normals = depth_pick.get("normals", {}) if isinstance(depth_pick.get("normals", {}), dict) else {}
+                depth_normals_diag = depth_pick.get("normals_diag", {}) if isinstance(depth_pick.get("normals_diag", {}), dict) else {}
+                atomic_entry["depth_midline"] = dxy.tolist()
+                atomic_entry["depth_normals"] = depth_normals
+                atomic_entry["depth_normals_diag"] = depth_normals_diag
+                atomic_entry["midline_depth_centered"] = dxy.tolist()
+                atomic_entry["gt_normals_depth_centered"] = depth_normals
+                atomic_entry["gt_widths_depth_centered"] = depth_normals.get("width_px", [])
+
+            atomic_entry["depth_cost_meta"] = {
+                "M3_local": m3.get("meta", {}) if isinstance(m3.get("meta", {}), dict) else {},
+                "M4_global": m4.get("meta", {}) if isinstance(m4.get("meta", {}), dict) else {},
+            }
             atomic_entry["timing"]["dt"] = timing_blob.get("dt", {})
             atomic_entry["timing"]["centered"] = timing_blob.get("centered", {})
             atomic_entry["timing"]["depth"] = timing_blob.get("depth", {})
             atomic_entry["timing"]["normals"] = timing_blob.get("normals", {})
+            atomic_entry["timing"]["methods"] = timing_blob.get("methods", {})
 
-            depth_xy_arr = None
-            if depth_xy is not None:
-                dxy = np.asarray(depth_xy, float)
-                if dxy.ndim == 2 and len(dxy) >= 2:
-                    depth_xy_arr = dxy
-                    atomic_entry["depth_midline"] = dxy.tolist()
-                    atomic_entry["depth_normals"] = depth_normals
-                    atomic_entry["depth_normals_diag"] = depth_normals_diag
-                    atomic_entry["midline_depth_centered"] = dxy.tolist()
-                    atomic_entry["gt_normals_depth_centered"] = depth_normals
-                    atomic_entry["gt_widths_depth_centered"] = depth_normals.get("width_px", [])
-
-            atomic_entry["auto_centering_meta"] = {
+            auto_meta = {
                 "enabled": True,
                 "domain_mode": str(auto_centering_domain_atomic),
                 "snap": {
                     "n_iters": int(auto_centering_iters),
                     "step_px": float(auto_centering_step_px),
                 },
-                "manual_vs_centered": {
-                    **_shift_stats(mid_xy, centered_xy),
-                    **_geometry_disagreement_stats(mid_xy, centered_xy),
-                    **_width_stability_stats(widths, centered_normals.get("width_px", [])),
-                },
-                "manual_vs_depth_distridge": (
-                    {
-                        **_shift_stats(mid_xy, depth_xy_arr),
-                        **_geometry_disagreement_stats(mid_xy, depth_xy_arr),
-                        **_width_stability_stats(widths, depth_normals.get("width_px", [])),
-                    }
-                    if depth_xy_arr is not None else None
-                ),
-                "depth_available": bool(depth_xy_arr is not None),
+                "comparisons": {},
             }
+            for mk in ("M1_dt", "M2_dt_geo", "M3_dt_geo_depth_local", "M4_dt_geo_depth_global"):
+                mv = methods.get(mk, {}) if isinstance(methods.get(mk, {}), dict) else {}
+                mxy = mv.get("midline", None)
+                mn = mv.get("normals", {}) if isinstance(mv.get("normals", {}), dict) else {}
+                auto_meta["comparisons"][mk] = {
+                    **_shift_stats(mid_xy, mxy),
+                    **_geometry_disagreement_stats(mid_xy, mxy),
+                    **_width_stability_stats(widths, mn.get("width_px", [])),
+                    "available": bool(mxy is not None),
+                    "reason": (mv.get("meta", {}) or {}).get("reason"),
+                }
+            auto_meta["manual_vs_centered"] = dict(auto_meta["comparisons"].get("M1_dt", {}))
+            auto_meta["manual_vs_depth_distridge"] = dict(auto_meta["comparisons"].get("M4_dt_geo_depth_global", {}))
+            auto_meta["depth_available"] = bool(
+                methods.get("M3_dt_geo_depth_local", {}).get("midline", None) is not None
+                or methods.get("M4_dt_geo_depth_global", {}).get("midline", None) is not None
+            )
+            atomic_entry["auto_centering_meta"] = auto_meta
 
             if auto_centering_debug:
                 manual_invalid = [~np.isfinite(np.asarray(widths, float))]
-                center_invalid = [~np.isfinite(np.asarray(centered_normals.get("width_px", []), float))]
-                out_dbg = os.path.join(auto_center_root, f"atomic_{scid}_manual_vs_centered.png")
-                plot_midline_centering_debug(
-                    out_path=out_dbg,
-                    crack_mask_u8=crack_mask,
-                    manual_segs=[mid_xy],
-                    centered_segs=[np.asarray(centered_xy, float)],
-                    territory_u8=terr,
-                    bbox_xywh=atomic_entry.get("mask_bbox"),
-                    title=f"atomic {scid}: manual (yellow) vs centered (cyan)",
-                    invalid_manual_masks=manual_invalid,
-                    invalid_center_masks=center_invalid,
-                )
-
-                debug_blob = center_res.get("debug", {}) if isinstance(center_res.get("debug", {}), dict) else {}
-                if (
-                    debug_blob.get("dt_norm") is not None
-                    and debug_blob.get("recess_norm") is not None
-                    and debug_blob.get("depth_score") is not None
-                ):
-                    out_cost = os.path.join(auto_center_root, f"atomic_{scid}_depth_cost_panel.png")
-                    plot_depth_cost_diagnostic(
-                        out_path=out_cost,
-                        crack_mask_u8=crack_mask_clipped,
-                        dt_norm=np.asarray(debug_blob.get("dt_norm"), np.float32),
-                        recess_norm=np.asarray(debug_blob.get("recess_norm"), np.float32),
-                        depth_score=np.asarray(debug_blob.get("depth_score"), np.float32),
-                        bbox_xywh=atomic_entry.get("mask_bbox"),
-                        title=f"atomic {scid}: depth-guided cost cues",
-                    )
-
-                if depth_xy_arr is not None:
-                    out_overlay = os.path.join(
-                        auto_center_root,
-                        f"atomic_{scid}_manual_vs_depth_distridge.png",
-                    )
+                for mk in ("M1_dt", "M2_dt_geo", "M3_dt_geo_depth_local", "M4_dt_geo_depth_global"):
+                    mv = methods.get(mk, {}) if isinstance(methods.get(mk, {}), dict) else {}
+                    mxy = mv.get("midline", None)
+                    mn = mv.get("normals", {}) if isinstance(mv.get("normals", {}), dict) else {}
+                    if mxy is None:
+                        continue
+                    style = method_style.get(mk, {})
+                    out_dbg = os.path.join(auto_center_root, f"atomic_{scid}_{mk}_manual_vs_method.png")
                     plot_midline_centering_debug(
-                        out_path=out_overlay,
+                        out_path=out_dbg,
                         crack_mask_u8=crack_mask_clipped,
                         manual_segs=[mid_xy],
-                        centered_segs=[depth_xy_arr],
+                        centered_segs=[np.asarray(mxy, float)],
                         territory_u8=terr,
                         bbox_xywh=atomic_entry.get("mask_bbox"),
-                        title=f"atomic {scid}: manual vs depth_distridge",
-                        compare_label="Depth Distridge Midline",
-                        compare_color="magenta",
-                        left_panel_title="manual vs depth_distridge (mask)",
-                        right_panel_title="DT ridge view (depth domain)",
+                        title=f"atomic {scid}: manual vs {style.get('label', mk)}",
+                        invalid_manual_masks=manual_invalid,
+                        invalid_center_masks=[~np.isfinite(np.asarray(mn.get("width_px", []), float))],
+                        compare_label=style.get("compare_label", mk),
+                        compare_color=style.get("color", "cyan"),
+                        left_panel_title=f"manual vs {style.get('label', mk)} (mask)",
+                        right_panel_title="DT ridge view (domain)",
                     )
+
+                    dbg = mv.get("debug", {}) if isinstance(mv.get("debug", {}), dict) else {}
+                    if mk in ("M2_dt_geo", "M3_dt_geo_depth_local", "M4_dt_geo_depth_global"):
+                        depth_lbl = "local" if mk == "M3_dt_geo_depth_local" else ("global" if mk == "M4_dt_geo_depth_global" else None)
+                        out_cost = os.path.join(auto_center_root, f"atomic_{scid}_{mk}_cost_panel.png")
+                        plot_depth_cost_diagnostic(
+                            out_path=out_cost,
+                            crack_mask_u8=crack_mask_clipped,
+                            dt_norm=np.asarray(dbg.get("dt_norm"), np.float32) if dbg.get("dt_norm") is not None else np.zeros_like(crack_mask_clipped, np.float32),
+                            geodesic_norm=dbg.get("geodesic_norm"),
+                            recess_norm=dbg.get("recess_norm"),
+                            depth_score=dbg.get("score_for_refine"),
+                            costmap=dbg.get("costmap"),
+                            bbox_xywh=atomic_entry.get("mask_bbox"),
+                            title=f"atomic {scid}: cost cues",
+                            method_label=mk,
+                            depth_label=depth_lbl,
+                        )
 
         return int(job["order"]), atomic_entry, float(atomic_compute_sec), float(atomic_center_sec)
 
@@ -3104,7 +3643,7 @@ def export_gt_supervision_for_image(
             "id": tag_name,
             "kind": "combined",
             "members": members,
-            # 🔴 AUTHORITATIVE bbox = UNION OF USER BOXES (xywh)
+            # ðŸ”´ AUTHORITATIVE bbox = UNION OF USER BOXES (xywh)
             "mask_bbox": [ux, uy, uw, uh],
             "midline": packed_mid,
             "gt_normals": {
@@ -3151,7 +3690,22 @@ def export_gt_supervision_for_image(
             per_seg_centered_normals_diag = []
             per_seg_depth_normals_diag = []
             depth_cost_meta_per_segment = []
-            depth_cost_debug_blobs = []
+            method_variant_segments = {
+                k: {
+                    "midline_segments": [],
+                    "midline_segments_meta": [],
+                    "normals_diag_per_segment": [],
+                    "edge1_x": [],
+                    "edge1_y": [],
+                    "edge2_x": [],
+                    "edge2_y": [],
+                    "width_px": [],
+                    "timing_sum": {},
+                    "meta": METHOD_SPECS.get(k, {}),
+                }
+                for k in METHOD_SPECS.keys()
+            }
+            method_cost_debug_blobs = {k: [] for k in ("M2_dt_geo", "M3_dt_geo_depth_local", "M4_dt_geo_depth_global")}
 
             combined_timing_blob = {
                 "dt": {"compute_s": 0.0},
@@ -3194,7 +3748,7 @@ def export_gt_supervision_for_image(
                     window_half_size=int(auto_centering_window_half_size),
                     dt_domain_u8=None,
                 )
-                center_res = compute_centered_midline_and_normals(
+                center_res = compute_midline_method_variants_and_normals(
                     mid_xy=S,
                     crack_mask_u8=mask_use,
                     territory_u8=terr_i,
@@ -3212,13 +3766,51 @@ def export_gt_supervision_for_image(
                     endpoint_mode="combined",
                 )
 
-                _acc_nested_timing(combined_timing_blob, center_res.get("timing", {}))
+                # Build backward-compatible timing accumulator from method family.
+                _acc_nested_timing(
+                    combined_timing_blob,
+                    _legacy_timing_from_methods(
+                        center_res.get("methods", {}) if isinstance(center_res.get("methods", {}), dict) else {}
+                    ),
+                )
+                methods_local = center_res.get("methods", {}) if isinstance(center_res.get("methods", {}), dict) else {}
+                for mk in METHOD_SPECS.keys():
+                    mv = methods_local.get(mk, {}) if isinstance(methods_local.get(mk, {}), dict) else {}
+                    mseg = mv.get("midline", None)
+                    mnorm = mv.get("normals", {}) if isinstance(mv.get("normals", {}), dict) else {}
+                    mdiag = mv.get("normals_diag", {}) if isinstance(mv.get("normals_diag", {}), dict) else {}
+                    mtime = mv.get("timing", {}) if isinstance(mv.get("timing", {}), dict) else {}
+                    mdebug = mv.get("debug", {}) if isinstance(mv.get("debug", {}), dict) else {}
+                    mm = method_variant_segments.get(mk, {})
+                    if mseg is not None:
+                        mseg = np.asarray(mseg, float)
+                    if mseg is not None and mseg.ndim == 2 and len(mseg) >= 2:
+                        mm["midline_segments"].append(np.asarray(mseg, float))
+                        mm["midline_segments_meta"].append(
+                            dict(seg_meta[seg_i]) if seg_i < len(seg_meta) else {"seg_idx": int(seg_i)}
+                        )
+                        mm["edge1_x"].append(np.asarray(mnorm.get("edge1_x", []), float))
+                        mm["edge1_y"].append(np.asarray(mnorm.get("edge1_y", []), float))
+                        mm["edge2_x"].append(np.asarray(mnorm.get("edge2_x", []), float))
+                        mm["edge2_y"].append(np.asarray(mnorm.get("edge2_y", []), float))
+                        mm["width_px"].append(np.asarray(mnorm.get("width_px", []), float))
+                        mm["normals_diag_per_segment"].append(mdiag)
+                    for tk, tv in mtime.items():
+                        try:
+                            mm["timing_sum"][tk] = float(mm["timing_sum"].get(tk, 0.0)) + float(tv or 0.0)
+                        except Exception:
+                            continue
+                    if mk in method_cost_debug_blobs and mdebug.get("dt_norm") is not None:
+                        method_cost_debug_blobs[mk].append((int(seg_i), mdebug, mask_use))
 
-                centered_S = np.asarray(center_res.get("centered_midline", S), float)
-                centered_normals = center_res.get("centered_normals", {})
+                m1_local = methods_local.get("M1_dt", {}) if isinstance(methods_local.get("M1_dt", {}), dict) else {}
+                m4_local = methods_local.get("M4_dt_geo_depth_global", {}) if isinstance(methods_local.get("M4_dt_geo_depth_global", {}), dict) else {}
+
+                centered_S = np.asarray(m1_local.get("midline", S), float)
+                centered_normals = m1_local.get("normals", {})
                 if not isinstance(centered_normals, dict):
                     centered_normals = {}
-                cseg_diag = center_res.get("centered_normals_diag", {})
+                cseg_diag = m1_local.get("normals_diag", {})
                 if not isinstance(cseg_diag, dict):
                     cseg_diag = {}
                 per_seg_centered_normals_diag.append(cseg_diag)
@@ -3236,22 +3828,16 @@ def export_gt_supervision_for_image(
                 ce2y_list.append(np.asarray(centered_normals.get("edge2_y", []), float))
                 cw_list.append(np.asarray(centered_normals.get("width_px", []), float))
 
-                dseg = center_res.get("depth_midline", None)
-                dnorm = center_res.get("depth_normals", {})
+                dseg = m4_local.get("midline", None)
+                dnorm = m4_local.get("normals", {})
                 if not isinstance(dnorm, dict):
                     dnorm = {}
-                dseg_diag = center_res.get("depth_normals_diag", {})
+                dseg_diag = m4_local.get("normals_diag", {})
                 if not isinstance(dseg_diag, dict):
                     dseg_diag = {}
                 per_seg_depth_normals_diag.append(dseg_diag)
-                depth_cost_meta_per_segment.append(center_res.get("depth_cost_meta", {}))
-                ddebug = center_res.get("debug", {}) if isinstance(center_res.get("debug", {}), dict) else {}
-                if (
-                    ddebug.get("dt_norm") is not None
-                    and ddebug.get("recess_norm") is not None
-                    and ddebug.get("depth_score") is not None
-                ):
-                    depth_cost_debug_blobs.append((int(seg_i), ddebug, mask_use))
+                depth_cost_meta_per_segment.append(m4_local.get("meta", {}) if isinstance(m4_local.get("meta", {}), dict) else {})
+                ddebug = m4_local.get("debug", {}) if isinstance(m4_local.get("debug", {}), dict) else {}
 
                 if dseg is not None:
                     dseg = np.asarray(dseg, float)
@@ -3365,6 +3951,37 @@ def export_gt_supervision_for_image(
                     float(v) for arr in dw_valid for v in np.asarray(arr, float)
                 ]
 
+            combined_entry["method_variants"] = {}
+            for mk in METHOD_SPECS.keys():
+                mpack = method_variant_segments.get(mk, {}) if isinstance(method_variant_segments.get(mk, {}), dict) else {}
+                m_segs = [np.asarray(Sm, float) for Sm in (mpack.get("midline_segments", []) or []) if Sm is not None and len(np.asarray(Sm, float)) >= 2]
+                m_meta = [dict(mm) for mm in (mpack.get("midline_segments_meta", []) or [])]
+                e1x = [np.asarray(a, float) for a in (mpack.get("edge1_x", []) or [])]
+                e1y = [np.asarray(a, float) for a in (mpack.get("edge1_y", []) or [])]
+                e2x = [np.asarray(a, float) for a in (mpack.get("edge2_x", []) or [])]
+                e2y = [np.asarray(a, float) for a in (mpack.get("edge2_y", []) or [])]
+                ww = [np.asarray(a, float) for a in (mpack.get("width_px", []) or [])]
+                combined_entry["method_variants"][mk] = {
+                    "midline_segments": [np.asarray(Sm, float).tolist() for Sm in m_segs],
+                    "midline_segments_meta": m_meta,
+                    "midline": _pack_segs_with_separators(m_segs) if m_segs else [],
+                    "normals": {
+                        "edge1_x": _pack_arrs_with_none_separators([_arr_to_list(a) for a in e1x]),
+                        "edge1_y": _pack_arrs_with_none_separators([_arr_to_list(a) for a in e1y]),
+                        "edge2_x": _pack_arrs_with_none_separators([_arr_to_list(a) for a in e2x]),
+                        "edge2_y": _pack_arrs_with_none_separators([_arr_to_list(a) for a in e2y]),
+                        "width_px": _pack_arrs_with_none_separators([_arr_to_list(a) for a in ww]),
+                    },
+                    "normals_diag_per_segment": mpack.get("normals_diag_per_segment", []),
+                    "timing": mpack.get("timing_sum", {}),
+                    "meta": {
+                        "label": METHOD_SPECS.get(mk, {}).get("label"),
+                        "use_geodesic": bool(METHOD_SPECS.get(mk, {}).get("use_geodesic", False)),
+                        "depth_mode": METHOD_SPECS.get(mk, {}).get("depth_mode"),
+                        "reason": None if m_segs else "no_valid_segments",
+                    },
+                }
+
             combined_entry["depth_cost_meta"] = {
                 "per_segment": depth_cost_meta_per_segment,
             }
@@ -3415,6 +4032,31 @@ def export_gt_supervision_for_image(
                 ),
                 "depth_available": bool(depth_geom_parts),
             }
+            combined_entry["auto_centering_meta"]["comparisons"] = {}
+            for mk in METHOD_SPECS.keys():
+                mv = (combined_entry.get("method_variants", {}) or {}).get(mk, {})
+                mv_parts = [np.asarray(Sm, float) for Sm in (mv.get("midline_segments", []) or []) if Sm is not None and len(Sm) >= 2]
+                mv_all = np.vstack(mv_parts) if mv_parts else np.empty((0, 2), float)
+                mv_w = []
+                if isinstance(mv.get("normals", {}), dict):
+                    ww_pack = mv["normals"].get("width_px", [])
+                    if isinstance(ww_pack, list):
+                        for v in ww_pack:
+                            if v is None:
+                                continue
+                            try:
+                                mv_w.append(float(v))
+                            except Exception:
+                                continue
+                combined_entry["auto_centering_meta"]["comparisons"][mk] = {
+                    **_geometry_disagreement_stats(manual_geom_all, mv_all),
+                    **_width_stability_stats(
+                        np.concatenate([np.asarray(a, float).reshape(-1) for a in w_list]) if w_list else [],
+                        mv_w,
+                    ),
+                    "available": bool(mv_parts),
+                    "reason": ((mv.get("meta", {}) or {}).get("reason") if isinstance(mv.get("meta", {}), dict) else None),
+                }
 
             if auto_centering_debug:
                 terr_vis = build_territory_mask_for_segments(
@@ -3435,20 +4077,26 @@ def export_gt_supervision_for_image(
                     invalid_center_masks=invalid_center_masks,
                 )
 
-                for seg_i, dbg_blob, dbg_mask_use in depth_cost_debug_blobs:
-                    out_cost = os.path.join(
-                        auto_center_root,
-                        f"combined_{tag_name}_seg{int(seg_i)}_depth_cost_panel.png",
-                    )
-                    plot_depth_cost_diagnostic(
-                        out_path=out_cost,
-                        crack_mask_u8=dbg_mask_use,
-                        dt_norm=np.asarray(dbg_blob.get("dt_norm"), np.float32),
-                        recess_norm=np.asarray(dbg_blob.get("recess_norm"), np.float32),
-                        depth_score=np.asarray(dbg_blob.get("depth_score"), np.float32),
-                        bbox_xywh=combined_entry.get("mask_bbox"),
-                        title=f"combined {tag_name} seg{int(seg_i)}: depth-guided cost cues",
-                    )
+                for mk, blobs in method_cost_debug_blobs.items():
+                    for seg_i, dbg_blob, dbg_mask_use in blobs:
+                        out_cost = os.path.join(
+                            auto_center_root,
+                            f"combined_{tag_name}_seg{int(seg_i)}_{mk}_cost_panel.png",
+                        )
+                        depth_lbl = "local" if mk == "M3_dt_geo_depth_local" else ("global" if mk == "M4_dt_geo_depth_global" else None)
+                        plot_depth_cost_diagnostic(
+                            out_path=out_cost,
+                            crack_mask_u8=dbg_mask_use,
+                            dt_norm=np.asarray(dbg_blob.get("dt_norm"), np.float32),
+                            geodesic_norm=np.asarray(dbg_blob.get("geodesic_norm"), np.float32) if dbg_blob.get("geodesic_norm") is not None else None,
+                            recess_norm=np.asarray(dbg_blob.get("recess_norm"), np.float32) if dbg_blob.get("recess_norm") is not None else None,
+                            depth_score=np.asarray(dbg_blob.get("score_for_refine"), np.float32) if dbg_blob.get("score_for_refine") is not None else None,
+                            costmap=np.asarray(dbg_blob.get("costmap"), np.float32) if dbg_blob.get("costmap") is not None else None,
+                            bbox_xywh=combined_entry.get("mask_bbox"),
+                            title=f"combined {tag_name} seg{int(seg_i)}: cost cues",
+                            method_label=mk,
+                            depth_label=depth_lbl,
+                        )
 
                 if combined_entry.get("depth_midline_segments"):
                     out_overlay = os.path.join(
@@ -3468,6 +4116,28 @@ def export_gt_supervision_for_image(
                         left_panel_title="manual vs depth_distridge (mask)",
                         right_panel_title="DT ridge view (depth domain)",
                     )
+
+                # Method-family overlays and cost diagnostics (M1-M4).
+                mv_combined = combined_entry.get("method_variants", {}) if isinstance(combined_entry.get("method_variants", {}), dict) else {}
+                for mk in ("M1_dt", "M2_dt_geo", "M3_dt_geo_depth_local", "M4_dt_geo_depth_global"):
+                    rec = mv_combined.get(mk, {}) if isinstance(mv_combined.get(mk, {}), dict) else {}
+                    mparts = [np.asarray(Sm, float) for Sm in (rec.get("midline_segments", []) or []) if Sm is not None and len(Sm) >= 2]
+                    if mparts:
+                        style = method_style.get(mk, {})
+                        out_overlay = os.path.join(auto_center_root, f"combined_{tag_name}_{mk}_manual_vs_method.png")
+                        plot_midline_centering_debug(
+                            out_path=out_overlay,
+                            crack_mask_u8=crack_mask_clipped,
+                            manual_segs=[np.asarray(S, float) for S in segs],
+                            centered_segs=mparts,
+                            territory_u8=terr_vis,
+                            bbox_xywh=combined_entry.get("mask_bbox"),
+                            title=f"combined {tag_name}: manual vs {style.get('label', mk)}",
+                            compare_label=style.get("compare_label", mk),
+                            compare_color=style.get("color", "cyan"),
+                            left_panel_title=f"manual vs {style.get('label', mk)} (mask)",
+                            right_panel_title="DT ridge view (domain)",
+                        )
 
         final_entries.append(combined_entry)
         gt_sup_diag["combined_added"] += 1
@@ -3647,5 +4317,5 @@ def export_gt_supervision_for_image(
             combined_member_ids=combined_flat,
         )
 
-    print(f"[GT_SUP] wrote JSON → {out_json}")
-    print(f"[GT_SUP] global overview → {global_png}")
+    print(f"[GT_SUP] wrote JSON â†’ {out_json}")
+    print(f"[GT_SUP] global overview â†’ {global_png}")

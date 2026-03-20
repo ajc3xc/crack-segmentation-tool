@@ -2146,6 +2146,73 @@ class CrackUtils:
     #####################################################################
     # Manual Drawing Functions
     #####################################################################
+
+    def load_local_depth(self, base_name, bbox_idx, wh_expected=None):
+        """
+        Load per-bbox depth map from atomic depth folder.
+        """
+        if not hasattr(self, "atomic_depth_folder"):
+            return None
+
+        path = os.path.join(self.atomic_depth_folder, f"{base_name}_{bbox_idx}.npy")
+        if not os.path.isfile(path):
+            print(f"[DEBUG local depth] missing: {path}")
+            return None
+
+        try:
+            depth = np.load(path).astype(np.float32, copy=False)
+        except Exception as e:
+            print(f"[DEBUG local depth] failed load {path}: {e}")
+            return None
+
+        if wh_expected is not None:
+            w, h = wh_expected
+            if depth.shape[:2] != (h, w):
+                depth = cv2.resize(depth, (w, h), interpolation=cv2.INTER_AREA)
+
+        return depth
+
+    def get_depth_for_bbox(self, method, base_name, bbox_idx, bbox_xywh):
+        """
+        Return depth map aligned to bbox (half-res) for M1-M4 style switching.
+        M1/M2: no depth
+        M3: local per-bbox depth
+        M4: global depth cropped to bbox
+        """
+        if method in ("M1", "M2"):
+            return None
+
+        x, y, w, h = [int(v) for v in bbox_xywh]
+
+        if method == "M3":
+            depth = self.load_local_depth(base_name, bbox_idx, (w, h))
+            if depth is None:
+                return None
+            dmax = float(np.max(depth)) if depth.size else 0.0
+            if dmax <= 1e-12:
+                return np.zeros((h, w), dtype=np.float32)
+            return (depth / dmax).astype(np.float32, copy=False)
+
+        if method == "M4":
+            if getattr(self, "current_depth", None) is None:
+                return None
+
+            H, W = self.current_depth.shape[:2]
+            x0 = max(0, min(W, x))
+            y0 = max(0, min(H, y))
+            x1 = max(0, min(W, x + w))
+            y1 = max(0, min(H, y + h))
+            crop = self.current_depth[y0:y1, x0:x1]
+            if crop.size == 0:
+                return None
+            if crop.shape[:2] != (h, w):
+                crop = cv2.resize(crop, (w, h), interpolation=cv2.INTER_AREA)
+            cmax = float(np.max(crop)) if crop.size else 0.0
+            if cmax <= 1e-12:
+                return np.zeros((h, w), dtype=np.float32)
+            return (crop / cmax).astype(np.float32, copy=False)
+
+        return None
     
     def change_image(self):
         import os, json, cv2
@@ -2358,12 +2425,32 @@ class CrackUtils:
             else:
                 print(f"[DEBUG change_image] No mask found for {base_name}")
 
-        # ---- DEPTH LOADING (optional external depth maps) ----
+        # ---- DEPTH LOADING (global + optional local depth roots) ----
+        self.current_depth = None
+        self.current_depth_path = None
+
+        # Auto-detect atomic per-bbox depth folder if not set explicitly.
+        if not getattr(self, "atomic_depth_folder", "") and getattr(self, "depth_folder", ""):
+            cand_atomic = os.path.join(self.depth_folder, "atomic_npy")
+            if os.path.isdir(cand_atomic):
+                self.atomic_depth_folder = cand_atomic
+
+        # Prefer explicit global depth folder if provided; otherwise infer from depth_folder.
+        if not getattr(self, "global_depth_folder", "") and getattr(self, "depth_folder", ""):
+            cand_global = os.path.join(self.depth_folder, "global_npy")
+            if os.path.isdir(cand_global):
+                self.global_depth_folder = cand_global
+
         depth_path = None
         if hasattr(self, "depth_map"):
             depth_path = self.depth_map.get(base_name)
+        if depth_path is None and getattr(self, "global_depth_folder", ""):
+            for ext in (".npy", ".tif", ".tiff", ".png", ".bmp", ".jpg", ".jpeg"):
+                cand = os.path.join(self.global_depth_folder, base_name + ext)
+                if os.path.isfile(cand):
+                    depth_path = cand
+                    break
         if depth_path is None and getattr(self, "depth_folder", ""):
-            # fallback direct probe in case map was not built
             for ext in (".npy", ".tif", ".tiff", ".png", ".bmp", ".jpg", ".jpeg"):
                 cand = os.path.join(self.depth_folder, base_name + ext)
                 if os.path.isfile(cand):
@@ -2373,16 +2460,16 @@ class CrackUtils:
         if depth_path and os.path.isfile(depth_path):
             depth_arr = _load_depth_map_from_path(depth_path)
             if depth_arr is not None:
-                self.current_depth = depth_arr
+                self.current_depth = depth_arr.astype(np.float32, copy=False)
                 self.current_depth_path = depth_path
                 print(
-                    f"[DEBUG change_image] depth loaded for {base_name}: "
+                    f"[DEBUG change_image] GLOBAL depth loaded for {base_name}: "
                     f"path={depth_path} shape={tuple(depth_arr.shape)} dtype={depth_arr.dtype}"
                 )
             else:
-                print(f"[DEBUG change_image] depth load failed for {base_name}: {depth_path}")
+                print(f"[DEBUG change_image] GLOBAL depth load failed for {base_name}: {depth_path}")
         else:
-            print(f"[DEBUG change_image] No depth found for {base_name}")
+            print(f"[DEBUG change_image] No GLOBAL depth found for {base_name}")
 
         im = self.original_image.copy()
         H, W = im.shape[:2]

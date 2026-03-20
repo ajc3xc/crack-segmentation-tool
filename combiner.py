@@ -2602,7 +2602,7 @@ def build_combined_crack_stateless(
     authoring_atomic: dict,
     member_ids: list[str],
     *,
-    window_half_size: int = 45,
+    window_half_size: int = 50,
     mu: float = 0.0,
     l: int = 5,
     p: int = 14,
