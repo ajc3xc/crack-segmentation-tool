@@ -7,7 +7,7 @@ import os
 import time
 import csv
 import json
-import inspect
+import re
 from pathlib import Path
 
 # Suppress moviepy warnings
@@ -24,9 +24,9 @@ from depth_anything_3.api import DepthAnything3
 # -------------------------------------------------
 # Hardcoded paths / settings
 # -------------------------------------------------
-INPUT_DIR = r"C:\Users\13144\Documents\Masters_Thesis\datasets\SUT_1-Segmentation\Original_Image"
-ANN_DIR = r"C:\Users\13144\Documents\Masters_Thesis\datasets\SUT_Compressed\Outputs"   # <base_name>.json lives here
-OUTPUT_DIR = r"C:\Users\13144\Documents\Masters_Thesis\datasets\SUT_Compressed\depth"
+INPUT_DIR = "/blue/cli2/a.camerer/crack_segmentation/SUT_Compressed/Original_Image/"
+ANN_DIR = "/home/a.camerer/Masters/SUT_outputs"   # <base_name>.json lives here
+OUTPUT_DIR = "depth"
 
 # The crack tool / supervision currently work in half-res coordinates.
 # Atomic mask_bbox values in the JSON are assumed to be in HALF-RES coords.
@@ -39,13 +39,14 @@ BATCH_SIZE = 6  # 4-8 is usually a good VRAM/speed tradeoff
 
 # Optional qualitative full-image depth preview (not used by pipeline).
 SAVE_GLOBAL_FULL_PREVIEW = True
-SAVE_GLOBAL_FULL_NPY = True   # set True only if you explicitly want raw full-image depth saved
+SAVE_GLOBAL_FULL_NPY = False
 
 # Depth Anything input-size divisor
 DIVISOR = 14
 
 TIMING_PER_IMAGE = os.path.join(OUTPUT_DIR, "timing_per_image.csv")
-TIMING_SUMMARY = os.path.join(OUTPUT_DIR, "timing_summary.csv")
+TIMING_SUMMARY_GLOBAL = os.path.join(OUTPUT_DIR, "timing_summary_global.csv")
+TIMING_SUMMARY_CROP = os.path.join(OUTPUT_DIR, "timing_summary_crop.csv")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -66,6 +67,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 print("CUDA available:", torch.cuda.is_available())
 print("Using device:", device)
+#import sys; sys.exit(0)
 
 
 # -------------------------------------------------
@@ -160,10 +162,10 @@ def infer_depth_raw(model_obj, rgb_u8):
     return depth.astype(np.float32, copy=False)
 
 
-def infer_depth_dynamic(model_obj, rgb_u8, max_attempts=5, scale_decay=0.75):
+def infer_depth_dynamic(model_obj, rgb_u8, max_attempts=3, scale_decay=0.8):
     """
-    Native-resolution first; on CUDA OOM, retry with reduced resolution.
-    Output is always resized back to the original input shape.
+    Native bbox resolution inference (no upscaling).
+    Minimal fallback if OOM.
     """
     if rgb_u8 is None or rgb_u8.ndim != 3 or rgb_u8.shape[2] != 3:
         raise ValueError("infer_depth_dynamic expects HxWx3 RGB image")
@@ -174,71 +176,70 @@ def infer_depth_dynamic(model_obj, rgb_u8, max_attempts=5, scale_decay=0.75):
 
     while attempt < int(max_attempts):
         try:
+            # Scaled attempt only when fallback is triggered.
             if abs(scale - 1.0) < 1e-9:
                 img_attempt = rgb_u8
             else:
-                ah = max(1, int(round(float(orig_h) * float(scale))))
-                aw = max(1, int(round(float(orig_w) * float(scale))))
+                ah = max(1, int(round(orig_h * scale)))
+                aw = max(1, int(round(orig_w * scale)))
                 img_attempt = cv2.resize(rgb_u8, (aw, ah), interpolation=cv2.INTER_AREA)
 
             ah, aw = img_attempt.shape[:2]
+
+            # Key behavior: run at native crop resolution.
             process_res = int(max(ah, aw))
-            print(
-                f"[DEPTH] preprocess input=({ah},{aw}) "
-                f"process_res={process_res} scale={scale:.3f}"
-            )
 
-            depth = None
+            print(f"[DEPTH] native bbox inference ({ah},{aw}) process_res={process_res}")
 
-            # Preferred path: explicit process_res override.
-            if hasattr(model_obj, "infer_image"):
-                try:
-                    sig = inspect.signature(model_obj.infer_image)
-                    kwargs = {}
-                    if "process_res" in sig.parameters:
-                        kwargs["process_res"] = int(process_res)
-                    if "process_res_method" in sig.parameters:
-                        kwargs["process_res_method"] = "upper_bound_resize"
-                    with torch.inference_mode():
-                        depth = model_obj.infer_image(img_attempt, **kwargs)
-                except TypeError:
-                    with torch.inference_mode():
-                        depth = model_obj.infer_image(img_attempt)
-                except Exception:
-                    depth = None
-
-            # Fallback path: legacy batch inference with pre-resized image.
-            if depth is None:
+            # FP16 inference on CUDA.
+            if device.type == "cuda":
                 with torch.inference_mode():
-                    pred = model_obj.inference([img_attempt])
-                depth = pred.depth[0]
+                    with torch.autocast(device_type="cuda", dtype=torch.float16):
+                        pred = model_obj.inference(
+                            image=[img_attempt],
+                            process_res=process_res,
+                            process_res_method="upper_bound_resize",
+                        )
+            else:
+                with torch.inference_mode():
+                    pred = model_obj.inference(
+                        image=[img_attempt],
+                        process_res=process_res,
+                        process_res_method="upper_bound_resize",
+                    )
+
+            depth = pred.depth[0]
 
             if isinstance(depth, torch.Tensor):
                 depth = depth.detach().cpu().numpy()
+
             depth = np.asarray(depth, np.float32)
 
+            # Resize back if fallback scaling was used.
             if depth.shape[:2] != (ah, aw):
                 depth = cv2.resize(depth, (aw, ah), interpolation=cv2.INTER_CUBIC)
+
             if (ah, aw) != (orig_h, orig_w):
                 depth = cv2.resize(depth, (orig_w, orig_h), interpolation=cv2.INTER_CUBIC)
-                print(
-                    f"[DEPTH] recovered with scale={scale:.3f} "
-                    f"res=({aw},{ah}) for orig=({orig_w},{orig_h})"
-                )
+                print(f"[DEPTH] recovered scale={scale:.3f}")
 
             return depth.astype(np.float32, copy=False)
 
         except RuntimeError as e:
             msg = str(e).lower()
-            if "out of memory" in msg and torch.cuda.is_available():
-                torch.cuda.empty_cache()
+
+            if "out of memory" in msg or "cuda" in msg:
+                print("[DEPTH][OOM] retrying smaller scale...")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
                 scale *= float(scale_decay)
                 attempt += 1
-                print(f"[DEPTH][OOM] retrying with scale={scale:.3f}")
                 continue
+
             raise
 
-    raise RuntimeError("Depth inference failed after multiple OOM retries")
+    raise RuntimeError("Depth inference failed after retries")
 
 
 def normalize_ann_ids(ann_root):
@@ -261,13 +262,6 @@ def normalize_ann_ids(ann_root):
     ann_root["combined_cracks"] = new_combined
 
 
-def half_shape_from_full(full_h, full_w):
-    """
-    Match the common 'half-res working image' convention.
-    """
-    return int(full_h // 2), int(full_w // 2)
-
-
 def pad_xyxy(x0, y0, x1, y1, pad, H, W):
     return (
         max(0, int(x0) - int(pad)),
@@ -275,6 +269,28 @@ def pad_xyxy(x0, y0, x1, y1, pad, H, W):
         min(int(W), int(x1) + int(pad)),
         min(int(H), int(y1) + int(pad)),
     )
+
+
+def expand_bbox_min_side(x0, y0, x1, y1, H, W, min_side=128):
+    """
+    Expand bbox so that both width and height are at least min_side.
+    No resizing, only context expansion.
+    """
+    bw = x1 - x0
+    bh = y1 - y0
+
+    cx = (x0 + x1) // 2
+    cy = (y0 + y1) // 2
+
+    new_w = max(bw, min_side)
+    new_h = max(bh, min_side)
+
+    new_x0 = max(0, cx - new_w // 2)
+    new_y0 = max(0, cy - new_h // 2)
+    new_x1 = min(W, cx + new_w // 2)
+    new_y1 = min(H, cy + new_h // 2)
+
+    return new_x0, new_y0, new_x1, new_y1
 
 
 def load_atomic_bboxes_half(json_path):
@@ -362,6 +378,24 @@ def save_json(path, obj):
         json.dump(obj, f, indent=2)
 
 
+def natural_sort_key(path_obj):
+    """
+    Natural filename sort: 1,2,10 instead of 1,10,2.
+    Works for numeric and mixed alphanumeric stems.
+    """
+    stem = path_obj.stem
+    parts = re.split(r"(\d+)", stem)
+    key = []
+    for p in parts:
+        if p.isdigit():
+            key.append((0, int(p)))
+        else:
+            key.append((1, p.lower()))
+    # Tiebreak with full lowercase name to keep ordering stable.
+    key.append((2, path_obj.name.lower()))
+    return tuple(key)
+
+
 # -------------------------------------------------
 # Warmup
 # -------------------------------------------------
@@ -381,9 +415,29 @@ print("Warmup complete.\n")
 image_paths = sorted([
     p for p in Path(INPUT_DIR).glob("*")
     if p.suffix.lower() in [".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"]
-])
+], key=natural_sort_key)
 
 print(f"Found {len(image_paths)} images.\n")
+
+# Temporary preflight check: image/json pairing
+image_stems = {p.stem for p in image_paths}
+json_paths = sorted(Path(ANN_DIR).glob("*.json"))
+json_stems = {p.stem for p in json_paths}
+
+missing_json_stems = sorted(image_stems - json_stems)
+orphan_json_stems = sorted(json_stems - image_stems)
+
+print(
+    f"[DEPTH][PRECHECK] images={len(image_stems)} "
+    f"jsons={len(json_stems)} missing_json={len(missing_json_stems)} "
+    f"orphan_json={len(orphan_json_stems)}"
+)
+for stem in missing_json_stems:
+    print(f"[DEPTH][PRECHECK][MISSING_JSON] image={stem}")
+for stem in orphan_json_stems:
+    print(f"[DEPTH][PRECHECK][ORPHAN_JSON] json={stem}.json")
+print("")
+#import sys; sys.exit()
 
 
 timings = []
@@ -392,6 +446,7 @@ timings = []
 # -------------------------------------------------
 # Process images
 # -------------------------------------------------
+i=0
 for img_path in image_paths:
     name = img_path.stem
     img = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
@@ -402,13 +457,13 @@ for img_path in image_paths:
 
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     H_full, W_full = img_rgb.shape[:2]
-    H_half, W_half = half_shape_from_full(H_full, W_full)
+    H_out, W_out = H_full, W_full
 
     json_path = os.path.join(ANN_DIR, name + ".json")
     atomic_boxes = load_atomic_bboxes_half(json_path)
 
-    stitched_half = np.zeros((H_half, W_half), dtype=np.float32)
-    stitched_weight = np.zeros((H_half, W_half), dtype=np.float32)
+    stitched_full = np.zeros((H_out, W_out), dtype=np.float32)
+    stitched_weight = np.zeros((H_out, W_out), dtype=np.float32)
 
     bbox_records = []
     bbox_total_seconds = 0.0
@@ -416,13 +471,12 @@ for img_path in image_paths:
 
     base_pad_full = int(round(float(PAD_HALF_PX) * float(BBOX_SCALE_TO_FULL)))
 
-    print(f"[DEPTH] image={name} full_hw=({H_full},{W_full}) half_hw=({H_half},{W_half}) atomic_boxes={len(atomic_boxes)}")
+    print(f"[DEPTH] image={name} full_hw=({H_full},{W_full}) output_hw=({H_out},{W_out}) atomic_boxes={len(atomic_boxes)}")
 
     # -------------------------------------------------
     # Optional full-image qualitative depth preview
     # -------------------------------------------------
     global_full_seconds = 0.0
-    global_npy_file = None
     global_png_file = None
     if SAVE_GLOBAL_FULL_PREVIEW or SAVE_GLOBAL_FULL_NPY:
         try:
@@ -436,20 +490,8 @@ for img_path in image_paths:
 
             if SAVE_GLOBAL_FULL_PREVIEW:
                 global_vis = normalize_for_vis(global_depth_full)
-                Hf, Wf = global_vis.shape[:2]
-                Hh = max(1, int(Hf // 2))
-                Wh = max(1, int(Wf // 2))
-                global_vis_half = cv2.resize(
-                    global_vis,
-                    (Wh, Hh),
-                    interpolation=cv2.INTER_AREA,
-                )
                 global_png_file = f"{name}.png"
-                cv2.imwrite(os.path.join(GLOBAL_PNG_DIR, global_png_file), global_vis_half)
-                print(
-                    f"[DEPTH] image={name} global_png_downscaled "
-                    f"full=({Hf},{Wf}) -> half=({Hh},{Wh})"
-                )
+                cv2.imwrite(os.path.join(GLOBAL_PNG_DIR, global_png_file), global_vis)
 
             print(f"[DEPTH] image={name} global_full_s={global_full_seconds:.4f}")
         except Exception as e:
@@ -506,39 +548,24 @@ for img_path in image_paths:
                 bw, bh = meta["bbox_size"]
                 depth_unpadded_full = np.zeros((bh, bw), dtype=np.float32)
 
-            wh, hh = meta["half_size"]
-            depth_half = cv2.resize(
-                depth_unpadded_full,
-                (max(1, wh), max(1, hh)),
-                interpolation=cv2.INTER_AREA,
-            ).astype(np.float32)
+            depth_full = depth_unpadded_full.astype(np.float32)
 
             atomic_npy_file = f"{name}_{bbox_idx}.npy"
             atomic_png_file = f"{name}_{bbox_idx}.png"
-            np.save(os.path.join(ATOMIC_NPY_DIR, atomic_npy_file), depth_half)
-            cv2.imwrite(os.path.join(ATOMIC_PNG_DIR, atomic_png_file), normalize_for_vis(depth_half))
+            np.save(os.path.join(ATOMIC_NPY_DIR, atomic_npy_file), depth_full)
+            cv2.imwrite(os.path.join(ATOMIC_PNG_DIR, atomic_png_file), normalize_for_vis(depth_full))
 
-            xh, yh = meta["half_origin"]
-            x0h, y0h = int(xh), int(yh)
-            x1h, y1h = x0h + wh, y0h + hh
+            h, w = depth_full.shape
+            y1f = min(y1f, y0f + h)
+            x1f = min(x1f, x0f + w)
 
-            x0h_clip = max(0, min(W_half, x0h))
-            y0h_clip = max(0, min(H_half, y0h))
-            x1h_clip = max(0, min(W_half, x1h))
-            y1h_clip = max(0, min(H_half, y1h))
-
-            if x1h_clip > x0h_clip and y1h_clip > y0h_clip:
-                dx0 = x0h_clip - x0h
-                dy0 = y0h_clip - y0h
-                dx1 = dx0 + (x1h_clip - x0h_clip)
-                dy1 = dy0 + (y1h_clip - y0h_clip)
-                stitched_half[y0h_clip:y1h_clip, x0h_clip:x1h_clip] += depth_half[dy0:dy1, dx0:dx1]
-                stitched_weight[y0h_clip:y1h_clip, x0h_clip:x1h_clip] += 1.0
+            stitched_full[y0f:y1f, x0f:x1f] += depth_full[:(y1f - y0f), :(x1f - x0f)]
+            stitched_weight[y0f:y1f, x0f:x1f] += 1.0
 
             bbox_records.append({
                 "bbox_index": int(bbox_idx),
                 "cid": cid,
-                "bbox_half_xywh": [int(meta["half_origin"][0]), int(meta["half_origin"][1]), int(wh), int(hh)],
+                "bbox_half_xywh": [int(meta["bbox_half_xywh"][0]), int(meta["bbox_half_xywh"][1]), int(meta["bbox_half_xywh"][2]), int(meta["bbox_half_xywh"][3])],
                 "bbox_full_xyxy": [int(x0f), int(y0f), int(x1f), int(y1f)],
                 "padded_full_xyxy": [int(meta["pad_bounds"][0]), int(meta["pad_bounds"][1]), int(meta["pad_bounds"][2]), int(meta["pad_bounds"][3])],
                 "depth_npy_file": atomic_npy_file,
@@ -579,13 +606,11 @@ for img_path in image_paths:
             bbox_w_full = max(1, x1f - x0f)
             bbox_h_full = max(1, y1f - y0f)
 
-        pad_x = max(base_pad_full, int((MIN_CONTEXT_FULL_PX - bbox_w_full) // 2))
-        pad_y = max(base_pad_full, int((MIN_CONTEXT_FULL_PX - bbox_h_full) // 2))
-
-        px0f = max(0, x0f - pad_x)
-        py0f = max(0, y0f - pad_y)
-        px1f = min(W_full, x1f + pad_x)
-        py1f = min(H_full, y1f + pad_y)
+        px0f, py0f, px1f, py1f = expand_bbox_min_side(
+            x0f, y0f, x1f, y1f,
+            H_full, W_full,
+            min_side=128,
+        )
         crop = img_rgb[py0f:py1f, px0f:px1f]
 
         if crop.size == 0:
@@ -598,11 +623,10 @@ for img_path in image_paths:
             "bbox_idx": int(bbox_idx),
             "cid": cid,
             "bbox_full": (int(x0f), int(y0f), int(x1f), int(y1f)),
+            "bbox_half_xywh": (int(xh), int(yh), int(wh), int(hh)),
             "pad_origin": (int(px0f), int(py0f)),
             "pad_bounds": (int(px0f), int(py0f), int(px1f), int(py1f)),
             "bbox_size": (int(bbox_w_full), int(bbox_h_full)),
-            "half_size": (int(wh), int(hh)),
-            "half_origin": (int(xh), int(yh)),
             "crop_shape": crop.shape[:2],
         })
 
@@ -613,19 +637,43 @@ for img_path in image_paths:
     bbox_total_seconds = float(bbox_total_seconds_acc[0])
     t_bbox_wall = float(time.perf_counter() - t_bbox_start)
 
-    # Average overlaps for stitched half canvas
-    valid_stitched = stitched_weight > 0
-    if np.any(valid_stitched):
-        stitched_half[valid_stitched] /= stitched_weight[valid_stitched]
+    valid = stitched_weight > 0
+    if np.any(valid):
+        stitched_full[valid] /= stitched_weight[valid]
 
-    # Save stitched half-res raw depth canvas for preview / compatibility
-    stitched_half_npy = os.path.join(OUTPUT_DIR, name + ".npy")
-    np.save(stitched_half_npy, stitched_half.astype(np.float32, copy=False))
+    stitched_vis_u8 = normalize_for_vis(stitched_full, mask=valid)
+    stitched_full_png = os.path.join(OUTPUT_DIR, name + ".png")
+    cv2.imwrite(stitched_full_png, stitched_vis_u8)
 
-    # Save stitched half-res PNG preview
-    stitched_vis_u8 = normalize_for_vis(stitched_half, mask=valid_stitched)
-    stitched_half_png = os.path.join(OUTPUT_DIR, name + ".png")
-    cv2.imwrite(stitched_half_png, stitched_vis_u8)
+    # Debug overlay: stitched depth + bbox placement/context visualization.
+    overlay = cv2.cvtColor(stitched_vis_u8, cv2.COLOR_GRAY2BGR)
+
+    # Green: original bbox (scaled from half-res annotations).
+    for rec in atomic_boxes:
+        xh, yh, wh, hh = [int(v) for v in rec["bbox_half_xywh"]]
+        x0 = int(np.floor(xh * BBOX_SCALE_TO_FULL))
+        y0 = int(np.floor(yh * BBOX_SCALE_TO_FULL))
+        x1 = int(np.ceil((xh + wh) * BBOX_SCALE_TO_FULL))
+        y1 = int(np.ceil((yh + hh) * BBOX_SCALE_TO_FULL))
+
+        x0 = max(0, min(W_out - 1, x0))
+        y0 = max(0, min(H_out - 1, y0))
+        x1 = max(x0 + 1, min(W_out - 1, x1))
+        y1 = max(y0 + 1, min(H_out - 1, y1))
+
+        cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 255, 0), 2)
+
+    # Blue: padded context region actually used for inference.
+    for rec in bbox_records:
+        px0, py0, px1, py1 = [int(v) for v in rec["padded_full_xyxy"]]
+        px0 = max(0, min(W_out - 1, px0))
+        py0 = max(0, min(H_out - 1, py0))
+        px1 = max(px0 + 1, min(W_out - 1, px1))
+        py1 = max(py0 + 1, min(H_out - 1, py1))
+        cv2.rectangle(overlay, (px0, py0), (px1, py1), (255, 0, 0), 1)
+
+    stitched_overlay_png = os.path.join(OUTPUT_DIR, f"{name}_stitched_bbox_overlay.png")
+    cv2.imwrite(stitched_overlay_png, overlay)
 
     # Save per-image metadata
     metadata = {
@@ -634,14 +682,13 @@ for img_path in image_paths:
         "input_image_path": str(img_path),
         "annotation_json_path": json_path,
         "full_hw": [int(H_full), int(W_full)],
-        "half_hw": [int(H_half), int(W_half)],
+        "output_hw": [int(H_out), int(W_out)],
         "bbox_scale_to_full": float(BBOX_SCALE_TO_FULL),
         "pad_half_px": int(PAD_HALF_PX),
         "pad_full_px": int(base_pad_full),
         "min_context_full_px": int(MIN_CONTEXT_FULL_PX),
-        "stitched_half_npy": os.path.basename(stitched_half_npy),
-        "stitched_half_png": os.path.basename(stitched_half_png),
-        "global_full_npy": global_npy_file,
+        "stitched_full_png": os.path.basename(stitched_full_png),
+        "stitched_overlay_png": os.path.basename(stitched_overlay_png),
         "global_full_png": global_png_file,
         "n_atomic_boxes": int(len(atomic_boxes)),
         "n_saved_boxes": int(len(bbox_records)),
@@ -671,6 +718,8 @@ for img_path in image_paths:
         f"bbox_gpu_seconds={bbox_total_seconds:.4f} bbox_wall_seconds={t_bbox_wall:.4f} "
         f"total_seconds={(t_bbox_wall + global_full_seconds):.4f}\n"
     )
+    #if i==5: break
+    #i+=1
 
 
 # -------------------------------------------------
@@ -704,28 +753,45 @@ with open(TIMING_PER_IMAGE, "w", newline="", encoding="utf-8") as f:
 # -------------------------------------------------
 # Summary stats
 # -------------------------------------------------
-times = [float(t["seconds"]) for t in timings] if timings else []
+global_times = [float(t["global_full_seconds"]) for t in timings if t["global_full_seconds"] > 0]
 
-summary = {
-    "num_images": int(len(times)),
-    "mean_time": float(np.mean(times)) if times else 0.0,
-    "median_time": float(np.median(times)) if times else 0.0,
-    "min_time": float(np.min(times)) if times else 0.0,
-    "max_time": float(np.max(times)) if times else 0.0,
-    "total_time": float(np.sum(times)) if times else 0.0,
-    "total_atomic_boxes": int(sum(int(t["n_atomic_boxes"]) for t in timings)),
-    "total_saved_boxes": int(sum(int(t["n_saved_boxes"]) for t in timings)),
-    "total_failed_boxes": int(sum(int(t["n_failed_boxes"]) for t in timings)),
+global_summary = {
+    "num_images": int(len(global_times)),
+    "mean_global_time": float(np.mean(global_times)) if global_times else 0.0,
+    "median_global_time": float(np.median(global_times)) if global_times else 0.0,
+    "min_global_time": float(np.min(global_times)) if global_times else 0.0,
+    "max_global_time": float(np.max(global_times)) if global_times else 0.0,
+    "total_global_time": float(np.sum(global_times)) if global_times else 0.0,
 }
 
-with open(TIMING_SUMMARY, "w", newline="", encoding="utf-8") as f:
+with open(TIMING_SUMMARY_GLOBAL, "w", newline="", encoding="utf-8") as f:
     writer = csv.writer(f)
     writer.writerow(["metric", "value"])
-    for k, v in summary.items():
+    for k, v in global_summary.items():
+        writer.writerow([k, v])
+
+# Crop summary uses GPU inference time (bbox_seconds).
+# Swap to bbox_wall_seconds if you want end-to-end crop wall time instead.
+crop_times = [float(t["bbox_seconds"]) for t in timings if t["bbox_seconds"] > 0]
+
+crop_summary = {
+    "num_images": int(len(crop_times)),
+    "mean_crop_time": float(np.mean(crop_times)) if crop_times else 0.0,
+    "median_crop_time": float(np.median(crop_times)) if crop_times else 0.0,
+    "min_crop_time": float(np.min(crop_times)) if crop_times else 0.0,
+    "max_crop_time": float(np.max(crop_times)) if crop_times else 0.0,
+    "total_crop_time": float(np.sum(crop_times)) if crop_times else 0.0,
+}
+
+with open(TIMING_SUMMARY_CROP, "w", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    writer.writerow(["metric", "value"])
+    for k, v in crop_summary.items():
         writer.writerow([k, v])
 
 
 print("\nFinished processing.")
 print("Per-image timing:", TIMING_PER_IMAGE)
-print("Summary:", TIMING_SUMMARY)
+print("Global summary:", TIMING_SUMMARY_GLOBAL)
+print("Crop summary:", TIMING_SUMMARY_CROP)
 print("Output dir:", OUTPUT_DIR)
