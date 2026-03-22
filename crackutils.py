@@ -2204,10 +2204,11 @@ class CrackUtils:
                 return None
 
             H, W = self.current_depth.shape[:2]
-            x0 = max(0, min(W, x))
-            y0 = max(0, min(H, y))
-            x1 = max(0, min(W, x + w))
-            y1 = max(0, min(H, y + h))
+            x0, y0, x1, y1 = x, y, x + w, y + h
+            x0 = max(0, min(W, x0))
+            y0 = max(0, min(H, y0))
+            x1 = max(0, min(W, x1))
+            y1 = max(0, min(H, y1))
             crop = self.current_depth[y0:y1, x0:x1]
             if crop.size == 0:
                 return None
@@ -2434,6 +2435,7 @@ class CrackUtils:
         # ---- DEPTH LOADING (global + optional local depth roots) ----
         self.current_depth = None
         self.current_depth_path = None
+        print("[DEPTH MODE] SIMPLE_LOAD_ONLY")
 
         # Auto-detect atomic per-bbox depth folder if not set explicitly.
         if not getattr(self, "atomic_depth_folder", "") and getattr(self, "depth_folder", ""):
@@ -2466,16 +2468,17 @@ class CrackUtils:
         if depth_path and os.path.isfile(depth_path):
             depth_arr = _load_depth_map_from_path(depth_path)
             if depth_arr is not None:
-                self.current_depth = depth_arr.astype(np.float32, copy=False)
+                depth_arr = np.asarray(depth_arr, np.float32)
+                self.current_depth = depth_arr
                 self.current_depth_path = depth_path
                 print(
-                    f"[DEBUG change_image] GLOBAL depth loaded for {base_name}: "
-                    f"path={depth_path} shape={tuple(depth_arr.shape)} dtype={depth_arr.dtype}"
+                    f"[DEPTH LOAD OK] {base_name} "
+                    f"path={depth_path} shape={depth_arr.shape} dtype={depth_arr.dtype}"
                 )
             else:
-                print(f"[DEBUG change_image] GLOBAL depth load failed for {base_name}: {depth_path}")
+                print(f"[DEPTH LOAD FAIL] {base_name} path={depth_path}")
         else:
-            print(f"[DEBUG change_image] No GLOBAL depth found for {base_name}")
+            print(f"[DEPTH MISSING] {base_name}")
 
         im = self.original_image.copy()
         H, W = im.shape[:2]

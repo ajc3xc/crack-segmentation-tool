@@ -2944,7 +2944,27 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
     # ---- 0) tiny shorthands -------------------------------------------------------
     def _image_base(self):
         import os
-        return os.path.splitext(os.path.basename(self.name))[0]
+        name = getattr(self, "name", None)
+        if isinstance(name, str) and name:
+            return os.path.splitext(os.path.basename(name))[0]
+
+        image_names = getattr(self, "image_names", None)
+        n = getattr(self, "n", None)
+        try:
+            if isinstance(image_names, (list, tuple)) and len(image_names) > 0 and n is not None:
+                idx = int(n)
+                if 0 <= idx < len(image_names):
+                    cand = image_names[idx]
+                    if isinstance(cand, str) and cand:
+                        return os.path.splitext(os.path.basename(cand))[0]
+        except Exception:
+            pass
+
+        ann_name = getattr(self, "ann_name", None)
+        if isinstance(ann_name, str) and ann_name:
+            return os.path.splitext(os.path.basename(ann_name))[0]
+
+        return "unnamed_image"
 
     def _metrics_dir(self):
         import os

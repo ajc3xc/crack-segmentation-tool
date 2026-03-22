@@ -272,7 +272,7 @@ class CrackAnnotator(QtWidgets.QWidget):
         super().keyPressEvent(event)
 
     def _to_image_coords(self, pos):
-        # Map from widget coords â†’ image coords (match pan/scale logic in paintEvent)
+        # Map from widget coords → image coords (match pan/scale logic in paintEvent)
         return ((pos.x() - self.pan_x) / self.scale,
                 (pos.y() - self.pan_y) / self.scale)
 
