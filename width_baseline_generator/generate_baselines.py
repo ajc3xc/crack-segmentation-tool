@@ -498,8 +498,21 @@ def width_adaptive_pca(bw: np.ndarray, skel: np.ndarray, dist_map: np.ndarray, b
         wmap[y, x] = float(proj.max() - proj.min())
     return wmap'''
     
-def width_pca_proj(bw, skel, patch_radius=7):
+def width_pca_proj(
+    bw: np.ndarray,
+    skel: Optional[np.ndarray] = None,
+    patch_radius: int = 7,
+    *,
+    dist_map: Optional[np.ndarray] = None,
+    patch_scale: float = 1.5,
+    min_radius: int = 5,
+    max_radius: int = 100,
+    min_points: int = 5,
+) -> np.ndarray:
     import numpy as np
+
+    if skel is None:
+        raise ValueError("width_pca_proj requires `skel`.")
 
     wmap = np.zeros_like(bw, dtype=np.float32)
     edge_mask = (bw > 0) & (
@@ -511,13 +524,18 @@ def width_pca_proj(bw, skel, patch_radius=7):
     H, W = bw.shape
 
     for y, x in zip(ys, xs):
-        y0, y1 = max(0,y-patch_radius), min(H,y+patch_radius+1)
-        x0, x1 = max(0,x-patch_radius), min(W,x+patch_radius+1)
+        if dist_map is not None:
+            r = int(np.clip(float(dist_map[y, x]) * float(patch_scale), float(min_radius), float(max_radius)))
+        else:
+            r = int(max(1, patch_radius))
+
+        y0, y1 = max(0, y - r), min(H, y + r + 1)
+        x0, x1 = max(0, x - r), min(W, x + r + 1)
 
         patch = edge_mask[y0:y1, x0:x1]
         pts = np.column_stack(np.nonzero(patch))
 
-        if len(pts) < 5:
+        if len(pts) < int(min_points):
             continue
 
         pts = pts + np.array([y0, x0])
@@ -891,7 +909,10 @@ def width_esd_local(
     bw: np.ndarray,
     *,
     skel: np.ndarray,
-    fixed_radius: int = 7,
+    dist_map: np.ndarray,
+    patch_scale: float = 1.5,
+    min_radius: int = 5,
+    max_radius: int = 100,
     min_points: int = 4,
     proj_thresh: float = 0.9,
 ) -> np.ndarray:
@@ -901,7 +922,7 @@ def width_esd_local(
 
     for y, x in zip(ys, xs):
 
-        r = int(fixed_radius)
+        r = int(np.clip(float(dist_map[y, x]) * float(patch_scale), float(min_radius), float(max_radius)))
         y0, y1 = max(0, y - r), min(bw.shape[0], y + r + 1)
         x0, x1 = max(0, x - r), min(bw.shape[1], x + r + 1)
 
@@ -947,6 +968,8 @@ def width_eob_hybrid_cpu(
     skel: np.ndarray,
     dist_map: np.ndarray,
     patch_scale: float = 1.5,
+    min_radius: int = 5,
+    max_radius: int = 100,
     min_points: int = 4,
     proj_thresh: float = 0.9,
 ) -> np.ndarray:
@@ -965,7 +988,7 @@ def width_eob_hybrid_cpu(
 
     for y, x in zip(ys, xs):
 
-        r = int(max(4, dist_map[y, x] * patch_scale))
+        r = int(np.clip(float(dist_map[y, x]) * float(patch_scale), float(min_radius), float(max_radius)))
 
         y0, y1 = max(0, y - r), min(bw.shape[0], y + r + 1)
         x0, x1 = max(0, x - r), min(bw.shape[1], x + r + 1)
@@ -1195,8 +1218,14 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
     _add_geometry("skel_graph_longest_path", skel_graph)
 
     # --------------------------------------------------
-    # Stage C: width baselines
+    # Stage C: width baselines (adaptive, hardcoded)
     # --------------------------------------------------
+    PATCH_SCALE = 1.5
+    MIN_RADIUS = 5
+    MAX_RADIUS = 100
+    PROJ_THRESH = 0.9
+    MIN_POINTS = int(cfg["pca_min_points"])
+
     # 1) MAT width (raw MAT skeleton, DT*2)
     w_mat = np.zeros_like(dist_map, dtype=np.float32)
     w_mat[skel_raw] = dist_map[skel_raw] * 2.0
@@ -1213,8 +1242,10 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
         bw,
         skel=skel_dse,
         dist_map=dist_map,
-        patch_scale=float(cfg["pca_patch_scale"]),
-        min_points=int(cfg["pca_min_points"]),
+        patch_scale=PATCH_SCALE,
+        min_radius=MIN_RADIUS,
+        max_radius=MAX_RADIUS,
+        min_points=MIN_POINTS,
     )
     timings["pca_width_dse_s"] = float(time.perf_counter() - t0)
     _add_width("pca_width_dse", w_pca_dse, skel_dse)
@@ -1225,8 +1256,11 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
         bw,
         skel=skel_dse,
         dist_map=dist_map,
-        patch_scale=float(cfg["pca_patch_scale"]),
-        min_points=int(cfg["pca_min_points"]),
+        patch_scale=PATCH_SCALE,
+        min_radius=MIN_RADIUS,
+        max_radius=MAX_RADIUS,
+        min_points=MIN_POINTS,
+        proj_thresh=PROJ_THRESH,
     )
     timings["esd_width_dse_s"] = float(time.perf_counter() - t0)
     _add_width("esd_width_dse", w_esd_dse, skel_dse)
@@ -1237,8 +1271,11 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
         bw,
         skel=skel_dse,
         dist_map=dist_map,
-        patch_scale=float(cfg["pca_patch_scale"]),
-        min_points=int(cfg["pca_min_points"]),
+        patch_scale=PATCH_SCALE,
+        min_radius=MIN_RADIUS,
+        max_radius=MAX_RADIUS,
+        min_points=MIN_POINTS,
+        proj_thresh=PROJ_THRESH,
     )
     timings["eob_width_dse_s"] = float(time.perf_counter() - t0)
     _add_width("eob_width_dse", w_eob_dse, skel_dse)
@@ -2372,9 +2409,9 @@ def main():
     paths = _collect_image_paths(IN_DIR)
 
     paths = sorted(paths, key=_natural_sort_key)
-    paths = paths[41]
-    #print(paths[:10])
-    return
+    paths = paths[41:42]
+    #print(paths)
+    #return
 
     if not paths:
         print(f"[width_baseline_creator] No images found under: {IN_DIR}")
