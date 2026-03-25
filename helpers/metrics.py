@@ -222,22 +222,16 @@ def hausdorff_p95(A, B, q=95):
 # --- DROP-IN REPLACEMENT in py ---
 
 
-def frechet_discrete_ds(A, B, max_points=800):
+def frechet_discrete_ds(A, B):
     """
     Iterative EiterMannila discrete Fréchet distance.
     - No recursion (avoids RecursionError)
-    - Resamples long polylines to <= max_points for robustness
+    - Expects caller-provided sampling
     """
     A = _finite_xy(A)
     B = _finite_xy(B)
     if len(A) == 0 or len(B) == 0:
         return float('inf')
-
-    # Optional safety downsampling by arclength (keeps geometry)
-    if len(A) > max_points:
-        A = _resample_by_arclen(A, N=max_points)
-    if len(B) > max_points:
-        B = _resample_by_arclen(B, N=max_points)
 
     n, m = len(A), len(B)
     # DP table of size (n x m)
@@ -275,10 +269,12 @@ def tangent_angles(xy):
     return ang
 
 
-def mean_tangent_angle_error_degs(A, B):
-    # resample to same count for angle comparison
-    Ar = _resample_by_arclen(A, N=400)
-    Br = _resample_by_arclen(B, N=len(Ar))
+def mean_tangent_angle_error_degs(A_resampled, B_resampled):
+    """
+    Mean absolute tangent-angle error (degrees) on caller-provided resampled curves.
+    """
+    Ar = _finite_xy(A_resampled)
+    Br = _finite_xy(B_resampled)
     if len(Ar)==0 or len(Br)==0: return np.nan
     aA = tangent_angles(Ar); aB = tangent_angles(Br)
     n = min(len(aA), len(aB))
@@ -288,9 +284,12 @@ def mean_tangent_angle_error_degs(A, B):
     return float(np.degrees(np.mean(np.abs(da))))
 
 
-def orthogonal_deviation(manual_xy, auto_xy, N=400, robust='median'):
-    """Signed distance from manual to nearest auto, measured along manual normal."""
-    M = _resample_by_arclen(manual_xy, N=N)
+def orthogonal_deviation(manual_xy_resampled, auto_xy):
+    """
+    Signed distance from manual (reference) to nearest auto, measured
+    along manual normals. Sign convention is with respect to manual normals.
+    """
+    M = _finite_xy(manual_xy_resampled)
     A = _finite_xy(auto_xy)
     if len(M)==0 or len(A)==0:
         return dict(mean=np.nan, median=np.nan, rmse=np.nan, p95=np.nan)
@@ -8643,7 +8642,9 @@ def compute_midline_metrics(auto_xy, man_xy, tau=3.0):
                 "orth_mean","orth_std","signed_bias_z",
                 "curvature_rms_auto","curvature_rms_manual","curvature_rms_ratio")}
 
-    # --- Light resampling for expensive ops ---
+    # --- Caller-owned resampling for sampling-dependent ops ---
+    A_dense = _resample_by_arclen(A, N=400)
+    B_dense = _resample_by_arclen(B, N=400)
     A_ds = _resample_by_arclen(A, N=min(600, len(A)))
     B_ds = _resample_by_arclen(B, N=min(600, len(B)))
 
@@ -8651,7 +8652,7 @@ def compute_midline_metrics(auto_xy, man_xy, tau=3.0):
         "nn_mean_bidirectional": _unwrap(nn_mean_bidirectional(A, B)),
         "hausdorff_max":    _unwrap(hausdorff_max(A, B)),
         "frechet_discrete_ds": float("nan"),
-        "mean_tan_angle_error_deg": _unwrap(mean_tangent_angle_error_degs(A, B)),
+        "mean_tan_angle_error_deg": _unwrap(mean_tangent_angle_error_degs(A_dense, B_dense)),
         "relative_length_error":  _unwrap(relative_length_error(A, B)),
     }
     
@@ -8665,13 +8666,13 @@ def compute_midline_metrics(auto_xy, man_xy, tau=3.0):
     try:
         if len(A_ds) >= 2 and len(B_ds) >= 2:
             out["frechet_discrete_ds"] = _unwrap(
-                frechet_discrete_ds(A_ds, B_ds, max_points=800)
+                frechet_discrete_ds(A_ds, B_ds)
             )
     except Exception as e:
         print(f"[metrics][warn] Fréchet failed: {e}")
 
     # --- Orthogonal deviation stats ---
-    orth = orthogonal_deviation(A, B, N=400)
+    orth = orthogonal_deviation(A_dense, B)
 
     # --- unwrap dict structures safely ---
     import numpy as np

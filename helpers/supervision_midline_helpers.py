@@ -3,7 +3,7 @@ import os
 import numpy as np
 import cv2
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from scipy.ndimage import gaussian_filter, gaussian_filter1d
+from scipy.ndimage import gaussian_filter
 
 from helpers.metrics import normals_from_mask_for_midline, resample_by_arclength
 
@@ -531,6 +531,7 @@ def _extract_depth_crop_for_bbox_or_domain(
     depth_crop=None,
     depth_bbox_xywh=None,
     full_image_hw=None,
+    context_pad_px=0,
 ):
     dom = (np.asarray(domain_u8) > 0)
     target_h, target_w = dom.shape[:2]
@@ -563,6 +564,7 @@ def _extract_depth_crop_for_bbox_or_domain(
 
     if depth_bbox_xywh is not None and len(depth_bbox_xywh) == 4:
         x, y, w, h = [int(v) for v in depth_bbox_xywh]
+        pad = int(max(0, context_pad_px))
         Hs, Ws = src.shape[:2]
         if (
             isinstance(full_image_hw, (list, tuple))
@@ -578,10 +580,10 @@ def _extract_depth_crop_for_bbox_or_domain(
             sy = 1.0
             sx = 1.0
 
-        x0 = int(np.floor(float(x) * sx))
-        y0 = int(np.floor(float(y) * sy))
-        x1 = int(np.ceil(float(x + max(0, w)) * sx))
-        y1 = int(np.ceil(float(y + max(0, h)) * sy))
+        x0 = int(np.floor(float(x - pad) * sx))
+        y0 = int(np.floor(float(y - pad) * sy))
+        x1 = int(np.ceil(float(x + max(0, w) + pad) * sx))
+        y1 = int(np.ceil(float(y + max(0, h) + pad) * sy))
 
         x0 = max(0, min(Ws, x0))
         y0 = max(0, min(Hs, y0))
@@ -603,6 +605,88 @@ def _extract_depth_crop_for_bbox_or_domain(
         "source": source_name,
         "raw_shape": list(raw_shape),
         "used_bbox_crop": bool(used_bbox_crop),
+        "context_pad_px": int(max(0, context_pad_px)),
+        "aligned_shape": [int(target_h), int(target_w)],
+        "resized": bool(resized),
+    }
+
+
+def _extract_image_crop_for_bbox_or_domain(
+    *,
+    domain_u8,
+    image_rgb_or_gray=None,
+    image_bbox_xywh=None,
+    full_image_hw=None,
+    context_pad_px=0,
+):
+    dom = (np.asarray(domain_u8) > 0)
+    target_h, target_w = dom.shape[:2]
+    if target_h <= 0 or target_w <= 0 or image_rgb_or_gray is None:
+        return None, {"reason": "empty_domain_or_missing_image"}
+
+    src = np.asarray(image_rgb_or_gray)
+    if src.ndim == 3:
+        if src.shape[2] == 1:
+            src = src[:, :, 0]
+        else:
+            src = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+    src = np.squeeze(src)
+    if src.ndim != 2:
+        return None, {"reason": f"bad_image_ndim:{src.ndim}"}
+
+    src = src.astype(np.float32, copy=False)
+    raw_shape = tuple(int(v) for v in src.shape[:2])
+    used_bbox_crop = False
+
+    if image_bbox_xywh is not None and len(image_bbox_xywh) == 4:
+        x, y, w, h = [int(v) for v in image_bbox_xywh]
+        pad = int(max(0, context_pad_px))
+        Hs, Ws = src.shape[:2]
+
+        if (
+            isinstance(full_image_hw, (list, tuple))
+            and len(full_image_hw) == 2
+            and int(full_image_hw[0]) > 0
+            and int(full_image_hw[1]) > 0
+        ):
+            Hf = int(full_image_hw[0])
+            Wf = int(full_image_hw[1])
+            sy = float(Hs) / float(Hf)
+            sx = float(Ws) / float(Wf)
+        else:
+            sy = 1.0
+            sx = 1.0
+
+        x0 = int(np.floor(float(x - pad) * sx))
+        y0 = int(np.floor(float(y - pad) * sy))
+        x1 = int(np.ceil(float(x + max(0, w) + pad) * sx))
+        y1 = int(np.ceil(float(y + max(0, h) + pad) * sy))
+
+        x0 = max(0, min(Ws, x0))
+        y0 = max(0, min(Hs, y0))
+        x1 = max(0, min(Ws, x1))
+        y1 = max(0, min(Hs, y1))
+
+        if x1 > x0 and y1 > y0:
+            crop = src[y0:y1, x0:x1]
+            if crop.size > 0:
+                src = crop
+                used_bbox_crop = True
+
+    resized = False
+    if src.shape[:2] != (target_h, target_w):
+        src = cv2.resize(src, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+        resized = True
+
+    mx = float(np.nanmax(src)) if src.size else 0.0
+    if mx > 1.5:
+        src = src / 255.0
+    src[~np.isfinite(src)] = 0.0
+    src = np.clip(src, 0.0, 1.0).astype(np.float32, copy=False)
+    return src, {
+        "raw_shape": list(raw_shape),
+        "used_bbox_crop": bool(used_bbox_crop),
+        "context_pad_px": int(max(0, context_pad_px)),
         "aligned_shape": [int(target_h), int(target_w)],
         "resized": bool(resized),
     }
@@ -775,7 +859,7 @@ def _compute_rgb_ridge_valley_cues(image_gray_f32, domain_u8):
     meta["compute_s"] = float(time.perf_counter() - t0)
     return ridge_n, valley_n, meta
 
-def _compute_rgb_trench_signal(image_gray_f32, domain_u8):
+def _compute_rgb_trench_signal(image_gray_f32, domain_u8, image_rgb=None):
     t0 = time.perf_counter()
 
     dom = (np.asarray(domain_u8) > 0)
@@ -827,18 +911,38 @@ def _compute_rgb_trench_signal(image_gray_f32, domain_u8):
     edge_suppress = 1.0 - edge_n
 
     # --------------------------------------------------
-    # 5) FUSION (ADDITIVE, not multiplicative)
+    # 5) Optional weak color anomaly cue (secondary only)
+    # --------------------------------------------------
+    if image_rgb is not None:
+        try:
+            rgb = np.asarray(image_rgb, np.float32)
+            if rgb.ndim == 3 and rgb.shape[:2] == g.shape[:2] and rgb.shape[2] >= 3:
+                b = rgb[:, :, 0]
+                g_ch = rgb[:, :, 1]
+                r = rgb[:, :, 2]
+                color_anomaly = np.abs(r - g_ch) + np.abs(r - b)
+                color_anomaly = _normalize_01_masked(color_anomaly, dom)
+            else:
+                color_anomaly = np.zeros_like(g, dtype=np.float32)
+        except Exception:
+            color_anomaly = np.zeros_like(g, dtype=np.float32)
+    else:
+        color_anomaly = np.zeros_like(g, dtype=np.float32)
+
+    # --------------------------------------------------
+    # 6) FUSION (ADDITIVE, grayscale-primary + weak color)
     # --------------------------------------------------
     rgb_trench = (
-        0.6 * valley_good +      # dominant
-        0.3 * ridge_soft +      # structure prior
-        0.1 * edge_suppress     # weak helper
+        0.5 * valley_good +      # dominant
+        0.25 * ridge_soft +      # structure prior
+        0.1 * edge_suppress +    # weak helper
+        0.15 * color_anomaly     # weak color anomaly cue
     )
 
     rgb_trench = np.clip(rgb_trench, 0.0, 1.0)
 
     # --------------------------------------------------
-    # 6) LIGHT STRUCTURE SMOOTHING (NOT HEAVY BLUR)
+    # 7) LIGHT STRUCTURE SMOOTHING (NOT HEAVY BLUR)
     # --------------------------------------------------
     rgb_trench = cv2.GaussianBlur(rgb_trench, (0, 0), sigmaX=1.5)
 
@@ -848,6 +952,7 @@ def _compute_rgb_trench_signal(image_gray_f32, domain_u8):
     valley_good[~dom] = 0.0
     ridge_soft[~dom] = 0.0
     edge_suppress[~dom] = 0.0
+    color_anomaly[~dom] = 0.0
     rgb_trench[~dom] = 0.0
 
     meta["compute_s"] = float(time.perf_counter() - t0)
@@ -859,52 +964,61 @@ METHOD_SPECS = {
         "label": "DT",
         "use_rgb": False,
         "use_depth": False,
+        "use_color": False,
     },
     "dt_depth": {
         "label": "DT + Depth",
         "use_rgb": False,
         "use_depth": True,
+        "use_color": False,
     },
     "dt_ridge_valley": {
         "label": "DT + Ridge/Valley",
         "use_rgb": True,
         "use_depth": False,
+        "use_color": False,
     },
     "dt_ridge_valley_depth": {
         "label": "DT + Ridge/Valley + Depth",
         "use_rgb": True,
         "use_depth": True,
+        "use_color": False,
+    },
+    "dt_ridge_color": {
+        "label": "DT + Ridge/Valley + Color",
+        "use_rgb": True,
+        "use_depth": False,
+        "use_color": True,
+    },
+    "dt_ridge_color_depth": {
+        "label": "DT + Ridge/Valley + Color + Depth",
+        "use_rgb": True,
+        "use_depth": True,
+        "use_color": True,
     },
 }
 
 ENABLE_DEPTH_PRIOR = True
-ENABLE_PATH_REFINE = False
+ENABLE_PATH_REFINE = True
 ENABLE_PATH_POSTPROCESS = False
 PRINT_DT_PATH_DIAGNOSTICS = True
 # Stage-1 parallelism: run method-family variants concurrently per call.
 ENABLE_METHOD_PARALLEL = True
 METHOD_PARALLEL_MAX_WORKERS = 8
-FLAGSHIP_PATH_SMOOTH_SIGMA = 1.5
-ENABLE_COSTMAP_SMOOTH = False
-COSTMAP_SMOOTH_SIGMA = 2.5
+ENABLE_COSTMAP_SMOOTH = True
+COSTMAP_SMOOTH_SIGMA = 1.0
 RGB_TRENCH_PRE_SMOOTH_SIGMA = 3.0
 RGB_TRENCH_POST_SMOOTH_SIGMA = 2.0
 RGB_TRENCH_POWER = 1.5
-RGB_COST_WEIGHT = 0.4
+RGB_COST_WEIGHT = 0.7
+DEPTH_COST_WEIGHT = 0.5
+ENABLE_CUE_BBOX_CONTEXT = True
+CUE_CONTEXT_PAD_PX = 5
 ENABLE_DT_BBOX_PAD = True
 DT_BACKGROUND_RING_PX = 5
 # Keep disabled by default; preferred behavior is pad->DT->crop in _compute_dt_fixed.
 ENABLE_DT_EDGE_UNBIAS = False
 DT_EDGE_UNBIAS_MARGIN = 10
-
-
-def _smooth_midline_gaussian(mid_xy, sigma=1.5):
-    arr = np.asarray(mid_xy, np.float32).copy()
-    if arr.ndim != 2 or arr.shape[1] != 2 or len(arr) < 5:
-        return np.asarray(mid_xy, float)
-    arr[:, 0] = gaussian_filter1d(arr[:, 0], float(sigma))
-    arr[:, 1] = gaussian_filter1d(arr[:, 1], float(sigma))
-    return np.asarray(arr, float)
 
 
 def _smooth_costmap_in_domain(costmap_f32, domain_u8, sigma=2.5):
@@ -973,7 +1087,7 @@ def _build_ridge_valley_method_costmaps(
         dep = np.clip(np.asarray(recess_norm, np.float32), 0.0, 1.0)
         # Weak depth influence to avoid cost collapse on noisy/flat depth.
         depth_term = np.ones_like(dtn, dtype=np.float32)
-        depth_term[dom] = (1.0 - 0.25 * dep[dom]).astype(np.float32)
+        depth_term[dom] = (1.0 - float(DEPTH_COST_WEIGHT) * dep[dom]).astype(np.float32)
         debug["depth_term"] = dep.copy()
         costmaps["dt_depth"] = np.full_like(dtn, inf, dtype=np.float32)
         costmaps["dt_depth"][dom] = (dt_bad[dom] * depth_term[dom]).astype(np.float32)
@@ -990,10 +1104,16 @@ def _build_ridge_valley_method_costmaps(
 
         costmaps["dt_ridge_valley"] = np.full_like(dtn, inf, dtype=np.float32)
         costmaps["dt_ridge_valley"][dom] = (dt_bad[dom] * rgb_bad[dom]).astype(np.float32)
+        costmaps["dt_ridge_color"] = np.full_like(dtn, inf, dtype=np.float32)
+        costmaps["dt_ridge_color"][dom] = (dt_bad[dom] * rgb_bad[dom]).astype(np.float32)
 
         if depth_term is not None:
             costmaps["dt_ridge_valley_depth"] = np.full_like(dtn, inf, dtype=np.float32)
             costmaps["dt_ridge_valley_depth"][dom] = (
+                dt_bad[dom] * rgb_bad[dom] * depth_term[dom]
+            ).astype(np.float32)
+            costmaps["dt_ridge_color_depth"] = np.full_like(dtn, inf, dtype=np.float32)
+            costmaps["dt_ridge_color_depth"][dom] = (
                 dt_bad[dom] * rgb_bad[dom] * depth_term[dom]
             ).astype(np.float32)
     elif ridge_norm is not None and valley_norm is not None:
@@ -1015,10 +1135,16 @@ def _build_ridge_valley_method_costmaps(
 
         costmaps["dt_ridge_valley"] = np.full_like(dtn, inf, dtype=np.float32)
         costmaps["dt_ridge_valley"][dom] = (dt_bad[dom] * rgb_bad[dom]).astype(np.float32)
+        costmaps["dt_ridge_color"] = np.full_like(dtn, inf, dtype=np.float32)
+        costmaps["dt_ridge_color"][dom] = (dt_bad[dom] * rgb_bad[dom]).astype(np.float32)
 
         if depth_term is not None:
             costmaps["dt_ridge_valley_depth"] = np.full_like(dtn, inf, dtype=np.float32)
             costmaps["dt_ridge_valley_depth"][dom] = (
+                dt_bad[dom] * rgb_bad[dom] * depth_term[dom]
+            ).astype(np.float32)
+            costmaps["dt_ridge_color_depth"] = np.full_like(dtn, inf, dtype=np.float32)
+            costmaps["dt_ridge_color_depth"][dom] = (
                 dt_bad[dom] * rgb_bad[dom] * depth_term[dom]
             ).astype(np.float32)
 
@@ -1032,7 +1158,7 @@ def _build_ridge_valley_method_costmaps(
         "selected_cost_key": str(selected_key),
         "used_depth": bool(depth_term is not None),
         "used_rgb": bool(rgb_bad is not None),
-        "depth_scale": 0.25,
+        "depth_scale": float(DEPTH_COST_WEIGHT),
         "rgb_weight": float(RGB_COST_WEIGHT),
     }
 
@@ -1100,6 +1226,7 @@ def _run_single_midline_method(
             "label": str(method_spec.get("label", method_key)),
             "use_rgb": bool(method_spec.get("use_rgb", False)),
             "use_depth": bool(method_spec.get("use_depth", False)),
+            "use_color": bool(method_spec.get("use_color", False)),
             "reason": None,
         },
     }
@@ -1127,6 +1254,7 @@ def _run_single_midline_method(
         use_depth = False
 
     use_rgb = bool(method_spec.get("use_rgb", False))
+    use_color = bool(method_spec.get("use_color", False))
     depth_local = None
     depth_align_meta = {}
     if use_depth:
@@ -1137,6 +1265,7 @@ def _run_single_midline_method(
             depth_crop=depth_crop,
             depth_bbox_xywh=depth_bbox_xywh,
             full_image_hw=full_image_hw,
+            context_pad_px=(int(CUE_CONTEXT_PAD_PX) if bool(ENABLE_CUE_BBOX_CONTEXT) else 0),
         )
         timing["depth_align_s"] = float(time.perf_counter() - t_align0)
         if depth_local is None:
@@ -1169,13 +1298,28 @@ def _run_single_midline_method(
     ridge_norm = None
     valley_norm = None
     if use_rgb:
-        gray = _prepare_gray_image(image_rgb, dom.shape[:2])
+        if bool(ENABLE_CUE_BBOX_CONTEXT):
+            gray, gray_meta = _extract_image_crop_for_bbox_or_domain(
+                domain_u8=dom,
+                image_rgb_or_gray=image_rgb,
+                image_bbox_xywh=depth_bbox_xywh,
+                full_image_hw=full_image_hw,
+                context_pad_px=int(CUE_CONTEXT_PAD_PX),
+            )
+            if isinstance(gray_meta, dict):
+                out["meta"]["rgb_align"] = gray_meta
+        else:
+            gray = _prepare_gray_image(image_rgb, dom.shape[:2])
         if gray is None:
             out["meta"]["reason"] = "missing_rgb_image"
             _log_method_failure(method_key, "missing_rgb_image")
             timing["total_s"] = float(time.perf_counter() - t0_method)
             return out
-        rgb_trench_norm, valley_norm, ridge_norm, edge_suppress_norm, _rgb_meta = _compute_rgb_trench_signal(gray, dom)
+        rgb_trench_norm, valley_norm, ridge_norm, edge_suppress_norm, _rgb_meta = _compute_rgb_trench_signal(
+            gray,
+            dom,
+            image_rgb=image_rgb if use_color else None,
+        )
         out["debug"]["ridge_norm"] = np.asarray(ridge_norm, np.float32)
         out["debug"]["valley_norm"] = np.asarray(valley_norm, np.float32)
         out["debug"]["rgb_cue_norm"] = np.asarray(rgb_trench_norm, np.float32)
@@ -1248,7 +1392,7 @@ def _run_single_midline_method(
             path_raw,
             score_ref_smooth,
             iterations=2,
-            step=0.15,
+            step=0.10,
         )
         timing["refine_s"] = float(time.perf_counter() - t_ref0)
 
@@ -1257,8 +1401,6 @@ def _run_single_midline_method(
         t_post0 = time.perf_counter()
         path_post = _postprocess_midline_polyline(path_refined, keep_endpoints=True)
         timing["postprocess_s"] = float(time.perf_counter() - t_post0)
-    if use_rgb and path_post is not None and len(path_post) >= 5:
-        path_post = _smooth_midline_gaussian(path_post, sigma=float(FLAGSHIP_PATH_SMOOTH_SIGMA))
     if path_post is None:
         out["meta"]["reason"] = "empty_path"
         _log_method_failure(method_key, "empty_path_postprocess")
@@ -1309,11 +1451,11 @@ def _run_single_midline_method(
         "route_domain_nonzero": int(np.count_nonzero(route_domain)),
     }
     timing["total_s"] = float(time.perf_counter() - t0_method)
-    print(
-        f"[MIDLINE OK] method={method_key} "
-        f"points={len(path_post)} "
-        f"cost={selected_key}"
-    )
+    #print(
+    #    f"[MIDLINE OK] method={method_key} "
+    #    f"points={len(path_post)} "
+    #    f"cost={selected_key}"
+    #)
     return out
 
 

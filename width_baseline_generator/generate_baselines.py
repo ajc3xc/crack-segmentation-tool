@@ -22,6 +22,7 @@ import sys
 import time
 import json
 import math
+import re
 import heapq
 import argparse
 from collections import deque
@@ -123,6 +124,18 @@ def _read_mask(path: str, threshold: float) -> np.ndarray:
 
 def _safe_mkdir(p: str) -> None:
     os.makedirs(p, exist_ok=True)
+
+
+def _natural_sort_key(path: str):
+    """
+    Sort by leading filename number first (e.g., 2.png, 2_modified.png),
+    then by full name as a tie-breaker.
+    """
+    name = os.path.basename(path)
+    stem, _ = os.path.splitext(name)
+    m = re.match(r"^\s*(\d+)", stem)
+    lead_num = int(m.group(1)) if m else float("inf")
+    return (lead_num, stem.lower())
 
 
 def _save_npz(
@@ -444,7 +457,7 @@ def _edge_points_in_patch(patch: np.ndarray) -> np.ndarray:
     return np.argwhere(edge)
 
 
-def width_pca_local(bw: np.ndarray, skel: np.ndarray, dist_map: np.ndarray, patch_scale: float = 1.5, min_points: int = 4) -> np.ndarray:
+'''def width_pca_local(bw: np.ndarray, skel: np.ndarray, dist_map: np.ndarray, patch_scale: float = 1.5, min_points: int = 4) -> np.ndarray:
     wmap = np.zeros_like(bw, dtype=np.float32)
     ys, xs = np.nonzero(skel)
     for y, x in zip(ys, xs):
@@ -464,7 +477,7 @@ def width_pca_local(bw: np.ndarray, skel: np.ndarray, dist_map: np.ndarray, patc
         wmap[y, x] = float(proj.max() - proj.min())
     return wmap
 
-
+#unused function
 def width_adaptive_pca(bw: np.ndarray, skel: np.ndarray, dist_map: np.ndarray, base_patch: int = 8, min_points: int = 4) -> np.ndarray:
     wmap = np.zeros_like(bw, dtype=np.float32)
     ys, xs = np.nonzero(skel)
@@ -483,8 +496,48 @@ def width_adaptive_pca(bw: np.ndarray, skel: np.ndarray, dist_map: np.ndarray, b
         minor_axis = pca.components_[1]
         proj = (edges - np.array([y, x])) @ minor_axis
         wmap[y, x] = float(proj.max() - proj.min())
-    return wmap
+    return wmap'''
+    
+def width_pca_proj(bw, skel, patch_radius=7):
+    import numpy as np
 
+    wmap = np.zeros_like(bw, dtype=np.float32)
+    edge_mask = (bw > 0) & (
+        (np.roll(bw,1,0)==0) | (np.roll(bw,-1,0)==0) |
+        (np.roll(bw,1,1)==0) | (np.roll(bw,-1,1)==0)
+    )
+
+    ys, xs = np.nonzero(skel)
+    H, W = bw.shape
+
+    for y, x in zip(ys, xs):
+        y0, y1 = max(0,y-patch_radius), min(H,y+patch_radius+1)
+        x0, x1 = max(0,x-patch_radius), min(W,x+patch_radius+1)
+
+        patch = edge_mask[y0:y1, x0:x1]
+        pts = np.column_stack(np.nonzero(patch))
+
+        if len(pts) < 5:
+            continue
+
+        pts = pts + np.array([y0, x0])
+
+        # PCA
+        mu = pts.mean(axis=0)
+        X = pts - mu
+        cov = X.T @ X / len(pts)
+
+        eigvals, eigvecs = np.linalg.eig(cov)
+
+        # minor axis (width direction)
+        v = eigvecs[:, np.argmin(eigvals)]
+        v = v / (np.linalg.norm(v) + 1e-8)
+
+        # projection span
+        proj = (pts - np.array([y, x])) @ v
+        wmap[y, x] = proj.max() - proj.min()
+
+    return wmap
 
 def compute_shared_precompute(
     bw: np.ndarray,
@@ -827,29 +880,64 @@ def _closest_opposite_side_pair(
     return p1, p2, float(np.sqrt(max(float(d2[iy, ix]), 0.0)))
 
 
+def _min_pairwise_dist(A, B):
+    # A: (Na, 2), B: (Nb, 2)
+    # returns scalar min ||Ai - Bj||
+    diff = A[:, None, :] - B[None, :, :]
+    d2 = np.einsum("ijk,ijk->ij", diff, diff)
+    return float(np.sqrt(d2.min()))
+
 def width_esd_local(
     bw: np.ndarray,
     *,
     skel: np.ndarray,
-    dist_map: np.ndarray,
-    patch_scale: float = 1.5,
+    fixed_radius: int = 7,
     min_points: int = 4,
-    normal_window: int = 5,
+    proj_thresh: float = 0.9,
 ) -> np.ndarray:
+
     wmap = np.zeros_like(bw, dtype=np.float32)
     ys, xs = np.nonzero(skel)
+
     for y, x in zip(ys, xs):
-        r = int(max(4, float(dist_map[y, x]) * float(patch_scale)))
+
+        r = int(fixed_radius)
         y0, y1 = max(0, y - r), min(bw.shape[0], y + r + 1)
         x0, x1 = max(0, x - r), min(bw.shape[1], x + r + 1)
+
         patch = bw[y0:y1, x0:x1]
         edges = _edge_points_in_patch(patch)
+
         if edges.shape[0] < int(min_points):
             continue
-        edges = edges + np.array([y0, x0])
-        _, normal = _local_tangent_normal(int(y), int(x), skel, window=int(normal_window))
-        _, _, w = _closest_opposite_side_pair(edges, int(y), int(x), normal, topk=6)
-        wmap[y, x] = float(w)
+
+        edges = edges + np.array([y0, x0], dtype=np.float32)
+
+        center = np.array([y, x], dtype=np.float32)
+
+        # --- vectorized ---
+        rel = edges - center
+        norms = np.linalg.norm(rel, axis=1, keepdims=True)
+        dirs = rel / (norms + 1e-8)
+
+        tangent, _ = _local_tangent_normal(int(y), int(x), skel, window=5)
+        O = tangent / (np.linalg.norm(tangent) + 1e-8)
+
+        proj = dirs @ O
+
+        # --- boolean masks ---
+        pos_mask = proj > proj_thresh
+        neg_mask = proj < -proj_thresh
+
+        if not np.any(pos_mask) or not np.any(neg_mask):
+            continue
+
+        pos = edges[pos_mask]
+        neg = edges[neg_mask]
+
+        # --- vectorized distance ---
+        wmap[y, x] = _min_pairwise_dist(pos, neg)
+
     return wmap
 
 
@@ -860,52 +948,111 @@ def width_eob_hybrid_cpu(
     dist_map: np.ndarray,
     patch_scale: float = 1.5,
     min_points: int = 4,
-    normal_window: int = 5,
-    topk: int = 6,
+    proj_thresh: float = 0.9,
 ) -> np.ndarray:
-    """
-    Compact OrthoBoundary+ESD style CPU baseline:
-      - pass 1 with skeleton normal
-      - boundary tangent correction
-      - pass 2 with corrected normal
-    """
+
     wmap = np.zeros_like(bw, dtype=np.float32)
-    edge_mask = _boundary_mask_4n(bw)
+
+    def _angle(v):
+        return np.arctan2(v[0], v[1])
+
+    def _avg_angle(a, b, c):
+        s = np.sin(a) + np.sin(b) + np.sin(c)
+        c_ = np.cos(a) + np.cos(b) + np.cos(c)
+        return np.arctan2(s, c_)
+
     ys, xs = np.nonzero(skel)
+
     for y, x in zip(ys, xs):
-        r = int(max(4, float(dist_map[y, x]) * float(patch_scale)))
+
+        r = int(max(4, dist_map[y, x] * patch_scale))
+
         y0, y1 = max(0, y - r), min(bw.shape[0], y + r + 1)
         x0, x1 = max(0, x - r), min(bw.shape[1], x + r + 1)
+
         patch = bw[y0:y1, x0:x1]
         edges = _edge_points_in_patch(patch)
+
         if edges.shape[0] < int(min_points):
             continue
-        edges = edges + np.array([y0, x0])
 
-        tangent, normal = _local_tangent_normal(int(y), int(x), skel, window=int(normal_window))
-        p1, p2, w1 = _closest_opposite_side_pair(edges, int(y), int(x), normal, topk=int(topk))
-        if p1 is None or p2 is None:
+        edges = edges + np.array([y0, x0], dtype=np.float32)
+        center = np.array([y, x], dtype=np.float32)
+
+        rel = edges - center
+        norms = np.linalg.norm(rel, axis=1, keepdims=True)
+        dirs = rel / (norms + 1e-8)
+
+        tangent, _ = _local_tangent_normal(int(y), int(x), skel, window=5)
+        O = tangent / (np.linalg.norm(tangent) + 1e-8)
+
+        proj = dirs @ O
+
+        pos_mask = proj > proj_thresh
+        neg_mask = proj < -proj_thresh
+
+        if not np.any(pos_mask) or not np.any(neg_mask):
             continue
 
-        y1b, x1b = int(round(float(p1[0]))), int(round(float(p1[1])))
-        y2b, x2b = int(round(float(p2[0]))), int(round(float(p2[1])))
-        if not (0 <= y1b < bw.shape[0] and 0 <= x1b < bw.shape[1] and 0 <= y2b < bw.shape[0] and 0 <= x2b < bw.shape[1]):
-            wmap[y, x] = float(w1)
+        pos = edges[pos_mask]
+        neg = edges[neg_mask]
+
+        # --- first pass ---
+        w1 = _min_pairwise_dist(pos, neg)
+
+        # get closest pair indices (vectorized)
+        diff = pos[:, None, :] - neg[None, :, :]
+        d2 = np.einsum("ijk,ijk->ij", diff, diff)
+        idx = np.unravel_index(np.argmin(d2), d2.shape)
+
+        p1 = pos[idx[0]]
+        p2 = neg[idx[1]]
+
+        # --- PCA tangents ---
+        def _pca_tangent(pt):
+            yy, xx = int(pt[0]), int(pt[1])
+            y0b, y1b = max(0, yy - 2), min(bw.shape[0], yy + 3)
+            x0b, x1b = max(0, xx - 2), min(bw.shape[1], xx + 3)
+
+            sub = bw[y0b:y1b, x0b:x1b]
+            pts = _edge_points_in_patch(sub)
+
+            if pts.shape[0] < 3:
+                return tangent
+
+            pts = pts + np.array([y0b, x0b])
+            X = pts - pts.mean(axis=0)
+            cov = X.T @ X / len(pts)
+
+            eigvals, eigvecs = np.linalg.eig(cov)
+            t = eigvecs[:, np.argmax(eigvals)]
+            return t / (np.linalg.norm(t) + 1e-8)
+
+        t1 = _pca_tangent(p1)
+        t2 = _pca_tangent(p2)
+
+        th_corr = _avg_angle(_angle(tangent), _angle(t1), _angle(t2))
+
+        O_corr = np.array([np.sin(th_corr), np.cos(th_corr)], dtype=np.float32)
+        O_corr /= (np.linalg.norm(O_corr) + 1e-8)
+
+        # --- second pass ---
+        proj2 = dirs @ O_corr
+
+        pos_mask2 = proj2 > proj_thresh
+        neg_mask2 = proj2 < -proj_thresh
+
+        if not np.any(pos_mask2) or not np.any(neg_mask2):
+            wmap[y, x] = w1
             continue
 
-        t1, _ = _local_tangent_normal(y1b, x1b, edge_mask, window=2)
-        t2, _ = _local_tangent_normal(y2b, x2b, edge_mask, window=2)
-        corr_tan = tangent + t1 + t2
-        nrm = float(np.linalg.norm(corr_tan))
-        if nrm < 1e-6:
-            corr_tan = tangent
-        else:
-            corr_tan = corr_tan / nrm
-        corr_normal = np.array([-corr_tan[1], corr_tan[0]], dtype=np.float32)
-        corr_normal /= (np.linalg.norm(corr_normal) + 1e-12)
+        pos2 = edges[pos_mask2]
+        neg2 = edges[neg_mask2]
 
-        _, _, w2 = _closest_opposite_side_pair(edges, int(y), int(x), corr_normal, topk=int(topk))
-        wmap[y, x] = float(w2 if w2 > 0 else w1)
+        w2 = _min_pairwise_dist(pos2, neg2)
+
+        wmap[y, x] = w2 if w2 > 0 else w1
+
     return wmap
 
 
@@ -1062,7 +1209,7 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     # 3) PCA width (DSE skeleton)
     t0 = time.perf_counter()
-    w_pca_dse = width_pca_local(
+    w_pca_dse = width_pca_proj(
         bw,
         skel=skel_dse,
         dist_map=dist_map,
@@ -1230,12 +1377,38 @@ def normalize_path(p):
 
 def _collect_image_paths(in_dir: str) -> List[str]:
     exts = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
-    paths = []
+    numbered_best: Dict[int, str] = {}
+    other_paths: List[str] = []
     for root, _, files in os.walk(in_dir):
         for fn in files:
             if os.path.splitext(fn)[1].lower() in exts:
-                paths.append(os.path.join(root, fn))
-    return sorted(paths)
+                full = os.path.join(root, fn)
+                stem = os.path.splitext(fn)[0]
+                m = re.match(r"^\s*(\d+)", stem)
+                if m is None:
+                    other_paths.append(full)
+                    continue
+
+                # Group by leading number across the whole input tree.
+                # Prefer *_modified variant when both exist.
+                key = int(m.group(1))
+                is_modified = "_modified" in stem.lower()
+                prev = numbered_best.get(key, None)
+                if prev is None:
+                    numbered_best[key] = full
+                    continue
+
+                prev_stem = os.path.splitext(os.path.basename(prev))[0]
+                prev_is_modified = "_modified" in prev_stem.lower()
+                if is_modified and not prev_is_modified:
+                    numbered_best[key] = full
+                elif is_modified == prev_is_modified:
+                    # Stable deterministic tie-breaker on full path.
+                    if full.lower() < prev.lower():
+                        numbered_best[key] = full
+
+    paths = list(numbered_best.values()) + other_paths
+    return sorted(paths, key=_natural_sort_key)
 
 
 def replot_from_saved_npz(
@@ -2198,8 +2371,10 @@ def main():
     # ============================================================
     paths = _collect_image_paths(IN_DIR)
 
-    paths = sorted(paths)
-    #paths = paths[:8]
+    paths = sorted(paths, key=_natural_sort_key)
+    paths = paths[41]
+    #print(paths[:10])
+    return
 
     if not paths:
         print(f"[width_baseline_creator] No images found under: {IN_DIR}")

@@ -2305,12 +2305,12 @@ def export_gt_supervision_for_image(
                     territory_plot = terr
                     if sel_cost is not None:
                         territory_plot = _viz_territory_from_costmap(sel_cost, crack_mask_clipped, pct=60.0)
-                    _dump_compare_arrays(
+                    '''_dump_compare_arrays(
                         dbg_tag,
                         sel_cost=sel_cost,
                         crack_mask_local=crack_mask_clipped,
                         territory_local=territory_plot,
-                    )
+                    )'''
                     out_dbg = os.path.join(atomic_dbg_dir, f"manual_vs_{mslug}.png")
                     plot_midline_centering_debug(
                         out_path=out_dbg,
@@ -2736,44 +2736,282 @@ def export_gt_supervision_for_image(
                             except Exception:
                                 continue
 
-            for seg_i, (S, w_manual) in enumerate(zip(segs, w_list)):
-                S = np.asarray(S, float)
-                bi = int(seg_meta[seg_i].get("branch_id", -1)) if seg_i < len(seg_meta) else -1
-                mask_use = branch_allowed_masks.get(
-                    bi,
+            def _bbox_from_segments(segs_local, pad, Hh, Ww):
+                xs = []
+                ys = []
+                for Ss in segs_local:
+                    Ss = np.asarray(Ss, float)
+                    if Ss.ndim != 2 or Ss.shape[1] != 2 or len(Ss) < 2:
+                        continue
+                    xs.append(Ss[:, 0])
+                    ys.append(Ss[:, 1])
+                if not xs:
+                    return None
+                x_all = np.concatenate(xs)
+                y_all = np.concatenate(ys)
+                xmin = int(np.floor(np.min(x_all))) - int(pad)
+                xmax = int(np.ceil(np.max(x_all))) + int(pad)
+                ymin = int(np.floor(np.min(y_all))) - int(pad)
+                ymax = int(np.ceil(np.max(y_all))) + int(pad)
+                xmin = max(0, xmin)
+                ymin = max(0, ymin)
+                xmax = min(Ww, xmax)
+                ymax = min(Hh, ymax)
+                if xmax <= xmin or ymax <= ymin:
+                    return None
+                return (xmin, ymin, xmax - xmin, ymax - ymin)
+
+            # Per-branch local context cache (within crack_mask_clipped coords).
+            branch_seg_indices = {}
+            for si, Sm in enumerate(segs):
+                bi = int(seg_meta[si].get("branch_id", -1)) if si < len(seg_meta) else -1
+                if bi < 0:
+                    continue
+                branch_seg_indices.setdefault(bi, []).append(int(si))
+
+            branch_local_cache = {}
+            for bi, idxs in branch_seg_indices.items():
+                segs_branch = [np.asarray(segs[i], float) for i in idxs]
+                bb_local = _bbox_from_segments(segs_branch, pad=5, Hh=Hm, Ww=Wm)
+                if bb_local is None:
+                    continue
+                bx, by, bw, bh = [int(v) for v in bb_local]
+
+                mask_branch_full = branch_allowed_masks.get(
+                    int(bi),
                     (crack_mask_clipped > 0).astype(np.uint8),
                 )
-                terr_i = build_territory_mask_from_polyline(
-                    mid_xy=S,
-                    crack_mask_u8=mask_use,
-                    window_half_size=int(auto_centering_window_half_size),
-                    dt_domain_u8=None,
-                )
-                center_res = compute_midline_method_variants_and_normals(
-                    mid_xy=S,
-                    crack_mask_u8=mask_use,
-                    domain_u8=None,
-                    image_rgb=original_image,
-                    depth_full=depth_full,
-                    depth_bbox_xywh=[ux, uy, uw, uh],
-                    full_image_hw=(int(H), int(W)),
-                    max_radius=50,
-                    snap_kwargs={
-                        "n_iters": int(auto_centering_iters),
-                        "step_px": float(auto_centering_step_px),
-                        "keep_endpoints": True,
-                    },
-                    endpoint_mode="combined",
-                )
+                mask_local = np.asarray(mask_branch_full[by:by + bh, bx:bx + bw], np.uint8)
+                if mask_local.size == 0 or not np.any(mask_local):
+                    continue
+                # Territory-aware island removal for branch-local optimization masks:
+                # keep only connected components that overlap this branch territory.
+                terr_branch_full = branch_terr_masks.get(int(bi), None)
+                if terr_branch_full is not None:
+                    territory_local = (
+                        np.asarray(terr_branch_full[by:by + bh, bx:bx + bw], np.uint8) > 0
+                    )
+                    if territory_local.size == mask_local.size and np.any(territory_local):
+                        try:
+                            num_labels, labels = cv2.connectedComponents((mask_local > 0).astype(np.uint8), 8)
+                            if int(num_labels) > 2:
+                                keep = np.zeros_like(mask_local, np.uint8)
+                                for lab in range(1, int(num_labels)):
+                                    comp = (labels == lab)
+                                    if np.any(comp & territory_local):
+                                        keep[comp] = 1
+                                if np.any(keep):
+                                    mask_local = keep
+                        except Exception:
+                            pass
 
-                # Build backward-compatible timing accumulator from method family.
-                _acc_nested_timing(
-                    combined_timing_blob,
-                    _legacy_timing_from_methods(
-                        center_res.get("methods", {}) if isinstance(center_res.get("methods", {}), dict) else {}
-                    ),
-                )
-                methods_local = center_res.get("methods", {}) if isinstance(center_res.get("methods", {}), dict) else {}
+                gx0 = int(ux + bx)
+                gy0 = int(uy + by)
+                gx1 = int(min(W, gx0 + bw))
+                gy1 = int(min(H, gy0 + bh))
+                if gx1 <= gx0 or gy1 <= gy0:
+                    continue
+
+                rgb_local = np.asarray(original_image[gy0:gy1, gx0:gx1])
+                depth_local = None
+                if depth_full is not None:
+                    try:
+                        depth_arr = np.asarray(depth_full)
+                        if depth_arr.ndim >= 2:
+                            Hdf, Wdf = depth_arr.shape[:2]
+                            sx = float(Wdf) / float(max(1, W))
+                            sy = float(Hdf) / float(max(1, H))
+                            dx0 = int(np.floor(gx0 * sx))
+                            dy0 = int(np.floor(gy0 * sy))
+                            dx1 = int(np.ceil(gx1 * sx))
+                            dy1 = int(np.ceil(gy1 * sy))
+                            dx0 = max(0, min(Wdf, dx0))
+                            dy0 = max(0, min(Hdf, dy0))
+                            dx1 = max(0, min(Wdf, dx1))
+                            dy1 = max(0, min(Hdf, dy1))
+                            if dx1 > dx0 and dy1 > dy0:
+                                depth_local = np.asarray(depth_arr[dy0:dy1, dx0:dx1])
+                    except Exception:
+                        depth_local = None
+
+                branch_local_cache[int(bi)] = {
+                    "bbox_local": [bx, by, bw, bh],
+                    "mask_local": mask_local,
+                    "rgb_local": rgb_local,
+                    "depth_local": depth_local,
+                }
+
+            combined_endpoint_mode = "combined"
+            if combined_endpoint_mode == "combined":
+                seg_work_items = []
+                for bi, idxs in branch_seg_indices.items():
+                    cache = branch_local_cache.get(int(bi), None)
+                    if cache is None:
+                        continue
+                    bx, by, bw, bh = [int(v) for v in cache.get("bbox_local", [0, 0, 0, 0])]
+                    mask_use = np.asarray(cache.get("mask_local"), np.uint8)
+                    rgb_use = np.asarray(cache.get("rgb_local"))
+                    depth_use = cache.get("depth_local", None)
+
+                    segs_branch = [np.asarray(segs[i], float) for i in idxs]
+                    if not segs_branch:
+                        continue
+                    S_branch = np.vstack(segs_branch)
+                    S_local = S_branch.copy()
+                    S_local[:, 0] -= float(bx)
+                    S_local[:, 1] -= float(by)
+
+                    center_res = compute_midline_method_variants_and_normals(
+                        mid_xy=S_local,
+                        crack_mask_u8=mask_use,
+                        domain_u8=None,
+                        image_rgb=rgb_use,
+                        depth_full=None,
+                        depth_crop=depth_use,
+                        depth_bbox_xywh=None,
+                        full_image_hw=(int(mask_use.shape[0]), int(mask_use.shape[1])),
+                        max_radius=50,
+                        snap_kwargs={
+                            "n_iters": int(auto_centering_iters),
+                            "step_px": float(auto_centering_step_px),
+                            "keep_endpoints": True,
+                        },
+                        endpoint_mode=combined_endpoint_mode,
+                    )
+                    _acc_nested_timing(
+                        combined_timing_blob,
+                        _legacy_timing_from_methods(
+                            center_res.get("methods", {}) if isinstance(center_res.get("methods", {}), dict) else {}
+                        ),
+                    )
+                    methods_local = center_res.get("methods", {}) if isinstance(center_res.get("methods", {}), dict) else {}
+                    for _mk, _mv in methods_local.items():
+                        if not isinstance(_mv, dict):
+                            continue
+                        _mseg = _mv.get("midline", None)
+                        if _mseg is not None:
+                            try:
+                                _mseg = np.asarray(_mseg, float)
+                                if _mseg.ndim == 2 and _mseg.shape[1] == 2 and len(_mseg) >= 2:
+                                    _mseg[:, 0] += float(bx)
+                                    _mseg[:, 1] += float(by)
+                                    _mv["midline"] = _mseg
+                            except Exception:
+                                pass
+                        _mn = _mv.get("normals", {})
+                        if isinstance(_mn, dict):
+                            for ex_key, ey_key in (("edge1_x", "edge1_y"), ("edge2_x", "edge2_y")):
+                                try:
+                                    ex = np.asarray(_mn.get(ex_key, []), float)
+                                    ey = np.asarray(_mn.get(ey_key, []), float)
+                                    if ex.size:
+                                        _mn[ex_key] = (ex + float(bx)).tolist()
+                                    if ey.size:
+                                        _mn[ey_key] = (ey + float(by)).tolist()
+                                except Exception:
+                                    continue
+
+                    for j, seg_i in enumerate(idxs):
+                        if seg_i < len(segs) and seg_i < len(w_list):
+                            seg_work_items.append((
+                                int(seg_i),
+                                np.asarray(segs[seg_i], float),
+                                w_list[seg_i],
+                                methods_local,
+                                mask_use,
+                                bx,
+                                by,
+                                f"branch_{int(bi)}",
+                                np.asarray(S_branch, float),
+                                bool(j == 0),
+                            ))
+            else:
+                seg_work_items = []
+                for seg_i, (S, w_manual) in enumerate(zip(segs, w_list)):
+                    S = np.asarray(S, float)
+                    bi = int(seg_meta[seg_i].get("branch_id", -1)) if seg_i < len(seg_meta) else -1
+                    cache = branch_local_cache.get(int(bi), None)
+                    if cache is not None:
+                        bx, by, bw, bh = [int(v) for v in cache.get("bbox_local", [0, 0, 0, 0])]
+                        mask_use = np.asarray(cache.get("mask_local"), np.uint8)
+                        rgb_use = np.asarray(cache.get("rgb_local"))
+                        depth_use = cache.get("depth_local", None)
+                        S_local = np.asarray(S, float).copy()
+                        S_local[:, 0] -= float(bx)
+                        S_local[:, 1] -= float(by)
+                    else:
+                        bx, by, bw, bh = 0, 0, int(Wm), int(Hm)
+                        mask_use = branch_allowed_masks.get(
+                            bi,
+                            (crack_mask_clipped > 0).astype(np.uint8),
+                        )
+                        rgb_use = np.asarray(original_image)
+                        depth_use = depth_full
+                        S_local = np.asarray(S, float)
+                    center_res = compute_midline_method_variants_and_normals(
+                        mid_xy=S_local,
+                        crack_mask_u8=mask_use,
+                        domain_u8=None,
+                        image_rgb=rgb_use,
+                        depth_full=None,
+                        depth_crop=depth_use,
+                        depth_bbox_xywh=None,
+                        full_image_hw=(int(mask_use.shape[0]), int(mask_use.shape[1])),
+                        max_radius=50,
+                        snap_kwargs={
+                            "n_iters": int(auto_centering_iters),
+                            "step_px": float(auto_centering_step_px),
+                            "keep_endpoints": True,
+                        },
+                        endpoint_mode=combined_endpoint_mode,
+                    )
+                    _acc_nested_timing(
+                        combined_timing_blob,
+                        _legacy_timing_from_methods(
+                            center_res.get("methods", {}) if isinstance(center_res.get("methods", {}), dict) else {}
+                        ),
+                    )
+                    methods_local = center_res.get("methods", {}) if isinstance(center_res.get("methods", {}), dict) else {}
+                    if cache is not None:
+                        for _mk, _mv in methods_local.items():
+                            if not isinstance(_mv, dict):
+                                continue
+                            _mseg = _mv.get("midline", None)
+                            if _mseg is not None:
+                                try:
+                                    _mseg = np.asarray(_mseg, float)
+                                    if _mseg.ndim == 2 and _mseg.shape[1] == 2 and len(_mseg) >= 2:
+                                        _mseg[:, 0] += float(bx)
+                                        _mseg[:, 1] += float(by)
+                                        _mv["midline"] = _mseg
+                                except Exception:
+                                    pass
+                            _mn = _mv.get("normals", {})
+                            if isinstance(_mn, dict):
+                                for ex_key, ey_key in (("edge1_x", "edge1_y"), ("edge2_x", "edge2_y")):
+                                    try:
+                                        ex = np.asarray(_mn.get(ex_key, []), float)
+                                        ey = np.asarray(_mn.get(ey_key, []), float)
+                                        if ex.size:
+                                            _mn[ex_key] = (ex + float(bx)).tolist()
+                                        if ey.size:
+                                            _mn[ey_key] = (ey + float(by)).tolist()
+                                    except Exception:
+                                        continue
+                    seg_work_items.append((
+                        int(seg_i),
+                        S,
+                        w_manual,
+                        methods_local,
+                        mask_use,
+                        bx,
+                        by,
+                        f"seg_{int(seg_i)}",
+                        np.asarray(S, float),
+                        True,
+                    ))
+
+            for seg_i, S, w_manual, methods_local, mask_use, bx, by, blob_id, blob_manual_seg, emit_cost_debug in seg_work_items:
                 for mk in METHOD_SPECS.keys():
                     mv = methods_local.get(mk, {}) if isinstance(methods_local.get(mk, {}), dict) else {}
                     mseg = mv.get("midline", None)
@@ -2800,12 +3038,31 @@ def export_gt_supervision_for_image(
                             mm["timing_sum"][tk] = float(mm["timing_sum"].get(tk, 0.0)) + float(tv or 0.0)
                         except Exception:
                             continue
-                    if mk in method_cost_debug_blobs and mdebug.get("dt_norm") is not None and _method_has_required_priors(mk, mv):
+                    if (
+                        emit_cost_debug
+                        and mk in method_cost_debug_blobs
+                        and mdebug.get("dt_norm") is not None
+                        and _method_has_required_priors(mk, mv)
+                    ):
                         sel_key, sel_cost, _, _ = _extract_selected_costmap(mv)
                         terr_plot_local = mask_use
                         if sel_cost is not None:
                             terr_plot_local = _viz_territory_from_costmap(sel_cost, mask_use, pct=60.0)
-                        method_cost_debug_blobs[mk].append((int(seg_i), mdebug, mask_use, str(sel_key), terr_plot_local))
+                        terr_plot_full = np.zeros_like(crack_mask_clipped, dtype=np.uint8)
+                        try:
+                            htl, wtl = np.asarray(terr_plot_local).shape[:2]
+                            terr_plot_full[by:by + htl, bx:bx + wtl] = (np.asarray(terr_plot_local) > 0).astype(np.uint8)
+                        except Exception:
+                            terr_plot_full = np.zeros_like(crack_mask_clipped, dtype=np.uint8)
+                        method_cost_debug_blobs[mk].append((
+                            str(blob_id),
+                            mdebug,
+                            mask_use,
+                            str(sel_key),
+                            terr_plot_full,
+                            np.asarray(mseg, float) if (mseg is not None and np.asarray(mseg).ndim == 2 and len(np.asarray(mseg)) >= 2) else None,
+                            np.asarray(blob_manual_seg, float),
+                        ))
 
                 m1_local = methods_local.get("dt", {}) if isinstance(methods_local.get("dt", {}), dict) else {}
                 m4_local = methods_local.get("dt_ridge_valley_depth", {}) if isinstance(methods_local.get("dt_ridge_valley_depth", {}), dict) else {}
@@ -3086,12 +3343,12 @@ def export_gt_supervision_for_image(
                 )
 
                 for mk, blobs in method_cost_debug_blobs.items():
-                    for seg_i, dbg_blob, dbg_mask_use, _sel_key, _terr_plot in blobs:
+                    for blob_id, dbg_blob, dbg_mask_use, _sel_key, _terr_plot, _mseg_plot, _manual_seg_plot in blobs:
                         style = method_style.get(mk, {})
                         mslug = str(style.get("slug", mk))
                         out_cost = os.path.join(
                             combined_dbg_dir,
-                            f"seg{int(seg_i)}_{mslug}_cost_panel.png",
+                            f"{str(blob_id)}_{mslug}_cost_panel.png",
                         )
                         depth_lbl = "global" if mk in ("dt_depth", "dt_ridge_valley_depth") else None
                         plot_depth_cost_diagnostic(
@@ -3103,10 +3360,29 @@ def export_gt_supervision_for_image(
                             depth_score=np.asarray(dbg_blob.get("score_for_refine"), np.float32) if dbg_blob.get("score_for_refine") is not None else None,
                             costmaps=dbg_blob.get("costmaps"),
                             bbox_xywh=combined_entry.get("mask_bbox"),
-                            title=f"combined {tag_name} seg{int(seg_i)}: cost cues",
+                            title=f"combined {tag_name} {str(blob_id)}: cost cues",
                             method_label=style.get("label", mk),
                             depth_label=depth_lbl,
                         )
+                        # Per-segment manual-vs-method overlay (combined branch debug)
+                        if _mseg_plot is not None and _manual_seg_plot is not None:
+                            out_seg_overlay = os.path.join(
+                                combined_dbg_dir,
+                                f"{str(blob_id)}_manual_vs_{mslug}.png",
+                            )
+                            plot_midline_centering_debug(
+                                out_path=out_seg_overlay,
+                                crack_mask_u8=crack_mask_clipped,
+                                manual_segs=[np.asarray(_manual_seg_plot, float)],
+                                centered_segs=[np.asarray(_mseg_plot, float)],
+                                territory_u8=np.asarray(_terr_plot, np.uint8),
+                                bbox_xywh=combined_entry.get("mask_bbox"),
+                                title=f"combined {tag_name} {str(blob_id)}: manual vs {style.get('label', mk)}",
+                                compare_label=style.get("compare_label", mk),
+                                compare_color=style.get("color", "cyan"),
+                                left_panel_title=f"{str(blob_id)} manual vs {style.get('label', mk)}",
+                                right_panel_title=right_title_by_cost_key.get(str(_sel_key), "Preferred region"),
+                            )
 
                 if combined_entry.get("depth_midline_segments"):
                     out_overlay = os.path.join(
@@ -3140,7 +3416,7 @@ def export_gt_supervision_for_image(
                         territory_method = np.zeros_like(crack_mask_clipped, dtype=np.uint8)
                         if dbg_blobs_mk:
                             sel_key_mk = str(dbg_blobs_mk[0][3])
-                            for _seg_i, _dbg, _mask_use, _sk, terr_local in dbg_blobs_mk:
+                            for _seg_i, _dbg, _mask_use, _sk, terr_local, _mseg_plot, _manual_seg_plot in dbg_blobs_mk:
                                 try:
                                     territory_method = territory_method | (np.asarray(terr_local) > 0).astype(np.uint8)
                                 except Exception:
