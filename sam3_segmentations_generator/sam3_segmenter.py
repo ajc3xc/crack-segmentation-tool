@@ -67,6 +67,11 @@ processor = Sam3Processor.from_pretrained(MODEL_REPO)
 print("Model loaded.\n")
 
 
+def cuda_sync():
+    if device == "cuda":
+        torch.cuda.synchronize()
+
+
 # ---------------- Mask utils ----------------
 def union_instance_masks(results):
     masks = results.get("masks", None)
@@ -114,8 +119,6 @@ def segment_image(pil_img):
 
 # ---------------- Batch loop ----------------
 def main():
-    t0_wall = time.perf_counter()
-
     in_root = Path(INPUT_DIR)
     out_root = Path(OUTPUT_DIR)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -126,6 +129,18 @@ def main():
         return
 
     print(f"Found {len(paths)} images\n")
+
+    # ---------------- Warm-up (untimed) ----------------
+    for p in paths:
+        try:
+            img = Image.open(p).convert("RGB")
+        except Exception:
+            continue
+        _ = segment_image(img)
+        cuda_sync()
+        break
+
+    t0_wall = time.perf_counter()
 
     timing_rows = []
     num_processed = 0
@@ -153,8 +168,10 @@ def main():
             print(f"[{i}] FAIL open {p.name}: {e}")
             continue
 
+        cuda_sync()
         t0 = time.perf_counter()
         mask = segment_image(img)
+        cuda_sync()
         infer_s = time.perf_counter() - t0
 
         total_inference_seconds += infer_s

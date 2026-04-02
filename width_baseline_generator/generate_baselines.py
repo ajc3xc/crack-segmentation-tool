@@ -393,7 +393,7 @@ def _local_tangent_normal(y: int, x: int, skel: np.ndarray, window: int = 5) -> 
     normal /= (np.linalg.norm(normal) + 1e-12)
     return tangent, normal
 
-
+#unused
 def width_profile_normal_2023(
     bw: np.ndarray,
     skel: np.ndarray,
@@ -1221,8 +1221,8 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
     # Stage C: width baselines (adaptive, hardcoded)
     # --------------------------------------------------
     PATCH_SCALE = 1.5
-    MIN_RADIUS = 5
-    MAX_RADIUS = 100
+    MIN_RADIUS = 4
+    MAX_RADIUS = 128
     PROJ_THRESH = 0.9
     MIN_POINTS = int(cfg["pca_min_points"])
 
@@ -1287,8 +1287,11 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
     #     bw,
     #     skel=skel_graph,
     #     dist_map=dist_map,
-    #     patch_scale=float(cfg["pca_patch_scale"]),
-    #     min_points=int(cfg["pca_min_points"]),
+    #     patch_scale=PATCH_SCALE,
+    #     min_radius=MIN_RADIUS,
+    #     max_radius=MAX_RADIUS,
+    #     min_points=MIN_POINTS,
+    #     proj_thresh=PROJ_THRESH,
     # )
     # timings["eob_width_graph_strict_s"] = float(time.perf_counter() - t0)
     # _add_baseline("eob_width_graph_strict", w_eob_graph, skel_graph)
@@ -2358,10 +2361,7 @@ def main():
 
     MAKE_PLOTS = True
 
-    PROFILE_WINDOW      = 5
-    PCA_PATCH_SCALE     = 1.5
     PCA_MIN_POINTS      = 4
-    ADAPTIVE_BASE_PATCH = 8
     GPU_LOCK_PATH = "/tmp/pandarallel_gpu_lock/lock.txt"
     
     import os
@@ -2409,7 +2409,7 @@ def main():
     paths = _collect_image_paths(IN_DIR)
 
     paths = sorted(paths, key=_natural_sort_key)
-    paths = paths[41:42]
+    #paths = paths[41:42]
     #print(paths)
     #return
 
@@ -2428,10 +2428,7 @@ def main():
         "out_dir": OUT_DIR,
         "methods": METHODS,
         "make_plots": MAKE_PLOTS,
-        "profile_window": PROFILE_WINDOW,
-        "pca_patch_scale": PCA_PATCH_SCALE,
         "pca_min_points": PCA_MIN_POINTS,
-        "adaptive_base_patch": ADAPTIVE_BASE_PATCH,
         "gpu_lock_path": GPU_LOCK_PATH,
     }
 
