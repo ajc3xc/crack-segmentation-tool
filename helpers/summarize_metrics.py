@@ -2923,6 +2923,177 @@ def _plot_dataset_full_timing_overview(
     return outputs
 
 
+def _aggregate_invalid_matches(
+    image_dirs: List[str],
+    out_dir: str,
+    *,
+    verbose: bool,
+) -> Dict[str, str]:
+    outputs: Dict[str, str] = {}
+    rows: List[pd.DataFrame] = []
+
+    def _parse_context_from_rel(rel_dir: str) -> Tuple[str, str, str]:
+        parts = [p for p in rel_dir.replace("\\", "/").split("/") if p and p != "."]
+        midline_type = "unknown"
+        crack_type = "unknown"
+        method = "unknown"
+        if len(parts) >= 1 and parts[0] in ("manual", "auto"):
+            midline_type = parts[0]
+            crack_type = parts[1] if len(parts) >= 2 else "unknown"
+            method = str(midline_type)
+        elif len(parts) >= 2 and parts[1] in ("manual", "auto"):
+            baseline = str(parts[0])
+            midline_type = str(parts[1])
+            crack_type = parts[2] if len(parts) >= 3 else "unknown"
+            method = f"{baseline}:{midline_type}"
+        elif len(parts) >= 1:
+            midline_type = str(parts[0])
+            crack_type = parts[1] if len(parts) >= 2 else "unknown"
+            method = str(midline_type)
+        return midline_type, crack_type, method
+
+    for img_dir in image_dirs:
+        image_name = os.path.basename(img_dir)
+        found = glob.glob(os.path.join(img_dir, "**", "invalid_matches.csv"), recursive=True)
+        for csv_path in found:
+            df = _safe_read_csv(csv_path)
+            if df is None or df.empty:
+                continue
+            rel_dir = os.path.relpath(os.path.dirname(csv_path), img_dir)
+            midline_type, crack_type, method = _parse_context_from_rel(rel_dir)
+
+            d = df.copy()
+            if "image" not in d.columns:
+                d["image"] = image_name
+            d["image"] = d["image"].astype(str)
+            d["method"] = method
+            d["midline_type"] = midline_type
+            d["crack_type"] = crack_type
+            d["source_csv"] = csv_path
+
+            for c in ("cid", "level", "entity_id", "reason", "branch_id", "extra_info"):
+                if c not in d.columns:
+                    d[c] = ""
+            for c in ("length", "n_segments", "overlap"):
+                if c not in d.columns:
+                    d[c] = np.nan
+
+            rows.append(
+                d[
+                    [
+                        "image",
+                        "method",
+                        "midline_type",
+                        "crack_type",
+                        "cid",
+                        "level",
+                        "entity_id",
+                        "reason",
+                        "length",
+                        "n_segments",
+                        "overlap",
+                        "branch_id",
+                        "extra_info",
+                        "source_csv",
+                    ]
+                ].copy()
+            )
+
+    if not rows:
+        _log(verbose, "[summarize] no invalid/exclusion rows found")
+        return outputs
+
+    all_df = pd.concat(rows, ignore_index=True)
+    all_df["reason"] = all_df["reason"].astype(str)
+    all_df["method"] = all_df["method"].astype(str)
+    all_df["level"] = all_df["level"].astype(str)
+
+    out_csv = os.path.join(out_dir, "dataset_invalid_matches_all.csv")
+    all_df.to_csv(out_csv, index=False)
+    outputs["dataset_invalid_matches_all_csv"] = out_csv
+
+    # Total failure reasons (counts).
+    reason_counts = (
+        all_df.groupby("reason", dropna=False).size().rename("count").reset_index()
+        .sort_values("count", ascending=False)
+    )
+    if not reason_counts.empty:
+        out_png = os.path.join(out_dir, "dataset_invalid_reason_counts_total.png")
+        _save_bar(
+            labels=reason_counts["reason"].astype(str).tolist(),
+            values=reason_counts["count"].astype(float).tolist(),
+            out_png=out_png,
+            title="Invalid / Exclusion Reasons (Total Count)",
+            ylabel="count",
+            rotate=40,
+        )
+        outputs["dataset_invalid_reason_counts_total_png"] = out_png
+
+    # Total failure reasons by clipped length.
+    tmp_len = all_df.copy()
+    tmp_len["length"] = pd.to_numeric(tmp_len["length"], errors="coerce")
+    reason_len = (
+        tmp_len[np.isfinite(tmp_len["length"]) & (tmp_len["length"] > 0)]
+        .groupby("reason", dropna=False)["length"]
+        .sum()
+        .reset_index()
+        .sort_values("length", ascending=False)
+    )
+    if not reason_len.empty:
+        out_png = os.path.join(out_dir, "dataset_invalid_reason_length_total.png")
+        _save_bar(
+            labels=reason_len["reason"].astype(str).tolist(),
+            values=reason_len["length"].astype(float).tolist(),
+            out_png=out_png,
+            title="Invalid / Exclusion Reasons (Total Length)",
+            ylabel="length (px)",
+            rotate=40,
+        )
+        outputs["dataset_invalid_reason_length_total_png"] = out_png
+
+    # Stacked bar: reasons by method.
+    pivot = (
+        all_df.groupby(["method", "reason"], dropna=False)
+        .size()
+        .rename("count")
+        .reset_index()
+        .pivot(index="method", columns="reason", values="count")
+        .fillna(0.0)
+    )
+    if not pivot.empty:
+        pivot = pivot.loc[pivot.sum(axis=1).sort_values(ascending=False).index]
+        methods = pivot.index.astype(str).tolist()
+        reasons = pivot.columns.astype(str).tolist()
+        x = np.arange(len(methods), dtype=float)
+        fig_w = max(8.0, 0.65 * len(methods))
+        fig, ax = plt.subplots(figsize=(fig_w, 4.8), dpi=180)
+        bottom = np.zeros(len(methods), dtype=float)
+        cmap = plt.get_cmap("tab20")
+        handles = []
+        for j, reason in enumerate(reasons):
+            vals = pivot[reason].to_numpy(float)
+            color = cmap(j % 20)
+            bars = ax.bar(x, vals, bottom=bottom, color=color, alpha=0.9, label=reason)
+            bottom += vals
+            if len(bars) > 0:
+                handles.append(Patch(facecolor=color, edgecolor="none", label=str(reason)))
+        ax.set_xticks(x)
+        ax.set_xticklabels(methods, rotation=35, ha="right", fontsize=8)
+        ax.set_ylabel("count")
+        ax.set_title("Invalid / Exclusion Reasons by Method (Stacked)")
+        ax.grid(axis="y", alpha=0.25)
+        if handles:
+            ax.legend(handles=handles, loc="best", fontsize=8, framealpha=0.9)
+        plt.tight_layout()
+        out_png = os.path.join(out_dir, "dataset_invalid_reason_counts_stacked_by_method.png")
+        fig.savefig(out_png, bbox_inches="tight")
+        plt.close(fig)
+        outputs["dataset_invalid_reason_counts_stacked_by_method_png"] = out_png
+
+    _log(verbose, f"[summarize] invalid/exclusion rows aggregated: {len(all_df)}")
+    return outputs
+
+
 def summarize_dataset_metrics(
     save_folder: str,
     *,
@@ -2974,6 +3145,7 @@ def summarize_dataset_metrics(
     outputs.update(_aggregate_mask_metrics(image_dirs, out_dir, verbose=verbose))
     outputs.update(_aggregate_width_metrics(image_dirs, out_dir, verbose=verbose))
     outputs.update(_aggregate_midline_metrics(image_dirs, out_dir, verbose=verbose))
+    outputs.update(_aggregate_invalid_matches(image_dirs, out_dir, verbose=verbose))
     outputs.update(_aggregate_timing_metrics(image_dirs, out_dir, verbose=verbose))
     outputs.update(_aggregate_width_distribution(image_dirs, out_dir, verbose=verbose))
     outputs.update(_aggregate_edge_rs3_selection(image_dirs, out_dir, verbose=verbose))

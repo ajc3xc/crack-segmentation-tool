@@ -104,6 +104,153 @@ def _len_seg(xy):
     if xy is None or len(xy) < 2: return 0.0
     return float(np.sqrt(((xy[1:]-xy[:-1])**2).sum(1)).sum())
 
+
+def _split_valid_runs(mask):
+    """
+    Split a 1D boolean mask into contiguous True runs.
+    Returns list of (start, end) with end-exclusive indexing.
+    """
+    m = np.asarray(mask, bool).reshape(-1)
+    if m.size == 0:
+        return []
+    runs = []
+    in_run = False
+    i0 = 0
+    for i, v in enumerate(m):
+        if v and not in_run:
+            in_run = True
+            i0 = i
+        elif (not v) and in_run:
+            runs.append((int(i0), int(i)))
+            in_run = False
+    if in_run:
+        runs.append((int(i0), int(m.size)))
+    return runs
+
+
+def length_weighted_err_stats(d_vals, ds_w):
+    """
+    Primitive length-weighted error stats.
+    Keeps exact behavior/math used in compare_widths_for_aligned_cracks.
+    """
+    d_vals = np.asarray(d_vals, float)
+    ds_w = np.asarray(ds_w, float)
+    n = min(len(d_vals), len(ds_w))
+    if n <= 0:
+        return {"bias": np.nan, "mae": np.nan, "rmse": np.nan, "p95_abs": np.nan, "median_abs": np.nan}
+
+    d_vals = d_vals[:n]
+    ds_w = ds_w[:n]
+    ok = np.isfinite(d_vals) & np.isfinite(ds_w) & (ds_w > 0)
+    if not np.any(ok):
+        return {"bias": np.nan, "mae": np.nan, "rmse": np.nan, "p95_abs": np.nan, "median_abs": np.nan}
+
+    d = d_vals[ok]
+    w = ds_w[ok]
+    W = float(np.sum(w) + 1e-12)
+
+    bias = float(np.sum(d * w) / W)
+    mae = float(np.sum(np.abs(d) * w) / W)
+    mse = float(np.sum((d ** 2) * w) / W)
+    rmse = float(np.sqrt(max(mse, 0.0)))
+
+    absd = np.abs(d[np.isfinite(d)])
+    p95 = float(np.percentile(absd, 95)) if absd.size else np.nan
+    med = float(np.median(absd)) if absd.size else np.nan
+
+    return {"bias": bias, "mae": mae, "rmse": rmse, "p95_abs": p95, "median_abs": med}
+
+
+def compute_length_weighted_metrics(d_vals, s_vals, *, debug=False):
+    """
+    Robust wrapper:
+    - builds ds and d_mid from (d_vals, s_vals)
+    - splits contiguous valid runs
+    - computes per-segment and crack-level length-weighted stats
+    - returns coverage and segment diagnostics
+    """
+    d_vals = np.asarray(d_vals, float).reshape(-1)
+    s_vals = np.asarray(s_vals, float).reshape(-1)
+    n = min(len(d_vals), len(s_vals))
+    if n < 2:
+        return {"bias": np.nan, "mae": np.nan, "rmse": np.nan, "coverage": 0.0, "segments": []}
+
+    d_vals = d_vals[:n]
+    s_vals = s_vals[:n]
+    ds = np.diff(s_vals)
+    d_mid = d_vals[:-1]
+
+    if ds.size == 0 or d_mid.size == 0:
+        return {"bias": np.nan, "mae": np.nan, "rmse": np.nan, "coverage": 0.0, "segments": []}
+
+    valid = np.isfinite(d_mid) & np.isfinite(ds) & (ds > 0)
+    runs = _split_valid_runs(valid)
+
+    L_total = float(np.sum(ds))
+    if (not np.isfinite(L_total)) or L_total <= 0:
+        return {"bias": np.nan, "mae": np.nan, "rmse": np.nan, "coverage": 0.0, "segments": []}
+
+    segments = []
+    for i0, i1 in runs:
+        if i1 - i0 <= 0:
+            continue
+        d_r = np.asarray(d_mid[i0:i1], float)
+        ds_r = np.asarray(ds[i0:i1], float)
+        stats_r = length_weighted_err_stats(d_r, ds_r)
+        L_r = float(np.sum(ds_r[np.isfinite(ds_r) & (ds_r > 0)]))
+        if (not np.isfinite(L_r)) or L_r <= 0:
+            continue
+        segments.append(
+            {
+                "L": L_r,
+                "bias": stats_r.get("bias", np.nan),
+                "mae": stats_r.get("mae", np.nan),
+                "rmse": stats_r.get("rmse", np.nan),
+                "p95_abs": stats_r.get("p95_abs", np.nan),
+                "median_abs": stats_r.get("median_abs", np.nan),
+                "i0": int(i0),
+                "i1": int(i1),
+            }
+        )
+
+    if not segments:
+        out = {"bias": np.nan, "mae": np.nan, "rmse": np.nan, "coverage": 0.0, "segments": []}
+        if debug:
+            print("[METRICS] N_total=0 N_valid=0 num_segments=0 coverage=0.0000")
+        return out
+
+    L_total_valid = float(np.sum([seg["L"] for seg in segments]))
+    sum_bias = 0.0
+    sum_mae = 0.0
+    sum_mse = 0.0
+    for seg in segments:
+        L = float(seg["L"])
+        b = float(seg["bias"]) if np.isfinite(seg["bias"]) else np.nan
+        a = float(seg["mae"]) if np.isfinite(seg["mae"]) else np.nan
+        r = float(seg["rmse"]) if np.isfinite(seg["rmse"]) else np.nan
+        if np.isfinite(b):
+            sum_bias += b * L
+        if np.isfinite(a):
+            sum_mae += a * L
+        if np.isfinite(r):
+            sum_mse += (r ** 2) * L
+
+    denom = float(L_total_valid + 1e-12)
+    out = {
+        "bias": float(sum_bias / denom),
+        "mae": float(sum_mae / denom),
+        "rmse": float(np.sqrt(max(sum_mse / denom, 0.0))),
+        "coverage": float(L_total_valid / max(L_total, 1e-12)),
+        "segments": segments,
+    }
+    if debug:
+        n_valid = int(np.sum(valid))
+        print(
+            f"[METRICS] N_total={int(len(d_mid))} N_valid={n_valid} "
+            f"num_segments={len(segments)} coverage={out['coverage']:.4f}"
+        )
+    return out
+
 ###############################################################################################
 # Midline Metrics
 ###############################################################################################
@@ -1884,6 +2031,8 @@ def project_widths_to_support(
     *,
     max_nn_dist_px=6.0,
     use_support_mask=True,
+    domain_mask=None,
+    bbox=None,
     debug=False,
 ):
     """
@@ -1903,6 +2052,8 @@ def project_widths_to_support(
         mid_xy: Nx2 float array of GT midline points (x, y)
         max_nn_dist_px: maximum allowed projection distance
         use_support_mask: if False, uses (wmap > 0) as support
+        domain_mask: optional HxW bool ownership mask for projection domain
+        bbox: optional hard clip bbox (x, y, w, h)
         debug: prints coverage diagnostics
 
     Returns:
@@ -1920,7 +2071,30 @@ def project_widths_to_support(
     if xy.ndim != 2 or xy.shape[1] != 2:
         return np.array([], dtype=np.float32)
 
+    bbox_clip = None
+    if bbox is not None:
+        try:
+            x0, y0, bw, bh = [int(v) for v in bbox]
+            x1 = x0 + bw
+            y1 = y0 + bh
+            x0 = int(np.clip(x0, 0, W))
+            y0 = int(np.clip(y0, 0, H))
+            x1 = int(np.clip(x1, 0, W))
+            y1 = int(np.clip(y1, 0, H))
+            if x1 > x0 and y1 > y0:
+                bbox_clip = (x0, y0, x1, y1)
+        except Exception:
+            bbox_clip = None
+
     finite = np.isfinite(xy).all(axis=1)
+    if bbox_clip is not None:
+        x0, y0, x1, y1 = bbox_clip
+        inside = (
+            (xy[:, 0] >= x0) & (xy[:, 0] < x1) &
+            (xy[:, 1] >= y0) & (xy[:, 1] < y1)
+        )
+        finite &= inside
+
     out = np.full((len(xy),), np.nan, dtype=np.float32)
     if not np.any(finite):
         return out
@@ -1932,6 +2106,19 @@ def project_widths_to_support(
         supp_m = np.asarray(supp).astype(bool)
     else:
         supp_m = np.isfinite(wmap) & (wmap > 0)
+
+    if domain_mask is not None:
+        dm = np.asarray(domain_mask).astype(bool)
+        if dm.shape == supp_m.shape:
+            supp_m &= dm
+        elif debug:
+            print(f"[B1 PROJ] domain_mask shape mismatch: supp={supp_m.shape} domain={dm.shape}")
+
+    if bbox_clip is not None:
+        x0, y0, x1, y1 = bbox_clip
+        bbox_mask = np.zeros_like(supp_m, dtype=bool)
+        bbox_mask[y0:y1, x0:x1] = True
+        supp_m &= bbox_mask
 
     ys, xs = np.nonzero(supp_m)
     if len(xs) == 0:
@@ -2099,6 +2286,173 @@ def compute_projected_width_diffs(
 
         return np.asarray(vals, float)
 
+    def _normalize_meta_list(meta_raw, n):
+        meta_raw = meta_raw if isinstance(meta_raw, list) else []
+        out = []
+        for i in range(int(n)):
+            m = meta_raw[i] if i < len(meta_raw) and isinstance(meta_raw[i], dict) else {}
+            out.append(dict(m))
+        return out
+
+    def _safe_bbox_xywh(bb, H, W):
+        if not (isinstance(bb, (list, tuple)) and len(bb) == 4):
+            return None
+        try:
+            x, y, w, h = [int(v) for v in bb]
+        except Exception:
+            return None
+        if w <= 0 or h <= 0:
+            return None
+        x0 = int(np.clip(x, 0, W))
+        y0 = int(np.clip(y, 0, H))
+        x1 = int(np.clip(x + w, 0, W))
+        y1 = int(np.clip(y + h, 0, H))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return (x0, y0, x1 - x0, y1 - y0)
+
+    def _tight_bbox_from_seg(seg_xy, H, W, pad=4):
+        seg_xy = _finite_xy(seg_xy)
+        if len(seg_xy) < 2:
+            return None
+        x0 = int(np.floor(np.min(seg_xy[:, 0])) - int(pad))
+        y0 = int(np.floor(np.min(seg_xy[:, 1])) - int(pad))
+        x1 = int(np.ceil(np.max(seg_xy[:, 0])) + int(pad))
+        y1 = int(np.ceil(np.max(seg_xy[:, 1])) + int(pad))
+        x0 = int(np.clip(x0, 0, W))
+        y0 = int(np.clip(y0, 0, H))
+        x1 = int(np.clip(x1, 0, W))
+        y1 = int(np.clip(y1, 0, H))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return (x0, y0, x1 - x0, y1 - y0)
+
+    def _segment_seed_mask(seg_xy, H, W):
+        seg_xy = _finite_xy(seg_xy)
+        m = np.zeros((H, W), dtype=bool)
+        if len(seg_xy) < 2:
+            return m
+        for i in range(len(seg_xy) - 1):
+            x0, y0 = seg_xy[i]
+            x1, y1 = seg_xy[i + 1]
+            if not (np.isfinite(x0) and np.isfinite(y0) and np.isfinite(x1) and np.isfinite(y1)):
+                continue
+            steps = int(max(abs(x1 - x0), abs(y1 - y0))) + 1
+            if steps < 2:
+                steps = 2
+            xs = np.rint(np.linspace(x0, x1, num=steps)).astype(int)
+            ys = np.rint(np.linspace(y0, y1, num=steps)).astype(int)
+            ok = (xs >= 0) & (xs < W) & (ys >= 0) & (ys < H)
+            if np.any(ok):
+                m[ys[ok], xs[ok]] = True
+        return m
+
+    def _rebuild_crack_mask_full(cr, H, W):
+        if not isinstance(cr, dict):
+            return None
+        pm = cr.get("pred_mask", None)
+        if pm is not None:
+            pm = np.asarray(pm).astype(bool)
+            if pm.shape == (H, W):
+                return pm
+        bb = _safe_bbox_xywh(cr.get("mask_bbox"), H, W)
+        crop = cr.get("mask_crop", None)
+        if bb is None or crop is None:
+            return None
+        x, y, w, h = bb
+        crop = np.asarray(crop)
+        if crop.ndim < 2:
+            return None
+        hh = min(h, crop.shape[0])
+        ww = min(w, crop.shape[1])
+        if hh <= 0 or ww <= 0:
+            return None
+        out = np.zeros((H, W), dtype=bool)
+        out[y:y + hh, x:x + ww] = (crop[:hh, :ww] > 0)
+        return out
+
+    def _build_projection_domain_mask(
+        *,
+        crack_type,
+        cid,
+        cr,
+        gt_seg,
+        seg_meta,
+        gt_mid_parts,
+        gt_mid_meta,
+        supp,
+        wmap,
+        gt_full,
+    ):
+        H, W = np.asarray(wmap).shape[:2]
+        if supp is not None:
+            support_base = np.asarray(supp).astype(bool)
+        else:
+            support_base = np.isfinite(wmap) & (np.asarray(wmap) > 0)
+
+        crack_mask = _rebuild_crack_mask_full(cr, H, W)
+        if crack_mask is not None and crack_mask.shape == support_base.shape and np.any(crack_mask):
+            domain = crack_mask.copy()
+        else:
+            gtb = (np.asarray(gt_full) > 0)
+            if gtb.shape == support_base.shape and np.any(gtb):
+                domain = gtb.copy()
+            else:
+                domain = support_base.copy()
+
+        if str(crack_type).lower() == "atomic":
+            seed = _segment_seed_mask(gt_seg, H, W)
+            if np.any(seed):
+                try:
+                    from scipy.ndimage import label
+                    lbl, _n = label(domain.astype(np.uint8))
+                    ids = np.unique(lbl[(seed) & (lbl > 0)])
+                    if ids.size > 0:
+                        domain = np.isin(lbl, ids)
+                except Exception:
+                    pass
+            return domain.astype(bool)
+
+        # Combined: try to enforce branch ownership. If explicit branch labels are
+        # missing, approximate branch domain from same-branch GT segments.
+        branch_id = None
+        if isinstance(seg_meta, dict):
+            branch_id = _safe_int(seg_meta.get("branch_id"), None)
+        if branch_id is None:
+            return domain.astype(bool)
+
+        branch_seed = np.zeros_like(domain, dtype=bool)
+        for Sx, mx in zip(gt_mid_parts, gt_mid_meta):
+            b = _safe_int((mx or {}).get("branch_id"), None) if isinstance(mx, dict) else None
+            if b is None or int(b) != int(branch_id):
+                continue
+            branch_seed |= _segment_seed_mask(Sx, H, W)
+
+        if np.any(branch_seed):
+            try:
+                from scipy.ndimage import binary_dilation
+                branch_region = binary_dilation(branch_seed, iterations=4)
+            except Exception:
+                branch_region = branch_seed
+            domain &= branch_region.astype(bool)
+
+        return domain.astype(bool)
+
+    def _get_segment_bbox(crack_type, cr, seg_xy, seg_meta, H, W):
+        ctype = str(crack_type).lower()
+        if ctype == "atomic":
+            bb = _safe_bbox_xywh((cr or {}).get("mask_bbox"), H, W)
+            if bb is not None:
+                return bb
+            return _tight_bbox_from_seg(seg_xy, H, W, pad=4)
+
+        if isinstance(seg_meta, dict):
+            for k in ("branch_bbox", "bbox", "mask_bbox", "pred_mask_bbox"):
+                bb = _safe_bbox_xywh(seg_meta.get(k), H, W)
+                if bb is not None:
+                    return bb
+        return _tight_bbox_from_seg(seg_xy, H, W, pad=4)
+
     # ============================================================
     # Main evaluation
     # ============================================================
@@ -2125,23 +2479,25 @@ def compute_projected_width_diffs(
                     dbg_examples["no_midline_segments"].append(str(cid))
                 continue
 
+            seg_meta = _normalize_meta_list(
+                (cr.get("midline_segments_meta") or cr.get("segments_meta") or []),
+                len(segs),
+            )
+
             gt_mid_parts = []
-            for s in segs:
+            gt_mid_meta = []
+            for s, mm in zip(segs, seg_meta):
                 if s is None:
                     continue
                 s = _finite_xy(s)
                 if len(s) >= 2:
                     gt_mid_parts.append(s)
+                    gt_mid_meta.append(mm if isinstance(mm, dict) else {})
 
             if not gt_mid_parts:
                 dbg_m["no_valid_midline_pts"] += 1
                 if len(dbg_examples["no_valid_midline_pts"]) < MAX_EX:
                     dbg_examples["no_valid_midline_pts"].append(str(cid))
-                continue
-
-            gt_mid = np.vstack(gt_mid_parts)
-            if len(gt_mid) < 2:
-                dbg_m["no_valid_midline_pts"] += 1
                 continue
 
             # --------------------------------------------------
@@ -2176,70 +2532,93 @@ def compute_projected_width_diffs(
                 continue
 
             # --------------------------------------------------
-            # Baseline widths sampled along GT geometry
+            # Segment-wise baseline projection with domain + bbox enforcement.
             # --------------------------------------------------
-            pred_widths = project_widths_to_support(
-                wmap,
-                supp,
-                gt_mid,
-                max_nn_dist_px=6.0,   # adjust 4–8 depending on density
-                debug=False,
-            )
+            Hm, Wm = np.asarray(wmap).shape[:2]
+            gt_off = 0
+            crack_s_idx = 0
+            crack_rows = 0
 
+            for seg_idx, (gt_seg, seg_meta_i) in enumerate(zip(gt_mid_parts, gt_mid_meta)):
+                gt_seg = np.asarray(gt_seg, float)
+                Lseg = int(len(gt_seg))
+                if Lseg < 2:
+                    gt_off += Lseg
+                    continue
 
-            if pred_widths is None:
-                dbg_m["pred_widths_too_short"] += 1
-                continue
+                gt_widths_seg = np.asarray(gt_widths[gt_off:gt_off + Lseg], float)
+                gt_off += Lseg
+                if gt_widths_seg.size < 2:
+                    continue
 
-            pred_widths = np.asarray(pred_widths, float)
-            if pred_widths.size < 2:
+                domain_mask = _build_projection_domain_mask(
+                    crack_type=crack_type,
+                    cid=cid,
+                    cr=cr,
+                    gt_seg=gt_seg,
+                    seg_meta=seg_meta_i,
+                    gt_mid_parts=gt_mid_parts,
+                    gt_mid_meta=gt_mid_meta,
+                    supp=supp,
+                    wmap=wmap,
+                    gt_full=gt_full,
+                )
+                bbox_seg = _get_segment_bbox(
+                    crack_type=crack_type,
+                    cr=cr,
+                    seg_xy=gt_seg,
+                    seg_meta=seg_meta_i,
+                    H=Hm,
+                    W=Wm,
+                )
+
+                pred_widths_seg = project_widths_to_support(
+                    wmap,
+                    supp,
+                    gt_seg,
+                    max_nn_dist_px=6.0,   # adjust 4–8 depending on density
+                    domain_mask=domain_mask,
+                    bbox=bbox_seg,
+                    debug=False,
+                )
+
+                if pred_widths_seg is None:
+                    continue
+
+                pred_widths_seg = np.asarray(pred_widths_seg, float)
+                n = min(len(gt_widths_seg), len(pred_widths_seg))
+                if n < 2:
+                    continue
+
+                gt_w = np.asarray(gt_widths_seg[:n], float)
+                pr_w = np.asarray(pred_widths_seg[:n], float)
+                diff = pr_w - gt_w
+                seg_xy_eval = np.asarray(gt_seg[:n], float)
+
+                overlay_coords.append(seg_xy_eval)
+                overlay_diffs.append(np.asarray(diff, float))
+
+                for i in range(n):
+                    width_rows.append({
+                        "image": base_name,
+                        "cid": str(cid),
+                        "method": method,
+                        "gt_width_px": float(gt_w[i]),
+                        "pred_width_px": float(pr_w[i]),
+                        "diff_px": float(diff[i]),
+                        "s_idx": int(crack_s_idx),
+                    })
+                    crack_s_idx += 1
+
+                crack_rows += int(n)
+
+            if crack_rows <= 0:
                 dbg_m["pred_widths_too_short"] += 1
                 if len(dbg_examples["pred_widths_too_short"]) < MAX_EX:
                     dbg_examples["pred_widths_too_short"].append(str(cid))
                 continue
 
-            # --------------------------------------------------
-            # Align lengths
-            # --------------------------------------------------
-            n = min(len(gt_widths), len(pred_widths))
-            if n < 2:
-                dbg_m["pred_widths_too_short"] += 1
-                continue
-
-            gt_widths   = gt_widths[:n]
-            pred_widths = pred_widths[:n]
-            diff        = pred_widths - gt_widths
-
-            # Keep method-local geometry + diffs for projected spatial overlay.
-            # IMPORTANT: preserve segment boundaries to avoid visual stitching
-            # lines between disjoint segments.
-            off_seg = 0
-            for sseg in gt_mid_parts:
-                sseg = np.asarray(sseg, float)
-                if sseg.ndim != 2 or len(sseg) < 2:
-                    continue
-                if off_seg >= n:
-                    break
-                mseg = min(len(sseg), n - off_seg)
-                if mseg < 2:
-                    off_seg += len(sseg)
-                    continue
-                overlay_coords.append(np.asarray(sseg[:mseg], float))
-                overlay_diffs.append(np.asarray(diff[off_seg:off_seg + mseg], float))
-                off_seg += len(sseg)
-
-            for i in range(n):
-                width_rows.append({
-                    "image": base_name,
-                    "cid": str(cid),
-                    "method": method,
-                    "gt_width_px": float(gt_widths[i]),
-                    "pred_width_px": float(pred_widths[i]),
-                    "diff_px": float(diff[i]),
-                    "s_idx": int(i),
-                })
-
-            dbg_m["rows_emitted"] += int(n)
+            dbg_m["rows_emitted"] += int(crack_rows)
 
         # --------------------------------------------------
         # Baseline projected-width spatial overlay (B1)
@@ -3494,7 +3873,7 @@ def compare_widths_for_aligned_cracks(
 
     Combined-specific behavior:
       - Stage 0: match combined crack to GT supervision by member overlap
-      - Stage 1: prune segments to shared atomic IDs
+      - Stage 1: prune segments to effective atomic IDs (shared-only for weak matches)
       - Stage 2: optional branch matching
       - Stage 3: symmetric bite-union clipping
       - GT widths computed along FINAL clipped polyline
@@ -3537,6 +3916,20 @@ def compare_widths_for_aligned_cracks(
     cracks = atomic if mode == "atomic" else combined
 
     print(f"\n[WIDTH DEBUG] === RUN MODE: {mode.upper()} ===")
+    output_dir = os.path.join(metrics_dir, midline_type or "unknown", crack_type or mode)
+    os.makedirs(output_dir, exist_ok=True)
+
+    def _collect_member_ids(raw_members):
+        out = []
+        for m in (raw_members or []):
+            if isinstance(m, dict):
+                aid = m.get("atomic_id", m.get("id", None))
+            else:
+                aid = m
+            if aid is None:
+                continue
+            out.append(str(aid))
+        return out
 
     # ---------------- load GT supervision (ATOMIC + COMBINED) ----------------
     gt_sup_combined = {}   # frozenset(members) -> entry
@@ -3551,9 +3944,9 @@ def compare_widths_for_aligned_cracks(
             for e in data.get("cracks", []):
                 kind = str(e.get("kind") or "").lower()
                 if kind == "combined":
-                    members = e.get("members") or []
+                    members = _collect_member_ids(e.get("members") or [])
                     if members:
-                        key = frozenset(map(str, members))
+                        key = frozenset(members)
                         gt_sup_combined[key] = e
                 elif kind == "atomic":
                     aid = e.get("id")
@@ -3747,7 +4140,7 @@ def compare_widths_for_aligned_cracks(
                 bite_obj = b
 
         members = crack.get("members") or []
-        members_set = set(map(str, members))
+        members_set = set(_collect_member_ids(members))
 
         return mid_segs, mid_meta, derived_segs, derived_meta, bite_obj, members_set
 
@@ -3758,6 +4151,96 @@ def compare_widths_for_aligned_cracks(
 
     width_pairs = []
     width_metric_rows = []
+    invalid_logs = []
+    failed_segment_csv = os.path.join(output_dir, "stage5_strict_skips.csv")
+
+    def _log_failed_segment_row(
+        *,
+        image,
+        cid,
+        reason,
+        L_geom,
+        pred_len_total=0,
+        gt_len_total=0,
+        branch_id="atomic",
+        seg_idx="group",
+        num_gt_candidates_same_branch=0,
+    ):
+        # Reuse the existing failed-segment CSV mechanism/schema.
+        _append_csv_row(
+            failed_segment_csv,
+            [
+                str(image),
+                str(cid),
+                str(branch_id),
+                str(seg_idx),
+                int(max(0, L_geom)),
+                str(reason),
+                int(max(0, pred_len_total)),
+                int(max(0, gt_len_total)),
+                int(max(0, num_gt_candidates_same_branch)),
+            ],
+            header=[
+                "image",
+                "cid",
+                "branch_id",
+                "seg_idx",
+                "L_geom",
+                "reason",
+                "pred_len_total",
+                "gt_len_total",
+                "num_gt_candidates_same_branch",
+            ],
+        )
+
+    def _serialize_member_list(v):
+        if v is None:
+            return None
+        try:
+            vals = sorted([str(x) for x in list(v)])
+        except Exception:
+            vals = [str(v)]
+        return json.dumps(vals)
+
+    def log_invalid(
+        *,
+        image,
+        cid,
+        level,
+        reason,
+        length,
+        n_segments,
+        pred_members=None,
+        gt_members=None,
+        overlap=None,
+        entity_id=None,
+        branch_id=None,
+        extra_info=None,
+    ):
+        invalid_logs.append(
+            {
+                "image": str(image),
+                "cid": str(cid),
+                "level": str(level),
+                "entity_id": None if entity_id is None else str(entity_id),
+                "reason": str(reason),
+                "length": (
+                    float(length)
+                    if length is not None and np.isfinite(length)
+                    else np.nan
+                ),
+                "n_segments": int(n_segments) if n_segments is not None else np.nan,
+                "pred_members": _serialize_member_list(pred_members),
+                "gt_members": _serialize_member_list(gt_members),
+                "overlap": (
+                    float(overlap)
+                    if overlap is not None and np.isfinite(overlap)
+                    else np.nan
+                ),
+                "branch_id": None if branch_id is None else str(branch_id),
+                "extra_info": None if extra_info is None else str(extra_info),
+            }
+        )
 
     def _should_midline_metrics(*, run_mode, run_midline_type, geometry_type):
         """
@@ -3893,8 +4376,11 @@ def compare_widths_for_aligned_cracks(
 
     def _align_atomic_gt_geom_to_pred(gt_xy_raw, pred_concat_xy, cid_dbg):
         """
-        Align atomic GT geometry to the authoritative pred geometry domain.
-        Returns (gt_aligned_xy, strategy_label) or (None, reason).
+        Validate/normalize atomic GT geometry for optional diagnostics only.
+        No resampling is allowed here: Stage 1 must not create index-space
+        correspondence. We only allow endpoint-direction flip, then require
+        sample-count compatibility with predicted support.
+        Returns (gt_xy_kept, strategy_label) or (None, reason).
         """
         gt = np.asarray(gt_xy_raw, float)
         pr = np.asarray(pred_concat_xy, float)
@@ -3924,10 +4410,12 @@ def compare_widths_for_aligned_cracks(
             gt = gt[::-1].copy()
             d_fwd, d_rev = d_rev, d_fwd
 
-        # Map GT to pred domain length (safe parametric alignment).
-        gt_aligned = _resample_polyline_to_len(gt, len(pr))
+        # No geometry resampling in atomic Stage 1.
+        # Require native sample-count compatibility for optional gt_match_seg slicing.
+        if len(gt) != len(pr):
+            return None, f"sample_count_mismatch(gt={len(gt)},pred={len(pr)})"
 
-        end_err = float(np.linalg.norm(pr[0] - gt_aligned[0]) + np.linalg.norm(pr[-1] - gt_aligned[-1]))
+        end_err = float(np.linalg.norm(pr[0] - gt[0]) + np.linalg.norm(pr[-1] - gt[-1]))
         len_ratio = float(gt_len / max(pr_len, 1e-9))
         len_mismatch = abs(len_ratio - 1.0)
 
@@ -3939,12 +4427,12 @@ def compare_widths_for_aligned_cracks(
         if (not np.isfinite(len_ratio)) or len_mismatch > len_tol:
             return None, f"length_ratio_out_of_range({len_ratio:.3f})"
 
-        strategy = "parametric_resample_flip" if flipped else "parametric_resample"
+        strategy = "flip_only" if flipped else "native_noop"
         print(
             f"[ATOMIC GT ALIGN] cid={cid_dbg} pred_total={len(pr)} gt_raw={len(gt_xy_raw)} "
             f"strategy={strategy} endpoint_error={end_err:.3f} len_ratio={len_ratio:.3f}"
         )
-        return gt_aligned, strategy
+        return gt, strategy
 
     def _lookup_atomic_gt_entry(cid_val):
         cid_s = str(cid_val)
@@ -4027,9 +4515,6 @@ def compare_widths_for_aligned_cracks(
         b = tuple((np.round(b / snap) * snap).tolist())
         return tuple(sorted([a, b]))
 
-    def _poly_centroid(S):
-        return np.nanmean(np.asarray(S, float), axis=0)
-
     def _poly_length(S):
         try:
             return float(_linestring_length(np.asarray(S, float)))
@@ -4070,8 +4555,6 @@ def compare_widths_for_aligned_cracks(
                 continue
             a, b = ep
 
-            all_pts = np.vstack(segs_k) if segs_k else rep
-            c = _poly_centroid(all_pts)
             L = float(np.sum([_poly_length(S) for S in segs_k]))
 
             aids = set()
@@ -4086,7 +4569,6 @@ def compare_widths_for_aligned_cracks(
                     "segs": segs_k,
                     "meta": meta_k,
                     "endpoints": (np.asarray(a, float), np.asarray(b, float)),
-                    "centroid": np.asarray(c, float),
                     "length": float(L),
                     "atomic_ids": aids,
                 }
@@ -4094,43 +4576,96 @@ def compare_widths_for_aligned_cracks(
 
         return out
 
-    def _branch_geom_cost(gtb, prb):
-        ga, gb = gtb["endpoints"]
-        pa, pb = prb["endpoints"]
+    def _branch_shared_length(branch_obj, shared_ids):
+        L = 0.0
+        for Sx, mx in zip(branch_obj.get("segs", []), branch_obj.get("meta", [])):
+            if Sx is None or len(Sx) < 2:
+                continue
+            mmx = mx if isinstance(mx, dict) else {}
+            aid = mmx.get("atomic_id", None)
+            if aid is None or str(aid) not in shared_ids:
+                continue
+            L += _poly_length(np.asarray(Sx, float))
+        return float(L)
 
-        d1 = float(np.linalg.norm(ga - pa) + np.linalg.norm(gb - pb))
-        d2 = float(np.linalg.norm(ga - pb) + np.linalg.norm(gb - pa))
-        d_end = min(d1, d2)
+    def _greedy_match_branches_geom(gt_br, pr_br, *, lambda_seg=0.20, return_diag=False):
+        """
+        Shared-support objective:
+        final_score = min(Lp_shared, Lg_shared) * (1 + lambda_seg * ns/max(np,ng,1))
+        where shared-support uses only atomics present in BOTH candidate branches.
+        """
+        scored_candidates = []
+        shared_candidates = []
+        pred_branch_ids = {int(p["branch_id"]) for p in (pr_br or [])}
 
-        d_cent = float(np.linalg.norm(gtb["centroid"] - prb["centroid"]))
+        for g in (gt_br or []):
+            g_id = int(g["branch_id"])
+            Ag = {str(a) for a in (g.get("atomic_ids") or set())}
+            for p in (pr_br or []):
+                p_id = int(p["branch_id"])
+                Ap = {str(a) for a in (p.get("atomic_ids") or set())}
+                As = sorted(Ap & Ag)
+                if not As:
+                    continue
 
-        Lg = max(1e-6, float(gtb["length"]))
-        Lp = max(1e-6, float(prb["length"]))
-        ratio = max(Lg / Lp, Lp / Lg)
-        d_len = float((ratio - 1.0) * 50.0)
+                Lp_shared = _branch_shared_length(p, set(As))
+                Lg_shared = _branch_shared_length(g, set(As))
+                L_shared = float(min(Lp_shared, Lg_shared))
 
-        return d_end + 0.25 * d_cent + d_len
+                ns = int(len(As))
+                np_seg = int(max(len(Ap), 1))
+                ng_seg = int(max(len(Ag), 1))
 
-    def _greedy_match_branches_geom(gt_br, pr_br, *, max_cost=250.0):
-        pairs = []
-        for gi, g in enumerate(gt_br):
-            for pi, p in enumerate(pr_br):
-                c = _branch_geom_cost(g, p)
-                pairs.append((c, gi, pi))
-        pairs.sort(key=lambda t: t[0])
+                cand = {
+                    "gt_branch_id": g_id,
+                    "pr_branch_id": p_id,
+                    "shared_ids": As,
+                    "ns": ns,
+                    "np": np_seg,
+                    "ng": ng_seg,
+                    "Lp_shared": float(Lp_shared),
+                    "Lg_shared": float(Lg_shared),
+                    "L_shared": float(L_shared),
+                    "gt_atomic_ids": sorted(list(Ag)),
+                    "pred_atomic_ids": sorted(list(Ap)),
+                }
+                shared_candidates.append(cand)
 
+                if not np.isfinite(L_shared) or L_shared <= 0.0:
+                    continue
+
+                # New Stage-2 objective: shared-support length + weak multiplicative shared-segment bias.
+                score_len = L_shared
+                score_count = 1.0 + float(lambda_seg) * (float(ns) / float(max(np_seg, ng_seg, 1)))
+                final_score = float(score_len * score_count)
+                cand["score"] = final_score
+                scored_candidates.append(cand)
+
+        scored_candidates = sorted(scored_candidates, key=lambda d: d["score"], reverse=True)
         used_g = set()
         used_p = set()
         matches = []
-        for c, gi, pi in pairs:
-            if c > max_cost:
-                break
-            if gi in used_g or pi in used_p:
+        for c in scored_candidates:
+            gb = int(c["gt_branch_id"])
+            pb = int(c["pr_branch_id"])
+            if gb in used_g or pb in used_p:
                 continue
-            used_g.add(gi)
-            used_p.add(pi)
-            matches.append((gt_br[gi]["branch_id"], pr_br[pi]["branch_id"], float(c)))
-        return matches
+            used_g.add(gb)
+            used_p.add(pb)
+            matches.append((gb, pb, float(c["score"])))
+
+        if not return_diag:
+            return matches
+
+        pred_with_shared = {int(c["pr_branch_id"]) for c in shared_candidates}
+        pred_with_scored = {int(c["pr_branch_id"]) for c in scored_candidates}
+        diag = {
+            "scored_candidates": scored_candidates,
+            "shared_candidates": shared_candidates,
+            "pred_no_shared": set(pred_branch_ids - pred_with_shared),
+            "pred_zero_shared_length": set(pred_with_shared - pred_with_scored),
+        }
+        return matches, diag
 
     def _assign_synth_branch_ids(segs_in, meta_in, scope_members=None):
         br = _build_branch_table_geom(segs_in, meta_in, scope_members=scope_members)
@@ -4287,6 +4822,195 @@ def compare_widths_for_aligned_cracks(
 
         return kept_segs, kept_meta, removed_segs
 
+    def _clip_polyline_into_run_indices(S, remove_mask, H, W, min_pts=2):
+        """
+        Index-preserving variant of _clip_polyline_into_runs.
+        Returns (kept_idx_runs, removed_idx_runs) where each run is a 1D int array.
+        """
+        S = np.asarray(S, float)
+        if S is None or len(S) < 2 or remove_mask is None:
+            idx = np.arange(len(S), dtype=int) if S is not None else np.asarray([], int)
+            return ([idx] if idx.size >= min_pts else []), []
+
+        kept_idx_runs = []
+        removed_idx_runs = []
+        buf_k = []
+        buf_r = []
+
+        for i in range(len(S) - 1):
+            p0 = S[i]
+            p1 = S[i + 1]
+            mx = 0.5 * (p0[0] + p1[0])
+            my = 0.5 * (p0[1] + p1[1])
+            ix = int(round(mx))
+            iy = int(round(my))
+            in_remove = False
+            if 0 <= ix < W and 0 <= iy < H:
+                in_remove = bool(remove_mask[iy, ix])
+
+            if not in_remove:
+                if not buf_k:
+                    buf_k.append(i)
+                buf_k.append(i + 1)
+                if len(buf_r) >= min_pts:
+                    removed_idx_runs.append(np.asarray(buf_r, int))
+                buf_r = []
+            else:
+                if not buf_r:
+                    buf_r.append(i)
+                buf_r.append(i + 1)
+                if len(buf_k) >= min_pts:
+                    kept_idx_runs.append(np.asarray(buf_k, int))
+                buf_k = []
+
+        if len(buf_k) >= min_pts:
+            kept_idx_runs.append(np.asarray(buf_k, int))
+        if len(buf_r) >= min_pts:
+            removed_idx_runs.append(np.asarray(buf_r, int))
+
+        return kept_idx_runs, removed_idx_runs
+
+    def _build_segment_records(segs_in, meta_in, width_full=None, *, fill_nan=False):
+        segs_valid = []
+        meta_valid = []
+        for i, (S, m) in enumerate(zip(segs_in or [], meta_in or [])):
+            if S is None or len(S) < 2:
+                continue
+            mm = m if isinstance(m, dict) else {}
+            segs_valid.append(np.asarray(S, float))
+            meta_valid.append(dict(mm))
+
+        total_pts = int(np.sum([len(S) for S in segs_valid]))
+        if total_pts <= 0:
+            return []
+
+        width_stream = None
+        if (not fill_nan) and width_full is not None:
+            width_stream = np.asarray(width_full, float).reshape(-1)
+
+        records = []
+        off = 0
+        for i, (S, mm) in enumerate(zip(segs_valid, meta_valid)):
+            L = int(len(S))
+            if fill_nan or width_stream is None:
+                w = np.full((L,), np.nan, float)
+            else:
+                s0 = int(off)
+                s1 = int(off + L)
+                if s0 >= width_stream.size:
+                    w = np.full((L,), np.nan, float)
+                else:
+                    sl = np.asarray(width_stream[s0:min(s1, width_stream.size)], float)
+                    if sl.size < L:
+                        w = np.full((L,), np.nan, float)
+                        if sl.size > 0:
+                            w[:sl.size] = sl
+                    else:
+                        w = sl[:L]
+            off += L
+            bid = _safe_int(mm.get("branch_id"), None)
+            sid = _safe_int(mm.get("seg_idx"), None)
+            if bid is None:
+                bid = int(i)
+            if sid is None:
+                sid = int(i)
+            aid = mm.get("atomic_id", None)
+            rec = {
+                "pts": np.asarray(S, float),
+                "width": np.asarray(w, float),
+                "branch_id": int(bid),
+                "seg_idx": int(sid),
+                "atomic_id": None if aid is None else str(aid),
+                "meta": dict(mm),
+            }
+            rec["meta"]["branch_id"] = int(rec["branch_id"])
+            rec["meta"]["seg_idx"] = int(rec["seg_idx"])
+            if rec["atomic_id"] is not None:
+                rec["meta"]["atomic_id"] = rec["atomic_id"]
+            records.append(rec)
+        return records
+
+    def _records_to_segs_meta(records_in):
+        segs_out, meta_out = [], []
+        for r in records_in or []:
+            pts = np.asarray(r.get("pts", None), float) if r is not None else None
+            if pts is None or pts.ndim != 2 or len(pts) < 2:
+                continue
+            mm = dict(r.get("meta", {}) if isinstance(r.get("meta", {}), dict) else {})
+            mm["branch_id"] = int(_safe_int(r.get("branch_id"), mm.get("branch_id", 0)))
+            mm["seg_idx"] = int(_safe_int(r.get("seg_idx"), mm.get("seg_idx", 0)))
+            if r.get("atomic_id", None) is not None:
+                mm["atomic_id"] = str(r.get("atomic_id"))
+            segs_out.append(pts)
+            meta_out.append(mm)
+        return segs_out, meta_out
+
+    def _apply_union_dominance_to_records(
+        records_in,
+        *,
+        loss_masks_pred_by_branch,
+        loss_masks_gt_by_branch,
+        H_full,
+        W_full,
+    ):
+        def _union_bite_for_branch(bid):
+            if bid is None:
+                return None
+            try:
+                bid_i = int(bid)
+            except Exception:
+                return None
+            mg = loss_masks_gt_by_branch.get(bid_i)
+            mp = loss_masks_pred_by_branch.get(bid_i)
+            if mg is None and mp is None:
+                return None
+            if mg is None:
+                return mp
+            if mp is None:
+                return mg
+            return (mg | mp)
+
+        kept_records = []
+        removed_records = []
+        for rec in (records_in or []):
+            pts = np.asarray(rec.get("pts", None), float)
+            w = np.asarray(rec.get("width", None), float).reshape(-1)
+            if pts is None or pts.ndim != 2 or len(pts) < 2:
+                continue
+            if len(w) != len(pts):
+                if len(w) < len(pts):
+                    ww = np.full((len(pts),), np.nan, float)
+                    if len(w) > 0:
+                        ww[:len(w)] = w
+                    w = ww
+                else:
+                    w = np.asarray(w[:len(pts)], float)
+
+            rm = _union_bite_for_branch(rec.get("branch_id", None))
+            if rm is None:
+                out = dict(rec)
+                out["pts"] = np.asarray(pts, float)
+                out["width"] = np.asarray(w, float)
+                kept_records.append(out)
+                continue
+
+            keep_idx_runs, rem_idx_runs = _clip_polyline_into_run_indices(
+                pts, rm, H_full, W_full, min_pts=2
+            )
+
+            for idx in keep_idx_runs:
+                out = dict(rec)
+                out["pts"] = np.asarray(pts[idx], float)
+                out["width"] = np.asarray(w[idx], float)
+                kept_records.append(out)
+            for idx in rem_idx_runs:
+                out = dict(rec)
+                out["pts"] = np.asarray(pts[idx], float)
+                out["width"] = np.asarray(w[idx], float)
+                removed_records.append(out)
+
+        return kept_records, removed_records
+
     def _k_ab(m):
         m = m if isinstance(m, dict) else {}
         aid = m.get("atomic_id", None)
@@ -4381,8 +5105,31 @@ def compare_widths_for_aligned_cracks(
             predw_full_any = _get_pred_width_full(crack, derived_concat, widths_geo)
 
         if (len(e1) < 2 or len(e2) < 2) and (predw_full_any is None or np.asarray(predw_full_any).size < 2):
+            if mode == "atomic" or str(cid).startswith("atomic_"):
+                _log_failed_segment_row(
+                    image=base_name,
+                    cid=cid,
+                    reason="atomic_no_usable_pred_width_trace",
+                    L_geom=int(pred_group_n_segments),
+                    pred_len_total=0,
+                    gt_len_total=0,
+                    branch_id="atomic",
+                    seg_idx="group",
+                )
             continue
 
+        pred_group_len = float(
+            np.sum(
+                [
+                    _polyline_length(np.asarray(s, float))
+                    for s in (segs or [])
+                    if s is not None and len(s) >= 2
+                ]
+            )
+        )
+        pred_group_n_segments = int(
+            np.sum([1 for s in (segs or []) if s is not None and len(s) >= 2])
+        )
 
         ##############################################
         # Part 1 (atomic): push width_pairs only
@@ -4396,6 +5143,16 @@ def compare_widths_for_aligned_cracks(
 
             if predw_full_any is None or predw_full_any.size < 2:
                 print(f"[WIDTH DEBUG] atomic cid={cid} has no usable pred width trace -> skip")
+                _log_failed_segment_row(
+                    image=base_name,
+                    cid=cid,
+                    reason="atomic_no_usable_pred_width_trace",
+                    L_geom=int(pred_group_n_segments),
+                    pred_len_total=0,
+                    gt_len_total=0,
+                    branch_id="atomic",
+                    seg_idx="group",
+                )
                 continue
 
             predw_full_any = np.asarray(predw_full_any, float).reshape(-1)
@@ -4408,35 +5165,69 @@ def compare_widths_for_aligned_cracks(
                 else:
                     print(f"[WIDTH DEBUG] atomic cid={cid} gt_sup keys: {list(gt_entry_atomic.keys())}")
                 print(f"[WIDTH DEBUG] atomic cid={cid} has keys: {list(crack.keys())[:20]}")
+                _log_failed_segment_row(
+                    image=base_name,
+                    cid=cid,
+                    reason="atomic_no_usable_gt_width_trace",
+                    L_geom=int(pred_group_n_segments),
+                    pred_len_total=int(len(predw_full_any)),
+                    gt_len_total=0,
+                    branch_id="atomic",
+                    seg_idx="group",
+                )
                 continue
             gtw_full_any = np.asarray(gtw_full_any, float).reshape(-1)
-
-            def _resample_1d_to_len_atomic(arr, L):
-                arr = np.asarray(arr, float).reshape(-1)
-                L = int(L)
-                if L <= 0:
-                    return np.asarray([], float)
-                if arr.size == 0:
-                    out = np.empty((L,), float)
-                    out[:] = np.nan
-                    return out
-                if arr.size == 1:
-                    out = np.empty((L,), float)
-                    out[:] = float(arr[0])
-                    return out
-                if arr.size == L:
-                    return arr.astype(float, copy=False)
-                x_old = np.linspace(0.0, 1.0, num=arr.size)
-                x_new = np.linspace(0.0, 1.0, num=L)
-                return np.interp(x_new, x_old, arr).astype(float, copy=False)
 
             total_geom = int(sum(len(s) for s in segs if s is not None and len(s) >= 2))
             if total_geom < 2:
                 print(f"[WIDTH DEBUG] atomic cid={cid} has <2 derived geometry samples -> skip")
+                _log_failed_segment_row(
+                    image=base_name,
+                    cid=cid,
+                    reason="atomic_invalid_geometry",
+                    L_geom=int(total_geom),
+                    pred_len_total=int(len(predw_full_any)),
+                    gt_len_total=int(len(gtw_full_any)),
+                    branch_id="atomic",
+                    seg_idx="group",
+                )
                 continue
 
-            predw_full_aligned = _resample_1d_to_len_atomic(predw_full_any, total_geom)
-            gtw_full_aligned = _resample_1d_to_len_atomic(gtw_full_any, total_geom)
+            # Part 1 builds native width pairs only.
+            # No interpolation here; Part 2 owns comparison-domain resampling.
+            if (len(predw_full_any) != total_geom) or (len(gtw_full_any) != total_geom):
+                print(
+                    f"[WIDTH DEBUG] atomic cid={cid} -> skip (atomic width length mismatch) "
+                    f"pred_len={len(predw_full_any)} gt_len={len(gtw_full_any)} total_geom={total_geom}"
+                )
+                log_invalid(
+                    image=base_name,
+                    cid=cid,
+                    level="group",
+                    reason="atomic_width_length_mismatch",
+                    length=float(total_geom),
+                    n_segments=int(pred_group_n_segments),
+                    pred_members=[str(cid)],
+                    gt_members=[str(cid)] if gt_entry_atomic is not None else None,
+                    overlap=np.nan,
+                    entity_id=cid,
+                    branch_id=None,
+                    extra_info=(
+                        f"pred_len={len(predw_full_any)} "
+                        f"gt_len={len(gtw_full_any)} total_geom={total_geom}"
+                    ),
+                )
+                _log_failed_segment_row(
+                    image=base_name,
+                    cid=cid,
+                    reason="atomic_width_length_mismatch",
+                    L_geom=int(total_geom),
+                    pred_len_total=int(len(predw_full_any)),
+                    gt_len_total=int(len(gtw_full_any)),
+                    branch_id="atomic",
+                    seg_idx="group",
+                )
+                continue
 
             pred_concat_xy = np.vstack([np.asarray(s, float) for s in segs if s is not None and len(s) >= 2])
             gt_geom_aligned = None
@@ -4445,6 +5236,16 @@ def compare_widths_for_aligned_cracks(
             if gt_geom_raw is None:
                 gt_geom_strategy = "missing_gt_geometry_stream"
                 print(f"[ATOMIC GT WARN] cid={cid} reason={gt_geom_strategy} GT geometry not attached")
+                _log_failed_segment_row(
+                    image=base_name,
+                    cid=cid,
+                    reason=str(gt_geom_strategy),
+                    L_geom=int(total_geom),
+                    pred_len_total=int(len(predw_full_any)),
+                    gt_len_total=int(len(gtw_full_any)),
+                    branch_id="atomic",
+                    seg_idx="group",
+                )
             else:
                 gt_geom_aligned, gt_geom_strategy = _align_atomic_gt_geom_to_pred(
                     gt_geom_raw,
@@ -4453,6 +5254,16 @@ def compare_widths_for_aligned_cracks(
                 )
                 if gt_geom_aligned is None:
                     print(f"[ATOMIC GT WARN] cid={cid} reason={gt_geom_strategy} GT geometry not attached")
+                    _log_failed_segment_row(
+                        image=base_name,
+                        cid=cid,
+                        reason=str(gt_geom_strategy),
+                        L_geom=int(total_geom),
+                        pred_len_total=int(len(predw_full_any)),
+                        gt_len_total=int(len(gtw_full_any)),
+                        branch_id="atomic",
+                        seg_idx="group",
+                    )
 
             print(
                 f"[WIDTH DEBUG] atomic cid={cid} aligned streams: "
@@ -4470,8 +5281,8 @@ def compare_widths_for_aligned_cracks(
                     off += L
                     continue
 
-                predw = predw_full_aligned[off:off + L].astype(float, copy=False)
-                gtw = gtw_full_aligned[off:off + L].astype(float, copy=False)
+                predw = predw_full_any[off:off + L].astype(float, copy=False)
+                gtw = gtw_full_any[off:off + L].astype(float, copy=False)
                 gt_match_seg = None
                 if gt_geom_aligned is not None:
                     gt_match_seg = np.asarray(gt_geom_aligned[off:off + L], float)
@@ -4517,27 +5328,41 @@ def compare_widths_for_aligned_cracks(
         # --------------------------------------------
 
         # Stage 0: find best GT entry by overlap
-        pred_key = frozenset(map(str, crack.get("members", []) or []))
+        pred_key = frozenset(pred_members)
         gt_entry = gt_sup_combined.get(pred_key)
 
         if gt_entry is None and gt_sup_combined:
-            pm = set(map(str, crack.get("members", []) or []))
+            pm = set(pred_members)
             best = None
             for k, e in gt_sup_combined.items():
-                gm = set(map(str, e.get("members", []) or []))
+                gm = set(_collect_member_ids(e.get("members", []) or []))
                 inter = len(pm & gm)
                 denom = max(1, max(len(pm), len(gm)))
                 u = inter / denom
                 if best is None or u > best[0]:
                     best = (u, e)
-            if best is not None and best[0] >= 0.60:
+            if best is not None:
                 gt_entry = best[1]
 
         if gt_entry is None:
-            gt_members = set(map(str, crack.get("members", []) or []))
+            log_invalid(
+                image=base_name,
+                cid=cid,
+                level="group",
+                reason="no_gt_match",
+                entity_id=cid,
+                length=pred_group_len,
+                n_segments=pred_group_n_segments,
+                pred_members=pred_members,
+                gt_members=None,
+                overlap=np.nan,
+            )
+
+        if gt_entry is None:
+            gt_members = set()
             bite_gt = None
         else:
-            gt_members = set(map(str, gt_entry.get("members", []) or []))
+            gt_members = set(_collect_member_ids(gt_entry.get("members", []) or []))
             bite_gt = None
             dom_gt = gt_entry.get("dominance_meta") or gt_entry.get("dominance") or {}
             if isinstance(dom_gt, dict) and "bite" in dom_gt:
@@ -4545,11 +5370,56 @@ def compare_widths_for_aligned_cracks(
 
         shared = pred_members & gt_members
         overlap = len(shared) / max(1, max(len(pred_members), len(gt_members)))
-        if overlap < 0.60:
-            print(f"[WIDTH DEBUG] combined cid={cid} overlap={overlap:.3f} -> SKIP")
+
+        if overlap >= 0.70:
+            match_quality = "strong"
+        elif overlap >= 0.50:
+            match_quality = "weak"
+        else:
+            match_quality = "invalid"
+
+        if match_quality == "invalid":
+            log_invalid(
+                image=base_name,
+                cid=cid,
+                level="group",
+                reason="overlap_below_threshold",
+                entity_id=cid,
+                length=pred_group_len,
+                n_segments=pred_group_n_segments,
+                pred_members=pred_members,
+                gt_members=gt_members,
+                overlap=overlap,
+                extra_info=f"n_shared={len(shared)}",
+            )
+            print(
+                f"[WIDTH DEBUG] combined cid={cid} overlap={overlap:.3f} "
+                f"quality=invalid -> SKIP"
+            )
             continue
 
-        print(f"[WIDTH DEBUG] cid={cid} shared_members={sorted(shared)}")
+        if abs(float(overlap) - 1.0) < 1e-9:
+            effective_members = set(pred_members)
+        else:
+            effective_members = set(shared)
+
+        raw_members = crack.get("members", []) or []
+        if abs(float(overlap) - 1.0) >= 1e-9:
+            members_iter = []
+            for m in raw_members:
+                aid = m.get("atomic_id", m.get("id", None)) if isinstance(m, dict) else m
+                if aid is not None and str(aid) in effective_members:
+                    members_iter.append(m)
+        else:
+            members_iter = list(raw_members)
+        members_iter_ids = set(_collect_member_ids(members_iter))
+        if not members_iter_ids:
+            members_iter_ids = set(effective_members)
+
+        print(
+            f"[WIDTH DEBUG] cid={cid} quality={match_quality} overlap={overlap:.3f} "
+            f"shared_members={sorted(shared)} effective_members={sorted(effective_members)}"
+        )
         
         # ============================================================
         # STAGE 0.5 — DECODE GT DOMINANCE BITE (AUTHORITATIVE)
@@ -4689,7 +5559,7 @@ def compare_widths_for_aligned_cracks(
         )
 
         # --------------------------------------------
-        # Stage 1: prune segments by shared atomic IDs
+        # Stage 1: prune segments by effective atomic IDs
         # --------------------------------------------
         pruned_segs = []
         pruned_meta = []
@@ -4698,8 +5568,21 @@ def compare_widths_for_aligned_cracks(
             if S is None or len(S) < 2:
                 continue
             aid = m.get("atomic_id")
-            if aid is not None and str(aid) not in shared:
-                print(f"[WIDTH DEBUG] DROP seg#{i} atomic={aid} (not shared)")
+            if aid is None or str(aid) not in effective_members:
+                print(f"[STAGE2 EXCL] cid={cid} level=atomic atomic={aid} reason=not_in_effective_members")
+                log_invalid(
+                    image=base_name,
+                    cid=cid,
+                    level="atomic",
+                    reason="not_in_effective_members",
+                    entity_id=aid,
+                    length=_poly_length(np.asarray(S, float)),
+                    n_segments=1,
+                    pred_members=pred_members,
+                    gt_members=gt_members,
+                    overlap=overlap,
+                    branch_id=m.get("branch_id") if isinstance(m, dict) else None,
+                )
                 continue
             pruned_segs.append(np.asarray(S, float))
             pruned_meta.append(dict(m))
@@ -4708,7 +5591,7 @@ def compare_widths_for_aligned_cracks(
             print(f"[WIDTH DEBUG] cid={cid} -> NO SEGMENTS AFTER PRUNE")
             continue
 
-        print(f"[WIDTH DEBUG] cid={cid} kept {len(pruned_segs)} segments after atomic prune")
+        print(f"[WIDTH DEBUG] cid={cid} kept {len(pruned_segs)} segments after effective-member prune")
 
         # --------------------------------------------
         # Stage 2: optional branch matching (SYMMETRIC)
@@ -4722,7 +5605,7 @@ def compare_widths_for_aligned_cracks(
         gt_pruned_meta = []
 
         # ============================================================
-        # Stage-2 helpers: branch signatures & matching (GEOMETRY-BASED)
+        # Stage-2 helpers: branch signatures + shared-support branch scoring
         # ============================================================
         def _seg_endpoints(S):
             S = np.asarray(S, float)
@@ -4745,10 +5628,6 @@ def compare_widths_for_aligned_cracks(
             b = tuple((np.round(b / snap) * snap).tolist())
             return tuple(sorted([a, b]))
 
-        def _poly_centroid(S):
-            S = np.asarray(S, float)
-            return np.nanmean(S, axis=0)
-
         def _poly_length(S):
             try:
                 return float(_linestring_length(np.asarray(S, float)))
@@ -4768,7 +5647,6 @@ def compare_widths_for_aligned_cracks(
                 "segs": [S...],
                 "meta": [m...],
                 "endpoints": (a,b) from the longest seg,
-                "centroid": (cx,cy),
                 "length": total length,
                 "atomic_ids": set(str)
             }
@@ -4804,10 +5682,6 @@ def compare_widths_for_aligned_cracks(
                     continue
                 a, b = ep
 
-                # centroid over all points
-                all_pts = np.vstack(segs_k) if segs_k else rep
-                c = _poly_centroid(all_pts)
-
                 # total length
                 L = float(np.sum([_poly_length(S) for S in segs_k]))
 
@@ -4822,77 +5696,115 @@ def compare_widths_for_aligned_cracks(
                     "segs": segs_k,
                     "meta": meta_k,
                     "endpoints": (np.asarray(a, float), np.asarray(b, float)),
-                    "centroid": np.asarray(c, float),
                     "length": float(L),
                     "atomic_ids": aids,
                 })
 
             return out
 
-        def _branch_geom_cost(gtb, prb):
+        def _branch_shared_length(branch_obj, shared_ids):
+            L = 0.0
+            for Sx, mx in zip(branch_obj.get("segs", []), branch_obj.get("meta", [])):
+                if Sx is None or len(Sx) < 2:
+                    continue
+                mmx = mx if isinstance(mx, dict) else {}
+                aid = mmx.get("atomic_id", None)
+                if aid is None or str(aid) not in shared_ids:
+                    continue
+                L += _poly_length(np.asarray(Sx, float))
+            return float(L)
+
+        def _greedy_match_branches_geom(gt_br, pr_br, *, lambda_seg=0.20, return_diag=False):
             """
-            Lower is better. Cost uses:
-            - min endpoint pairing distance (order invariant)
-            - centroid distance
-            - length ratio penalty
+            Shared-support objective:
+            final_score = min(Lp_shared, Lg_shared) * (1 + lambda_seg * ns/max(np,ng,1))
+            where shared-support uses only atomics present in BOTH candidate branches.
             """
-            ga, gb = gtb["endpoints"]
-            pa, pb = prb["endpoints"]
+            scored_candidates = []
+            shared_candidates = []
+            pred_branch_ids = {int(p["branch_id"]) for p in (pr_br or [])}
 
-            # endpoint distance (order invariant)
-            d1 = float(np.linalg.norm(ga - pa) + np.linalg.norm(gb - pb))
-            d2 = float(np.linalg.norm(ga - pb) + np.linalg.norm(gb - pa))
-            d_end = min(d1, d2)
+            for g in (gt_br or []):
+                g_id = int(g["branch_id"])
+                Ag = {str(a) for a in (g.get("atomic_ids") or set())}
+                for p in (pr_br or []):
+                    p_id = int(p["branch_id"])
+                    Ap = {str(a) for a in (p.get("atomic_ids") or set())}
+                    As = sorted(Ap & Ag)
+                    if not As:
+                        continue
 
-            d_cent = float(np.linalg.norm(gtb["centroid"] - prb["centroid"]))
+                    Lp_shared = _branch_shared_length(p, set(As))
+                    Lg_shared = _branch_shared_length(g, set(As))
+                    L_shared = float(min(Lp_shared, Lg_shared))
 
-            # length ratio penalty
-            Lg = max(1e-6, float(gtb["length"]))
-            Lp = max(1e-6, float(prb["length"]))
-            ratio = max(Lg / Lp, Lp / Lg)   # >= 1
-            d_len = float((ratio - 1.0) * 50.0)  # 50px penalty per 1x mismatch
+                    ns = int(len(As))
+                    np_seg = int(max(len(Ap), 1))
+                    ng_seg = int(max(len(Ag), 1))
 
-            return d_end + 0.25 * d_cent + d_len
+                    cand = {
+                        "gt_branch_id": g_id,
+                        "pr_branch_id": p_id,
+                        "shared_ids": As,
+                        "ns": ns,
+                        "np": np_seg,
+                        "ng": ng_seg,
+                        "Lp_shared": float(Lp_shared),
+                        "Lg_shared": float(Lg_shared),
+                        "L_shared": float(L_shared),
+                        "gt_atomic_ids": sorted(list(Ag)),
+                        "pred_atomic_ids": sorted(list(Ap)),
+                    }
+                    shared_candidates.append(cand)
 
-        def _greedy_match_branches_geom(gt_br, pr_br, *, max_cost=250.0):
-            """
-            Greedy one-to-one matching by geometry cost.
-            Returns list of tuples: (gt_branch_id, pr_branch_id, cost)
-            """
-            pairs = []
-            for gi, g in enumerate(gt_br):
-                for pi, p in enumerate(pr_br):
-                    c = _branch_geom_cost(g, p)
-                    pairs.append((c, gi, pi))
+                    if not np.isfinite(L_shared) or L_shared <= 0.0:
+                        continue
 
-            pairs.sort(key=lambda t: t[0])
+                    # New Stage-2 objective: shared-support length + weak multiplicative shared-segment bias.
+                    score_len = L_shared
+                    score_count = 1.0 + float(lambda_seg) * (float(ns) / float(max(np_seg, ng_seg, 1)))
+                    final_score = float(score_len * score_count)
+                    cand["score"] = final_score
+                    scored_candidates.append(cand)
 
+            scored_candidates = sorted(scored_candidates, key=lambda d: d["score"], reverse=True)
             used_g = set()
             used_p = set()
             matches = []
-            for c, gi, pi in pairs:
-                if c > max_cost:
-                    break
-                if gi in used_g or pi in used_p:
+            for c in scored_candidates:
+                gb = int(c["gt_branch_id"])
+                pb = int(c["pr_branch_id"])
+                if gb in used_g or pb in used_p:
                     continue
-                used_g.add(gi)
-                used_p.add(pi)
-                matches.append((gt_br[gi]["branch_id"], pr_br[pi]["branch_id"], float(c)))
+                used_g.add(gb)
+                used_p.add(pb)
+                matches.append((gb, pb, float(c["score"])))
 
-            return matches
+            if not return_diag:
+                return matches
+
+            pred_with_shared = {int(c["pr_branch_id"]) for c in shared_candidates}
+            pred_with_scored = {int(c["pr_branch_id"]) for c in scored_candidates}
+            diag = {
+                "scored_candidates": scored_candidates,
+                "shared_candidates": shared_candidates,
+                "pred_no_shared": set(pred_branch_ids - pred_with_shared),
+                "pred_zero_shared_length": set(pred_with_shared - pred_with_scored),
+            }
+            return matches, diag
 
 
         # ============================================================
-        # (A) GT prune — IMPORTANT FIX:
-        #   1) scope to pred_members first
-        #   2) then prune to shared
+        # (A) GT prune:
+        #   1) scope to members_iter first
+        #   2) then apply effective-members gate (weak => shared-only)
         # ============================================================
         if gt_entry is not None:
             gt_segs_all, gt_meta_all = _extract_gt_stream_segments_and_meta(gt_entry, "midline")
 
             print(
                 f"[STAGE2 DBG] cid={cid} GT segs={len(gt_segs_all)} "
-                f"GT meta={len(gt_meta_all)} shared={sorted(shared)}"
+                f"GT meta={len(gt_meta_all)} effective_members={sorted(effective_members)}"
             )
 
             if len(gt_segs_all) == len(gt_meta_all) and len(gt_segs_all) > 0:
@@ -4903,49 +5815,137 @@ def compare_widths_for_aligned_cracks(
                     aid = mg.get("atomic_id")
 
                     # --- scope gate: drop GT segments not in THIS predicted crack ---
-                    if aid is not None and str(aid) not in pred_members:
+                    if aid is not None and str(aid) not in members_iter_ids:
                         print(f"[STAGE2 DBG] SKIP GT seg#{i} atomic={aid} (out-of-scope)")
                         continue
 
-                    # --- shared gate: drop GT segments not shared with prediction ---
-                    if aid is not None and str(aid) not in shared:
-                        print(f"[STAGE2 DBG] DROP GT seg#{i} atomic={aid} (not shared)")
+                    if aid is None or str(aid) not in effective_members:
+                        print(f"[STAGE2 DBG] DROP GT seg#{i} atomic={aid} (not in effective set)")
                         continue
 
                     gt_pruned_segs.append(np.asarray(Sg, float))
                     gt_pruned_meta.append(dict(mg))
             else:
-                # meta mismatch → keep geometry but you lose ability to do atomic/shared gating reliably
-                for i, Sg in enumerate(gt_segs_all):
-                    if Sg is None or len(Sg) < 2:
-                        continue
-                    gt_pruned_segs.append(np.asarray(Sg, float))
-                    gt_pruned_meta.append({})
+                # For partial overlap we cannot trust GT meta-less segments to be in shared support.
+                if abs(float(overlap) - 1.0) >= 1e-9:
+                    print(
+                        f"[STAGE2 DBG] cid={cid} partial-overlap with GT meta mismatch; "
+                        f"dropping GT segments to avoid non-shared evaluation"
+                    )
+                else:
+                    for i, Sg in enumerate(gt_segs_all):
+                        if Sg is None or len(Sg) < 2:
+                            continue
+                        gt_pruned_segs.append(np.asarray(Sg, float))
+                        gt_pruned_meta.append({})
 
-            print(f"[STAGE2 DBG] cid={cid} GT kept {len(gt_pruned_segs)} segs after scoped+shared prune")
+            print(f"[STAGE2 DBG] cid={cid} GT kept {len(gt_pruned_segs)} segs after scoped/effective prune")
 
 
         # ============================================================
         # (B) symmetric branch matching (GEOMETRY-BASED)
         #   NOTE: do NOT trust GT/PRED branch_id numbering!
         # ============================================================
-        if gt_pruned_segs and pruned_segs:
-            gt_br = _build_branch_table_geom(gt_pruned_segs, gt_pruned_meta, scope_members=shared)
-            pr_br = _build_branch_table_geom(pruned_segs, pruned_meta, scope_members=shared)
+        gt_br = _build_branch_table_geom(gt_pruned_segs, gt_pruned_meta, scope_members=effective_members)
+        pr_br = _build_branch_table_geom(pruned_segs, pruned_meta, scope_members=effective_members)
+        branch_diag = {
+            "scored_candidates": [],
+            "shared_candidates": [],
+            "pred_no_shared": set(),
+            "pred_zero_shared_length": set(),
+        }
 
-            if gt_br and pr_br:
-                matches = _greedy_match_branches_geom(gt_br, pr_br, max_cost=250.0)
+        if pr_br:
+            if gt_br:
+                matches, branch_diag = _greedy_match_branches_geom(
+                    gt_br,
+                    pr_br,
+                    lambda_seg=0.20,
+                    return_diag=True,
+                )
+            else:
+                matches = []
+                branch_diag["pred_no_shared"] = {int(p["branch_id"]) for p in pr_br}
 
-                if matches:
-                    matched_gt_branch_ids   = {g for (g, p, c) in matches}
-                    matched_pred_branch_ids = {p for (g, p, c) in matches}
+            matched_gt_branch_ids = {g for (g, p, s) in matches}
+            matched_pred_branch_ids = {p for (g, p, s) in matches}
 
-                    print(
-                        f"[STAGE2 DBG] cid={cid} branch matches (geom): "
-                        f"GT={sorted(matched_gt_branch_ids)} "
-                        f"PRED={sorted(matched_pred_branch_ids)} "
-                        f"costs={[round(c,1) for (_,_,c) in matches]}"
-                    )
+            for c in branch_diag.get("scored_candidates", []):
+                print(
+                    f"[STAGE2 SCORE] cid={cid} pred_branch={c['pr_branch_id']} gt_branch={c['gt_branch_id']} "
+                    f"score={c['score']:.3f} L_shared={c['L_shared']:.3f} "
+                    f"ns={c['ns']} np={c['np']} ng={c['ng']}"
+                )
+
+            if matches:
+                print(
+                    f"[STAGE2 DBG] cid={cid} branch matches (shared-support): "
+                    f"GT={sorted(matched_gt_branch_ids)} "
+                    f"PRED={sorted(matched_pred_branch_ids)} "
+                    f"scores={[round(s,3) for (_, _, s) in matches]}"
+                )
+            else:
+                print(f"[STAGE2 DBG] cid={cid} no matched branches under shared-support scoring")
+
+            best_scored_by_pred = {}
+            for c in branch_diag.get("scored_candidates", []):
+                pb = int(c["pr_branch_id"])
+                if pb not in best_scored_by_pred or float(c["score"]) > float(best_scored_by_pred[pb]["score"]):
+                    best_scored_by_pred[pb] = c
+
+            best_shared_by_pred = {}
+            for c in branch_diag.get("shared_candidates", []):
+                pb = int(c["pr_branch_id"])
+                if pb not in best_shared_by_pred or float(c["L_shared"]) > float(best_shared_by_pred[pb]["L_shared"]):
+                    best_shared_by_pred[pb] = c
+
+            for pb in pr_br:
+                bid = int(pb.get("branch_id", -1))
+                if bid in matched_pred_branch_ids:
+                    continue
+
+                if bid in branch_diag.get("pred_no_shared", set()):
+                    reason = "no_shared_atomics"
+                    cand = None
+                elif bid in branch_diag.get("pred_zero_shared_length", set()):
+                    reason = "zero_shared_length"
+                    cand = best_shared_by_pred.get(bid, None)
+                else:
+                    reason = "lost_in_matching"
+                    cand = best_scored_by_pred.get(bid, None)
+
+                gt_members_branch = None
+                extra = None
+                if cand is not None:
+                    gt_members_branch = cand.get("gt_atomic_ids", None)
+                    if reason == "lost_in_matching":
+                        extra = (
+                            f"best_score={float(cand.get('score', np.nan)):.3f}; "
+                            f"best_gt_branch={cand.get('gt_branch_id')}; "
+                            f"shared={cand.get('shared_ids', [])}"
+                        )
+                    else:
+                        extra = (
+                            f"L_shared={float(cand.get('L_shared', np.nan)):.3f}; "
+                            f"best_gt_branch={cand.get('gt_branch_id')}; "
+                            f"shared={cand.get('shared_ids', [])}"
+                        )
+
+                print(f"[STAGE2 EXCL] cid={cid} level=branch branch={bid} reason={reason}")
+                log_invalid(
+                    image=base_name,
+                    cid=cid,
+                    level="branch",
+                    reason=reason,
+                    entity_id=bid,
+                    branch_id=bid,
+                    length=float(pb.get("length", np.nan)),
+                    n_segments=len(pb.get("segs", []) or []),
+                    pred_members=pb.get("atomic_ids", None),
+                    gt_members=gt_members_branch,
+                    overlap=overlap,
+                    extra_info=extra,
+                )
 
 
         # ============================================================
@@ -4971,7 +5971,7 @@ def compare_widths_for_aligned_cracks(
             return seg_to_bid
 
         if matched_pred_branch_ids is not None:
-            seg2bid = _assign_synth_branch_ids(pruned_segs, pruned_meta, scope_members=shared)
+            seg2bid = _assign_synth_branch_ids(pruned_segs, pruned_meta, scope_members=effective_members)
             keep_s, keep_m = [], []
 
             for S, m in zip(pruned_segs, pruned_meta):
@@ -4987,11 +5987,29 @@ def compare_widths_for_aligned_cracks(
                     keep_m.append(m)
                 else:
                     print(f"[STAGE2 DBG] DROP PRED synth_branch={bid} (unmatched)")
+                    aid = m.get("atomic_id", None) if isinstance(m, dict) else None
+                    print(
+                        f"[STAGE2 EXCL] cid={cid} level=atomic atomic={aid} "
+                        f"reason=unused_after_branch_matching branch={bid}"
+                    )
+                    log_invalid(
+                        image=base_name,
+                        cid=cid,
+                        level="atomic",
+                        reason="unused_after_branch_matching",
+                        entity_id=aid,
+                        branch_id=bid,
+                        length=_poly_length(np.asarray(S, float)),
+                        n_segments=1,
+                        pred_members=pred_members,
+                        gt_members=gt_members,
+                        overlap=overlap,
+                    )
 
             pruned_segs, pruned_meta = keep_s, keep_m
 
         if matched_gt_branch_ids is not None:
-            seg2bid = _assign_synth_branch_ids(gt_pruned_segs, gt_pruned_meta, scope_members=shared)
+            seg2bid = _assign_synth_branch_ids(gt_pruned_segs, gt_pruned_meta, scope_members=effective_members)
             keep_s, keep_m = [], []
 
             for S, m in zip(gt_pruned_segs, gt_pruned_meta):
@@ -5124,7 +6142,7 @@ def compare_widths_for_aligned_cracks(
             gt_pruned_segs,
             gt_pruned_meta,
             pred_members,
-            shared,
+            effective_members,
             out_dir,
         ):
             """
@@ -5296,7 +6314,7 @@ def compare_widths_for_aligned_cracks(
                 framealpha=0.9,
             )
 
-            member_str = ", ".join(sorted(shared)) if shared else ", ".join(sorted(pred_members))
+            member_str = ", ".join(sorted(effective_members)) if effective_members else ", ".join(sorted(pred_members))
             fig.suptitle(
                 f"Stage-2 prune — cid={cid}\nAtomic members: [{member_str}]",
                 fontsize=11,
@@ -5327,8 +6345,8 @@ def compare_widths_for_aligned_cracks(
             gt_entry=gt_entry,
             gt_pruned_segs=gt_pruned_segs,
             gt_pruned_meta=gt_pruned_meta,
-            pred_members=pred_members,
-            shared=shared,
+            pred_members=members_iter_ids,
+            effective_members=effective_members,
             out_dir=cid_opsec_dir,
         )
 
@@ -6023,6 +7041,22 @@ def compare_widths_for_aligned_cracks(
             else [{}] * len(gt_stage5_source_segs)
         )
 
+        # Build authoritative width streams BEFORE dominance clipping.
+        # Offsets are only allowed here while converting flat width vectors into segment records.
+        pred_source_stage45 = predw_full_any
+        if pred_source_stage45 is None or np.asarray(pred_source_stage45).size < 2:
+            pred_source_stage45 = widths_geo
+        if pred_source_stage45 is None or np.asarray(pred_source_stage45).size < 2:
+            print(f"[STAGE4.5] cid={cid} no usable predicted width source")
+            continue
+        pred_source_stage45 = np.asarray(pred_source_stage45, float).reshape(-1)
+
+        gtw_source_stage45 = _get_gt_width_full(crack, gt_entry)
+        if gtw_source_stage45 is None or np.asarray(gtw_source_stage45).size < 2:
+            print(f"[STAGE4.5] cid={cid} no usable GT width source in payload/supervision")
+            continue
+        gtw_source_stage45 = np.asarray(gtw_source_stage45, float).reshape(-1)
+
         print(f"[STAGE4.5] using Stage-2 PRED mid segs: {len(pred_mid_stage2_segs)}")
         print(f"[STAGE4.5] using Stage-2 PRED derived segs: {len(pred_der_stage2_segs)}")
         print(f"[STAGE4.5] using Stage-2/4 GT segs: {len(gt_stage5_source_segs)}")
@@ -6085,33 +7119,57 @@ def compare_widths_for_aligned_cracks(
         # ------------------------------------------------------------
         pred_pre45_segs = [np.asarray(S, float) for S in pred_der_stage2_segs if S is not None and len(S) >= 2]
 
+        # Build symmetric records (pts + width + keys) for dominance clipping.
+        pred_mid_stage2_records = _build_segment_records(
+            pred_mid_stage2_segs,
+            pred_mid_stage2_meta,
+            width_full=None,
+            fill_nan=True,
+        )
+        pred_der_stage2_records = _build_segment_records(
+            pred_der_stage2_segs,
+            pred_der_stage2_meta,
+            width_full=pred_source_stage45,
+            fill_nan=False,
+        )
+        gt_stage5_source_records = _build_segment_records(
+            gt_stage5_source_segs,
+            gt_stage5_source_meta,
+            width_full=gtw_source_stage45,
+            fill_nan=False,
+        )
+
         # ============================================================
         # Stage 4.5 — APPLY UNION DOMINANCE (PRED MID + PRED DERIVED + GT)
         # ============================================================
-        pred_mid_dom_segs, pred_mid_dom_meta, bite_pruned_pred_mid = _apply_union_dominance(
-            pred_mid_stage2_segs,
-            pred_mid_stage2_meta,
+        pred_mid_dom_records, bite_pruned_pred_mid_records = _apply_union_dominance_to_records(
+            pred_mid_stage2_records,
             loss_masks_pred_by_branch=loss_masks_pred_by_branch,
             loss_masks_gt_by_branch=loss_masks_gt_by_branch,
             H_full=H,
             W_full=W,
         )
-        pred_der_dom_segs, pred_der_dom_meta, bite_pruned_pred_der = _apply_union_dominance(
-            pred_der_stage2_segs,
-            pred_der_stage2_meta,
+        pred_der_dom_records, bite_pruned_pred_der_records = _apply_union_dominance_to_records(
+            pred_der_stage2_records,
             loss_masks_pred_by_branch=loss_masks_pred_by_branch,
             loss_masks_gt_by_branch=loss_masks_gt_by_branch,
             H_full=H,
             W_full=W,
         )
-        gt_dom_segs, gt_dom_meta, bite_pruned_gt_segs = _apply_union_dominance(
-            gt_stage5_source_segs,
-            gt_stage5_source_meta,
+        gt_dom_records, bite_pruned_gt_records = _apply_union_dominance_to_records(
+            gt_stage5_source_records,
             loss_masks_pred_by_branch=loss_masks_pred_by_branch,
             loss_masks_gt_by_branch=loss_masks_gt_by_branch,
             H_full=H,
             W_full=W,
         )
+
+        pred_mid_dom_segs, pred_mid_dom_meta = _records_to_segs_meta(pred_mid_dom_records)
+        pred_der_dom_segs, pred_der_dom_meta = _records_to_segs_meta(pred_der_dom_records)
+        gt_dom_segs, gt_dom_meta = _records_to_segs_meta(gt_dom_records)
+        bite_pruned_pred_mid = [np.asarray(r["pts"], float) for r in bite_pruned_pred_mid_records if r is not None and len(r.get("pts", [])) >= 2]
+        bite_pruned_pred_der = [np.asarray(r["pts"], float) for r in bite_pruned_pred_der_records if r is not None and len(r.get("pts", [])) >= 2]
+        bite_pruned_gt_segs = [np.asarray(r["pts"], float) for r in bite_pruned_gt_records if r is not None and len(r.get("pts", [])) >= 2]
 
         bite_pruned_pred_segs = bite_pruned_pred_der
         gt_stage5_segs = gt_dom_segs
@@ -6181,9 +7239,9 @@ def compare_widths_for_aligned_cracks(
         # ------------------------------------------------------------
         if mode == "combined" and gt_stage5_segs and pred_der_dom_segs:
             try:
-                gt_br_45 = _build_branch_table_geom(gt_stage5_segs, gt_stage5_meta, scope_members=shared)
-                pr_br_45 = _build_branch_table_geom(pred_der_dom_segs, pred_der_dom_meta, scope_members=shared)
-                m_45 = _greedy_match_branches_geom(gt_br_45, pr_br_45, max_cost=250.0)
+                gt_br_45 = _build_branch_table_geom(gt_stage5_segs, gt_stage5_meta, scope_members=effective_members)
+                pr_br_45 = _build_branch_table_geom(pred_der_dom_segs, pred_der_dom_meta, scope_members=effective_members)
+                m_45 = _greedy_match_branches_geom(gt_br_45, pr_br_45, lambda_seg=0.20)
             except Exception as e:
                 m_45 = []
                 print(f"[STAGE4.75 WARN] branch remap failed to build: {e}")
@@ -6203,6 +7261,20 @@ def compare_widths_for_aligned_cracks(
                     if int(b_new) != int(b_old):
                         mm["branch_id"] = int(b_new)
                         n_remap += 1
+
+                # Keep record namespace in sync with metadata for strict Stage-5 key joins.
+                for rec in (gt_dom_records or []):
+                    b_old = _safe_int(rec.get("branch_id"), None)
+                    if b_old is None:
+                        continue
+                    b_new = gt_to_pred_bid.get(int(b_old), None)
+                    if b_new is None:
+                        continue
+                    rec["branch_id"] = int(b_new)
+                    mmr = rec.get("meta", {})
+                    if isinstance(mmr, dict):
+                        mmr["branch_id"] = int(b_new)
+
                 print(
                     f"[STAGE4.75] GT->PRED branch remap applied: {gt_to_pred_bid} "
                     f"(meta_updates={n_remap})"
@@ -6221,264 +7293,300 @@ def compare_widths_for_aligned_cracks(
         final_pred_segs = []
         stage4_pairs = []
 
-        pred_source = predw_full_any
-        if pred_source is None or np.asarray(pred_source).size < 2:
-            pred_source = widths_geo
-        if pred_source is None or np.asarray(pred_source).size < 2:
-            print(f"[STAGE5] cid={cid} no usable predicted width source")
-            continue
-        pred_source = np.asarray(pred_source, float).reshape(-1)
+        def _norm_stage5_key_from_record(rec_obj):
+            if not isinstance(rec_obj, dict):
+                return None
+            b = _safe_int(rec_obj.get("branch_id"), None)
+            s = _safe_int(rec_obj.get("seg_idx"), None)
+            mm = rec_obj.get("meta", {})
+            if b is None and isinstance(mm, dict):
+                b = _safe_int(mm.get("branch_id"), None)
+            if s is None and isinstance(mm, dict):
+                s = _safe_int(mm.get("seg_idx"), None)
+            if b is None or s is None:
+                return None
+            return (int(b), int(s))
 
-        gtw_source = _get_gt_width_full(crack, gt_entry)
-        if gtw_source is None or np.asarray(gtw_source).size < 2:
-            print(f"[STAGE5] cid={cid} no usable GT width source in payload/supervision")
-            continue
-        gtw_source = np.asarray(gtw_source, float).reshape(-1)
-
-        def _pad_to_len(arr, L, pad_value=np.nan):
-            arr = np.asarray(arr, float).reshape(-1)
-            if arr.size >= L:
-                return arr[:L]
-            out = np.empty((L,), dtype=float)
-            out[:] = pad_value
-            if arr.size > 0:
-                out[:arr.size] = arr
-            return out
-
-        def _safe_take(arr, s0, L, pad_value=np.nan):
-            """
-            Take arr[s0:s0+L], but if it runs out, pad with pad_value to length L.
-            Never returns shorter than L.
-            """
-            arr = np.asarray(arr, float).reshape(-1)
-            if L <= 0:
-                return np.asarray([], float)
-            s0 = int(max(0, s0))
-            s1 = int(s0 + L)
-            if s0 >= arr.size:
-                out = np.empty((L,), dtype=float)
-                out[:] = pad_value
-                return out
-            sl = arr[s0:min(s1, arr.size)]
-            return _pad_to_len(sl, L, pad_value=pad_value)
-
-        def _resample_1d_to_len(arr, L):
-            """
-            Resample 1D signal to length L using linear interpolation.
-            Falls back to NaN padding for degenerate/empty inputs.
-            """
-            arr = np.asarray(arr, float).reshape(-1)
-            L = int(L)
-            if L <= 0:
-                return np.asarray([], float)
-            if arr.size == 0:
-                return _pad_to_len(arr, L, pad_value=np.nan)
-            if arr.size == 1:
-                return _pad_to_len(arr, L, pad_value=np.nan)
-            if arr.size == L:
-                return arr.astype(float, copy=False)
-            x_old = np.linspace(0.0, 1.0, num=arr.size)
-            x_new = np.linspace(0.0, 1.0, num=L)
-            return np.interp(x_new, x_old, arr).astype(float, copy=False)
+        def _iter_valid_records(records_in):
+            for rec in (records_in or []):
+                if not isinstance(rec, dict):
+                    continue
+                pts = np.asarray(rec.get("pts", None), float)
+                if pts.ndim != 2 or len(pts) < 2:
+                    continue
+                yield rec
 
         stage5_slice_csv = os.path.join(topo_dbg_dir, "stage5_slices.csv")
         if DEBUG_TOPOLOGY_TRACE:
             os.makedirs(topo_dbg_dir, exist_ok=True)
 
+        pred_total_pts = int(
+            np.sum([len(np.asarray(rec.get("pts", []), float)) for rec in _iter_valid_records(pred_der_dom_records)])
+        )
+        gt_total_pts = int(
+            np.sum([len(np.asarray(rec.get("pts", []), float)) for rec in _iter_valid_records(gt_dom_records)])
+        )
+
         print(
             f"[STAGE5 PRECHECK] cid={cid} "
-            f"pred_width_len={len(pred_source)} gt_width_len={len(gtw_source)} "
+            f"pred_width_len={pred_total_pts} gt_width_len={gt_total_pts} "
             f"geom_pts_total={int(sum(len(S) for S in (pred_der_dom_segs or []) if S is not None))}"
         )
-        if len(pred_source) != len(gtw_source):
+        if pred_total_pts != gt_total_pts:
             print(
                 f"[STAGE5 WARN] cid={cid} width vector length mismatch "
-                f"(pred={len(pred_source)} gt={len(gtw_source)})"
+                f"(pred={pred_total_pts} gt={gt_total_pts})"
             )
-
-        # Build GT per-(branch_id, seg_idx) buckets in GT-local concatenation order.
-        # This avoids using prediction-side global offsets to read GT width streams.
-        def _norm_stage5_key(meta_obj):
-            if not isinstance(meta_obj, dict):
-                return None
-            b = _safe_int(meta_obj.get("branch_id"), None)
-            s = _safe_int(meta_obj.get("seg_idx"), None)
-            if b is None or s is None:
-                return None
-            return (int(b), int(s))
 
         gt_bucket = {}
-        gt_bucket_by_branch = {}
-        gt_branch_seq = {}
-        gt_off = 0
-        for S_gt, m_gt in zip(gt_stage5_segs or [], gt_stage5_meta or []):
-            if S_gt is None or len(S_gt) < 2:
+        for gt_rec in _iter_valid_records(gt_dom_records):
+            key = _norm_stage5_key_from_record(gt_rec)
+            if key is None:
                 continue
-            mm_gt = m_gt if isinstance(m_gt, dict) else {}
-            key = _norm_stage5_key(mm_gt)
-            b_only = _safe_int(mm_gt.get("branch_id"), None)
-            if key is None and b_only is not None:
-                kseq = int(gt_branch_seq.get(int(b_only), 0))
-                key = (int(b_only), kseq)
-                gt_branch_seq[int(b_only)] = kseq + 1
-            Lgt = int(len(S_gt))
-            gtw_local = _safe_take(gtw_source, gt_off, Lgt, pad_value=np.nan)
-            gt_off += Lgt
-            rec = (
-                np.asarray(S_gt, float),
-                np.asarray(gtw_local, float),
-                int(Lgt),
-                dict(mm_gt),
-            )
-            if key is not None:
-                gt_bucket.setdefault(key, []).append(rec)
-            if b_only is not None:
-                gt_bucket_by_branch.setdefault(int(b_only), []).append(rec)
+            gt_bucket.setdefault(key, []).append(gt_rec)
 
         print("\n[DEBUG KEY INSPECTION]")
         print("GT KEYS:")
         for k in gt_bucket.keys():
             print("   ", k, type(k[0]), type(k[1]))
-        print("GT BRANCH KEYS:")
-        for bk, arr in gt_bucket_by_branch.items():
-            print("   ", bk, "count=", len(arr))
         print("PRED KEYS:")
-        for m in (pred_der_dom_meta or []):
-            if isinstance(m, dict):
-                kb = m.get("branch_id")
-                ks = m.get("seg_idx")
-                print("   ", (kb, ks), type(kb), type(ks))
+        for pr_rec in _iter_valid_records(pred_der_dom_records):
+            kb = pr_rec.get("branch_id")
+            ks = pr_rec.get("seg_idx")
+            print("   ", (kb, ks), type(kb), type(ks))
         print("[END DEBUG]\n")
 
+        stage5_strict_skip_csv = os.path.join(topo_dbg_dir, "stage5_strict_skips.csv")
         used_gt_ids = set()
 
-        def _iter_available_gt_records():
-            for arr in gt_bucket.values():
-                for rec in arr:
-                    if id(rec) not in used_gt_ids:
-                        yield rec
-
-        def _geom_match_cost(pred_seg, gt_seg):
-            """
-            Endpoint/orientation + length consistency cost for fallback matching.
-            Lower is better.
-            """
-            P = np.asarray(pred_seg, float)
-            G = np.asarray(gt_seg, float)
-            if P.ndim != 2 or G.ndim != 2 or len(P) < 2 or len(G) < 2:
-                return float("inf")
-            p0, p1 = P[0], P[-1]
-            g0, g1 = G[0], G[-1]
-            d_fwd = float(np.linalg.norm(p0 - g0) + np.linalg.norm(p1 - g1))
-            d_rev = float(np.linalg.norm(p0 - g1) + np.linalg.norm(p1 - g0))
-            d_end = min(d_fwd, d_rev)
-            len_ratio = float(len(G) / max(len(P), 1))
-            d_len = abs(len_ratio - 1.0) * 25.0
-            return d_end + d_len
-
-        pred_off = 0
         stage5_unmatched_skips = 0
-        for S, m in zip(pred_der_dom_segs, pred_der_dom_meta):
-            if S is None or len(S) < 2:
-                continue
-
-            pts = np.asarray(S, float)
+        for pred_rec in _iter_valid_records(pred_der_dom_records):
+            pts = np.asarray(pred_rec.get("pts", None), float)
             L = int(len(pts))
 
-            mm_pred = m if isinstance(m, dict) else {}
-            seg_idx_dbg = mm_pred.get("seg_idx")
-            branch_dbg = mm_pred.get("branch_id")
-            key = _norm_stage5_key(mm_pred)
+            mm_pred = pred_rec.get("meta", {}) if isinstance(pred_rec.get("meta", {}), dict) else {}
+            seg_idx_dbg = pred_rec.get("seg_idx", mm_pred.get("seg_idx"))
+            branch_dbg = pred_rec.get("branch_id", mm_pred.get("branch_id"))
+            atomic_dbg = pred_rec.get("atomic_id", mm_pred.get("atomic_id", None))
+            key = _norm_stage5_key_from_record(pred_rec)
             if key is None:
-                raise RuntimeError(
-                    f"[STAGE5 FATAL] invalid pred key metadata for cid={cid}: "
-                    f"branch_id={branch_dbg}, seg_idx={seg_idx_dbg}"
+                stage5_unmatched_skips += 1
+                print(
+                    f"[STAGE5 STRICT SKIP] cid={cid} branch_id={branch_dbg} seg_idx={seg_idx_dbg} "
+                    f"reason=invalid_key_metadata"
                 )
+                log_invalid(
+                    image=base_name,
+                    cid=cid,
+                    level="atomic",
+                    reason="invalid_key_metadata",
+                    length=_polyline_length(pts),
+                    n_segments=1,
+                    pred_members=pred_members,
+                    gt_members=gt_members,
+                    overlap=overlap,
+                    entity_id=atomic_dbg,
+                    branch_id=branch_dbg,
+                    extra_info=f"seg_idx={seg_idx_dbg}",
+                )
+                if DEBUG_TOPOLOGY_TRACE:
+                    _append_csv_row(
+                        stage5_strict_skip_csv,
+                        [
+                            str(base_name),
+                            str(cid),
+                            str(branch_dbg),
+                            str(seg_idx_dbg),
+                            int(L),
+                            "invalid_key_metadata",
+                            int(pred_total_pts),
+                            int(gt_total_pts),
+                            0,
+                        ],
+                        header=[
+                            "image",
+                            "cid",
+                            "branch_id",
+                            "seg_idx",
+                            "L_geom",
+                            "reason",
+                            "pred_len_total",
+                            "gt_len_total",
+                            "num_gt_candidates_same_branch",
+                        ],
+                    )
+                continue
 
-            # Pred width stream: local sequential attachment over surviving pred segments.
-            predw = _safe_take(pred_source, pred_off, L, pad_value=np.nan)
-            pred_off += L
+            predw = np.asarray(pred_rec.get("width", np.full((L,), np.nan, float)), float).reshape(-1)
+            if predw.size != L:
+                stage5_unmatched_skips += 1
+                print(
+                    f"[STAGE5 STRICT SKIP] cid={cid} branch_id={branch_dbg} seg_idx={seg_idx_dbg} "
+                    f"reason=invalid_width_alignment_pred predw_len={predw.size} geom_len={L}"
+                )
+                log_invalid(
+                    image=base_name,
+                    cid=cid,
+                    level="atomic",
+                    reason="invalid_width_alignment_pred",
+                    length=_polyline_length(pts),
+                    n_segments=1,
+                    pred_members=pred_members,
+                    gt_members=gt_members,
+                    overlap=overlap,
+                    entity_id=atomic_dbg,
+                    branch_id=branch_dbg,
+                    extra_info=f"predw_len={predw.size}; geom_len={L}",
+                )
+                if DEBUG_TOPOLOGY_TRACE:
+                    _append_csv_row(
+                        stage5_strict_skip_csv,
+                        [
+                            str(base_name),
+                            str(cid),
+                            str(branch_dbg),
+                            str(seg_idx_dbg),
+                            int(L),
+                            "invalid_width_alignment_pred",
+                            int(pred_total_pts),
+                            int(gt_total_pts),
+                            0,
+                        ],
+                        header=[
+                            "image",
+                            "cid",
+                            "branch_id",
+                            "seg_idx",
+                            "L_geom",
+                            "reason",
+                            "pred_len_total",
+                            "gt_len_total",
+                            "num_gt_candidates_same_branch",
+                        ],
+                    )
+                continue
 
-            # GT width stream: local by (branch_id, seg_idx), no pred-global indexing.
+            # GT width stream: STRICT local by (branch_id, seg_idx); no fallback matching.
             gt_list = gt_bucket.get(key, [])
             gt_list_avail = [rec for rec in gt_list if id(rec) not in used_gt_ids]
             if gt_list_avail:
                 rec0 = gt_list_avail[0]
                 used_gt_ids.add(id(rec0))
-                gt_match_seg, gtw_local, gt_seg_len, _ = rec0
+                gt_match_seg = np.asarray(rec0.get("pts", None), float)
+                gtw = np.asarray(rec0.get("width", np.full((len(gt_match_seg),), np.nan, float)), float).reshape(-1)
+                if gtw.size != len(gt_match_seg):
+                    stage5_unmatched_skips += 1
+                    reason = "invalid_width_alignment_gt"
+                    print(
+                        f"[STAGE5 STRICT SKIP] cid={cid} branch_id={branch_dbg} seg_idx={seg_idx_dbg} "
+                        f"reason={reason} gtw_len={gtw.size} gt_geom_len={len(gt_match_seg)}"
+                    )
+                    log_invalid(
+                        image=base_name,
+                        cid=cid,
+                        level="atomic",
+                        reason=reason,
+                        length=_polyline_length(pts),
+                        n_segments=1,
+                        pred_members=pred_members,
+                        gt_members=gt_members,
+                        overlap=overlap,
+                        entity_id=atomic_dbg,
+                        branch_id=branch_dbg,
+                        extra_info=f"gtw_len={gtw.size}; gt_geom_len={len(gt_match_seg)}; key={key}",
+                    )
+                    if DEBUG_TOPOLOGY_TRACE:
+                        _append_csv_row(
+                            stage5_strict_skip_csv,
+                            [
+                                str(base_name),
+                                str(cid),
+                                str(branch_dbg),
+                                str(seg_idx_dbg),
+                                int(L),
+                                str(reason),
+                                int(pred_total_pts),
+                                int(gt_total_pts),
+                                0,
+                            ],
+                            header=[
+                                "image",
+                                "cid",
+                                "branch_id",
+                                "seg_idx",
+                                "L_geom",
+                                "reason",
+                                "pred_len_total",
+                                "gt_len_total",
+                                "num_gt_candidates_same_branch",
+                            ],
+                        )
+                    continue
+                gt_seg_len = int(len(gt_match_seg))
                 gt_match_mode = "segment_local_match_strict"
             else:
-                # Fallback: branch-only match if GT seg_idx is missing/inconsistent.
+                stage5_unmatched_skips += 1
                 b_only = key[0]
-                cand = gt_bucket_by_branch.get(int(b_only), [])
-                cand_avail = [rec for rec in cand if id(rec) not in used_gt_ids]
-                if cand_avail:
-                    # Pick length-closest remaining segment in this branch.
-                    rec_best = min(cand_avail, key=lambda rec: abs(int(rec[2]) - int(L)))
-                    used_gt_ids.add(id(rec_best))
-                    gt_match_seg, gtw_local, gt_seg_len, _ = rec_best
-                    gt_match_mode = "segment_local_match_branch_fallback"
-                    print(
-                        f"[STAGE5 WARN] strict key miss for {key}, "
-                        f"used branch fallback branch={b_only} len_pred={L} len_gt={gt_seg_len}"
+                n_same_branch = int(
+                    np.sum(
+                        [
+                            1
+                            for k_stage5, arr_stage5 in gt_bucket.items()
+                            if isinstance(k_stage5, tuple) and len(k_stage5) == 2 and int(k_stage5[0]) == int(b_only)
+                            for _ in arr_stage5
+                        ]
                     )
+                )
+                if len(gt_list) > 0:
+                    reason = "gt_already_consumed"
                 else:
-                    # Global geometry fallback across all remaining GT segments.
-                    rem = list(_iter_available_gt_records())
-                    if rem:
-                        rec_best = min(rem, key=lambda rec: _geom_match_cost(pts, rec[0]))
-                        used_gt_ids.add(id(rec_best))
-                        gt_match_seg, gtw_local, gt_seg_len, _ = rec_best
-                        gt_match_mode = "segment_local_match_global_fallback"
-                        print(
-                            f"[STAGE5 WARN] no strict/branch match for key={key}; "
-                            f"used GLOBAL fallback len_pred={L} len_gt={gt_seg_len}"
-                        )
-                    else:
-                        stage5_unmatched_skips += 1
-                        print(
-                            f"[STAGE5 WARN] no GT match for normalized key={key} "
-                            f"(raw branch={branch_dbg}, seg_idx={seg_idx_dbg}) cid={cid} -> skip segment"
-                        )
-                        if DEBUG_TOPOLOGY_TRACE:
-                            _append_csv_row(
-                                stage5_slice_csv,
-                                [
-                                    str(cid),
-                                    str(branch_dbg),
-                                    str(seg_idx_dbg),
-                                    int(L),
-                                    int(max(0, pred_off - L)),
-                                    int(len(predw)),
-                                    0,  # gtw_len
-                                    int(np.sum(~np.isfinite(predw))),
-                                    0,  # gt_nonfinite
-                                    0,  # gt_padded_nonfinite
-                                    0,  # gt_real_nonfinite
-                                    int(len(pred_source)),
-                                    int(len(gtw_source)),
-                                    "no_gt_match_skip",
-                                    0,  # gt_seg_len
-                                ],
-                                header=[
-                                    "cid",
-                                    "branch_id",
-                                    "seg_idx",
-                                    "L_geom",
-                                    "pred_s0",
-                                    "predw_len",
-                                    "gtw_len",
-                                    "pred_nonfinite",
-                                    "gt_nonfinite",
-                                    "gt_padded_nonfinite",
-                                    "gt_real_nonfinite",
-                                    "pred_len",
-                                    "gt_len",
-                                    "gt_match_mode",
-                                    "gt_seg_len",
-                                ],
-                            )
-                        continue
+                    reason = "no_gt_match_strict"
+
+                print(
+                    f"[STAGE5 STRICT SKIP] cid={cid} branch_id={branch_dbg} seg_idx={seg_idx_dbg} "
+                    f"reason={reason} key={key}"
+                )
+                log_invalid(
+                    image=base_name,
+                    cid=cid,
+                    level="atomic",
+                    reason=reason,
+                    length=_polyline_length(pts),
+                    n_segments=1,
+                    pred_members=pred_members,
+                    gt_members=gt_members,
+                    overlap=overlap,
+                    entity_id=atomic_dbg,
+                    branch_id=branch_dbg,
+                    extra_info=f"key={key}",
+                )
+                if DEBUG_TOPOLOGY_TRACE:
+                    _append_csv_row(
+                        stage5_strict_skip_csv,
+                        [
+                            str(base_name),
+                            str(cid),
+                            str(branch_dbg),
+                            str(seg_idx_dbg),
+                            int(L),
+                            str(reason),
+                            int(pred_total_pts),
+                            int(gt_total_pts),
+                            int(n_same_branch),
+                        ],
+                        header=[
+                            "image",
+                            "cid",
+                            "branch_id",
+                            "seg_idx",
+                            "L_geom",
+                            "reason",
+                            "pred_len_total",
+                            "gt_len_total",
+                            "num_gt_candidates_same_branch",
+                        ],
+                    )
+                continue
 
             # Orientation diagnostic (debug-only): detect local segment reversal.
             orient_flag = "unknown"
@@ -6501,8 +7609,6 @@ def compare_widths_for_aligned_cracks(
                 f"flag={orient_flag}"
             )
 
-            gtw = _resample_1d_to_len(gtw_local, L)
-
             # ----------------------------
             # DEBUG: classify nonfinite causes (segment-local)
             # ----------------------------
@@ -6520,19 +7626,22 @@ def compare_widths_for_aligned_cracks(
                     bad = np.where((~_gt_padded_mask) & _gt_nonfinite_mask)[0][:10]
                     print(f"  GT NONFINITE (NOT padding): count={_gt_real_nonfinite} first_idx={bad.tolist()}")
                     for j in bad:
-                        print(f"    j={int(j)} pred_global={int(max(0, pred_off - L) + j)} gtw={gtw[j]} predw={predw[j]}")
+                        pv = predw[j] if int(j) < len(predw) else np.nan
+                        print(f"    j={int(j)} gtw={gtw[j]} predw={pv}")
                 if _pred_real_nonfinite > 0:
                     bad = np.where(_pred_nonfinite_mask)[0][:10]
                     print(f"  PRED NONFINITE: count={_pred_real_nonfinite} first_idx={bad.tolist()}")
                     for j in bad:
+                        gv = gtw[j] if int(j) < len(gtw) else np.nan
+                        padded_flag = bool(_gt_padded_mask[int(j)]) if int(j) < len(_gt_padded_mask) else False
                         print(
-                            f"    j={int(j)} pred_global={int(max(0, pred_off - L) + j)} predw={predw[j]} "
-                            f"gtw={gtw[j]} padded_gt={bool(_gt_padded_mask[j])}"
+                            f"    j={int(j)} predw={predw[j]} "
+                            f"gtw={gv} padded_gt={padded_flag}"
                         )
 
             print(
                 f"[STAGE5 TRACE] cid={cid} branch_id={branch_dbg} seg_idx={seg_idx_dbg} "
-                f"source=local_segmatch pred_s0={int(max(0, pred_off - L))} L={L} "
+                f"source=record_strict_match L={L} "
                 f"gt_match={gt_match_mode} gt_seg_len={gt_seg_len} "
                 f"pred_nonfinite={_pred_real_nonfinite} "
                 f"gt_nonfinite={int(np.sum(_gt_nonfinite_mask))} "
@@ -6547,15 +7656,14 @@ def compare_widths_for_aligned_cracks(
                         str(branch_dbg),
                         str(seg_idx_dbg),
                         int(L),
-                        int(max(0, pred_off - L)),
                         int(len(predw)),
                         int(len(gtw)),
                         int(_pred_real_nonfinite),
                         int(np.sum(_gt_nonfinite_mask)),
                         int(_gt_padded_nonfinite),
                         int(_gt_real_nonfinite),
-                        int(len(pred_source)),
-                        int(len(gtw_source)),
+                        int(pred_total_pts),
+                        int(gt_total_pts),
                         str(gt_match_mode),
                         int(gt_seg_len),
                     ],
@@ -6564,7 +7672,6 @@ def compare_widths_for_aligned_cracks(
                         "branch_id",
                         "seg_idx",
                         "L_geom",
-                        "pred_s0",
                         "predw_len",
                         "gtw_len",
                         "pred_nonfinite",
@@ -6585,29 +7692,43 @@ def compare_widths_for_aligned_cracks(
             predw = np.asarray(predw, float)
             gtw = np.asarray(gtw, float)
 
-            d = predw - gtw
-            stage4_pairs.append((pts, d))
+            nd = int(min(len(pts), len(predw), len(gtw)))
+            if nd >= 2:
+                pts_eval = np.asarray(pts[:nd], float)
+                predw_eval = np.asarray(predw[:nd], float)
+                gtw_eval = np.asarray(gtw[:nd], float)
+                d = predw_eval - gtw_eval
+                stage4_pairs.append((pts_eval, d))
+            else:
+                print(
+                    f"[STAGE5 TRACE] cid={cid} seg_idx={seg_idx_dbg} "
+                    f"no overlap for stage4_pairs (n={nd}); keeping strict joined record"
+                )
             final_pred_segs.append(pts)
 
             width_pairs.append({
                 "image": base_name,
                 "cid": str(cid),
-                "member_id": str(m.get("atomic_id")) if isinstance(m, dict) else None,
+                "member_id": (None if atomic_dbg is None else str(atomic_dbg)),
                 "crack_type": "combined",
                 "midline_type": midline_type,
                 "geometry_type": "derived",
                 "bbox": crack.get("mask_bbox"),
                 "pred_mask_bbox": crack.get("mask_bbox"),
                 "pred_mask_crop": crack.get("mask_crop"),
-                "pts": pts,
-                "predw": predw,
-                "gruthw": gtw,
+                "pts": np.asarray(pts, float),
+                "predw": np.asarray(predw, float),
+                "gruthw": np.asarray(gtw, float),
                 "gt_source": gt_match_mode,
                 "gt_match_seg": np.asarray(gt_match_seg, float) if gt_match_seg is not None else None,
-                "branch_id": m.get("branch_id"),
-                "seg_idx": m.get("seg_idx"),
+                "branch_id": branch_dbg,
+                "seg_idx": seg_idx_dbg,
                 "gt_mismatch": False,
                 "gt_relation": "combined_vs_combined",
+                "match_quality": match_quality,
+                "is_weak_alignment": (match_quality == "weak"),
+                "is_valid_match": True,
+                "overlap_score": float(overlap),
             })
 
         print(f"[STAGE5] width attachment complete - {len(stage4_pairs)} segments")
@@ -7035,39 +8156,6 @@ def compare_widths_for_aligned_cracks(
                 runs.append((start, len(mask_bool) - 1))
             return runs
 
-        def _length_weighted_err_stats(d_vals, ds_w):
-            """
-            d_vals: length N
-            ds_w:   length N (weights). In our usage: d_rs[:-1] with ds = diff(s_rs).
-            """
-            d_vals = np.asarray(d_vals, float)
-            ds_w   = np.asarray(ds_w, float)
-            n = min(len(d_vals), len(ds_w))
-            if n <= 0:
-                return {"bias": np.nan, "mae": np.nan, "rmse": np.nan, "p95_abs": np.nan, "median_abs": np.nan}
-
-            d_vals = d_vals[:n]
-            ds_w   = ds_w[:n]
-            ok = np.isfinite(d_vals) & np.isfinite(ds_w) & (ds_w > 0)
-            if not np.any(ok):
-                return {"bias": np.nan, "mae": np.nan, "rmse": np.nan, "p95_abs": np.nan, "median_abs": np.nan}
-
-            d = d_vals[ok]
-            w = ds_w[ok]
-            W = float(np.sum(w) + 1e-12)
-
-            bias = float(np.sum(d * w) / W)
-            mae  = float(np.sum(np.abs(d) * w) / W)
-            mse  = float(np.sum((d ** 2) * w) / W)
-            rmse = float(math.sqrt(max(mse, 0.0)))
-
-            absd = np.abs(d[np.isfinite(d)])
-            p95  = float(np.percentile(absd, 95)) if absd.size else np.nan
-            med  = float(np.median(absd)) if absd.size else np.nan
-
-            return {"bias": bias, "mae": mae, "rmse": rmse, "p95_abs": p95, "median_abs": med}
-
-      
         # ============================================================
         # Part 2 main: resample segments, then compute widths + diffs,
         # and compute length-weighted stats (metrics == visualization)
@@ -7114,10 +8202,96 @@ def compare_widths_for_aligned_cracks(
             y = np.interp(t, s, xy[:, 1])
             return np.column_stack([x, y]).astype(float, copy=False)
 
+        def _normalized_arclen_u_part2(xy):
+            xy = np.asarray(xy, float)
+            if xy.ndim != 2 or xy.shape[1] != 2 or len(xy) < 2:
+                return None
+            d = np.sqrt(np.sum((xy[1:] - xy[:-1]) ** 2, axis=1))
+            if d.size == 0:
+                return None
+            s = np.concatenate([[0.0], np.cumsum(d)])
+            total = float(s[-1]) if len(s) > 0 else 0.0
+            if (not np.isfinite(total)) or total <= 1e-12:
+                return None
+            return (s / total).astype(float, copy=False)
+
+        def _interp_1d_on_u(u_src, y_src, u_common):
+            u_src = np.asarray(u_src, float).reshape(-1)
+            y_src = np.asarray(y_src, float).reshape(-1)
+            u_common = np.asarray(u_common, float).reshape(-1)
+            if len(u_src) != len(y_src) or len(u_src) < 2:
+                out = np.empty((len(u_common),), float)
+                out[:] = np.nan
+                return out
+            m = np.isfinite(u_src) & np.isfinite(y_src)
+            u = u_src[m]
+            y = y_src[m]
+            if len(u) == 0:
+                out = np.empty((len(u_common),), float)
+                out[:] = np.nan
+                return out
+            if len(u) == 1:
+                out = np.empty((len(u_common),), float)
+                out[:] = float(y[0])
+                return out
+            u_uni, idx = np.unique(u, return_index=True)
+            y_uni = y[idx]
+            if len(u_uni) == 1:
+                out = np.empty((len(u_common),), float)
+                out[:] = float(y_uni[0])
+                return out
+            return np.interp(u_common, u_uni, y_uni).astype(float, copy=False)
+
+        def _interp_xy_on_u(u_src, pts_src, u_common):
+            pts_src = np.asarray(pts_src, float)
+            if pts_src.ndim != 2 or pts_src.shape[1] != 2 or len(pts_src) < 2:
+                out = np.empty((len(u_common), 2), float)
+                out[:] = np.nan
+                return out
+            x = _interp_1d_on_u(u_src, pts_src[:, 0], u_common)
+            y = _interp_1d_on_u(u_src, pts_src[:, 1], u_common)
+            return np.column_stack([x, y]).astype(float, copy=False)
+
+        def resample_width_pair_relative(pred_pts, predw, gt_pts_support, gtw, N=None):
+            """
+            Compare widths at matched relative positions along the segment:
+            - predicted geometry defines pair identity (reference support)
+            - GT support comes from gt_match_seg when available/valid
+            - both widths are interpolated to one shared normalized arclength grid
+            """
+            pred_pts = np.asarray(pred_pts, float)
+            predw = np.asarray(predw, float).reshape(-1)
+            gt_pts_support = np.asarray(gt_pts_support, float)
+            gtw = np.asarray(gtw, float).reshape(-1)
+
+            if pred_pts.ndim != 2 or pred_pts.shape[1] != 2 or len(pred_pts) < 2:
+                return None, None, None
+            if gt_pts_support.ndim != 2 or gt_pts_support.shape[1] != 2 or len(gt_pts_support) < 2:
+                return None, None, None
+            if len(predw) != len(pred_pts) or len(gtw) != len(gt_pts_support):
+                return None, None, None
+
+            u_pred = _normalized_arclen_u_part2(pred_pts)
+            u_gt = _normalized_arclen_u_part2(gt_pts_support)
+            if u_pred is None or u_gt is None:
+                return None, None, None
+
+            if N is None:
+                N = int(len(predw))
+            N = int(N)
+            if N < 2:
+                return None, None, None
+
+            u_common = np.linspace(0.0, 1.0, num=N)
+            predw_rs = _interp_1d_on_u(u_pred, predw, u_common)
+            gtw_rs = _interp_1d_on_u(u_gt, gtw, u_common)
+            pts_rs = _interp_xy_on_u(u_pred, pred_pts, u_common)
+            return pts_rs, predw_rs, gtw_rs
+
         # ============================================================
         # Part 2: per-width-pair processing
         #   - Build ORIGINAL-domain signals (plot-only)
-        #   - Resample into authoritative domain
+        #   - Compare widths on one shared relative-arclength domain
         #   - Compute d ONLY in resampled domain
         #   - Cache ORIGINAL using arclength windowing (no index clipping)
         # ============================================================
@@ -7131,6 +8305,9 @@ def compare_widths_for_aligned_cracks(
             mtype = str(wp.get("midline_type", midline_type))
             gtype = str(wp.get("geometry_type", "derived"))
             bbox  = wp.get("bbox", None)
+            entity_part2 = wp.get("member_id", None)
+            if entity_part2 is None:
+                entity_part2 = cid_s
 
             print(
                 f"[PART2 DEBUG] ▶ wp: "
@@ -7148,64 +8325,171 @@ def compare_widths_for_aligned_cracks(
                     f"[PART2 FATAL] non-derived geometry slipped into Part2: "
                     f"cid={cid_s} crack_type={ctype} midline_type={mtype} geometry_type={gtype}"
                 )
+
+            # Strict support validation:
+            # malformed support is skipped and logged instead of repaired.
             if pts is None or predw is None:
-                raise RuntimeError(
-                    f"[PART2 FATAL] missing pts/predw: cid={cid_s} "
-                    f"pts={None if pts is None else len(pts)} "
-                    f"predw={None if predw is None else len(predw)}"
+                log_invalid(
+                    image=image,
+                    cid=cid_s,
+                    level="atomic",
+                    reason="part2_pred_support_mismatch",
+                    length=np.nan,
+                    n_segments=1,
+                    entity_id=entity_part2,
+                    branch_id=wp.get("branch_id", None),
+                    extra_info=(
+                        f"pred_pts_len={None if pts is None else len(pts)} "
+                        f"predw_len={None if predw is None else len(predw)} "
+                        f"gt_pts_len={None if wp.get('gt_match_seg', None) is None else len(wp.get('gt_match_seg', []))} "
+                        f"gtw_len={None if gtruthw is None else len(gtruthw)}"
+                    ),
                 )
+                print(f"[PART2 SKIP] cid={cid_s} reason=part2_pred_support_mismatch (missing pts/predw)")
+                continue
             if gtruthw is None:
-                raise RuntimeError(
-                    f"[PART2 FATAL] gtruthw is None (should be produced in Stage5): cid={cid_s}"
+                log_invalid(
+                    image=image,
+                    cid=cid_s,
+                    level="atomic",
+                    reason="part2_gt_support_mismatch",
+                    length=float(_polyline_length(np.asarray(pts, float))) if pts is not None else np.nan,
+                    n_segments=1,
+                    entity_id=entity_part2,
+                    branch_id=wp.get("branch_id", None),
+                    extra_info=(
+                        f"pred_pts_len={len(pts)} predw_len={len(predw)} "
+                        f"gt_pts_len={None if wp.get('gt_match_seg', None) is None else len(wp.get('gt_match_seg', []))} "
+                        f"gtw_len=None"
+                    ),
                 )
+                print(f"[PART2 SKIP] cid={cid_s} reason=part2_gt_support_mismatch (missing gtruthw)")
+                continue
 
-            pts = np.asarray(pts, float)
-            predw = np.asarray(predw, float)
-            gtruthw = np.asarray(gtruthw, float)
+            pred_pts = np.asarray(pts, float)
+            predw_raw = np.asarray(predw, float).reshape(-1)
+            gtruthw_raw = np.asarray(gtruthw, float).reshape(-1)
 
-            # Geometry + predw must align 1:1 (Stage5 ensures this)
-            n_geom = min(len(pts), len(predw))
-            if n_geom < 2:
-                raise RuntimeError(
-                    f"[PART2 FATAL] <2 samples after geom/pred trim: cid={cid_s} "
-                    f"(pts={len(pts)}, predw={len(predw)}, gtw={len(gtruthw)})"
+            if pred_pts.ndim != 2 or pred_pts.shape[1] != 2 or len(pred_pts) < 2 or len(predw_raw) != len(pred_pts):
+                log_invalid(
+                    image=image,
+                    cid=cid_s,
+                    level="atomic",
+                    reason="part2_pred_support_mismatch",
+                    length=float(_polyline_length(pred_pts)) if pred_pts.ndim == 2 else np.nan,
+                    n_segments=1,
+                    entity_id=entity_part2,
+                    branch_id=wp.get("branch_id", None),
+                    extra_info=(
+                        f"pred_pts_len={len(pred_pts) if pred_pts.ndim == 2 else None} "
+                        f"predw_len={len(predw_raw)} "
+                        f"gt_pts_len={None if wp.get('gt_match_seg', None) is None else len(wp.get('gt_match_seg', []))} "
+                        f"gtw_len={len(gtruthw_raw)}"
+                    ),
                 )
+                print(
+                    f"[PART2 SKIP] cid={cid_s} reason=part2_pred_support_mismatch "
+                    f"pred_pts_len={len(pred_pts) if pred_pts.ndim == 2 else None} predw_len={len(predw_raw)}"
+                )
+                continue
 
-            pts = pts[:n_geom]
-            predw = predw[:n_geom]
+            # Keep local aliases used by downstream cache/debug blocks.
+            pts = np.asarray(pred_pts, float)
 
-            # GT stream does not control geometry length.
-            # If shorter, pad with NaN; if longer, clip to geometry.
-            if len(gtruthw) < n_geom:
-                gtmp = np.empty((n_geom,), float)
-                gtmp[:] = np.nan
-                if len(gtruthw) > 0:
-                    gtmp[:len(gtruthw)] = gtruthw
-                gtruthw = gtmp
+            gt_match_seg_raw = wp.get("gt_match_seg", None)
+            gt_pts_candidate = None
+            if gt_match_seg_raw is not None:
+                gt_tmp = np.asarray(gt_match_seg_raw, float)
+                if gt_tmp.ndim == 2 and gt_tmp.shape[1] == 2:
+                    gt_pts_candidate = gt_tmp
+
+            # Part 2 compares widths at matched relative positions along the segment.
+            # Predicted geometry defines the reference pair identity.
+            # GT support may come from gt_match_seg if available and aligned to gtruthw.
+            if gt_pts_candidate is not None and len(gt_pts_candidate) == len(gtruthw_raw):
+                gt_pts_support = gt_pts_candidate
+            elif len(gtruthw_raw) == len(pred_pts):
+                gt_pts_support = pred_pts
             else:
-                gtruthw = gtruthw[:n_geom]
+                log_invalid(
+                    image=image,
+                    cid=cid_s,
+                    level="atomic",
+                    reason="part2_gt_support_mismatch",
+                    length=float(_polyline_length(pred_pts)),
+                    n_segments=1,
+                    entity_id=entity_part2,
+                    branch_id=wp.get("branch_id", None),
+                    extra_info=(
+                        f"pred_pts_len={len(pred_pts)} predw_len={len(predw_raw)} "
+                        f"gt_pts_len={None if gt_pts_candidate is None else len(gt_pts_candidate)} "
+                        f"gtw_len={len(gtruthw_raw)}"
+                    ),
+                )
+                print(
+                    f"[PART2 SKIP] cid={cid_s} reason=part2_gt_support_mismatch "
+                    f"pred_pts_len={len(pred_pts)} gtw_len={len(gtruthw_raw)} "
+                    f"gt_pts_len={None if gt_pts_candidate is None else len(gt_pts_candidate)}"
+                )
+                continue
 
-            n = n_geom
-
-            s_full = arclen_s(pts)
+            s_full = arclen_s(pred_pts)
             if len(s_full) < 2:
-                raise RuntimeError(f"[PART2 FATAL] invalid arclength for cid={cid_s}")
+                log_invalid(
+                    image=image,
+                    cid=cid_s,
+                    level="atomic",
+                    reason="part2_pred_support_mismatch",
+                    length=float(_polyline_length(pred_pts)),
+                    n_segments=1,
+                    entity_id=entity_part2,
+                    branch_id=wp.get("branch_id", None),
+                    extra_info=f"invalid_pred_arclength pred_pts_len={len(pred_pts)}",
+                )
+                print(f"[PART2 SKIP] cid={cid_s} reason=part2_pred_support_mismatch (invalid pred arclength)")
+                continue
 
             total_len = float(s_full[-1] - s_full[0])
             if not np.isfinite(total_len) or total_len <= 0:
-                raise RuntimeError(f"[PART2 FATAL] non-finite total_len for cid={cid_s}: {total_len}")
+                log_invalid(
+                    image=image,
+                    cid=cid_s,
+                    level="atomic",
+                    reason="part2_pred_support_mismatch",
+                    length=np.nan,
+                    n_segments=1,
+                    entity_id=entity_part2,
+                    branch_id=wp.get("branch_id", None),
+                    extra_info=f"nonfinite_total_len={total_len}",
+                )
+                print(f"[PART2 SKIP] cid={cid_s} reason=part2_pred_support_mismatch (non-finite total_len)")
+                continue
 
             # ------------------------------------------------------------
             # ORIGINAL DOMAIN (plot-only)
             # ------------------------------------------------------------
-            s_orig = arclen_s(pts)
-            predw_orig = np.asarray(predw, float)
-
-            gtruthw_orig = np.asarray(gtruthw, float)
+            s_orig = arclen_s(pred_pts)
+            predw_orig = np.asarray(predw_raw, float)
+            gtruthw_orig = np.asarray(gtruthw_raw, float)
 
             m0 = min(len(s_orig), len(predw_orig), len(gtruthw_orig))
             if m0 < 2:
-                raise RuntimeError(f"[PART2 FATAL] too few aligned ORIGINAL samples for cid={cid_s}")
+                log_invalid(
+                    image=image,
+                    cid=cid_s,
+                    level="atomic",
+                    reason="part2_gt_support_mismatch",
+                    length=float(_polyline_length(pred_pts)),
+                    n_segments=1,
+                    entity_id=entity_part2,
+                    branch_id=wp.get("branch_id", None),
+                    extra_info=(
+                        f"too_few_original_samples m0={m0} "
+                        f"pred_pts_len={len(pred_pts)} predw_len={len(predw_orig)} gtw_len={len(gtruthw_orig)}"
+                    ),
+                )
+                print(f"[PART2 SKIP] cid={cid_s} reason=part2_gt_support_mismatch (too few original samples)")
+                continue
 
             s_orig       = np.asarray(s_orig[:m0], float)
             predw_orig   = np.asarray(predw_orig[:m0], float)
@@ -7251,26 +8535,47 @@ def compare_widths_for_aligned_cracks(
 
 
             # ------------------------------------------------------------
-            # RESAMPLE GEOMETRY + WIDTHS (authoritative domain)
+            # RESAMPLE WIDTHS IN A SINGLE RELATIVE-ARCLENGTH DOMAIN
+            #   - no padding/clipping repairs
+            #   - both streams evaluated at matched normalized positions
             # ------------------------------------------------------------
-            pts_rs, predw_rs, gtruthw_rs = resample_by_arclength(
-                pts, predw, gtruthw,
-                ds_target=ds_target_px,
-                min_pts=2,
-                preserve_endpoints=True,
-                fastpath=True,
+            pts_rs, predw_rs, gtruthw_rs = resample_width_pair_relative(
+                pred_pts,
+                predw_raw,
+                gt_pts_support,
+                gtruthw_raw,
+                N=len(predw_raw),
             )
+            if (
+                pts_rs is None or predw_rs is None or gtruthw_rs is None
+                or len(pts_rs) < 2
+                or len(predw_rs) != len(pts_rs)
+                or len(gtruthw_rs) != len(pts_rs)
+            ):
+                log_invalid(
+                    image=image,
+                    cid=cid_s,
+                    level="atomic",
+                    reason="part2_gt_support_mismatch",
+                    length=float(_polyline_length(pred_pts)),
+                    n_segments=1,
+                    entity_id=entity_part2,
+                    branch_id=wp.get("branch_id", None),
+                    extra_info=(
+                        f"pred_pts_len={len(pred_pts)} predw_len={len(predw_raw)} "
+                        f"gt_pts_len={len(gt_pts_support)} gtw_len={len(gtruthw_raw)} "
+                        f"rs_pts_len={None if pts_rs is None else len(pts_rs)} "
+                        f"rs_predw_len={None if predw_rs is None else len(predw_rs)} "
+                        f"rs_gtw_len={None if gtruthw_rs is None else len(gtruthw_rs)}"
+                    ),
+                )
+                print(f"[PART2 SKIP] cid={cid_s} reason=part2_gt_support_mismatch (relative resample failed)")
+                continue
 
-            if pts_rs is None or len(pts_rs) < 2:
-                raise RuntimeError(f"[PART2 FATAL] resample failed for cid={cid_s}")
-
-            mrs = min(len(pts_rs), len(predw_rs), len(gtruthw_rs))
-            if mrs < 2:
-                raise RuntimeError(f"[PART2 FATAL] resampled arrays too short for cid={cid_s}")
-
-            pts_rs     = np.asarray(pts_rs[:mrs], float)
-            predw_rs   = np.asarray(predw_rs[:mrs], float)
-            gtruthw_rs = np.asarray(gtruthw_rs[:mrs], float)
+            pts_rs = np.asarray(pts_rs, float)
+            predw_rs = np.asarray(predw_rs, float)
+            gtruthw_rs = np.asarray(gtruthw_rs, float)
+            mrs = int(len(pts_rs))
 
             if (
                 DEBUG_CORRESPONDENCE_ON
@@ -7291,8 +8596,7 @@ def compare_widths_for_aligned_cracks(
                 bd["pts_list"].append(np.asarray(pts_rs, float))
                 bd["predw_list"].append(np.asarray(predw_rs, float))
                 bd["gtw_list"].append(np.asarray(gtruthw_rs, float))
-                gt_match_seg = wp.get("gt_match_seg", None)
-                gt_pts_rs = _resample_polyline_to_len_part2(gt_match_seg, mrs)
+                gt_pts_rs = _resample_polyline_to_len_part2(gt_pts_support, mrs)
                 bd["gt_pts_list"].append(gt_pts_rs)
                 try:
                     pm = _rebuild_pred_mask_from_wp(wp, H, W)
@@ -7446,7 +8750,15 @@ def compare_widths_for_aligned_cracks(
                 if bbox is not None:
                     bboxes_part2.append(bbox)
 
-                st = _length_weighted_err_stats(d_run[:-1], ds_w)
+                mw = compute_length_weighted_metrics(d_run, s_run)
+                st0 = length_weighted_err_stats(d_run[:-1], ds_w)
+                st = {
+                    "bias": mw.get("bias", np.nan),
+                    "mae": mw.get("mae", np.nan),
+                    "rmse": mw.get("rmse", np.nan),
+                    "p95_abs": st0.get("p95_abs", np.nan),
+                    "median_abs": st0.get("median_abs", np.nan),
+                }
                 st["run_len_px"] = runL
                 run_stats.append(st)
 
@@ -7832,7 +9144,7 @@ def compare_widths_for_aligned_cracks(
                         if len(d_rs) >= 2 and len(s_rs) >= 2:
                             ds = np.diff(s_rs)
                             d_all.append(d_rs[:-1])
-                            st = _length_weighted_err_stats(d_rs[:-1], ds)
+                            st = compute_length_weighted_metrics(d_rs, s_rs)
                             if np.isfinite(st.get("rmse", np.nan)):
                                 run_rmse.append(st["rmse"])
 
@@ -7941,6 +9253,40 @@ def compare_widths_for_aligned_cracks(
     except Exception as e:
         print(f"[PART2] skipped (fatal): {e}")
 
+    if invalid_logs:
+        try:
+            import pandas as pd
+            os.makedirs(output_dir, exist_ok=True)
+            out_path = os.path.join(output_dir, "invalid_matches.csv")
+            df_new = pd.DataFrame(
+                invalid_logs,
+                columns=[
+                    "image",
+                    "cid",
+                    "level",
+                    "entity_id",
+                    "reason",
+                    "length",
+                    "n_segments",
+                    "pred_members",
+                    "gt_members",
+                    "overlap",
+                    "branch_id",
+                    "extra_info",
+                ],
+            )
+            if os.path.exists(out_path):
+                try:
+                    df_old = pd.read_csv(out_path)
+                except Exception:
+                    df_old = pd.DataFrame(columns=df_new.columns)
+                df_out = pd.concat([df_old, df_new], ignore_index=True)
+            else:
+                df_out = df_new
+            df_out.to_csv(out_path, index=False)
+            print(f"[WIDTH DEBUG] saved invalid/exclusion rows → {out_path}")
+        except Exception as e:
+            print(f"[WIDTH DEBUG] failed to save invalid/exclusion rows: {e}")
 
     # ---------------- plotting ----------------
     if not coords:
