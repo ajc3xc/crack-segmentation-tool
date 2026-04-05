@@ -2296,88 +2296,108 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     combined_gt = _enrich_combined_for_baseline(combined_gt, gt_sup_root)
                     print(f"[BASELINE DEBUG] combined_gt entries: {len(combined_gt)}")
 
+                    normalized_maps = {}
                     for method, rec in width_baseline_maps_local.items():
-                        print(f"[BASELINE] evaluating method='{method}'")
-
-                        # ----------------------------
-                        # REQUIRED baseline artifacts
-                        # ----------------------------
                         if not isinstance(rec, dict):
                             raise TypeError(
                                 f"[BASELINE] expected dict for method '{method}', got {type(rec)}"
                             )
-
                         missing = [k for k in ("width_map", "support_mask", "skel") if k not in rec]
                         if missing:
                             raise KeyError(
                                 f"[BASELINE] missing fields for '{method}': {missing}, "
                                 f"found keys={list(rec.keys())}"
                             )
+                        normalized_maps[str(method)] = rec
 
-                        wmap = rec["width_map"]
-                        supp = rec["support_mask"]
-                        skel = rec["skel"]
+                    if not normalized_maps:
+                        print("[BASELINE] no baseline maps after validation")
+                        return
 
+                    width_eval_methods = [
+                        m for m in normalized_maps.keys()
+                        if not str(m).lower().startswith("skel_")
+                    ]
+                    print(f"[BASELINE DEBUG] width methods: {width_eval_methods}")
+
+                    # ============================================================
+                    # Regime B1 - GT-projected width diffs (family-shared projection)
+                    # ============================================================
+                    rows_all = compute_projected_width_diffs(
+                        gt_payload={"combined_cracks": combined_gt},
+                        gt_full=gt_full,
+                        width_baseline_maps=normalized_maps,
+                        base_name=base_name,
+                        midline_type=midline_type,
+                        crack_type="combined",
+                        metrics_dir_local=metrics_dir,
+                    )
+
+                    rows_by_method = {}
+                    for r in (rows_all or []):
+                        method = str((r or {}).get("method", ""))
+                        if not method:
+                            continue
+                        rows_by_method.setdefault(method, []).append(r)
+
+                    for method in width_eval_methods:
+                        rows = rows_by_method.get(method, [])
                         metrics_dir_local = os.path.join(metrics_dir, method)
                         os.makedirs(metrics_dir_local, exist_ok=True)
-
-                        # ============================================================
-                        # Regime B1 — GT-PROJECTED WIDTH DIFFS (COMBINED)
-                        # ============================================================
-                        rows = compute_projected_width_diffs(
-                            gt_payload={"combined_cracks": combined_gt},
-                            gt_full=gt_full,
-                            width_baseline_maps={method: (wmap, supp)},
-                            base_name=base_name,
-                            midline_type=midline_type,
-                            crack_type="combined",
-                            metrics_dir_local=metrics_dir_local,
-                        )
-
                         if not rows:
                             print(f"[BASELINE] no width rows for '{method}'")
+                            continue
+                        export_width_metrics_all(
+                            metrics_dir_local,
+                            base_name,
+                            rows,
+                            midline_type,
+                            crack_type="combined",
+                        )
+
+                    # ============================================================
+                    # Regime B2 - baseline midline geometry for skeleton methods only
+                    # ============================================================
+                    try:
+                        from helpers.metrics import compute_midline_metrics_baseline
+
+                        gt_mid_all = []
+                        for _cid, cr in combined_gt.items():
+                            mid = np.asarray(cr.get("midline", []), float)
+                            if mid.ndim == 2 and len(mid) >= 2:
+                                gt_mid_all.append(mid)
+                                continue
+                            for S in (cr.get("midline_segments") or []):
+                                S = np.asarray(S, float)
+                                if S.ndim == 2 and len(S) >= 2:
+                                    gt_mid_all.append(S)
+
+                        if gt_mid_all:
+                            gt_mid = np.vstack(gt_mid_all)
+                            gt_xy = gt_mid[:, ::-1]
                         else:
-                            export_width_metrics_all(
-                                metrics_dir_local,
-                                base_name,
-                                rows,
-                                midline_type,
-                                crack_type="combined",
-                            )
+                            gt_mid = None
+                            gt_xy = None
 
-                        # ============================================================
-                        # Regime B2 — BASELINE MIDLINE GEOMETRY (ORDER-INVARIANT)
-                        # ============================================================
-                        try:
-                            from helpers.metrics import compute_midline_metrics_baseline
-
-                            # ---- GT combined midlines ----
-                            gt_mid_all = []
-                            for cid, cr in combined_gt.items():
-                                mid = np.asarray(cr.get("midline", []), float)
-                                if mid.ndim == 2 and len(mid) >= 2:
-                                    gt_mid_all.append(mid)
-                                    continue
-
-                                for S in (cr.get("midline_segments") or []):
-                                    S = np.asarray(S, float)
-                                    if S.ndim == 2 and len(S) >= 2:
-                                        gt_mid_all.append(S)
-
-                            if not gt_mid_all:
-                                print("[BASELINE MIDLINE] no valid GT combined midlines")
+                        for method in ("skel_mat_raw", "skel_mat_dse"):
+                            rec = normalized_maps.get(method)
+                            if rec is None:
+                                continue
+                            if gt_mid is None or gt_xy is None or len(gt_mid) < 2:
+                                print(f"[BASELINE MIDLINE] no valid GT combined midlines for '{method}'")
                                 continue
 
-                            gt_mid = np.vstack(gt_mid_all)
-
-                            # ---- baseline skeleton → point cloud ----
-                            pred_xy = np.column_stack(np.nonzero(skel))   # (row, col)
-                            gt_xy   = gt_mid[:, ::-1]                      # (x,y) → (row,col)
+                            skel = rec.get("skel")
+                            pred_xy = np.column_stack(np.nonzero(skel))
+                            if pred_xy.size == 0:
+                                print(f"[BASELINE MIDLINE] empty skeleton for '{method}'")
+                                continue
 
                             mm = compute_midline_metrics_baseline(pred_xy, gt_xy)
                             nn = float(mm.get("nn_mean_bidirectional", np.nan))
                             hd = float(mm.get("hausdorff_max", np.nan))
                             cov = float(mm.get("coverage_min", np.nan))
+
                             def _safe(x):
                                 return float(x) if np.isfinite(x) else 0.0
 
@@ -2387,16 +2407,10 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                                 + (1.0 - float(np.clip(_safe(cov), 0.0, 1.0)))
                             )
                             length_px = float(
-                                np.sum(
-                                    np.hypot(
-                                        np.diff(gt_mid[:, 0]),
-                                        np.diff(gt_mid[:, 1]),
-                                    )
-                                )
+                                np.sum(np.hypot(np.diff(gt_mid[:, 0]), np.diff(gt_mid[:, 1])))
                             ) if len(gt_mid) >= 2 else 0.0
 
-                            midline_metric_rows = []
-                            midline_metric_rows.append({
+                            midline_metric_rows = [{
                                 "image": base_name,
                                 "crack_id": "width_baseline_combined",
                                 "crack_type": "combined",
@@ -2407,8 +2421,6 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                                 "os_mode": "baseline",
                                 "method": method,
                                 "length_px": length_px,
-
-                                # --- selection metrics ---
                                 "score_mid": score_mid,
                                 "nn_mean_bidirectional": mm.get("nn_mean_bidirectional"),
                                 "hausdorff_max": mm.get("hausdorff_max"),
@@ -2416,15 +2428,15 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                                 "precision_tau": mm.get("precision_tau"),
                                 "recall_tau": mm.get("recall_tau"),
                                 "f1_tau": mm.get("f1_tau"),
-
-                                # --- diagnostics ---
                                 "mean_tan_angle_error_deg": mm.get("mean_tan_angle_error_deg"),
                                 "relative_length_error": mm.get("relative_length_error"),
                                 "orth_mean": mm.get("orth_mean"),
                                 "orth_std": mm.get("orth_std"),
                                 "signed_bias_z": mm.get("signed_bias_z"),
-                            })
+                            }]
 
+                            metrics_dir_local = os.path.join(metrics_dir, method)
+                            os.makedirs(metrics_dir_local, exist_ok=True)
                             export_midline_metrics_all(
                                 metrics_dir_local,
                                 base_name,
@@ -2433,12 +2445,11 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                                 crack_type="combined",
                                 variant_id=method,
                             )
-
                             print(f"[BASELINE MIDLINE] geometry metrics written for '{method}'")
 
-                        except Exception as e:
-                            print(f"[BASELINE MIDLINE] failed for '{method}': {e}")
-                            traceback.print_exc()
+                    except Exception as e:
+                        print(f"[BASELINE MIDLINE] failed: {e}")
+                        traceback.print_exc()
 
                     print(f"[WIDTH BASELINE] finished Regime B1 + B2 for {base_name}")
                     return
@@ -2570,16 +2581,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 try:
                     width_baseline_maps = load_width_baseline_widthmaps_for_image(width_baseline_root)
                     print("[BASELINE DEBUG] loaded methods:", list(width_baseline_maps.keys()))
-
-                    # Geometry-only baseline methods (skeleton masks) do not carry
-                    # valid width maps for width evaluation.
                     if isinstance(width_baseline_maps, dict) and width_baseline_maps:
-                        width_baseline_maps = {
-                            str(k): v
-                            for k, v in width_baseline_maps.items()
-                            if not str(k).lower().startswith("skel_")
-                        }
-                        print("[BASELINE DEBUG] width-eval methods (filtered):", list(width_baseline_maps.keys()))
+                        width_baseline_maps = {str(k): v for k, v in width_baseline_maps.items()}
 
                     if width_baseline_maps:
                         _run_one_mode(

@@ -2024,6 +2024,199 @@ def augment_combined_with_orphan_atomics(
 
     return out
 
+def _project_support_indices_core(
+    wmap,
+    supp,
+    mid_xy,
+    *,
+    max_nn_dist_px=6.0,
+    use_support_mask=True,
+    domain_mask=None,
+    bbox=None,
+    debug=False,
+):
+    """
+    Projection-only stage:
+      - build filtered support cloud
+      - nearest-neighbor map GT points -> support indices
+      - apply radius rejection
+    """
+    import numpy as np
+
+    if wmap is None:
+        return {
+            "valid": np.zeros((0,), dtype=bool),
+            "indices": np.zeros((0,), dtype=int),
+            "dists": np.zeros((0,), dtype=float),
+            "skel_xy": np.zeros((0, 2), dtype=np.float32),
+            "finite_mask": np.zeros((0,), dtype=bool),
+        }
+
+    wmap = np.asarray(wmap)
+    H, W = wmap.shape[:2]
+    xy = np.asarray(mid_xy, float)
+    if xy.ndim != 2 or xy.shape[1] != 2:
+        return {
+            "valid": np.zeros((0,), dtype=bool),
+            "indices": np.zeros((0,), dtype=int),
+            "dists": np.zeros((0,), dtype=float),
+            "skel_xy": np.zeros((0, 2), dtype=np.float32),
+            "finite_mask": np.zeros((0,), dtype=bool),
+        }
+
+    bbox_clip = None
+    if bbox is not None:
+        try:
+            x0, y0, bw, bh = [int(v) for v in bbox]
+            x1 = x0 + bw
+            y1 = y0 + bh
+            x0 = int(np.clip(x0, 0, W))
+            y0 = int(np.clip(y0, 0, H))
+            x1 = int(np.clip(x1, 0, W))
+            y1 = int(np.clip(y1, 0, H))
+            if x1 > x0 and y1 > y0:
+                bbox_clip = (x0, y0, x1, y1)
+        except Exception:
+            bbox_clip = None
+
+    finite = np.isfinite(xy).all(axis=1)
+    if bbox_clip is not None:
+        x0, y0, x1, y1 = bbox_clip
+        inside = (
+            (xy[:, 0] >= x0) & (xy[:, 0] < x1) &
+            (xy[:, 1] >= y0) & (xy[:, 1] < y1)
+        )
+        finite &= inside
+
+    if use_support_mask and supp is not None:
+        supp_m = np.asarray(supp).astype(bool)
+    else:
+        supp_m = np.isfinite(wmap) & (wmap > 0)
+
+    if domain_mask is not None:
+        dm = np.asarray(domain_mask).astype(bool)
+        if dm.shape == supp_m.shape:
+            supp_m &= dm
+        elif debug:
+            print(f"[B1 PROJ] domain_mask shape mismatch: supp={supp_m.shape} domain={dm.shape}")
+
+    if bbox_clip is not None:
+        x0, y0, x1, y1 = bbox_clip
+        bbox_mask = np.zeros_like(supp_m, dtype=bool)
+        bbox_mask[y0:y1, x0:x1] = True
+        supp_m &= bbox_mask
+
+    ys, xs = np.nonzero(supp_m)
+    if len(xs) == 0:
+        if debug:
+            print("[B1 PROJ] support empty")
+        return {
+            "valid": np.zeros((len(xy),), dtype=bool),
+            "indices": np.full((len(xy),), -1, dtype=int),
+            "dists": np.full((len(xy),), np.inf, dtype=float),
+            "skel_xy": np.zeros((0, 2), dtype=np.float32),
+            "finite_mask": finite,
+        }
+
+    supp_xy = np.column_stack([xs.astype(np.float32), ys.astype(np.float32)])
+
+    d_all = np.full((len(xy),), np.inf, dtype=float)
+    idx_all = np.full((len(xy),), -1, dtype=int)
+
+    if np.any(finite):
+        try:
+            from scipy.spatial import cKDTree
+            tree = cKDTree(supp_xy)
+            d, idx = tree.query(xy[finite], k=1)
+            d = np.asarray(d, float)
+            idx = np.asarray(idx, int)
+        except Exception:
+            d = np.full((np.sum(finite),), np.inf, float)
+            idx = np.full((np.sum(finite),), -1, int)
+            for i, p in enumerate(xy[finite]):
+                dd = np.sum((supp_xy - p) ** 2, axis=1)
+                j = int(np.argmin(dd))
+                idx[i] = j
+                d[i] = float(np.sqrt(dd[j]))
+
+        finite_idx = np.flatnonzero(finite)
+        d_all[finite_idx] = d
+        idx_all[finite_idx] = idx
+
+    valid = finite & np.isfinite(d_all) & (idx_all >= 0) & (d_all <= float(max_nn_dist_px))
+    return {
+        "valid": valid,
+        "indices": idx_all,
+        "dists": d_all,
+        "skel_xy": supp_xy,
+        "finite_mask": finite,
+    }
+
+
+def project_indices_to_support(
+    wmap,
+    supp,
+    mid_xy,
+    *,
+    max_nn_dist_px=6.0,
+    use_support_mask=True,
+    domain_mask=None,
+    bbox=None,
+    debug=False,
+):
+    """
+    Public projection stage returning indices/distances/support cloud.
+    """
+    return _project_support_indices_core(
+        wmap,
+        supp,
+        mid_xy,
+        max_nn_dist_px=max_nn_dist_px,
+        use_support_mask=use_support_mask,
+        domain_mask=domain_mask,
+        bbox=bbox,
+        debug=debug,
+    )
+
+
+def sample_widths_from_projected_indices(wmap, proj):
+    """
+    Width-lookup stage:
+      - uses projected support indices
+      - preserves per-method NaNs independently
+    """
+    import numpy as np
+
+    if wmap is None:
+        return np.array([], dtype=np.float32)
+    wmap = np.asarray(wmap)
+    H, W = wmap.shape[:2]
+
+    valid = np.asarray((proj or {}).get("valid", []), bool).reshape(-1)
+    idx_all = np.asarray((proj or {}).get("indices", []), int).reshape(-1)
+    skel_xy = np.asarray((proj or {}).get("skel_xy", []), float)
+    if valid.size == 0 or idx_all.size != valid.size or skel_xy.ndim != 2 or skel_xy.shape[1] != 2:
+        return np.array([], dtype=np.float32)
+
+    out = np.full((len(valid),), np.nan, dtype=np.float32)
+    if not np.any(valid):
+        return out
+
+    idx_v = idx_all[valid]
+    ok_idx = (idx_v >= 0) & (idx_v < len(skel_xy))
+    if not np.any(ok_idx):
+        return out
+
+    take_rows = np.flatnonzero(valid)[ok_idx]
+    pxy = skel_xy[idx_v[ok_idx]]
+    xx = np.clip(pxy[:, 0].astype(int), 0, W - 1)
+    yy = np.clip(pxy[:, 1].astype(int), 0, H - 1)
+    vals = np.asarray(wmap[yy, xx], np.float32)
+    vals[~np.isfinite(vals)] = np.nan
+    out[take_rows] = vals
+    return out
+
+
 def project_widths_to_support(
     wmap,
     supp,
@@ -2061,122 +2254,27 @@ def project_widths_to_support(
     """
     import numpy as np
 
-    if wmap is None:
-        return np.array([], dtype=np.float32)
+    proj = _project_support_indices_core(
+        wmap,
+        supp,
+        mid_xy,
+        max_nn_dist_px=max_nn_dist_px,
+        use_support_mask=use_support_mask,
+        domain_mask=domain_mask,
+        bbox=bbox,
+        debug=debug,
+    )
+    out = sample_widths_from_projected_indices(wmap, proj)
 
-    wmap = np.asarray(wmap)
-    H, W = wmap.shape[:2]
-
-    xy = np.asarray(mid_xy, float)
-    if xy.ndim != 2 or xy.shape[1] != 2:
-        return np.array([], dtype=np.float32)
-
-    bbox_clip = None
-    if bbox is not None:
-        try:
-            x0, y0, bw, bh = [int(v) for v in bbox]
-            x1 = x0 + bw
-            y1 = y0 + bh
-            x0 = int(np.clip(x0, 0, W))
-            y0 = int(np.clip(y0, 0, H))
-            x1 = int(np.clip(x1, 0, W))
-            y1 = int(np.clip(y1, 0, H))
-            if x1 > x0 and y1 > y0:
-                bbox_clip = (x0, y0, x1, y1)
-        except Exception:
-            bbox_clip = None
-
-    finite = np.isfinite(xy).all(axis=1)
-    if bbox_clip is not None:
-        x0, y0, x1, y1 = bbox_clip
-        inside = (
-            (xy[:, 0] >= x0) & (xy[:, 0] < x1) &
-            (xy[:, 1] >= y0) & (xy[:, 1] < y1)
-        )
-        finite &= inside
-
-    out = np.full((len(xy),), np.nan, dtype=np.float32)
-    if not np.any(finite):
-        return out
-
-    # --------------------------------------------
-    # Build support mask
-    # --------------------------------------------
-    if use_support_mask and supp is not None:
-        supp_m = np.asarray(supp).astype(bool)
-    else:
-        supp_m = np.isfinite(wmap) & (wmap > 0)
-
-    if domain_mask is not None:
-        dm = np.asarray(domain_mask).astype(bool)
-        if dm.shape == supp_m.shape:
-            supp_m &= dm
-        elif debug:
-            print(f"[B1 PROJ] domain_mask shape mismatch: supp={supp_m.shape} domain={dm.shape}")
-
-    if bbox_clip is not None:
-        x0, y0, x1, y1 = bbox_clip
-        bbox_mask = np.zeros_like(supp_m, dtype=bool)
-        bbox_mask[y0:y1, x0:x1] = True
-        supp_m &= bbox_mask
-
-    ys, xs = np.nonzero(supp_m)
-    if len(xs) == 0:
-        if debug:
-            print("[B1 PROJ] support empty")
-        return out
-
-    supp_xy = np.column_stack([
-        xs.astype(np.float32),
-        ys.astype(np.float32),
-    ])
-
-    # --------------------------------------------
-    # Nearest neighbor projection
-    # --------------------------------------------
-    try:
-        from scipy.spatial import cKDTree
-        tree = cKDTree(supp_xy)
-        d, idx = tree.query(xy[finite], k=1)
-        d = np.asarray(d, float)
-        idx = np.asarray(idx, int)
-    except Exception:
-        # fallback (slow but safe)
-        d = np.full((np.sum(finite),), np.inf, float)
-        idx = np.full((np.sum(finite),), -1, int)
-        for i, p in enumerate(xy[finite]):
-            dd = np.sum((supp_xy - p) ** 2, axis=1)
-            j = int(np.argmin(dd))
-            idx[i] = j
-            d[i] = float(np.sqrt(dd[j]))
-
-    ok = d <= float(max_nn_dist_px)
-
-    if not np.any(ok):
-        if debug:
-            print(
-                f"[B1 PROJ] 0/{len(d)} within max_nn_dist_px={max_nn_dist_px}"
-            )
-        return out
-
-    nn_x = supp_xy[idx[ok], 0].astype(int)
-    nn_y = supp_xy[idx[ok], 1].astype(int)
-    nn_x = np.clip(nn_x, 0, W - 1)
-    nn_y = np.clip(nn_y, 0, H - 1)
-
-    vals = wmap[nn_y, nn_x].astype(np.float32)
-
-    out_idx = np.flatnonzero(finite)[ok]
-    out[out_idx] = vals
-
-    if debug:
+    if debug and out.size > 0:
+        valid_proj = int(np.sum(np.asarray(proj.get("valid", []), bool)))
+        finite = np.asarray(proj.get("finite_mask", []), bool)
         print(
-            f"[B1 PROJ] total={len(xy)} "
-            f"finite={np.sum(finite)} "
-            f"valid_proj={np.sum(ok)} "
-            f"nan_out={np.sum(~np.isfinite(out))}"
+            f"[B1 PROJ] total={len(out)} "
+            f"finite={int(np.sum(finite))} "
+            f"valid_proj={valid_proj} "
+            f"nan_out={int(np.sum(~np.isfinite(out)))}"
         )
-
     return out
 
 # baseline width comparison function (extremely simple)
@@ -2222,7 +2320,7 @@ def compute_projected_width_diffs(
     # -----------------------------
     # Baseline debug counters
     # -----------------------------
-    dbg = {
+    dbg_template = {
         "cr_total": 0,
         "cr_not_dict": 0,
         "no_midline_segments": 0,
@@ -2453,103 +2551,201 @@ def compute_projected_width_diffs(
                     return bb
         return _tight_bbox_from_seg(seg_xy, H, W, pad=4)
 
+    def _normalize_baseline_record(method_name, rec_obj):
+        method_s = str(method_name)
+        if isinstance(rec_obj, dict):
+            wmap = rec_obj.get("width_map")
+            supp = rec_obj.get("support_mask")
+            skel = rec_obj.get("skel")
+            meta = rec_obj.get("meta", {})
+        elif isinstance(rec_obj, (tuple, list)) and len(rec_obj) >= 2:
+            wmap, supp = rec_obj[0], rec_obj[1]
+            skel = supp
+            meta = {}
+        else:
+            return None
+
+        if wmap is None or supp is None:
+            return None
+
+        wmap = np.asarray(wmap)
+        supp = np.asarray(supp).astype(bool)
+        if wmap.ndim != 2 or supp.ndim != 2 or wmap.shape[:2] != supp.shape[:2]:
+            return None
+
+        if skel is None:
+            skel = supp
+        skel = np.asarray(skel).astype(bool)
+        if skel.ndim != 2 or skel.shape[:2] != wmap.shape[:2]:
+            skel = supp
+
+        return {
+            "method": method_s,
+            "width_map": wmap,
+            "support_mask": supp,
+            "skel": skel,
+            "meta": meta if isinstance(meta, dict) else {},
+            "is_skeleton_method": method_s.lower().startswith("skel_"),
+        }
+
+    def _infer_family_key(method_name, rec_obj):
+        m = str(method_name).lower()
+        if m in {"skel_mat_raw", "mat_width_raw"}:
+            return "skel_mat_raw"
+        if m in {"skel_mat_dse", "mat_width_dse", "pca_width_dse", "esd_width_dse", "eob_width_dse"}:
+            return "skel_mat_dse"
+
+        meta = rec_obj.get("meta", {}) if isinstance(rec_obj, dict) else {}
+        skel_method = str(meta.get("skeleton_method", "")).strip()
+        if skel_method:
+            return skel_method
+
+        supp = np.asarray(rec_obj.get("support_mask"), bool)
+        sig = hashlib.md5(np.ascontiguousarray(supp.astype(np.uint8)).tobytes()).hexdigest()[:12]
+        return f"support::{supp.shape[0]}x{supp.shape[1]}::{sig}"
+
+    # Normalize maps (support both dict records and legacy tuples).
+    norm_maps = {}
+    for method, rec in (width_baseline_maps or {}).items():
+        nrec = _normalize_baseline_record(method, rec)
+        if nrec is None:
+            print(f"[BASELINE B1] skip invalid baseline record for method='{method}'")
+            continue
+        norm_maps[str(method)] = nrec
+
+    if not norm_maps:
+        return width_rows
+
+    families = {}
+    for method, rec in norm_maps.items():
+        fam_key = _infer_family_key(method, rec)
+        fam = families.setdefault(
+            fam_key,
+            {
+                "family_key": fam_key,
+                "support_method": None,
+                "width_methods": [],
+                "all_methods": [],
+            },
+        )
+        fam["all_methods"].append(method)
+        if rec["is_skeleton_method"]:
+            fam["support_method"] = method
+        if fam["support_method"] is None:
+            fam["support_method"] = method
+        if not rec["is_skeleton_method"]:
+            fam["width_methods"].append(method)
+
+    # Keep only families that have width methods to evaluate.
+    families = {k: v for k, v in families.items() if v.get("width_methods")}
+    if not families:
+        return width_rows
+
+    width_methods = sorted({m for fam in families.values() for m in fam["width_methods"]})
+    dbg_by_method = {m: dict(dbg_template) for m in width_methods}
+    overlays_by_method = {m: {"coords": [], "diffs": []} for m in width_methods}
+
+    fam_dbg = {
+        k: {
+            "support_method": v["support_method"],
+            "width_methods": sorted(v["width_methods"]),
+        }
+        for k, v in families.items()
+    }
+    print(f"[BASELINE B1] family projection plan: {fam_dbg}")
+
     # ============================================================
-    # Main evaluation
+    # Main evaluation (family-shared projection + per-method sampling)
     # ============================================================
+    for cid, cr in cracks.items():
+        for method in width_methods:
+            dbg_by_method[method]["cr_total"] += 1
 
-    for method, (wmap, supp) in width_baseline_maps.items():
-        dbg_m = dict(dbg)
-        overlay_coords = []
-        overlay_diffs = []
+        if not isinstance(cr, dict):
+            for method in width_methods:
+                dbg_by_method[method]["cr_not_dict"] += 1
+            continue
 
-        for cid, cr in cracks.items():
-            dbg_m["cr_total"] += 1
+        segs = cr.get("midline_segments") or []
+        if not segs:
+            for method in width_methods:
+                dbg_by_method[method]["no_midline_segments"] += 1
+            if len(dbg_examples["no_midline_segments"]) < MAX_EX:
+                dbg_examples["no_midline_segments"].append(str(cid))
+            continue
 
-            if not isinstance(cr, dict):
-                dbg_m["cr_not_dict"] += 1
+        seg_meta = _normalize_meta_list(
+            (cr.get("midline_segments_meta") or cr.get("segments_meta") or []),
+            len(segs),
+        )
+
+        gt_mid_parts = []
+        gt_mid_meta = []
+        for s, mm in zip(segs, seg_meta):
+            if s is None:
                 continue
+            s = _finite_xy(s)
+            if len(s) >= 2:
+                gt_mid_parts.append(s)
+                gt_mid_meta.append(mm if isinstance(mm, dict) else {})
 
-            # --------------------------------------------------
-            # GT midline segments (authoritative)
-            # --------------------------------------------------
-            segs = cr.get("midline_segments") or []
-            if not segs:
-                dbg_m["no_midline_segments"] += 1
-                if len(dbg_examples["no_midline_segments"]) < MAX_EX:
-                    dbg_examples["no_midline_segments"].append(str(cid))
-                continue
+        if not gt_mid_parts:
+            for method in width_methods:
+                dbg_by_method[method]["no_valid_midline_pts"] += 1
+            if len(dbg_examples["no_valid_midline_pts"]) < MAX_EX:
+                dbg_examples["no_valid_midline_pts"].append(str(cid))
+            continue
 
-            seg_meta = _normalize_meta_list(
-                (cr.get("midline_segments_meta") or cr.get("segments_meta") or []),
-                len(segs),
-            )
+        gt_widths = None
+        for k in ("gt_widths_auto_centered", "gt_widths", "widths"):
+            gt_widths = _coerce_width_vector(cr.get(k))
+            if gt_widths is not None:
+                break
 
-            gt_mid_parts = []
-            gt_mid_meta = []
-            for s, mm in zip(segs, seg_meta):
-                if s is None:
-                    continue
-                s = _finite_xy(s)
-                if len(s) >= 2:
-                    gt_mid_parts.append(s)
-                    gt_mid_meta.append(mm if isinstance(mm, dict) else {})
+        if gt_widths is None:
+            gtn = cr.get("gt_normals") or {}
+            if isinstance(gtn, dict):
+                gt_widths = _coerce_width_vector(gtn.get("width_px"))
 
-            if not gt_mid_parts:
-                dbg_m["no_valid_midline_pts"] += 1
-                if len(dbg_examples["no_valid_midline_pts"]) < MAX_EX:
-                    dbg_examples["no_valid_midline_pts"].append(str(cid))
-                continue
+        if gt_widths is None:
+            for method in width_methods:
+                dbg_by_method[method]["no_gt_widths"] += 1
+            if len(dbg_examples["no_gt_widths"]) < MAX_EX:
+                dbg_examples["no_gt_widths"].append(str(cid))
+            continue
 
-            # --------------------------------------------------
-            # GT widths (robust extraction)
-            # --------------------------------------------------
-            gt_widths = None
+        if gt_widths.size < 2:
+            for method in width_methods:
+                dbg_by_method[method]["gt_widths_too_short"] += 1
+            continue
 
-            # Preferred explicit GT vector
-            for k in (
-                "gt_widths_auto_centered",
-                "gt_widths",
-                "widths",
-            ):
-                gt_widths = _coerce_width_vector(cr.get(k))
-                if gt_widths is not None:
-                    break
+        gt_off = 0
+        crack_s_idx_by_method = {m: 0 for m in width_methods}
+        crack_rows_by_method = {m: 0 for m in width_methods}
 
-            # Fallback to normals dict
-            if gt_widths is None:
-                gtn = cr.get("gt_normals") or {}
-                if isinstance(gtn, dict):
-                    gt_widths = _coerce_width_vector(gtn.get("width_px"))
-
-            if gt_widths is None:
-                dbg_m["no_gt_widths"] += 1
-                if len(dbg_examples["no_gt_widths"]) < MAX_EX:
-                    dbg_examples["no_gt_widths"].append(str(cid))
-                continue
-
-            if gt_widths.size < 2:
-                dbg_m["gt_widths_too_short"] += 1
-                continue
-
-            # --------------------------------------------------
-            # Segment-wise baseline projection with domain + bbox enforcement.
-            # --------------------------------------------------
-            Hm, Wm = np.asarray(wmap).shape[:2]
-            gt_off = 0
-            crack_s_idx = 0
-            crack_rows = 0
-
-            for seg_idx, (gt_seg, seg_meta_i) in enumerate(zip(gt_mid_parts, gt_mid_meta)):
-                gt_seg = np.asarray(gt_seg, float)
-                Lseg = int(len(gt_seg))
-                if Lseg < 2:
-                    gt_off += Lseg
-                    continue
-
-                gt_widths_seg = np.asarray(gt_widths[gt_off:gt_off + Lseg], float)
+        for seg_idx, (gt_seg, seg_meta_i) in enumerate(zip(gt_mid_parts, gt_mid_meta)):
+            gt_seg = np.asarray(gt_seg, float)
+            Lseg = int(len(gt_seg))
+            if Lseg < 2:
                 gt_off += Lseg
-                if gt_widths_seg.size < 2:
+                continue
+
+            gt_widths_seg = np.asarray(gt_widths[gt_off:gt_off + Lseg], float)
+            gt_off += Lseg
+            if gt_widths_seg.size < 2:
+                continue
+
+            # Segment-wise projection is computed once per skeleton family and then
+            # reused for all width methods in that family.
+            for fam_key, fam in families.items():
+                support_method = fam["support_method"]
+                support_rec = norm_maps.get(support_method)
+                if support_rec is None:
                     continue
+
+                wmap_support = np.asarray(support_rec["width_map"])
+                supp_support = np.asarray(support_rec["support_mask"]).astype(bool)
+                Hm, Wm = wmap_support.shape[:2]
 
                 domain_mask = _build_projection_domain_mask(
                     crack_type=crack_type,
@@ -2559,8 +2755,8 @@ def compute_projected_width_diffs(
                     seg_meta=seg_meta_i,
                     gt_mid_parts=gt_mid_parts,
                     gt_mid_meta=gt_mid_meta,
-                    supp=supp,
-                    wmap=wmap,
+                    supp=supp_support,
+                    wmap=wmap_support,
                     gt_full=gt_full,
                 )
                 bbox_seg = _get_segment_bbox(
@@ -2572,57 +2768,74 @@ def compute_projected_width_diffs(
                     W=Wm,
                 )
 
-                pred_widths_seg = project_widths_to_support(
-                    wmap,
-                    supp,
+                proj = project_indices_to_support(
+                    wmap_support,
+                    supp_support,
                     gt_seg,
-                    max_nn_dist_px=6.0,   # adjust 4–8 depending on density
+                    max_nn_dist_px=6.0,
+                    use_support_mask=True,
                     domain_mask=domain_mask,
                     bbox=bbox_seg,
                     debug=False,
                 )
 
-                if pred_widths_seg is None:
-                    continue
+                for method in fam["width_methods"]:
+                    rec_method = norm_maps.get(method)
+                    if rec_method is None:
+                        continue
 
-                pred_widths_seg = np.asarray(pred_widths_seg, float)
-                n = min(len(gt_widths_seg), len(pred_widths_seg))
-                if n < 2:
-                    continue
+                    pred_widths_seg = sample_widths_from_projected_indices(
+                        np.asarray(rec_method["width_map"]),
+                        proj,
+                    )
+                    if pred_widths_seg is None:
+                        continue
 
-                gt_w = np.asarray(gt_widths_seg[:n], float)
-                pr_w = np.asarray(pred_widths_seg[:n], float)
-                diff = pr_w - gt_w
-                seg_xy_eval = np.asarray(gt_seg[:n], float)
+                    pred_widths_seg = np.asarray(pred_widths_seg, float)
+                    n = min(len(gt_widths_seg), len(pred_widths_seg))
+                    if n < 2:
+                        continue
 
-                overlay_coords.append(seg_xy_eval)
-                overlay_diffs.append(np.asarray(diff, float))
+                    gt_w = np.asarray(gt_widths_seg[:n], float)
+                    pr_w = np.asarray(pred_widths_seg[:n], float)
+                    diff = pr_w - gt_w
+                    seg_xy_eval = np.asarray(gt_seg[:n], float)
 
-                for i in range(n):
-                    width_rows.append({
-                        "image": base_name,
-                        "cid": str(cid),
-                        "method": method,
-                        "gt_width_px": float(gt_w[i]),
-                        "pred_width_px": float(pr_w[i]),
-                        "diff_px": float(diff[i]),
-                        "s_idx": int(crack_s_idx),
-                    })
-                    crack_s_idx += 1
+                    overlays_by_method[method]["coords"].append(seg_xy_eval)
+                    overlays_by_method[method]["diffs"].append(np.asarray(diff, float))
 
-                crack_rows += int(n)
+                    s_idx = int(crack_s_idx_by_method[method])
+                    for i in range(n):
+                        width_rows.append(
+                            {
+                                "image": base_name,
+                                "cid": str(cid),
+                                "method": method,
+                                "gt_width_px": float(gt_w[i]),
+                                "pred_width_px": float(pr_w[i]),
+                                "diff_px": float(diff[i]),
+                                "s_idx": int(s_idx + i),
+                            }
+                        )
+                    crack_s_idx_by_method[method] = s_idx + int(n)
+                    crack_rows_by_method[method] += int(n)
 
-            if crack_rows <= 0:
-                dbg_m["pred_widths_too_short"] += 1
+        for method in width_methods:
+            if crack_rows_by_method[method] <= 0:
+                dbg_by_method[method]["pred_widths_too_short"] += 1
                 if len(dbg_examples["pred_widths_too_short"]) < MAX_EX:
                     dbg_examples["pred_widths_too_short"].append(str(cid))
-                continue
+            else:
+                dbg_by_method[method]["rows_emitted"] += int(crack_rows_by_method[method])
 
-            dbg_m["rows_emitted"] += int(crack_rows)
+    # --------------------------------------------------
+    # Baseline projected-width spatial overlay (B1), per method
+    # --------------------------------------------------
+    for method in width_methods:
+        dbg_m = dbg_by_method[method]
+        coords = overlays_by_method[method]["coords"]
+        diffs = overlays_by_method[method]["diffs"]
 
-        # --------------------------------------------------
-        # Baseline projected-width spatial overlay (B1)
-        # --------------------------------------------------
         if dbg_m["rows_emitted"] > 0 and metrics_dir_local is not None:
             try:
                 import matplotlib.pyplot as plt
@@ -2630,15 +2843,9 @@ def compute_projected_width_diffs(
                 import numpy as np
                 import os
 
-                coords = overlay_coords
-                diffs = overlay_diffs
-
                 if not coords:
                     raise RuntimeError("No valid projected segments for overlay")
 
-                # --------------------------------------------------
-                # Compute tight bounds from geometry (+ fixed 5px pad)
-                # --------------------------------------------------
                 all_pts = np.vstack(coords)
                 x0, y0 = np.min(all_pts, axis=0)
                 x1, y1 = np.max(all_pts, axis=0)
@@ -2649,9 +2856,6 @@ def compute_projected_width_diffs(
                 x1p = int(np.ceil(x1 + pad))
                 y1p = int(np.ceil(y1 + pad))
 
-                # --------------------------------------------------
-                # Clip to GT image bounds and crop GT mask
-                # --------------------------------------------------
                 H, W = gt_full.shape[:2]
                 x0c = max(0, x0p)
                 y0c = max(0, y0p)
@@ -2707,8 +2911,12 @@ def compute_projected_width_diffs(
                 ax.axis("off")
                 ax.set_title(f"{method} - Baseline projected widths")
 
+                method_root = metrics_dir_local
+                if len(width_methods) > 1:
+                    method_root = os.path.join(metrics_dir_local, method)
+
                 out_dir = os.path.join(
-                    metrics_dir_local,
+                    method_root,
                     midline_type or "unknown",
                     crack_type,
                 )
@@ -2725,11 +2933,8 @@ def compute_projected_width_diffs(
                 print(f"[BASELINE B1] wrote overlay: {out_path}")
 
             except Exception as e:
-                print(f"[BASELINE B1] overlay failed: {e}")
+                print(f"[BASELINE B1] overlay failed for method='{method}': {e}")
 
-        # --------------------------------------------------
-        # Debug if empty
-        # --------------------------------------------------
         if dbg_m["rows_emitted"] == 0:
             print(f"[BASELINE B1 DEBUG] method='{method}' produced 0 rows.")
             print(f"  total_cracks={dbg_m['cr_total']}")

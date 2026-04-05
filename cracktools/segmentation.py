@@ -30,8 +30,8 @@ warnings.filterwarnings("ignore", message="invalid value encountered", category=
 def edge_masks(
     image_gray,
     track,
-    window_half_size=40,
-    mode="new",   # "new" (GPU hybrid) or "old" (akomp22)
+    window_half_size=45,
+    mode="old",   # "new" (GPU hybrid) or "old" (akomp22)
 ):
     """
     Unified edge mask extractor.
@@ -44,6 +44,7 @@ def edge_masks(
     """
     import numpy as np
     import scipy.ndimage as ndi
+    mode = "old"
     
     #NOTE: new on here sucks. Using old only for baselines.
 
@@ -867,13 +868,8 @@ def edges_tracking(
     # 4. Metric build (KEEP OLD IDENTICAL; keep NEW conservative exponent cap)
     # --------------------------------------------------
     t0 = time.perf_counter()
-    if mode == "old":
-        metric1 = (1 + em1 * l) ** p * df
-        metric2 = (1 + em2 * l) ** p * df
-    else:
-        pp = min(int(p), 4)
-        metric1 = (1 + em1 * l) ** pp * df
-        metric2 = (1 + em2 * l) ** pp * df
+    metric1 = (1 + em1 * l) ** p * df
+    metric2 = (1 + em2 * l) ** p * df
     t_metric = time.perf_counter() - t0
 
     # --------------------------------------------------
