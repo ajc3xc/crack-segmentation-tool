@@ -640,6 +640,8 @@ class ManualDrawing(CrackUtils):
         """
         Clear any unsaved manual segment (used when overwriting).
         """
+        if hasattr(self, "manuall_loops"):
+            del self.manuall_loops
         if hasattr(self, "manuall_x"):
             del self.manuall_x
         if hasattr(self, "manuall_y"):
@@ -654,7 +656,6 @@ class ManualDrawing(CrackUtils):
             
     def draw_segment(self, mode):
         from shapely.geometry import Polygon, MultiPolygon
-        from shapely.ops import unary_union
         import matplotlib.pyplot as plt
         import numpy as np
         import cv2
@@ -662,7 +663,16 @@ class ManualDrawing(CrackUtils):
         print(f"[DRAW_SEGMENT] mode={mode}")
         try:
             # --- Handle unsaved previous strokes ---
-            if hasattr(self, "manuall_x") and len(getattr(self, "manuall_x", [])) > 0:
+            has_pending_loops = (
+                hasattr(self, "manuall_loops")
+                and isinstance(getattr(self, "manuall_loops", None), list)
+                and len(getattr(self, "manuall_loops", [])) > 0
+            )
+            has_pending_xy = (
+                hasattr(self, "manuall_x")
+                and len(getattr(self, "manuall_x", [])) > 0
+            )
+            if has_pending_loops or has_pending_xy:
                 from PyQt5.QtWidgets import QMessageBox
                 msg = QMessageBox()
                 msg.setIcon(QMessageBox.Warning)
@@ -712,28 +722,46 @@ class ManualDrawing(CrackUtils):
                 print("[DRAW_SEGMENT] No closed loop detected in stroke.")
                 return
 
-            # --- Merge overlapping polygons ---
-            merged = unary_union(polys)
+            # Keep loops independent (no global unary union).
+            independent_polys = []
+            for poly in polys:
+                if poly is None or poly.is_empty:
+                    continue
+                # local validity fix per-loop only
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
+                if poly is None or poly.is_empty:
+                    continue
+                if isinstance(poly, Polygon):
+                    independent_polys.append(poly)
+                elif isinstance(poly, MultiPolygon):
+                    for g in list(poly.geoms):
+                        if g is not None and (not g.is_empty):
+                            independent_polys.append(g)
 
-            if isinstance(merged, Polygon):
-                merged = [merged]
-            elif isinstance(merged, MultiPolygon):
-                merged = list(merged.geoms)
-
-            print(f"[DRAW_SEGMENT] independent loops after merge: {len(merged)}")
+            print(f"[DRAW_SEGMENT] independent loops kept: {len(independent_polys)}")
 
             # --- Convert to OpenCV contours ---
             valid_loops = []
-            for poly in merged:
-                c = np.array(poly.exterior.coords, dtype=np.int32).reshape((-1, 1, 2))
-                if c.shape[0] >= 3:
+            for poly in independent_polys:
+                c = np.asarray(poly.exterior.coords, dtype=np.int32)
+                if c.ndim != 2 or c.shape[1] != 2 or c.shape[0] < 3:
+                    continue
+                # Ensure closed contour for robust fillPoly behavior.
+                if not np.array_equal(c[0], c[-1]):
+                    c = np.vstack([c, c[0]])
+                c = c.reshape((-1, 1, 2))
+                if c.shape[0] >= 4:
                     valid_loops.append(c)
 
             if not valid_loops:
-                print("[DRAW_SEGMENT] no valid loops after merge; abort.")
+                print("[DRAW_SEGMENT] no valid independent loops; abort.")
                 return
 
-            # --- Store biggest loop as the working poly ---
+            # Keep every loop for downstream save/erase.
+            self.manuall_loops = valid_loops
+
+            # Legacy single-loop fields retained for compatibility/debug.
             biggest = max(valid_loops, key=cv2.contourArea)
             self.manuall_x = biggest[:, 0, 0]
             self.manuall_y = biggest[:, 0, 1]
@@ -811,15 +839,63 @@ class ManualDrawing(CrackUtils):
             print("[MANUAL_SAVE] ERROR printing initial debug:", e)
 
         try:
-            # sanity: we must have a drawn loop
-            if not hasattr(self, "manuall_x") or not hasattr(self, "manuall_y"):
-                error("No manual polyline to save/erase.")
-                return
-            if len(self.manuall_x) < 2 or len(self.manuall_y) < 2:
-                error("Manual polyline too short.")
-                return
+            def _sanitize_loops_for_fill(loops_in):
+                """
+                Return contours ready for cv2.fillPoly:
+                  - dtype int32
+                  - shape (N,1,2)
+                  - closed loops (first == last)
+                  - minimum 3 unique vertices (>=4 points including closure)
+                """
+                out = []
+                for lp in loops_in or []:
+                    a = np.asarray(lp, dtype=np.int32)
+                    if a.ndim == 3 and a.shape[1] == 1 and a.shape[2] == 2:
+                        a = a[:, 0, :]
+                    elif a.ndim != 2 or a.shape[1] != 2:
+                        continue
+                    if a.shape[0] < 3:
+                        continue
 
-            poly = np.column_stack([self.manuall_x, self.manuall_y]).astype(float)
+                    # Drop immediate duplicates to avoid degenerate contours.
+                    if a.shape[0] > 1:
+                        keep = [0]
+                        for i in range(1, a.shape[0]):
+                            if not np.array_equal(a[i], a[i - 1]):
+                                keep.append(i)
+                        a = a[np.asarray(keep, dtype=int)]
+                    if a.shape[0] < 3:
+                        continue
+
+                    if not np.array_equal(a[0], a[-1]):
+                        a = np.vstack([a, a[0]])
+                    if a.shape[0] < 4:
+                        continue
+                    out.append(a.reshape((-1, 1, 2)).astype(np.int32, copy=False))
+                return out
+
+            # Build drawable loops from new multi-loop storage first, then fallback.
+            drawn_loops = []
+            if hasattr(self, "manuall_loops") and isinstance(self.manuall_loops, list):
+                for c in self.manuall_loops:
+                    cc = np.asarray(c, np.int32)
+                    if cc.ndim == 3 and cc.shape[1] == 1 and cc.shape[2] == 2 and cc.shape[0] >= 3:
+                        drawn_loops.append(cc)
+
+            if not drawn_loops:
+                if not hasattr(self, "manuall_x") or not hasattr(self, "manuall_y"):
+                    error("No manual loop(s) to save/erase.")
+                    return
+                if len(self.manuall_x) < 2 or len(self.manuall_y) < 2:
+                    error("Manual polyline too short.")
+                    return
+                poly = np.column_stack([self.manuall_x, self.manuall_y]).astype(np.int32)
+                drawn_loops = [poly.reshape((-1, 1, 2))]
+
+            drawn_loops = _sanitize_loops_for_fill(drawn_loops)
+            if not drawn_loops:
+                error("No valid closed manual loop(s) to save/erase.")
+                return
 
             ann = self.annotation.setdefault("annotations", {})
             atomic = ann.setdefault("atomic_cracks", {})
@@ -925,8 +1001,7 @@ class ManualDrawing(CrackUtils):
             # ====================== ERASE MODE ==========================
             if mode == "erase":
                 erase_mask = np.zeros((H, W), np.uint8)
-                poly_pts = poly.astype(np.int32).reshape((-1, 1, 2))
-                cv2.fillPoly(erase_mask, [poly_pts], 255)
+                cv2.fillPoly(erase_mask, drawn_loops, 255)
 
                 for kind, cid, crack in iter_final_cracks():
                     full_old = reconstruct_full_mask(crack)
@@ -966,11 +1041,7 @@ class ManualDrawing(CrackUtils):
             else:
                 target_kind, target_id, target_crack = None, None, None
                 poly_mask = np.zeros((H, W), np.uint8)
-                cv2.fillPoly(
-                    poly_mask,
-                    [poly.astype(np.int32).reshape((-1, 1, 2))],
-                    255
-                )
+                cv2.fillPoly(poly_mask, drawn_loops, 255)
 
                 # 1) find first final crack that overlaps the drawn region
                 for kind, cid, crack in iter_final_cracks():
@@ -1027,6 +1098,8 @@ class ManualDrawing(CrackUtils):
 
             self.change_image()
 
+            if hasattr(self, "manuall_loops"):
+                del self.manuall_loops
             if hasattr(self, "manuall_x"):
                 del self.manuall_x
             if hasattr(self, "manuall_y"):
