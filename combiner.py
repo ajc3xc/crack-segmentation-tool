@@ -719,6 +719,11 @@ def dominant_segments_from_group(
     if not atomics:
         return [], {"branches": [], "segments_meta": [], "bite": None}
 
+    for i, a in enumerate(atomics):
+        print(f"\n[ENDPOINT CHECK] atomic_id={a['atomic_id']}")
+        print(f"  USER endpoints: {a.get('endpoints', set())}")
+        print(f"  GEOM start/end: {a['poly'][0]} -> {a['poly'][-1]}")
+
     # -----------------------------
     # 1.5) mask / canvas init (NOW atomics exists)
     # -----------------------------
@@ -784,8 +789,11 @@ def dominant_segments_from_group(
     def _endpoints(S):
         return np.asarray(S[0], float), np.asarray(S[-1], float)
 
-    def _pts_close(a, b, tol=1e-6):
+    def _pts_close(a, b, tol=.2):
         return float(np.linalg.norm(a - b)) <= tol
+
+    def _dist(a, b):
+        return float(np.linalg.norm(np.asarray(a, float) - np.asarray(b, float)))
 
     unused = set(range(len(atomics)))
     branches = []  # list[list[atomic indices]]
@@ -812,10 +820,18 @@ def dominant_segments_from_group(
             best_j = None
             best_len = -1.0
             best_attach_mode = None  # ("start"/"end", flip_bool)
+            print(f"\n[BRANCH GROW] branch_size={len(branch)} current_endpoints={len(branch_endpoints)}")
+            print(f"  b_start={b_start}, b_end={b_end}")
 
             for j in list(unused):
                 Sj = atomics[j]["poly"]
                 j_start, j_end = _endpoints(Sj)
+                print(f"\n  [CANDIDATE] j={j} atomic_id={atomics[j]['atomic_id']}")
+                print(f"    j_start={j_start}, j_end={j_end}")
+                print(f"    dist(b_end, j_start)={_dist(b_end, j_start):.2f}")
+                print(f"    dist(b_end, j_end)  ={_dist(b_end, j_end):.2f}")
+                print(f"    dist(b_start, j_start)={_dist(b_start, j_start):.2f}")
+                print(f"    dist(b_start, j_end)  ={_dist(b_start, j_end):.2f}")
 
                 # ------------------------------------------------
                 # LOOP PREVENTION:
@@ -823,10 +839,12 @@ def dominant_segments_from_group(
                 # ------------------------------------------------
                 start_in = any(_pts_close(j_start, ep) for ep in branch_endpoints)
                 end_in   = any(_pts_close(j_end,   ep) for ep in branch_endpoints)
+                print(f"    start_in={start_in}, end_in={end_in}")
 
                 if start_in and end_in:
                     # both endpoints already appear somewhere in branch
                     # -> would close a cycle
+                    print(f"    REJECTED (loop prevention): both endpoints already in branch")
                     continue
 
                 # try attach to branch end
@@ -841,8 +859,10 @@ def dominant_segments_from_group(
                 elif _pts_close(b_start, j_start):
                     mode = ("start", True)
                 else:
+                    print(f"    REJECTED (no endpoint match)")
                     continue
 
+                print(f"    ATTACH mode={mode}, length={atomics[j]['length']:.2f}")
                 if atomics[j]["length"] > best_len:
                     best_len = atomics[j]["length"]
                     best_j = j
@@ -872,7 +892,12 @@ def dominant_segments_from_group(
 
                 grew = True
 
+        print(f"\n[BRANCH FINAL] size={len(branch)} atomics={[atomics[i]['atomic_id'] for i in branch]}")
         branches.append(branch)
+
+    print("\n[BRANCH SUMMARY]")
+    for bi, br in enumerate(branches):
+        print(f"  branch {bi}: {[atomics[i]['atomic_id'] for i in br]}")
 
     # --------------------------------------------------
     # Optional greedy-branch construction debug plot
@@ -1579,6 +1604,8 @@ def dominant_segments_from_group(
                     f"is_primary={m.get('is_primary')}, "
                     f"len_px={m.get('length'):.2f}"
                 )
+        for i, a in enumerate(atomics):
+            print(f"[SEG {i}] start={a['poly'][0]} end={a['poly'][-1]} len={a['length']:.1f}")
     
     return kept, meta
 
