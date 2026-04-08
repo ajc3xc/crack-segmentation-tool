@@ -254,36 +254,19 @@ class TrackSegmentPipeline(CrackUtils, Ui_MainWindow):
             track_local_xy = np.array(self.track)
             xmin, ymin, xmax, ymax = [int(round(v)) for v in self.active_bbox]
 
-            # --- coordinate system detection / selection ---
-            src = getattr(self, "current_source", None)
-            # Heuristic: if within bbox limits, it's already local
-            is_local_like = (
-                np.all(track_local_xy[0] >= 0) and np.all(track_local_xy[0] < (xmax - xmin)) and
-                np.all(track_local_xy[1] >= 0) and np.all(track_local_xy[1] < (ymax - ymin))
-            )
-            print(f"[EDGE_MASK] coord detection → src={src}, is_local_like={is_local_like}")
+            # Strict invariant: track is always [y, x] in local crop coordinates.
+            track_full_y = track_local_xy[0] + ymin
+            track_full_x = track_local_xy[1] + xmin
+            track_full_yx = np.vstack([track_full_y, track_full_x]).astype(float)
+            print("[EDGE_MASK] using strict [y,x] local->full conversion (+bbox)")
 
-            if src in ("manual", "manual_poly"):
-                # Manual track was stored in crop coords → convert to full image coords
-                track_full_y = track_local_xy[0] + ymin
-                track_full_x = track_local_xy[1] + xmin
-                track_full_yx = np.vstack([track_full_y, track_full_x])
-                print("[EDGE_MASK] Manual mode - local→full via +bbox")
-
-            elif is_local_like:
-                # Modern AUTO (new midline_tracking output) or eval variant
-                track_full_y = track_local_xy[1] + ymin
-                track_full_x = track_local_xy[0] + xmin
-                track_full_yx = np.vstack([track_full_y, track_full_x])
-                print("[EDGE_MASK] Auto eval/new pipeline mode - local→full via +bbox (no shift)")
-
-            else:
-                # Legacy AUTO (old GUI version, needs swap + shift)
-                t = np.vstack([track_local_xy[1], track_local_xy[0]])  # swap to [y,x]
-                target_point = np.array([self.pts[1][1], self.pts[1][0]])
-                shift_vector = target_point - t[:, 0]
-                track_full_yx = t + shift_vector[:, np.newaxis]
-                print(f"[EDGE_MASK] Auto legacy GUI mode - applied legacy shift: {shift_vector}")
+            # Optional sanity check
+            H, W = img_gray.shape
+            if not (
+                np.all((track_full_yx[0] >= 0) & (track_full_yx[0] < H)) and
+                np.all((track_full_yx[1] >= 0) & (track_full_yx[1] < W))
+            ):
+                print("[WARN] track_full_yx out of bounds")
 
             # --- tripwire check ---
             auto_start_full = np.array([track_full_yx[1, 0], track_full_yx[0, 0]], float)

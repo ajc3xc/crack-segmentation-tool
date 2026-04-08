@@ -153,7 +153,7 @@ def int2(a):
     return (int(np.round(a)))
 
 class Draw():
-    def contours(self, image, scale, move_x=0, move_y=0, annotations=None, mode="add"):
+    def contours(self, image, scale, move_x=0, move_y=0, annotations=None, mode="add", return_strokes=False):
         """
         Interactive contour drawing:
         - Green polylines drawn continuously with mouse
@@ -165,7 +165,7 @@ class Draw():
         self.image = image
         self.scale = scale
         self.drawing = False
-        self.t = 2  # line thickness
+        self.t = 4  # line thickness (increased per request)
 
         # Stroke storage
         self.contours_x, self.contours_y = [], []
@@ -352,8 +352,18 @@ class Draw():
 
         contours_name = f"{mode.upper()} contours (Esc or 'X' closes) midline(Cyan=combined, White=atomic); mask(Red); non-combined atomic endpoints (Blue)"
         gui_normal_flag = getattr(cv2, "WINDOW_GUI_NORMAL", 0)
-        # AUTOSIZE avoids OpenCV Qt viewport drag/pan behavior hijacking left-drag.
-        cv2.namedWindow(contours_name, cv2.WINDOW_AUTOSIZE | gui_normal_flag)
+        # Use WINDOW_NORMAL so the manual draw window can be resized.
+        cv2.namedWindow(contours_name, cv2.WINDOW_NORMAL | gui_normal_flag)
+        try:
+            import tkinter as tk
+            root = tk.Tk()
+            root.withdraw()
+            screen_w = int(root.winfo_screenwidth())
+            screen_h = int(root.winfo_screenheight())
+            root.destroy()
+        except Exception:
+            screen_w, screen_h = 1920, 1080
+        cv2.resizeWindow(contours_name, int(screen_w // 2), int(screen_h // 2))
         cv2.moveWindow(contours_name, move_x, move_y)
 
         if mode=='add':
@@ -461,6 +471,19 @@ class Draw():
             new_h = int2(view.shape[0] / self.scale / self.scale2y)
             self.image_countur = cv2.resize(view, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
+            # Manual-draw instruction overlay.
+            cv2.rectangle(self.image_countur, (5, 5), (178, 22), (0, 0, 0), -1)
+            cv2.putText(
+                self.image_countur,
+                "LMB: draw, RMB: erase",
+                (8, 17),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.38,
+                (0, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+
             cv2.imshow(contours_name, self.image_countur)
 
             key = cv2.waitKey(1) & 0xFF
@@ -468,10 +491,37 @@ class Draw():
                 _apply_zoom(0.5, 0.5, True)
             elif key in (ord('-'), ord('_'), ord('[')):
                 _apply_zoom(0.5, 0.5, False)
-            if key == 27 or cv2.getWindowProperty(contours_name, cv2.WND_PROP_VISIBLE) < 1:
+            if key in (27, ord('x'), ord('X')) or cv2.getWindowProperty(contours_name, cv2.WND_PROP_VISIBLE) < 1:
                 break
 
         cv2.destroyAllWindows()
+
+        try:
+            print(f"[CONTOURS] num_strokes={len(self.contours_x)}")
+            print(f"[CONTOURS] stroke_sizes={[len(s) for s in self.contours_x]}")
+            for i, (xs, ys) in enumerate(zip(self.contours_x, self.contours_y)):
+                if len(xs) <= 0 or len(ys) <= 0:
+                    continue
+                print(
+                    f"[CONTOURS] stroke[{i}] "
+                    f"start=({float(xs[0]):.1f},{float(ys[0]):.1f}) "
+                    f"end=({float(xs[-1]):.1f},{float(ys[-1]):.1f}) "
+                    f"n={len(xs)}"
+                )
+        except Exception as e:
+            print(f"[CONTOURS] debug print failed: {e}")
+
+        if return_strokes:
+            strokes = []
+            for xs, ys in zip(self.contours_x, self.contours_y):
+                if len(xs) < 2 or len(ys) < 2:
+                    continue
+                st = []
+                for xv, yv in zip(xs, ys):
+                    st.append([float(xv) - 0.5, float(yv) - 0.5])
+                if len(st) >= 2:
+                    strokes.append(st)
+            return strokes
 
         flat_x = [item for sublist in self.contours_x for item in sublist]
         flat_y = [item for sublist in self.contours_y for item in sublist]

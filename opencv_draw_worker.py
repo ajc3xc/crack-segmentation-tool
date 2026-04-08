@@ -72,18 +72,20 @@ def main() -> int:
         elif mode == "contours":
             annotations = payload.get("annotations", {}) or {}
             contour_mode = str(payload.get("contour_mode", "add"))
-            x, y = ct.tools.Draw().contours(
+            strokes = ct.tools.Draw().contours(
                 image,
                 image_size,
                 annotations=annotations,
                 mode=contour_mode,
+                return_strokes=True,
             )
+            if strokes is None:
+                strokes = []
             _write_output(
                 out_json,
                 {
                     "ok": True,
-                    "x": np.asarray(x, dtype=float).ravel().tolist() if x is not None else [],
-                    "y": np.asarray(y, dtype=float).ravel().tolist() if y is not None else [],
+                    "strokes": strokes,
                 },
             )
         else:

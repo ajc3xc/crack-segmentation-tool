@@ -132,12 +132,18 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         self.export_gt_supervision.clicked.connect(self.export_gt_supervision_for_current_image)
         self.update_image_crop_button.clicked.connect(self.update_image_crop)
         self.wavelet_button.clicked.connect(self.check_wavelet)
-        self.middle_point_button.clicked.connect(self.select_middle_point)
-        self.middpoint_update_button.clicked.connect(self.update_midpoint_image)
         self.BatchPipelineButton.clicked.connect(self.batch_run_pipeline)
         self.update_os_button.clicked.connect(self.update_os)
         self.update_cost_button.clicked.connect(self.update_os_cost)
         self.midline_track_button.clicked.connect(self.midline_tracking)
+
+        # Remove unused midpoint-check UI controls from the Tracking tab.
+        if hasattr(self, "middle_point_button"):
+            self.middle_point_button.hide()
+        if hasattr(self, "middpoint_update_button"):
+            self.middpoint_update_button.hide()
+        if hasattr(self, "middlepoint_display"):
+            self.middlepoint_display.hide()
 
         # Repurpose the OS button for full pipeline
         try:
@@ -172,8 +178,6 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         self.saved = False
 
         self.update_image_crop_button.setStyleSheet("background-color : red")
-        self.middle_point_button.setStyleSheet("background-color : red")
-        self.middpoint_update_button.setStyleSheet("background-color : red")
         self.update_os_button.setStyleSheet("background-color : red")
         self.update_cost_button.setStyleSheet("background-color : red")
         self.midline_track_button.setStyleSheet("background-color : red")

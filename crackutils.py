@@ -429,7 +429,7 @@ class CrackUtils:
         """
         Isolate OpenCV HighGUI contour drawing in a child process to avoid
         PyQt/OpenCV Qt backend conflicts in the main process.
-        Returns (x, y) arrays matching ct.tools.Draw().contours(...)
+        Returns list of strokes, where each stroke is an (N,2) float array.
         """
         import json
         import os
@@ -503,9 +503,25 @@ class CrackUtils:
             if not result.get("ok", False):
                 raise RuntimeError(str(result.get("error", "Unknown OpenCV draw worker error")))
 
-            x = np.asarray(result.get("x") or [], dtype=np.float32)
-            y = np.asarray(result.get("y") or [], dtype=np.float32)
-            return x, y
+            strokes_raw = result.get("strokes") or []
+            if not isinstance(strokes_raw, list):
+                strokes_raw = []
+
+            out_strokes = []
+            print(f"[SUBPROCESS] returned num_strokes={len(strokes_raw)}")
+            print(f"[SUBPROCESS] returned stroke_sizes={[len(s) if isinstance(s, list) else 0 for s in strokes_raw]}")
+            for i, st in enumerate(strokes_raw):
+                arr = np.asarray(st, dtype=np.float32).reshape(-1, 2) if st is not None else np.zeros((0, 2), np.float32)
+                if len(arr) < 2:
+                    continue
+                print(
+                    f"[SUBPROCESS] stroke[{i}] "
+                    f"start=({float(arr[0,0]):.1f},{float(arr[0,1]):.1f}) "
+                    f"end=({float(arr[-1,0]):.1f},{float(arr[-1,1]):.1f}) "
+                    f"n={len(arr)}"
+                )
+                out_strokes.append(arr)
+            return out_strokes
         finally:
             try:
                 shutil.rmtree(tmp_dir, ignore_errors=True)

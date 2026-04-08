@@ -44,9 +44,13 @@ def edge_masks(
     """
     import numpy as np
     import scipy.ndimage as ndi
-    mode = "old"
-    
-    #NOTE: new on here sucks. Using old only for baselines.
+    mode = "new"
+    track = np.asarray(track, dtype=float)
+    if track.shape[0] != 2:
+        raise ValueError(f"Track must be (2, N), got {track.shape}")
+    H, W = image_gray.shape
+    track[0] = np.clip(track[0], 0, H - 1)
+    track[1] = np.clip(track[1], 0, W - 1)
 
     # ------------------------------------------------------------------
     # =============== MODE: NEW (YOUR GPU HYBRID) ======================
@@ -77,40 +81,38 @@ def edge_masks(
         n_skipped = 0
 
         for i in range(track.shape[1] - 1):
-            y0 = float(track[0, i])
-            x0 = float(track[1, i])
+            start_y = float(track[0, i])
+            start_x = float(track[1, i])
             if i < track.shape[1] - center_line_length:
-                y1 = float(track[0, i + center_line_length])
-                x1 = float(track[1, i + center_line_length])
+                end_y = float(track[0, i + center_line_length])
+                end_x = float(track[1, i + center_line_length])
                 flip = False
             else:
-                y1 = float(track[0, i - center_line_length])
-                x1 = float(track[1, i - center_line_length])
+                end_y = float(track[0, i - center_line_length])
+                end_x = float(track[1, i - center_line_length])
                 flip = True
 
-            if y0 == y1 and x0 == x1:
+            if start_y == end_y and start_x == end_x:
                 n_skipped += 1
                 continue
 
             try:
                 from cracktools.tracking import tang_len
-                ddx, ddy, _ = tang_len(x0, y0, x1, y1)
+                ddx, ddy, _ = tang_len(start_x, start_y, end_x, end_y)
             except Exception:
-                ddy = y1 - y0
-                ddx = x1 - x0
+                ddy = end_y - start_y
+                ddx = end_x - start_x
             if flip:
                 ddx, ddy = -ddx, -ddy
 
             angle = np.degrees(np.arctan2(ddx, ddy))
-            half_r = int(min(window_half_size, y0, img_h - y0 - 1))
-            half_c = int(min(window_half_size, x0, img_w - x0 - 1))
-            r1, r2 = int(round(y0 - half_r)), int(round(y0 + half_r))
-            c1, c2 = int(round(x0 - half_c)), int(round(x0 + half_c))
-            if r1 < 0 or r2 > img_h or c1 < 0 or c2 > img_w:
+            y0 = max(0, int(start_y - window_half_size))
+            y1 = min(img_h, int(start_y + window_half_size))
+            x0 = max(0, int(start_x - window_half_size))
+            x1 = min(img_w, int(start_x + window_half_size))
+            if (y1 - y0) < 5 or (x1 - x0) < 5:
                 continue
-            window = image_gray[r1:r2, c1:c2]
-            if window.shape[0] < 3 or window.shape[1] < 3:
-                continue
+            window = image_gray[y0:y1, x0:x1]
 
             try:
                 patch = window.astype(float) / 255.0
@@ -124,10 +126,11 @@ def edge_masks(
                     grad_x = ndi.gaussian_filter(patch, sigma=1, order=(0, 1), mode='reflect')
 
                 projected = grad_x * (-ddy) + grad_y * ddx
-                m = max(1, int(min(half_r, half_c) / 5))
+                m = max(1, int(min(window.shape[0], window.shape[1]) / 5))
                 projected[:m, :] = projected[-m:, :] = 0
                 projected[:, :m] = projected[:, -m:] = 0
-                edge_mask[r1:r2, c1:c2] += projected
+                edge_window = edge_mask[y0:y1, x0:x1]
+                edge_mask[y0:y1, x0:x1] = edge_window + projected
             except Exception as e:
                 print(f"[edge_mask-new] Failed at i={i}: {e}")
                 continue
@@ -149,54 +152,43 @@ def edge_masks(
     H, W = image_gray.shape
 
     for i in range(track.shape[1] - 1):
-        # ORIGINAL code: track[1] -> "x", track[0] -> "y"
-        start_point_x = track[1, i]
-        start_point_y = track[0, i]
+        start_y = track[0, i]
+        start_x = track[1, i]
         a = False
 
         if i < track.shape[1] - center_line_length:
-            end_point_x = track[1, i + center_line_length]
-            end_point_y = track[0, i + center_line_length]
+            end_x = track[1, i + center_line_length]
+            end_y = track[0, i + center_line_length]
         else:
             a = True
-            end_point_x = track[1, i - center_line_length]
-            end_point_y = track[0, i - center_line_length]
+            end_x = track[1, i - center_line_length]
+            end_y = track[0, i - center_line_length]
 
-        if start_point_x == end_point_x and start_point_y == end_point_y:
+        if start_x == end_x and start_y == end_y:
             n_skipped += 1
             continue
 
-        # ORIGINAL tangent computation
         try:
             from cracktools.tracking import tang_len
-            ddx, ddy, _ = tang_len(start_point_x, start_point_y,
-                                   end_point_x, end_point_y)
+            ddx, ddy, _ = tang_len(start_x, start_y, end_x, end_y)
         except Exception:
-            ddy = end_point_y - start_point_y
-            ddx = end_point_x - start_point_x
+            ddy = end_y - start_y
+            ddx = end_x - start_x
 
         if a:
             ddx = -ddx
             ddy = -ddy
 
-        # ORIGINAL angle
         angle_deg = np.arctan2(ddx, ddy) * 57.3
 
-        # ORIGINAL window (note: index order kept as in repo)
-        r1 = int(start_point_x - window_half_size)
-        r2 = int(start_point_x + window_half_size)
-        c1 = int(start_point_y - window_half_size)
-        c2 = int(start_point_y + window_half_size)
-
-        # In the original this could crash; here we safely skip
-        if r1 < 0 or c1 < 0 or r2 > H or c2 > W:
+        y0 = max(0, int(start_y - window_half_size))
+        y1 = min(H, int(start_y + window_half_size))
+        x0 = max(0, int(start_x - window_half_size))
+        x1 = min(W, int(start_x + window_half_size))
+        if (y1 - y0) < 5 or (x1 - x0) < 5:
             continue
+        window = image_gray[y0:y1, x0:x1]
 
-        window = image_gray[r1:r2, c1:c2]
-        if window.shape[0] < 3 or window.shape[1] < 3:
-            continue
-
-        # ORIGINAL rotate → sobel → unrotate
         win_rot = ndi.rotate(window, angle_deg, reshape=False)
         sobel = ndi.gaussian_filter(
             win_rot / 255.0,
@@ -208,15 +200,14 @@ def edge_masks(
         )
         sobel_rot = ndi.rotate(sobel, -angle_deg, reshape=False)
 
-        # ORIGINAL border suppression
-        m = max(1, int(window_half_size / 5))
+        m = max(1, int(min(window.shape[0], window.shape[1]) / 5))
         sobel_rot[:m, :] = 0
         sobel_rot[-m:, :] = 0
         sobel_rot[:, :m] = 0
         sobel_rot[:, -m:] = 0
 
-        edge_window = edge_mask[r1:r2, c1:c2]
-        edge_mask[r1:r2, c1:c2] = edge_window + sobel_rot
+        edge_window = edge_mask[y0:y1, x0:x1]
+        edge_mask[y0:y1, x0:x1] = edge_window + sobel_rot
 
     print(f"[edge_mask] (mode=old) skipped {n_skipped} zero-length segments")
     edge_mask1 = edge_mask - np.min(edge_mask)

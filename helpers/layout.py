@@ -857,7 +857,7 @@ class Ui_MainWindow(object):
         MainWindow.setWindowTitle(_translate("MainWindow", "MainWindow"))
         
         #Select Image Tab
-        self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_5), _translate("MainWindow", "Select Image"))
+        self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_5), _translate("MainWindow", "Main Menu"))
         self.SelectFolderButton.setText(_translate("MainWindow", "Select Folder"))
         self.SelectFolderButton.setToolTip(_translate("MainWindow", "<html><head/><body><p>Draw contours of a crack manually</p><p>Wheel mause to zoom in/out</p><p>LMB hold to draw</p><p>LMB release to fix contur part</p><p>RMB to erase previouse contur part</p></body></html>"))
         self.PreviousImageButton.setText(_translate("MainWindow", "Previous"))

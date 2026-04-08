@@ -655,8 +655,7 @@ class ManualDrawing(CrackUtils):
             self.manual_segment_screen.setPixmap(QPixmap())
             
     def draw_segment(self, mode):
-        from shapely.geometry import Polygon, MultiPolygon
-        import matplotlib.pyplot as plt
+        import os
         import numpy as np
         import cv2
 
@@ -687,76 +686,136 @@ class ManualDrawing(CrackUtils):
                     self.clear_pending_segment()
 
             image_size = self.select_image_size.value()
-            x, y = self._run_opencv_contours_subprocess(
+            strokes = self._run_opencv_contours_subprocess(
                 self.image[:, :, ::-1],
                 image_size,
                 self.annotation.get("annotations", {}),
                 mode,
             )
-            if len(x) < 3:
-                print("[DRAW_SEGMENT] too few points; abort.")
+            if not strokes:
+                print("[DRAW_SEGMENT] no strokes returned; abort.")
                 return
 
-            coords = np.column_stack([x, y]).astype(np.int32)
+            print(
+                f"[DRAW_SEGMENT] num_strokes={len(strokes)} "
+                f"stroke_sizes={[int(len(s)) for s in strokes]}"
+            )
 
-            tol = 15       # closure distance in px
-            min_gap = 10   # min separation in indices
-            polys = []
+            # --- Rasterize stroke and extract actual enclosed regions ---
+            H, W = self.image.shape[:2]
+            dbg_root = getattr(self, "save_folder", None)
+            if not dbg_root:
+                dbg_root = os.path.dirname(getattr(self, "name", "") or "") or "."
+            dbg_dir = os.path.join(dbg_root, "_manual_segment_debug")
+            os.makedirs(dbg_dir, exist_ok=True)
 
-            # --- Find ALL closures along stroke ---
-            for i in range(len(coords) - min_gap):
-                for j in range(i + min_gap, len(coords)):
-                    d = np.linalg.norm(coords[i] - coords[j])
-                    if d < tol:
-                        loop_coords = coords[i:j+1]
-                        if len(loop_coords) >= 3:
-                            poly = Polygon(loop_coords)
-                            if not poly.is_valid:
-                                poly = poly.buffer(0)
-                            if not poly.is_empty and poly.area > 30:
-                                polys.append(poly)
+            # Fill eligibility: first valid loop wins per stroke.
+            # If a self-loop is found at (i,j), keep only pts[i:j+1] and stop.
+            close_tol = 20.0
+            min_loop_gap = 15
+            min_loop_area_px = 30.0
+            closed_strokes = []
+            open_strokes = []
+            self_loop_strokes = 0
 
-            print(f"[DRAW_SEGMENT] raw loops found: {len(polys)}")
+            def _extract_first_loop_segment(st, tol_px, min_gap):
+                st = np.asarray(st, dtype=np.float32).reshape(-1, 2)
+                n = int(len(st))
+                if n < (min_gap + 2):
+                    return None
+                for i in range(0, n - min_gap):
+                    for j in range(i + min_gap, n):
+                        dij = float(np.linalg.norm(st[i] - st[j]))
+                        if dij <= float(tol_px):
+                            return st[i : j + 1]
+                return None
 
-            if not polys:
-                print("[DRAW_SEGMENT] No closed loop detected in stroke.")
-                return
-
-            # Keep loops independent (no global unary union).
-            independent_polys = []
-            for poly in polys:
-                if poly is None or poly.is_empty:
+            for s in strokes:
+                if s is None:
                     continue
-                # local validity fix per-loop only
-                if not poly.is_valid:
-                    poly = poly.buffer(0)
-                if poly is None or poly.is_empty:
+                st = np.asarray(s, dtype=np.float32).reshape(-1, 2)
+                if len(st) < 2:
                     continue
-                if isinstance(poly, Polygon):
-                    independent_polys.append(poly)
-                elif isinstance(poly, MultiPolygon):
-                    for g in list(poly.geoms):
-                        if g is not None and (not g.is_empty):
-                            independent_polys.append(g)
+                d_end = float(np.linalg.norm(st[0] - st[-1]))
+                if d_end <= close_tol:
+                    loop_candidate = st
+                else:
+                    loop_candidate = _extract_first_loop_segment(st, close_tol, min_loop_gap)
+                    if loop_candidate is not None:
+                        self_loop_strokes += 1
 
-            print(f"[DRAW_SEGMENT] independent loops kept: {len(independent_polys)}")
+                if loop_candidate is None or len(loop_candidate) < 3:
+                    open_strokes.append(st)
+                    continue
 
-            # --- Convert to OpenCV contours ---
+                c_test = np.round(loop_candidate).astype(np.int32).reshape((-1, 1, 2))
+                a_test = float(cv2.contourArea(c_test.astype(np.float32)))
+                if a_test <= float(min_loop_area_px):
+                    open_strokes.append(st)
+                    continue
+                closed_strokes.append(loop_candidate)
+
+            print(
+                f"[DRAW_SEGMENT] closed_strokes={len(closed_strokes)} "
+                f"self_loop_strokes={self_loop_strokes} "
+                f"open_strokes={len(open_strokes)} "
+                f"close_tol={close_tol:.1f}"
+            )
+
             valid_loops = []
-            for poly in independent_polys:
-                c = np.asarray(poly.exterior.coords, dtype=np.int32)
-                if c.ndim != 2 or c.shape[1] != 2 or c.shape[0] < 3:
+            kept_loop_sizes = []
+            kept_loop_areas = []
+            for st in closed_strokes:
+                c = np.round(st).astype(np.int32).reshape((-1, 1, 2))
+                if c is None or len(c) < 3:
                     continue
-                # Ensure closed contour for robust fillPoly behavior.
-                if not np.array_equal(c[0], c[-1]):
-                    c = np.vstack([c, c[0]])
-                c = c.reshape((-1, 1, 2))
-                if c.shape[0] >= 4:
-                    valid_loops.append(c)
+                area = float(cv2.contourArea(c.astype(np.float32)))
+                if area <= float(min_loop_area_px):
+                    continue
+                valid_loops.append(c)
+                kept_loop_sizes.append(int(c.shape[0]))
+                kept_loop_areas.append(area)
+
+            # Debug masks from direct per-stroke loops (no global contour extraction).
+            stroke_mask = np.zeros((H, W), np.uint8)
+            if valid_loops:
+                cv2.fillPoly(stroke_mask, valid_loops, 255)
+            cv2.imwrite(os.path.join(dbg_dir, "01_stroke_mask.png"), stroke_mask)
+            cv2.imwrite(os.path.join(dbg_dir, "02_stroke_mask_closed.png"), stroke_mask)
+            print(f"[DRAW_SEGMENT] stroke_mask sum={int(stroke_mask.sum())}")
+            print(f"[DRAW_SEGMENT] cnts_found={len(valid_loops)} (direct loops)")
+            print(f"[DRAW_SEGMENT] cnt_areas={[round(a, 2) for a in kept_loop_areas]}")
+
+            cnt_vis = cv2.cvtColor(stroke_mask.copy(), cv2.COLOR_GRAY2BGR)
+            for i, c in enumerate(valid_loops):
+                cv2.drawContours(cnt_vis, [c], -1, (0, 255, 0), 1)
+                M = cv2.moments(c)
+                if M["m00"] > 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    cv2.putText(
+                        cnt_vis,
+                        str(i),
+                        (cx, cy),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (0, 0, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
+                x0, y0, w0, h0 = cv2.boundingRect(c)
+                a0 = float(cv2.contourArea(c.astype(np.float32)))
+                print(f"[DRAW_SEGMENT] cnt[{i}] bbox=({x0},{y0},{w0},{h0}) area={a0:.2f}")
+            cv2.imwrite(os.path.join(dbg_dir, "03_found_contours.png"), cnt_vis)
 
             if not valid_loops:
-                print("[DRAW_SEGMENT] no valid independent loops; abort.")
+                print("[DRAW_SEGMENT] No enclosed region detected from stroke.")
                 return
+            print(
+                f"[DRAW_SEGMENT] valid_loops={len(valid_loops)} "
+                f"loop_sizes={kept_loop_sizes} "
+                f"loop_areas={[round(a, 2) for a in kept_loop_areas]}"
+            )
 
             # Keep every loop for downstream save/erase.
             self.manuall_loops = valid_loops
@@ -768,12 +827,45 @@ class ManualDrawing(CrackUtils):
             self.pending_mode = mode
 
             # --- Preview ---
-            H, W = self.image.shape[:2]
             im = self.image.astype(np.uint8).copy()
             im = self.draw_existing_cracks(im)
 
             preview_mask = np.zeros((H, W), np.uint8)
             cv2.fillPoly(preview_mask, valid_loops, 255)
+            print(f"[DRAW_SEGMENT] preview mask raw sum={int(preview_mask.sum())}")
+            print(f"[DRAW_SEGMENT] preview mask cleaned sum={int(preview_mask.sum())}")
+            cv2.imwrite(os.path.join(dbg_dir, "05_preview_mask.png"), preview_mask)
+
+            # Show open strokes as line-only guidance (not fillable).
+            for st in open_strokes:
+                pts = np.round(st).astype(np.int32).reshape((-1, 1, 2))
+                cv2.polylines(
+                    im,
+                    [pts],
+                    isClosed=False,
+                    color=(255, 255, 0),
+                    thickness=4,
+                    lineType=cv2.LINE_AA,
+                )
+
+            fill_vis = np.zeros((H, W, 3), np.uint8)
+            for i, c in enumerate(valid_loops):
+                cv2.drawContours(fill_vis, [c], -1, (0, 255, 0), thickness=-1)
+                M = cv2.moments(c)
+                if M["m00"] > 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    cv2.putText(
+                        fill_vis,
+                        str(i),
+                        (cx, cy),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (255, 255, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
+            cv2.imwrite(os.path.join(dbg_dir, "04_valid_loops_fill.png"), fill_vis)
 
             fill_color = (0, 255, 0) if mode == "add" else (255, 50, 0)
             overlay = np.zeros_like(im)
@@ -848,13 +940,23 @@ class ManualDrawing(CrackUtils):
                   - minimum 3 unique vertices (>=4 points including closure)
                 """
                 out = []
+                dropped_reasons = {
+                    "shape": 0,
+                    "too_short_pre": 0,
+                    "too_short_post_dedup": 0,
+                    "too_short_post_close": 0,
+                }
+                in_count = 0
                 for lp in loops_in or []:
+                    in_count += 1
                     a = np.asarray(lp, dtype=np.int32)
                     if a.ndim == 3 and a.shape[1] == 1 and a.shape[2] == 2:
                         a = a[:, 0, :]
                     elif a.ndim != 2 or a.shape[1] != 2:
+                        dropped_reasons["shape"] += 1
                         continue
                     if a.shape[0] < 3:
+                        dropped_reasons["too_short_pre"] += 1
                         continue
 
                     # Drop immediate duplicates to avoid degenerate contours.
@@ -865,13 +967,20 @@ class ManualDrawing(CrackUtils):
                                 keep.append(i)
                         a = a[np.asarray(keep, dtype=int)]
                     if a.shape[0] < 3:
+                        dropped_reasons["too_short_post_dedup"] += 1
                         continue
 
                     if not np.array_equal(a[0], a[-1]):
                         a = np.vstack([a, a[0]])
                     if a.shape[0] < 4:
+                        dropped_reasons["too_short_post_close"] += 1
                         continue
                     out.append(a.reshape((-1, 1, 2)).astype(np.int32, copy=False))
+                print(
+                    f"[MANUAL_SAVE] sanitize_loops: in={in_count} out={len(out)} "
+                    f"dropped={dropped_reasons} "
+                    f"out_sizes={[int(v.shape[0]) for v in out]}"
+                )
                 return out
 
             # Build drawable loops from new multi-loop storage first, then fallback.
@@ -881,6 +990,10 @@ class ManualDrawing(CrackUtils):
                     cc = np.asarray(c, np.int32)
                     if cc.ndim == 3 and cc.shape[1] == 1 and cc.shape[2] == 2 and cc.shape[0] >= 3:
                         drawn_loops.append(cc)
+            print(
+                f"[MANUAL_SAVE] raw pending loops="
+                f"{len(drawn_loops)} sizes={[int(v.shape[0]) for v in drawn_loops]}"
+            )
 
             if not drawn_loops:
                 if not hasattr(self, "manuall_x") or not hasattr(self, "manuall_y"):
@@ -926,16 +1039,39 @@ class ManualDrawing(CrackUtils):
                 for cmb_id, crack in combined.items():
                     yield "combined", cmb_id, crack
 
+            def _get_crack_bbox(crack):
+                """
+                Atomic/combined bbox aliases seen in annotations.
+                Returns [x,y,w,h] or None.
+                """
+                for k in ("mask_bbox", "bbox", "crack_bbox"):
+                    bb = crack.get(k)
+                    if isinstance(bb, (list, tuple)) and len(bb) == 4:
+                        try:
+                            x0, y0, w0, h0 = [int(v) for v in bb]
+                            if w0 > 0 and h0 > 0:
+                                return [x0, y0, w0, h0]
+                        except Exception:
+                            pass
+                return None
+
             # ---------- helper: full-image mask from crop+bbox ----------
-            def reconstruct_full_mask(crack):
-                mc, bb = crack.get("mask_crop"), crack.get("mask_bbox")
-                if mc is None or bb is None or not len(mc):
-                    return np.zeros((H, W), np.uint8)
-                crop = np.array(mc, dtype=np.uint8)
-                x0, y0, w, h = [int(v) for v in bb]
-                x1, y1 = min(x0 + w, W), min(y0 + h, H)
+            def reconstruct_full_mask(crack, *, allow_bbox_proxy=False):
+                mc = crack.get("mask_crop")
+                bb = _get_crack_bbox(crack)
                 full = np.zeros((H, W), np.uint8)
-                full[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
+                if mc is not None and bb is not None and len(mc):
+                    crop = np.array(mc, dtype=np.uint8)
+                    x0, y0, w, h = [int(v) for v in bb]
+                    x1, y1 = min(x0 + w, W), min(y0 + h, H)
+                    full[y0:y1, x0:x1] = crop[:y1 - y0, :x1 - x0]
+                    return full
+                # BBox-only fallback for overlap targeting when mask_crop is absent.
+                if allow_bbox_proxy and bb is not None:
+                    x0, y0, w, h = [int(v) for v in bb]
+                    x1, y1 = min(x0 + w, W), min(y0 + h, H)
+                    if x1 > x0 and y1 > y0:
+                        full[y0:y1, x0:x1] = 255
                 return full
 
             # ---------- helper: rebuild edges + normals from full mask ----------
@@ -988,9 +1124,11 @@ class ManualDrawing(CrackUtils):
             print("[MANUAL_SAVE] final cracks (pre-op):")
             for kind, cid, crack in iter_final_cracks():
                 mc = crack.get("mask_crop")
-                bb = crack.get("mask_bbox")
-                if mc is None or bb is None:
-                    print(f"  {kind} id={cid}: NO mask_crop/bbox")
+                bb = _get_crack_bbox(crack)
+                if mc is None and bb is None:
+                    print(f"  {kind} id={cid}: NO mask_crop/bbox aliases")
+                elif mc is None and bb is not None:
+                    print(f"  {kind} id={cid}: bbox-only={bb} (no mask_crop)")
                 else:
                     arr = np.array(mc, dtype=np.uint8)
                     print(
@@ -1045,7 +1183,8 @@ class ManualDrawing(CrackUtils):
 
                 # 1) find first final crack that overlaps the drawn region
                 for kind, cid, crack in iter_final_cracks():
-                    full_old = reconstruct_full_mask(crack)
+                    # Allow bbox-only atomics to be selected as target.
+                    full_old = reconstruct_full_mask(crack, allow_bbox_proxy=True)
                     if np.any(cv2.bitwise_and(full_old, poly_mask)):
                         target_kind, target_id, target_crack = kind, cid, crack
                         break
@@ -1055,7 +1194,8 @@ class ManualDrawing(CrackUtils):
                     return
 
                 # 2) union new region into that crack's mask
-                full_old = reconstruct_full_mask(target_crack)
+                # Union from real stored mask only (avoid expanding to full bbox proxy).
+                full_old = reconstruct_full_mask(target_crack, allow_bbox_proxy=False)
                 full_new = cv2.bitwise_or(full_old, poly_mask)
 
                 ys, xs = np.where(full_new > 0)

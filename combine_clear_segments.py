@@ -183,15 +183,21 @@ class CombineClearSegments(CrackUtils):
             for i, (tpe, cid) in enumerate(display_items):
                 crack = atomic_cracks[cid] if tpe == "atomic" else combined_cracks[cid]
                 m_full = mask_from_crack(crack)
+                is_selected = listwidget.item(i).isSelected()
+                seg_color = (255, 255, 0) if is_selected else (255, 0, 0)  # yellow / red
+                midline_color = (0, 140, 0) if is_selected else (0, 0, 255)  # dark green / blue
+                alpha = 0.6 if is_selected else 0.25
                 if np.any(m_full):
-                    color = (255, 0, 0)
-                    alpha = 0.25
-                    if listwidget.item(i).isSelected():
-                        color = (255, 255, 0)
-                        alpha = 0.6
                     overlay = np.zeros_like(display)
-                    overlay[m_full.astype(bool)] = color
+                    overlay[m_full.astype(bool)] = seg_color
                     display = cv2.addWeighted(display, 1, overlay, alpha, 0)
+                midline = np.asarray(crack.get("midline", []), dtype=float)
+                if midline.ndim == 2 and midline.shape[0] >= 2 and midline.shape[1] >= 2:
+                    pts = np.round(midline[:, :2]).astype(np.int32).reshape(-1, 1, 2)
+                    cv2.polylines(display, [pts], False, midline_color, 2, lineType=cv2.LINE_AA)
+                elif midline.ndim == 2 and midline.shape[0] == 1 and midline.shape[1] >= 2:
+                    p = tuple(np.round(midline[0, :2]).astype(np.int32))
+                    cv2.circle(display, p, 2, midline_color, -1, lineType=cv2.LINE_AA)
             im = display.astype(np.uint8)
             qimage = QImage(im, im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qimage)
@@ -347,11 +353,15 @@ class CombineClearSegments(CrackUtils):
 
         ann = self.annotation.setdefault("annotations", {})
         combined = ann.setdefault("combined_cracks", {})
+        atomic = ann.setdefault("atomic_cracks", {})
         if not combined:
             error("No combined cracks to delete.")
             return
 
         keys_sorted = sorted(combined.keys(), key=lambda s: int(s))
+        combined_member_ids = set()
+        for cmb in combined.values():
+            combined_member_ids.update(cmb.get("members", []))
         labels = []
         H, W = self.original_image.shape[:2]
         for cid in keys_sorted:
@@ -378,6 +388,15 @@ class CombineClearSegments(CrackUtils):
 
         # Highlight function
         def highlight():
+            def draw_midline(img, crack, color, thickness=2):
+                midline = np.asarray(crack.get("midline", []), dtype=float)
+                if midline.ndim == 2 and midline.shape[0] >= 2 and midline.shape[1] >= 2:
+                    pts = np.round(midline[:, :2]).astype(np.int32).reshape(-1, 1, 2)
+                    cv2.polylines(img, [pts], False, color, thickness, lineType=cv2.LINE_AA)
+                elif midline.ndim == 2 and midline.shape[0] == 1 and midline.shape[1] >= 2:
+                    p = tuple(np.round(midline[0, :2]).astype(np.int32))
+                    cv2.circle(img, p, max(2, thickness), color, -1, lineType=cv2.LINE_AA)
+
             disp = self.original_image.copy()
             for i, cid in enumerate(keys_sorted):
                 mask = reconstruct_full_mask_from_crack(combined[cid], H, W)
@@ -391,6 +410,29 @@ class CombineClearSegments(CrackUtils):
                     overlay[mask.astype(bool)] = (255, 255, 0)  # yellow if not selected
                     alpha = 0.4
                 disp = cv2.addWeighted(disp, 1, overlay, alpha, 0)
+
+            # Show combined midlines (selected in dark green, unselected in blue).
+            for i, cid in enumerate(keys_sorted):
+                cmb = combined[cid]
+                midline_color = (0, 140, 0) if lw.item(i).isSelected() else (0, 0, 255)
+                draw_midline(disp, cmb, midline_color, thickness=2)
+
+            # Show non-combined atomic midlines in blue.
+            for atom_id, crack in atomic.items():
+                if atom_id in combined_member_ids:
+                    continue
+                draw_midline(disp, crack, (0, 0, 255), thickness=2)
+
+            # For selected combined cracks, highlight member atomic midlines in green only.
+            for i, cid in enumerate(keys_sorted):
+                if not lw.item(i).isSelected():
+                    continue
+                members = combined[cid].get("members", [])
+                for m_id in members:
+                    crack = atomic.get(m_id)
+                    if crack is None:
+                        continue
+                    draw_midline(disp, crack, (0, 180, 0), thickness=2)
             qimage = QImage(disp, disp.shape[1], disp.shape[0], disp.strides[0], QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qimage)
             self.ImageScreen.setPixmap(
@@ -484,25 +526,23 @@ class CombineClearSegments(CrackUtils):
         def highlight_selected_segments():
             display = self.original_image.copy()
             for i, m in enumerate(masks):
-                color = (255, 0, 0)
-                alpha = 0.25
-                if listwidget.item(i).isSelected():
-                    color = (255, 255, 0)
-                    alpha = 0.6
+                is_selected = listwidget.item(i).isSelected()
+                seg_color = (255, 255, 0) if is_selected else (255, 0, 0)  # yellow / red
+                midline_color = (0, 140, 0) if is_selected else (0, 0, 255)  # dark green / blue
+                alpha = 0.6 if is_selected else 0.25
                 if np.any(m):
                     overlay = np.zeros_like(display)
-                    overlay[m.astype(bool)] = color
+                    overlay[m.astype(bool)] = seg_color
                     display = cv2.addWeighted(display, 1, overlay, alpha, 0)
-                elif listwidget.item(i).isSelected():
-                    crack_id = items[i][1]
-                    crack = atomic_cracks.get(crack_id, {})
-                    midline = np.asarray(crack.get("midline", []), dtype=float)
-                    if midline.ndim == 2 and midline.shape[0] >= 2 and midline.shape[1] >= 2:
-                        pts = np.round(midline[:, :2]).astype(np.int32).reshape(-1, 1, 2)
-                        cv2.polylines(display, [pts], False, (0, 0, 255), 2, lineType=cv2.LINE_AA)
-                    elif midline.ndim == 2 and midline.shape[0] == 1 and midline.shape[1] >= 2:
-                        p = tuple(np.round(midline[0, :2]).astype(np.int32))
-                        cv2.circle(display, p, 2, (0, 0, 255), -1, lineType=cv2.LINE_AA)
+                crack_id = items[i][1]
+                crack = atomic_cracks.get(crack_id, {})
+                midline = np.asarray(crack.get("midline", []), dtype=float)
+                if midline.ndim == 2 and midline.shape[0] >= 2 and midline.shape[1] >= 2:
+                    pts = np.round(midline[:, :2]).astype(np.int32).reshape(-1, 1, 2)
+                    cv2.polylines(display, [pts], False, midline_color, 2, lineType=cv2.LINE_AA)
+                elif midline.ndim == 2 and midline.shape[0] == 1 and midline.shape[1] >= 2:
+                    p = tuple(np.round(midline[0, :2]).astype(np.int32))
+                    cv2.circle(display, p, 2, midline_color, -1, lineType=cv2.LINE_AA)
             from PyQt5.QtGui import QImage, QPixmap
             qimage = QImage(display, display.shape[1], display.shape[0],
                             display.strides[0], QImage.Format_RGB888)
