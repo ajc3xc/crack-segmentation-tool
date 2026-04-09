@@ -16,10 +16,51 @@ from helpers.geometry_canonical import (
     canonicalize_branch_direction,
     assert_direction_consistency,
 )
+from helpers.branch_stitching import stitch_branch_segments as shared_stitch_branch_segments
 
 from shapely.geometry import LineString, MultiLineString
 from shapely.ops import unary_union
 from helpers.plot_metrics import *
+
+COMBINER_DEBUG_LEVEL = 1
+
+
+def _c_log(level, msg):
+    if COMBINER_DEBUG_LEVEL >= int(level):
+        print(msg)
+
+
+def _dbg_pts(tag, pts, bbox=None, level=1):
+    try:
+        a = np.asarray(pts, float)
+        if a.ndim != 2 or a.shape[1] != 2 or len(a) == 0:
+            _c_log(level, f"[DBG_PTS] {tag}: invalid shape={getattr(a, 'shape', None)}")
+            return
+        mn = np.min(a, axis=0)
+        mx = np.max(a, axis=0)
+        _c_log(level, f"[DBG_PTS] {tag}: min={mn.tolist()}, max={mx.tolist()}, n={len(a)}")
+        if bbox is not None and len(bbox) == 4:
+            x, y, w, h = [int(v) for v in bbox]
+            _c_log(level, f"[DBG_PTS] {tag}: bbox=({x},{y},{w},{h})")
+    except Exception as e:
+        _c_log(level, f"[DBG_PTS] {tag}: failed ({e})")
+
+
+def _dbg_frame_mismatch(pts, bbox, level=1):
+    try:
+        a = np.asarray(pts, float)
+        if a.ndim != 2 or a.shape[1] != 2 or len(a) == 0:
+            _c_log(level, "[FRAME_CHECK] invalid pts")
+            return
+        x0, y0, w, h = [float(v) for v in bbox]
+        global_like = float(np.mean((a[:, 0] > w) | (a[:, 1] > h)))
+        local_like = float(np.mean(
+            (a[:, 0] >= 0) & (a[:, 0] <= w) &
+            (a[:, 1] >= 0) & (a[:, 1] <= h)
+        ))
+        _c_log(level, f"[FRAME_CHECK] global_like={global_like:.2f}, local_like={local_like:.2f}")
+    except Exception as e:
+        _c_log(level, f"[FRAME_CHECK] failed ({e})")
 
 
 def _finite_xy(arr):
@@ -719,11 +760,6 @@ def dominant_segments_from_group(
     if not atomics:
         return [], {"branches": [], "segments_meta": [], "bite": None}
 
-    for i, a in enumerate(atomics):
-        print(f"\n[ENDPOINT CHECK] atomic_id={a['atomic_id']}")
-        print(f"  USER endpoints: {a.get('endpoints', set())}")
-        print(f"  GEOM start/end: {a['poly'][0]} -> {a['poly'][-1]}")
-
     # -----------------------------
     # 1.5) mask / canvas init (NOW atomics exists)
     # -----------------------------
@@ -792,9 +828,6 @@ def dominant_segments_from_group(
     def _pts_close(a, b, tol=.2):
         return float(np.linalg.norm(a - b)) <= tol
 
-    def _dist(a, b):
-        return float(np.linalg.norm(np.asarray(a, float) - np.asarray(b, float)))
-
     unused = set(range(len(atomics)))
     branches = []  # list[list[atomic indices]]
     attach_orders = {}  # atomic_idx -> order within branch (1-based)
@@ -820,18 +853,9 @@ def dominant_segments_from_group(
             best_j = None
             best_len = -1.0
             best_attach_mode = None  # ("start"/"end", flip_bool)
-            print(f"\n[BRANCH GROW] branch_size={len(branch)} current_endpoints={len(branch_endpoints)}")
-            print(f"  b_start={b_start}, b_end={b_end}")
-
             for j in list(unused):
                 Sj = atomics[j]["poly"]
                 j_start, j_end = _endpoints(Sj)
-                print(f"\n  [CANDIDATE] j={j} atomic_id={atomics[j]['atomic_id']}")
-                print(f"    j_start={j_start}, j_end={j_end}")
-                print(f"    dist(b_end, j_start)={_dist(b_end, j_start):.2f}")
-                print(f"    dist(b_end, j_end)  ={_dist(b_end, j_end):.2f}")
-                print(f"    dist(b_start, j_start)={_dist(b_start, j_start):.2f}")
-                print(f"    dist(b_start, j_end)  ={_dist(b_start, j_end):.2f}")
 
                 # ------------------------------------------------
                 # LOOP PREVENTION:
@@ -839,12 +863,10 @@ def dominant_segments_from_group(
                 # ------------------------------------------------
                 start_in = any(_pts_close(j_start, ep) for ep in branch_endpoints)
                 end_in   = any(_pts_close(j_end,   ep) for ep in branch_endpoints)
-                print(f"    start_in={start_in}, end_in={end_in}")
 
                 if start_in and end_in:
                     # both endpoints already appear somewhere in branch
                     # -> would close a cycle
-                    print(f"    REJECTED (loop prevention): both endpoints already in branch")
                     continue
 
                 # try attach to branch end
@@ -859,10 +881,8 @@ def dominant_segments_from_group(
                 elif _pts_close(b_start, j_start):
                     mode = ("start", True)
                 else:
-                    print(f"    REJECTED (no endpoint match)")
                     continue
 
-                print(f"    ATTACH mode={mode}, length={atomics[j]['length']:.2f}")
                 if atomics[j]["length"] > best_len:
                     best_len = atomics[j]["length"]
                     best_j = j
@@ -892,12 +912,11 @@ def dominant_segments_from_group(
 
                 grew = True
 
-        print(f"\n[BRANCH FINAL] size={len(branch)} atomics={[atomics[i]['atomic_id'] for i in branch]}")
         branches.append(branch)
 
-    print("\n[BRANCH SUMMARY]")
+    _c_log(1, "\n[BRANCH SUMMARY]")
     for bi, br in enumerate(branches):
-        print(f"  branch {bi}: {[atomics[i]['atomic_id'] for i in br]}")
+        _c_log(1, f"  branch {bi}: {[atomics[i]['atomic_id'] for i in br]}")
 
     # --------------------------------------------------
     # Optional greedy-branch construction debug plot
@@ -1605,7 +1624,7 @@ def dominant_segments_from_group(
                     f"len_px={m.get('length'):.2f}"
                 )
         for i, a in enumerate(atomics):
-            print(f"[SEG {i}] start={a['poly'][0]} end={a['poly'][-1]} len={a['length']:.1f}")
+            _c_log(3, f"[SEG {i}] start={a['poly'][0]} end={a['poly'][-1]} len={a['length']:.1f}")
     
     return kept, meta
 
@@ -2489,13 +2508,13 @@ def _split_derived_by_atomic_junctions(
     unique_aids = [a for a in atomic_seq if a is not None]
     if len(set(unique_aids)) <= 1:
         try:
-            print(f"[DERIVED SPLIT DBG] branch={branch_id} atomic_seq={atomic_seq} unique_aids={sorted(set(unique_aids))}")
-            print(
+            _c_log(3, f"[DERIVED SPLIT DBG] branch={branch_id} atomic_seq={atomic_seq} unique_aids={sorted(set(unique_aids))}")
+            _c_log(3, (
                 f"[DERIVED SPLIT DBG] branch={branch_id} chain_metas_atomic="
                 f"{[((m if isinstance(m, dict) else {}).get('atomic_id'), (m if isinstance(m, dict) else {}).get('seg_idx')) for m in (chain_metas or [])]}"
-            )
+            ))
         except Exception as _e:
-            print(f"[DERIVED SPLIT DBG] branch={branch_id} chain atomic debug failed: {_e}")
+            _c_log(3, f"[DERIVED SPLIT DBG] branch={branch_id} chain atomic debug failed: {_e}")
         aid0 = unique_aids[0] if unique_aids else None
         return [D], [{
             "branch_id": int(branch_id),
@@ -2606,21 +2625,21 @@ def _split_derived_by_atomic_junctions(
 
     # DEBUG: verify split output (segment count, atomic assignments, endpoints)
     try:
-        print(f"[DERIVED SPLIT DBG] branch={branch_id} out_segs={len(out_segs)} out_meta={len(out_meta)}")
+        _c_log(3, f"[DERIVED SPLIT DBG] branch={branch_id} out_segs={len(out_segs)} out_meta={len(out_meta)}")
         for i, (S, m) in enumerate(zip(out_segs, out_meta)):
             S = np.asarray(S, float)
             mm = m if isinstance(m, dict) else {}
             aid = mm.get("atomic_id", None)
             if S.ndim == 2 and S.shape[1] == 2 and len(S) >= 1:
-                print(
+                _c_log(3, (
                     f"[DERIVED SPLIT DBG]  seg{i}: atomic_id={aid} n={len(S)} "
                     f"start=({float(S[0,0]):.3f},{float(S[0,1]):.3f}) "
                     f"end=({float(S[-1,0]):.3f},{float(S[-1,1]):.3f})"
-                )
+                ))
             else:
-                print(f"[DERIVED SPLIT DBG]  seg{i}: atomic_id={aid} invalid_shape={getattr(S, 'shape', None)}")
+                _c_log(3, f"[DERIVED SPLIT DBG]  seg{i}: atomic_id={aid} invalid_shape={getattr(S, 'shape', None)}")
     except Exception as _e:
-        print(f"[DERIVED SPLIT DBG] branch={branch_id} failed: {_e}")
+        _c_log(3, f"[DERIVED SPLIT DBG] branch={branch_id} failed: {_e}")
 
     return out_segs, out_meta
 
@@ -2754,7 +2773,7 @@ def build_combined_crack_stateless(
     t_post_total  = 0.0
     t_loop_total  = 0.0
 
-    print(f"[COMBINER] branches = {len(branch_to_segs)}")
+    _c_log(1, f"[COMBINER] branches = {len(branch_to_segs)}")
 
     # --------------------------------------------------------
     # Process EACH BRANCH as ONE CHAIN (preferred)
@@ -2840,10 +2859,10 @@ def build_combined_crack_stateless(
                 )
                 for c in clusters
             ]
-            print(
-                f"[TOPO DEGREE] branch={branch_id} tol={float(tol):.2f} "
-                f"nodes={len(clusters)} odd={odd} max_deg={max_deg} chain_like={chain_like} "
-                f"node_degrees={nodes_preview[:8]}"
+            _c_log(
+                1,
+                f"[TOPO DEGREE] branch={branch_id} nodes={len(clusters)} "
+                f"odd={odd} max_deg={max_deg} chain_like={chain_like}",
             )
             if not chain_like:
                 print(
@@ -2854,7 +2873,7 @@ def build_combined_crack_stateless(
         # Debug endpoint drift vs declared user topology before stitching.
         if len(seg_list) >= 2:
             try:
-                print(f"[TOPO PRE-STITCH] branch={branch_id} n_segs={len(seg_list)}")
+                _c_log(3, f"[TOPO PRE-STITCH] branch={branch_id} n_segs={len(seg_list)}")
                 _branch_endpoint_degree_diag(seg_list, tol=2.0)
                 for i, S in enumerate(seg_list):
                     S = np.asarray(S, float)
@@ -2869,18 +2888,18 @@ def build_combined_crack_stateless(
                     u1_idx, u1_d = _nearest_pt_info(p1, ups)
                     e0_idx, e0_d = _nearest_pt_info(p0, ueps)
                     e1_idx, e1_d = _nearest_pt_info(p1, ueps)
-                    print(
+                    _c_log(3, (
                         f"[TOPO PRE-STITCH] seg{i} atomic={aid} n={len(S)} "
                         f"start=({p0[0]:.3f},{p0[1]:.3f}) end=({p1[0]:.3f},{p1[1]:.3f})"
-                    )
-                    print(
+                    ))
+                    _c_log(3, (
                         f"[TOPO PRE-STITCH] seg{i} nearest_userpt start=(idx={u0_idx},d={u0_d}) "
                         f"end=(idx={u1_idx},d={u1_d})"
-                    )
-                    print(
+                    ))
+                    _c_log(3, (
                         f"[TOPO PRE-STITCH] seg{i} nearest_user_endpoint start=(idx={e0_idx},d={e0_d}) "
                         f"end=(idx={e1_idx},d={e1_d}) n_user_endpoints={len(ueps)}"
-                    )
+                    ))
 
                 for i in range(len(seg_list)):
                     for j in range(i + 1, len(seg_list)):
@@ -2898,12 +2917,12 @@ def build_combined_crack_stateless(
                                 d = np.sqrt(np.sum((ej - pi[None, :]) ** 2, axis=1))
                                 if np.any(d <= 1e-6):
                                     shared.append((float(pi[0]), float(pi[1])))
-                        print(
+                        _c_log(3, (
                             f"[TOPO PRE-STITCH] pair i={i}({ai}) j={j}({aj}) "
                             f"shared_user_endpoints={len(shared)} {shared[:4]}"
-                        )
+                        ))
             except Exception as _e:
-                print(f"[TOPO PRE-STITCH] debug failed branch={branch_id}: {_e}")
+                _c_log(3, f"[TOPO PRE-STITCH] debug failed branch={branch_id}: {_e}")
 
         # ====================================================
         # 0) Stitch segments into ONE continuous polyline
@@ -2967,6 +2986,8 @@ def build_combined_crack_stateless(
             segs = [np.asarray(s, float) for s in seg_list if s is not None and len(s) >= 2]
             if not segs:
                 return None, False, "no valid segs"
+            for si, ss in enumerate(segs):
+                _dbg_pts(f"branch{branch_id}_seg{si}", ss, level=1)
 
             used = set()
             chain = [segs[0]]
@@ -3011,6 +3032,12 @@ def build_combined_crack_stateless(
                     # Prepend candidates: connect candidate end -> chain start
                     d_pre_as_is = float(np.linalg.norm(b - cur_start))
                     d_pre_rev = float(np.linalg.norm(a - cur_start))
+                    _c_log(
+                        1,
+                        f"[DBG_DIST] branch={branch_id} cand={j} "
+                        f"app_fwd={d_app_as_is:.3f} app_rev={d_app_rev:.3f} "
+                        f"pre_fwd={d_pre_as_is:.3f} pre_rev={d_pre_rev:.3f}",
+                    )
 
                     if d_pre_as_is < best_dist:
                         best_dist = d_pre_as_is
@@ -3038,13 +3065,13 @@ def build_combined_crack_stateless(
                         join_dist = float(
                             np.linalg.norm(np.asarray(chain[-1][-1], float) - np.asarray(best_oriented[0], float))
                         )
-                    print(
-                        f"[STITCH JOIN DBG] branch={branch_id} append_j={best_j} "
-                        f"best_dist={float(best_dist):.3f} join_dist={join_dist:.3f} "
-                        f"flipped={best_flipped} action={best_action} mode={mode} is_auto={bool(is_auto)}"
+                    _c_log(
+                        1,
+                        f"[STITCH JOIN] branch={branch_id} {best_action}_j={best_j} "
+                        f"dist={join_dist:.3f} flipped={best_flipped}",
                     )
                 except Exception as _e:
-                    print(f"[STITCH JOIN DBG] branch={branch_id} failed: {_e}")
+                    _c_log(3, f"[STITCH JOIN DBG] branch={branch_id} failed: {_e}")
 
                 if best_action == "prepend":
                     chain.insert(0, best_oriented)
@@ -3092,7 +3119,14 @@ def build_combined_crack_stateless(
 
         # AUTO/MANUAL semantics are passed explicitly by caller; `mode` is edge mode ("old"/"new").
         allow_teleport = bool(is_auto)
-        S_branch, ok, reason = stitch_branch_segments(seg_list, max_jump=10.0, allow_teleport=allow_teleport)
+        S_branch, ok, reason = shared_stitch_branch_segments(
+            seg_list,
+            max_jump=10.0,
+            allow_teleport=allow_teleport,
+        )
+
+        if not ok:
+            print(f"[STITCH FAIL] branch={branch_id}: {reason}")
 
         # ====================================================
         # 1) No fallback runs in AUTO. Either proceed or fail.
@@ -3130,6 +3164,10 @@ def build_combined_crack_stateless(
             y1 = min(H, int(np.ceil (S_run[:, 1].max() + branch_pad)))
             if x1 - x0 < 2 or y1 - y0 < 2:
                 continue
+            bw, bh = int(x1 - x0), int(y1 - y0)
+            _c_log(1, f"[DBG_BBOX] branch={branch_id} run={run_id} bbox=({x0},{y0},{bw},{bh})")
+            _dbg_pts(f"branch{branch_id}_run{run_id}_midline BEFORE crop", S_run, bbox=(x0, y0, bw, bh), level=1)
+            _dbg_frame_mismatch(S_run, (x0, y0, bw, bh), level=1)
 
             # 🔴 DEBUG BEFORE ANY SOLVER LOGIC
             '''debug_bbox_only(
@@ -3147,6 +3185,15 @@ def build_combined_crack_stateless(
                 S_run[:, 1] - y0,
                 S_run[:, 0] - x0
             ])
+            midline_xy_crop_dbg = np.column_stack([track_local_yx[1], track_local_yx[0]])
+            _dbg_pts(
+                f"branch{branch_id}_run{run_id}_midline AFTER crop",
+                midline_xy_crop_dbg,
+                bbox=(x0, y0, bw, bh),
+                level=1,
+            )
+            if np.any(midline_xy_crop_dbg < -5) or np.any(midline_xy_crop_dbg[:, 0] > (bw + 5)) or np.any(midline_xy_crop_dbg[:, 1] > (bh + 5)):
+                print("[DBG_BBOX][WARN] OUT OF BOUNDS AFTER CROP", flush=True)
 
             # seeds/tips for THIS run (branch)
             pts_crop = [
@@ -3177,6 +3224,16 @@ def build_combined_crack_stateless(
                 track_local_yx[1],
                 track_local_yx[0],
             ])
+            ys = np.round(midline_xy_crop[:, 1]).astype(int)
+            xs = np.round(midline_xy_crop[:, 0]).astype(int)
+            valid = (
+                (ys >= 0) & (ys < crop.shape[0]) &
+                (xs >= 0) & (xs < crop.shape[1])
+            )
+            _c_log(1, "[DBG_MASK_ALIGNMENT]")
+            _c_log(1, f"midline sample: {midline_xy_crop[:3].tolist()}")
+            _c_log(1, f"mask shape: {(crop.shape[0], crop.shape[1])}")
+            _c_log(1, f"valid ratio: {float(np.mean(valid)):.3f}")
 
             t_et0 = time.perf_counter()
             # ------------------------------------------------
@@ -3281,6 +3338,15 @@ def build_combined_crack_stateless(
                 edge2=e2_full,
                 normals_are_vectors=False,
             )
+            try:
+                print("\n[DBG_CANON_INPUT]", flush=True)
+                print(f"segA_end: {np.asarray(S_run[-1], float).tolist()}", flush=True)
+                print(f"segB_start: {np.asarray(derived_mid_full[0], float).tolist()}", flush=True)
+                print(f"segB_end: {np.asarray(derived_mid_full[-1], float).tolist()}", flush=True)
+                print(f"segA_bbox: ({int(x0)},{int(y0)},{int(x1 - x0)},{int(y1 - y0)})", flush=True)
+                print(f"segB_bbox: ({int(x0)},{int(y0)},{int(x1 - x0)},{int(y1 - y0)})", flush=True)
+            except Exception as _e:
+                print(f"[DBG_CANON_INPUT] failed: {_e}", flush=True)
             if orient_info.get("flipped", False):
                 n1_full = _finite_xy(np.asarray(n1_full, float)[::-1].copy())
                 n2_full = _finite_xy(np.asarray(n2_full, float)[::-1].copy())
@@ -3415,18 +3481,18 @@ def build_combined_crack_stateless(
         mid_meta_b = mid_pack["meta"]
 
         try:
-            print(f"[MID META DBG] branch={bi} mid_segs_b={len(mid_segs_b)} mid_meta_b={len(mid_meta_b)}")
+            _c_log(3, f"[MID META DBG] branch={bi} mid_segs_b={len(mid_segs_b)} mid_meta_b={len(mid_meta_b)}")
             for ii, (Sx, mx) in enumerate(zip(mid_segs_b, mid_meta_b)):
                 Sx = np.asarray(Sx, float)
                 mm = mx if isinstance(mx, dict) else {}
-                print(
+                _c_log(3, (
                     f"[MID META DBG]  seg{ii}: n={len(Sx)} "
                     f"atomic_id={mm.get('atomic_id')} branch_id={mm.get('branch_id')} seg_idx={mm.get('seg_idx')}"
-                )
+                ))
             if len(mid_segs_b) != len(mid_meta_b):
-                print(f"[MID META DBG] branch={bi} WARNING len mismatch segs={len(mid_segs_b)} meta={len(mid_meta_b)}")
+                _c_log(3, f"[MID META DBG] branch={bi} WARNING len mismatch segs={len(mid_segs_b)} meta={len(mid_meta_b)}")
         except Exception as _e:
-            print(f"[MID META DBG] branch={bi} failed: {_e}")
+            _c_log(3, f"[MID META DBG] branch={bi} failed: {_e}")
 
         d_segs, d_meta = _split_derived_by_atomic_junctions(
             branch_id=bi,
@@ -3436,10 +3502,10 @@ def build_combined_crack_stateless(
             tol_shared=2.5,
         )
         try:
-            print(f"[DERIVED SPLIT CALL] branch={bi} sources={[((mm if isinstance(mm, dict) else {}) or {}).get('source') for mm in (d_meta or [])]}")
-            print(f"[DERIVED SPLIT CALL] branch={bi} atomic_ids={[((mm if isinstance(mm, dict) else {}) or {}).get('atomic_id') for mm in (d_meta or [])]}")
+            _c_log(3, f"[DERIVED SPLIT CALL] branch={bi} sources={[((mm if isinstance(mm, dict) else {}) or {}).get('source') for mm in (d_meta or [])]}")
+            _c_log(3, f"[DERIVED SPLIT CALL] branch={bi} atomic_ids={[((mm if isinstance(mm, dict) else {}) or {}).get('atomic_id') for mm in (d_meta or [])]}")
         except Exception as _e:
-            print(f"[DERIVED SPLIT CALL] branch={bi} debug failed: {_e}")
+            _c_log(3, f"[DERIVED SPLIT CALL] branch={bi} debug failed: {_e}")
         # Enforce continuity + deterministic branch direction on split derived segments.
         if d_segs:
             d_assoc = [dict(mm if isinstance(mm, dict) else {}) for mm in d_meta]

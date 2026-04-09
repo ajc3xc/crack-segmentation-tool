@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 
 # Form implementation generated from reading ui file 'app.ui'
 #
@@ -109,6 +109,701 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         n_out = len((report or {}).get("outputs", {}) or {})
         print(f"[summarize] dataset aggregation complete ({n_out} artifacts tracked)")
         return report
+
+    def _resolve_metrics_image_indices(self, image_indices=None, base_names=None):
+        import os
+
+        if not getattr(self, "image_names", None):
+            return []
+
+        total = len(self.image_names)
+        if image_indices is not None:
+            out = []
+            for i in (image_indices or []):
+                try:
+                    ii = int(i)
+                except Exception:
+                    continue
+                if 0 <= ii < total:
+                    out.append(ii)
+            return sorted(set(out))
+
+        if base_names is not None:
+            by_base = {}
+            for i, p in enumerate(self.image_names):
+                b = os.path.splitext(os.path.basename(str(p)))[0]
+                by_base[str(b)] = int(i)
+            out = []
+            for b in (base_names or []):
+                if str(b) in by_base:
+                    out.append(int(by_base[str(b)]))
+            return sorted(set(out))
+
+        return list(range(total))
+
+    def _best_ablation_json_path(self):
+        import os
+        calib_dir = os.path.join(self.save_folder, "metrics", "_calibration")
+        os.makedirs(calib_dir, exist_ok=True)
+        return os.path.join(calib_dir, "best_ablation_length_only.json")
+
+    def _load_best_non_dt_method(self, best_json_path=None):
+        import json
+        import os
+
+        allowed = {"dt_depth", "dt_ridge_valley", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
+        p = best_json_path or self._best_ablation_json_path()
+        if not os.path.isfile(p):
+            return None
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                obj = json.load(f) or {}
+        except Exception:
+            return None
+        best = str(obj.get("best_non_dt", "")).strip()
+        if best in allowed:
+            return best
+        return None
+
+    def _load_best_ablation_method(self, best_json_path=None):
+        """
+        Load persisted global BEST_NON_DT ablation method.
+        Raises a clear RuntimeError if missing/invalid.
+        """
+        import json
+        import os
+
+        allowed = {"dt_depth", "dt_ridge_valley", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
+        p = best_json_path or self._best_ablation_json_path()
+        if not os.path.isfile(p):
+            raise RuntimeError(
+                f"[WIDTH DRIVER] Missing best-method selection file: {p}. "
+                f"Run global ablation aggregation first."
+            )
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                obj = json.load(f) or {}
+        except Exception as e:
+            raise RuntimeError(f"[WIDTH DRIVER] Failed to read best-method file {p}: {e}")
+
+        best = str(obj.get("best_non_dt", "")).strip()
+        if best not in allowed:
+            raise RuntimeError(
+                f"[WIDTH DRIVER] Invalid or missing best_non_dt='{best}' in {p}. "
+                f"Expected one of: {sorted(allowed)}"
+            )
+        return best
+
+    def _aggregate_ablation_rs3_length_only(
+        self,
+        *,
+        image_indices=None,
+        base_names=None,
+        persist=True,
+        write_plot=True,
+    ):
+        import json
+        import os
+        import numpy as np
+        import pandas as pd
+        import matplotlib.pyplot as plt
+
+        methods = ["dt", "dt_depth", "dt_ridge_valley", "dt_ridge_valley_depth", "dt_ridge_color_depth"]
+        non_dt = [m for m in methods if m != "dt"]
+
+        idxs = self._resolve_metrics_image_indices(image_indices=image_indices, base_names=base_names)
+        rows = []
+        for idx in idxs:
+            try:
+                base = os.path.splitext(os.path.basename(self.image_names[idx]))[0]
+            except Exception:
+                continue
+            p = os.path.join(
+                self.save_folder,
+                "supervision",
+                base,
+                "analysis",
+                "gt_ablation_midline_metrics.csv",
+            )
+            if not os.path.isfile(p):
+                continue
+            try:
+                d = pd.read_csv(p)
+            except Exception:
+                continue
+            if d is None or d.empty:
+                continue
+            if "variant_id" not in d.columns or "score_mid" not in d.columns:
+                continue
+            if "length_px" not in d.columns:
+                d["length_px"] = np.nan
+            d = d.copy()
+            d["image"] = base
+            rows.append(d)
+
+        calib_dir = os.path.join(self.save_folder, "metrics", "_calibration")
+        os.makedirs(calib_dir, exist_ok=True)
+        all_rows_csv = os.path.join(calib_dir, "ablation_rs3_all_rows.csv")
+        summary_csv = os.path.join(calib_dir, "ablation_rs3_weighted_summary.csv")
+        best_json = os.path.join(calib_dir, "best_ablation_length_only.json")
+        plot_png = os.path.join(calib_dir, "ablation_rs3_weighted_summary.png")
+
+        if not rows:
+            empty = pd.DataFrame(columns=["method_key", "n_rows", "total_length_px", "mean_rs3", "weighted_rs3"])
+            if persist:
+                empty.to_csv(all_rows_csv, index=False)
+                empty.to_csv(summary_csv, index=False)
+                with open(best_json, "w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "weighting": "length_only",
+                            "best_non_dt": None,
+                            "weighted_rs3": {},
+                            "mean_rs3": {},
+                            "n_rows": {},
+                        },
+                        f,
+                        indent=2,
+                    )
+            return {"best_non_dt": None, "summary_df": empty, "all_df": empty}
+
+        df_all = pd.concat(rows, ignore_index=True)
+        df_all = df_all[df_all["variant_id"].astype(str).isin(methods)].copy()
+        df_all["score_mid"] = pd.to_numeric(df_all["score_mid"], errors="coerce")
+        df_all["length_px"] = pd.to_numeric(df_all["length_px"], errors="coerce")
+        df_all = df_all[np.isfinite(df_all["score_mid"])].copy()
+
+        summary_rows = []
+        weighted_map = {}
+        mean_map = {}
+        n_map = {}
+
+        for mk in methods:
+            d = df_all[df_all["variant_id"].astype(str) == str(mk)].copy()
+            x = pd.to_numeric(d.get("score_mid"), errors="coerce").astype(float).to_numpy() if not d.empty else np.array([], float)
+            w = pd.to_numeric(d.get("length_px"), errors="coerce").astype(float).to_numpy() if not d.empty else np.array([], float)
+            ok_x = np.isfinite(x)
+            mean_rs3 = float(np.mean(x[ok_x])) if np.any(ok_x) else np.nan
+            ok_w = np.isfinite(x) & np.isfinite(w) & (w > 0)
+            weighted_rs3 = float(np.sum(x[ok_w] * w[ok_w]) / np.sum(w[ok_w])) if np.any(ok_w) else np.nan
+            total_len = float(np.sum(w[ok_w])) if np.any(ok_w) else 0.0
+
+            summary_rows.append(
+                {
+                    "method_key": mk,
+                    "n_rows": int(len(d)),
+                    "total_length_px": float(total_len),
+                    "mean_rs3": float(mean_rs3) if np.isfinite(mean_rs3) else np.nan,
+                    "weighted_rs3": float(weighted_rs3) if np.isfinite(weighted_rs3) else np.nan,
+                }
+            )
+            weighted_map[mk] = float(weighted_rs3) if np.isfinite(weighted_rs3) else None
+            mean_map[mk] = float(mean_rs3) if np.isfinite(mean_rs3) else None
+            n_map[mk] = int(len(d))
+
+        summary_df = pd.DataFrame(summary_rows)
+
+        best_non_dt = None
+        pool = summary_df[summary_df["method_key"].isin(non_dt)].copy()
+        pool["weighted_rs3"] = pd.to_numeric(pool["weighted_rs3"], errors="coerce")
+        pool = pool[np.isfinite(pool["weighted_rs3"])]
+        if not pool.empty:
+            best_non_dt = str(pool.sort_values("weighted_rs3", ascending=True).iloc[0]["method_key"])
+
+        if persist:
+            df_all.to_csv(all_rows_csv, index=False)
+            summary_df.to_csv(summary_csv, index=False)
+            with open(best_json, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "weighting": "length_only",
+                        "best_non_dt": best_non_dt,
+                        "weighted_rs3": weighted_map,
+                        "mean_rs3": mean_map,
+                        "n_rows": n_map,
+                    },
+                    f,
+                    indent=2,
+                )
+
+            if write_plot and not summary_df.empty:
+                try:
+                    order = methods
+                    bar_df = summary_df.set_index("method_key").reindex(order).reset_index()
+                    y = pd.to_numeric(bar_df["weighted_rs3"], errors="coerce").astype(float).to_numpy()
+                    x = np.arange(len(order))
+                    fig, ax = plt.subplots(figsize=(10, 4), dpi=170)
+                    colors = ["#4e79a7" if m != best_non_dt else "#e15759" for m in order]
+                    ax.bar(x, np.nan_to_num(y, nan=0.0), color=colors, alpha=0.9)
+                    for i, v in enumerate(y):
+                        if np.isfinite(v):
+                            ax.text(i, v + 0.01, f"{v:.3f}", ha="center", va="bottom", fontsize=8)
+                    ax.set_xticks(x, order, rotation=15)
+                    ax.set_ylabel("Length-weighted RS3")
+                    ax.set_title("GT Ablation (Length-only weighting)")
+                    ax.grid(axis="y", alpha=0.25)
+                    fig.tight_layout()
+                    fig.savefig(plot_png)
+                    plt.close(fig)
+                except Exception:
+                    pass
+
+        return {"best_non_dt": best_non_dt, "summary_df": summary_df, "all_df": df_all}
+
+    def _build_method_payload_from_gt_supervision(
+        self,
+        *,
+        gt_sup_root_local,
+        gt_full,
+        method_key,
+    ):
+        import json
+        import os
+        import numpy as np
+
+        method_key = str(method_key or "").strip()
+        allowed = {"dt", "dt_depth", "dt_ridge_valley", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
+        if method_key not in allowed:
+            print(f"[METHOD PAYLOAD] unsupported method key: {method_key}")
+            return {}, {}
+
+        gt_u8 = (np.asarray(gt_full) > 0).astype(np.uint8)
+        H, W = gt_u8.shape[:2]
+
+        def _split_packed_xy(raw):
+            segs, cur = [], []
+            if raw is None:
+                return segs
+            for p in (raw or []):
+                try:
+                    x, y = p
+                except Exception:
+                    x, y = None, None
+                if x is None or y is None:
+                    if len(cur) >= 2:
+                        segs.append(np.asarray(cur, float))
+                    cur = []
+                    continue
+                try:
+                    xf, yf = float(x), float(y)
+                except Exception:
+                    continue
+                if np.isfinite(xf) and np.isfinite(yf):
+                    cur.append([xf, yf])
+            if len(cur) >= 2:
+                segs.append(np.asarray(cur, float))
+            return segs
+
+        def _pack_segs_with_nan(segs):
+            out = []
+            for i, S in enumerate(segs or []):
+                arr = np.asarray(S, float)
+                if arr.ndim != 2 or arr.shape[1] != 2 or len(arr) < 2:
+                    continue
+                if i > 0:
+                    out.append([None, None])
+                out.extend(arr.tolist())
+            return out
+
+        def _flatten_numeric_1d(raw):
+            out = []
+            def _rec(x):
+                if x is None:
+                    return
+                if isinstance(x, np.ndarray):
+                    for vv in x.reshape(-1):
+                        _rec(vv)
+                    return
+                if isinstance(x, (list, tuple)):
+                    for vv in x:
+                        _rec(vv)
+                    return
+                try:
+                    v = float(x)
+                except Exception:
+                    return
+                if np.isfinite(v):
+                    out.append(v)
+            _rec(raw)
+            return out
+
+        def _as_bbox_xywh(bb):
+            if not (isinstance(bb, (list, tuple)) and len(bb) == 4):
+                return None
+            try:
+                x, y, w, h = map(int, bb)
+            except Exception:
+                return None
+            if w <= 0 or h <= 0:
+                return None
+            return [x, y, w, h]
+
+        def _normal_edge_points_from_normals(normals_obj):
+            if not isinstance(normals_obj, dict):
+                return {}
+            e1x = normals_obj.get("edge1_x", []) or []
+            e1y = normals_obj.get("edge1_y", []) or []
+            e2x = normals_obj.get("edge2_x", []) or []
+            e2y = normals_obj.get("edge2_y", []) or []
+            n = min(len(e1x), len(e1y), len(e2x), len(e2y))
+            e1, e2 = [], []
+            for i in range(n):
+                try:
+                    x1, y1 = float(e1x[i]), float(e1y[i])
+                    x2, y2 = float(e2x[i]), float(e2y[i])
+                except Exception:
+                    continue
+                if not (np.isfinite(x1) and np.isfinite(y1) and np.isfinite(x2) and np.isfinite(y2)):
+                    continue
+                e1.append([x1, y1])
+                e2.append([x2, y2])
+            return {"edge1": e1, "edge2": e2} if len(e1) >= 2 and len(e2) >= 2 else {}
+
+        def _inflate_crop_to_gt(mask_crop, bbox_xywh):
+            bb = _as_bbox_xywh(bbox_xywh)
+            if bb is None:
+                return None, None, None
+            try:
+                m = (np.asarray(mask_crop) > 0).astype(np.uint8)
+            except Exception:
+                return None, None, None
+            if m.ndim != 2 or m.size == 0:
+                return None, None, None
+            x, y, w, h = bb
+            x0 = max(0, int(x))
+            y0 = max(0, int(y))
+            x1 = min(W, int(x0 + m.shape[1]))
+            y1 = min(H, int(y0 + m.shape[0]))
+            if x1 <= x0 or y1 <= y0:
+                return None, None, None
+            crop = m[: (y1 - y0), : (x1 - x0)]
+            full = np.zeros((H, W), np.uint8)
+            full[y0:y1, x0:x1] = crop
+            return crop, [int(x0), int(y0), int(crop.shape[1]), int(crop.shape[0])], full
+
+        def _crop_from_gt_bbox(bbox_xywh):
+            bb = _as_bbox_xywh(bbox_xywh)
+            if bb is None:
+                return None, None, None
+            x, y, w, h = bb
+            x0 = max(0, int(x))
+            y0 = max(0, int(y))
+            x1 = min(W, int(x + w))
+            y1 = min(H, int(y + h))
+            if x1 <= x0 or y1 <= y0:
+                return None, None, None
+            crop = np.asarray(gt_u8[y0:y1, x0:x1], np.uint8)
+            full = np.zeros((H, W), np.uint8)
+            full[y0:y1, x0:x1] = crop
+            return crop, [int(x0), int(y0), int(crop.shape[1]), int(crop.shape[0])], full
+
+        def _bbox_from_segs(segs, pad=3):
+            pts = []
+            for S in (segs or []):
+                arr = np.asarray(S, float)
+                if arr.ndim != 2 or arr.shape[1] != 2 or len(arr) < 2:
+                    continue
+                arr = arr[np.isfinite(arr).all(axis=1)]
+                if len(arr) >= 2:
+                    pts.append(arr)
+            if not pts:
+                return None
+            P = np.vstack(pts)
+            x0 = int(np.floor(np.min(P[:, 0]) - pad))
+            y0 = int(np.floor(np.min(P[:, 1]) - pad))
+            x1 = int(np.ceil(np.max(P[:, 0]) + pad))
+            y1 = int(np.ceil(np.max(P[:, 1]) + pad))
+            return [int(x0), int(y0), int(max(1, x1 - x0 + 1)), int(max(1, y1 - y0 + 1))]
+
+        def _method_segments(mv):
+            if not isinstance(mv, dict):
+                return []
+            segs = []
+            mseg = mv.get("midline_segments", None)
+            if isinstance(mseg, list):
+                for S in mseg:
+                    arr = np.asarray(S, float)
+                    if arr.ndim == 2 and arr.shape[1] == 2 and len(arr) >= 2:
+                        segs.append(arr)
+            if segs:
+                return segs
+            mp = mv.get("midline", None)
+            if mp is None:
+                return []
+            arr = np.asarray(mp, float)
+            if arr.ndim == 2 and arr.shape[1] == 2 and len(arr) >= 2:
+                return [arr]
+            return _split_packed_xy(mp)
+
+        sup_json = os.path.join(gt_sup_root_local or "", "gt_supervision.json")
+        if not os.path.isfile(sup_json):
+            print(f"[METHOD PAYLOAD] missing supervision: {sup_json}")
+            return {}, {}
+        try:
+            with open(sup_json, "r", encoding="utf-8") as f:
+                sup = json.load(f) or {}
+        except Exception as e:
+            print(f"[METHOD PAYLOAD] failed to read {sup_json}: {e}")
+            return {}, {}
+
+        cracks = sup.get("cracks", []) if isinstance(sup, dict) else []
+        if not isinstance(cracks, list):
+            return {}, {}
+
+        atomic_out = {}
+        combined_out = {}
+        masks_ok = 0
+
+        for c in cracks:
+            if not isinstance(c, dict):
+                continue
+            cid = str(c.get("id", "")).strip()
+            kind = str(c.get("kind", "")).lower()
+            if not cid or kind not in {"atomic", "combined"}:
+                continue
+
+            mvs = c.get("method_variants", {}) if isinstance(c.get("method_variants", {}), dict) else {}
+            mv = mvs.get(method_key, {}) if isinstance(mvs.get(method_key, {}), dict) else {}
+            method_segs = _method_segments(mv)
+            if not method_segs:
+                continue
+
+            normals_obj = mv.get("normals", {}) if isinstance(mv.get("normals", {}), dict) else {}
+            normal_edges = _normal_edge_points_from_normals(normals_obj)
+            pred_widths = _flatten_numeric_1d(normals_obj.get("width_px", []))
+            pred_widths = [float(v) for v in pred_widths] if len(pred_widths) >= 2 else None
+
+            crop_u8 = None
+            safe_bbox = None
+            full_mask = None
+
+            raw_bbox = _as_bbox_xywh(c.get("mask_bbox"))
+            raw_crop = c.get("mask_crop")
+            if raw_crop is not None and raw_bbox is not None:
+                crop_u8, safe_bbox, full_mask = _inflate_crop_to_gt(raw_crop, raw_bbox)
+            if (crop_u8 is None or safe_bbox is None or full_mask is None) and raw_bbox is not None:
+                crop_u8, safe_bbox, full_mask = _crop_from_gt_bbox(raw_bbox)
+            if crop_u8 is None or safe_bbox is None or full_mask is None:
+                geom_bbox = _bbox_from_segs(method_segs, pad=3)
+                if geom_bbox is not None:
+                    crop_u8, safe_bbox, full_mask = _crop_from_gt_bbox(geom_bbox)
+            if crop_u8 is None or safe_bbox is None or full_mask is None:
+                print(f"[METHOD PAYLOAD] skip {kind}:{cid} missing/invalid mask artifacts")
+                continue
+            masks_ok += 1
+
+            if kind == "atomic":
+                mid_out = method_segs[0].tolist() if len(method_segs) == 1 else _pack_segs_with_nan(method_segs)
+                ent = {
+                    "id": cid,
+                    "source": str(method_key),
+                    "midline": mid_out,
+                    "derived_midline": mid_out,
+                    "mask_bbox": safe_bbox,
+                    "mask_crop": crop_u8,
+                    "pred_mask": full_mask.astype(np.uint8),
+                    "members": c.get("members", []),
+                    "normal_edge_points": normal_edges,
+                }
+                if pred_widths is not None:
+                    ent["pred_widths"] = pred_widths
+                atomic_out[cid] = ent
+                continue
+
+            meta = mv.get("midline_segments_meta")
+            if not isinstance(meta, list) or len(meta) != len(method_segs):
+                meta = [{"branch_id": int(i), "seg_idx": int(i)} for i in range(len(method_segs))]
+            else:
+                fixed = []
+                for i, m in enumerate(meta):
+                    d = dict(m) if isinstance(m, dict) else {}
+                    d.setdefault("branch_id", int(i))
+                    d.setdefault("seg_idx", int(i))
+                    fixed.append(d)
+                meta = fixed
+
+            ent = {
+                "id": cid,
+                "source": str(method_key),
+                "members": c.get("members", []),
+                "mask_bbox": safe_bbox,
+                "mask_crop": crop_u8,
+                "pred_mask": full_mask.astype(np.uint8),
+                "midline_segments": [np.asarray(S, float).tolist() for S in method_segs],
+                "midline_segments_meta": [dict(m) for m in meta],
+                "derived_midline_segments": [np.asarray(S, float).tolist() for S in method_segs],
+                "derived_midline_segments_meta": [dict(m) for m in meta],
+                "derived_midline": _pack_segs_with_nan(method_segs),
+                "normal_edge_points": normal_edges,
+                "dominance_meta": c.get("dominance_meta"),
+            }
+            if pred_widths is not None:
+                ent["pred_widths"] = pred_widths
+            combined_out[cid] = ent
+
+        print(
+            f"[METHOD PAYLOAD] method={method_key} built atomic={len(atomic_out)} "
+            f"combined={len(combined_out)} masks=OK({masks_ok}) from {sup_json}"
+        )
+        return atomic_out, combined_out
+
+    def _run_metrics_for_image_idx(
+        self,
+        idx,
+        *,
+        edge_params=None,
+        export_supervision=True,
+        display=False,
+        width_eval_mode="dt_best_et",
+        best_method_key=None,
+        edge_parallel_workers=None,
+        run_edge_tracking=True,
+    ):
+        import os
+        import time
+        import numpy as np
+        from helpers import metrics as metrics_mod
+
+        if not (0 <= int(idx) < len(getattr(self, "image_names", []) or [])):
+            return {"ok": False, "reason": "bad_index", "idx": idx}
+
+        orig_n = int(getattr(self, "n", 0))
+        t0 = time.perf_counter()
+        base_name = None
+        try:
+            self.n = int(idx)
+            self.change_image()
+            base_name = self._image_base()
+
+            self._purge_metrics_for_current_image()
+            self._sync_metrics_snapshot_from_authoring(refresh_combine=True, persist=True)
+
+            atomic = dict(self._metric_atomic() or {})
+            manual_ids = []
+            for cid, cr in atomic.items():
+                src = str((cr or {}).get("source") or "").lower()
+                if src.startswith("auto") or src == "combined":
+                    continue
+                mid = metrics_mod._finite_xy((cr or {}).get("midline", []))
+                if len(mid) >= 2:
+                    manual_ids.append(cid)
+
+            if manual_ids and bool(run_edge_tracking):
+                self.run_edge_tracking_parallel(
+                    crack_ids=manual_ids,
+                    cpu_max_workers=edge_parallel_workers,
+                    edge_params_fixed=(edge_params or {"window_half_size": 45, "mu": 0.0, "l": 5, "p": 14, "seg_mode": "new"}),
+                )
+            elif not manual_ids:
+                print(f"[RUN IMAGE] {base_name}: no ET cracks with valid midline")
+
+            self.compute_mask_and_width_metrics_for_image(
+                display=bool(display),
+                export_supervision=bool(export_supervision),
+                width_eval_mode=str(width_eval_mode),
+                best_method_key=best_method_key,
+            )
+
+            return {
+                "ok": True,
+                "image": base_name,
+                "idx": int(idx),
+                "cracks": int(len(manual_ids)),
+                "elapsed_s": float(time.perf_counter() - t0),
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "image": base_name,
+                "idx": int(idx),
+                "reason": str(e),
+                "elapsed_s": float(time.perf_counter() - t0),
+            }
+        finally:
+            try:
+                self.n = orig_n
+                self.change_image()
+            except Exception:
+                pass
+
+    def _batch_run_metrics_global_dt_best_et(
+        self,
+        *,
+        image_indices=None,
+        base_names=None,
+        edge_params=None,
+        export_supervision=True,
+        display=False,
+        edge_parallel_workers=None,
+        recompute_best=True,
+    ):
+        import os
+        import pandas as pd
+        import time
+
+        idxs = self._resolve_metrics_image_indices(image_indices=image_indices, base_names=base_names)
+        if not idxs:
+            print("[batch dt_best_et] no target images")
+            return {"ok": False, "reason": "no_images"}
+
+        calib_dir = os.path.join(self.save_folder, "metrics", "_calibration")
+        os.makedirs(calib_dir, exist_ok=True)
+
+        t0 = time.perf_counter()
+        pass1_rows = []
+        print(f"[batch dt_best_et] pass1 export/ablation prep on {len(idxs)} images")
+        for n, idx in enumerate(idxs, 1):
+            print(f"[batch dt_best_et] pass1 {n}/{len(idxs)} idx={idx}")
+            r = self._run_metrics_for_image_idx(
+                idx,
+                edge_params=edge_params,
+                export_supervision=export_supervision,
+                display=display,
+                width_eval_mode="et_only",
+                best_method_key=None,
+                edge_parallel_workers=edge_parallel_workers,
+            )
+            pass1_rows.append(r)
+
+        if recompute_best:
+            agg = self._aggregate_ablation_rs3_length_only(image_indices=idxs, persist=True, write_plot=True)
+            best_non_dt = agg.get("best_non_dt")
+        else:
+            best_non_dt = self._load_best_ablation_method()
+        if not best_non_dt:
+            best_non_dt = self._load_best_ablation_method()
+
+        print(f"[batch dt_best_et] selected best_non_dt={best_non_dt}")
+
+        pass2_rows = []
+        print(f"[batch dt_best_et] pass2 DT/BEST/ET width eval on {len(idxs)} images")
+        for n, idx in enumerate(idxs, 1):
+            print(f"[batch dt_best_et] pass2 {n}/{len(idxs)} idx={idx}")
+            r = self._run_metrics_for_image_idx(
+                idx,
+                edge_params=edge_params,
+                export_supervision=False,
+                display=display,
+                width_eval_mode="dt_best_et",
+                best_method_key=best_non_dt,
+                edge_parallel_workers=edge_parallel_workers,
+                run_edge_tracking=False,
+            )
+            pass2_rows.append(r)
+
+        try:
+            pd.DataFrame(pass1_rows).to_csv(os.path.join(calib_dir, "dt_best_et_pass1.csv"), index=False)
+            pd.DataFrame(pass2_rows).to_csv(os.path.join(calib_dir, "dt_best_et_pass2.csv"), index=False)
+        except Exception:
+            pass
+
+        self.summarize_dataset_metrics()
+        return {
+            "ok": True,
+            "best_non_dt": best_non_dt,
+            "n_images": int(len(idxs)),
+            "elapsed_s": float(time.perf_counter() - t0),
+        }
     
     def _flatten_edge_worker_result(self, crack_id, params, ew):
         """
@@ -637,26 +1332,30 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         export_supervision=True,
         *,
         cache_key=None,
-        include_auto=False,   # enable auto-variant scoring
+        include_auto=False,   # deprecated in final stage (kept for call compatibility)
+        width_eval_mode="dt_best_et",
+        best_method_key=None,
+        best_selection_path=None,
     ):
         """
         Snapshot-only driver (strict edges). Writes:
-        - metrics/<base>/cid{X}/gt_vs_manual_mask_global.png
+        - metrics/<base>/cid{X}/gt_vs_et_mask_global.png
         - metrics/<base>/cid{X}/gt_normals.png
-        - metrics/<base>/combined{C}_{members}/manual/gt_vs_manual_mask_global.png
-        - metrics/<base>/combined{C}_{members}/manual/gt_normals.png  (merged normals)
+        - metrics/<base>/combined{C}_{members}/ET/gt_vs_et_mask_global.png
+        - metrics/<base>/combined{C}_{members}/ET/gt_normals.png  (merged normals)
         - metrics/<base>/combined{C}_{members}/auto/gt_vs_auto_mask_global.png
         - metrics/<base>/combined{C}_{members}/auto/auto_normals.png
         - metrics/<base>/mask_metrics.csv
             * crack_type: atomic, combined, TOTAL
-            * supervision: manual, auto, baseline
+            * supervision: ET, auto, baseline
             * method: geodesic or external baseline method name
             * baseline rows are TOTAL-only (segmentation masks only)
         - metrics/<base>/mask_comparison_grid.png
-            * dynamic grid over available variants (manual/auto/baselines)
+            * dynamic grid over available variants (ET/auto/baselines)
         - width diff overlays + per-type CSVs
-            * manual: atomic + combined
-            * auto:   atomic + combined
+            * ET
+            * dt
+            * BEST_NON_DT (from persisted global selection)
         """
         import os, json, numpy as np, pandas as pd, traceback, cv2
         from helpers.metrics import (
@@ -682,6 +1381,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         #from cracktools.segmentation import generate_mask_from_edges
 
         print(f"[DEBUG METRICS] ===== START for {getattr(self, 'name', '?')} =====")
+        if include_auto:
+            print("[WIDTH DRIVER] include_auto is deprecated in final stage; forcing ET+dt+BEST_NON_DT only.")
+        include_auto = False
         if getattr(self, "current_mask", None) is None:
             print("[DEBUG METRICS] ⚠ no GT mask loaded")
             return {}
@@ -994,7 +1696,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 out[str(ccid)] = rebuilt
             return out
 
-        combined_map = _rebuild_combined_map_for_mode(mode_label="manual", atomic_src=atomic)
+        combined_map = _rebuild_combined_map_for_mode(mode_label="ET", atomic_src=atomic)
 
         auto_combined_map = {}
         if include_auto and auto_atomic:
@@ -1021,7 +1723,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             row = {
                 "image": base_name,
                 "crack_type": crack_type,     # atomic / combined / TOTAL
-                "supervision": supervision,   # manual / auto
+                "supervision": supervision,   # ET / auto
                 "method": str(method),
                 "variant": str(variant),
                 "crack_id": str(crack_id) if crack_id is not None else "",
@@ -1398,7 +2100,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             method="geodesic",
         ):
             """
-            Combined metrics (MANUAL + AUTO unified).
+            Combined metrics (ET + AUTO unified).
 
             Rules:
             - Metrics computed ONLY on bbox crop
@@ -1406,7 +2108,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             - All legacy plots are restored
 
             supervision:
-            - "manual"
+            - "ET"
             - "auto"
             """
             agg = np.zeros((H, W), np.uint8)
@@ -1428,14 +2130,14 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     # Output directories (RESTORED)
                     # --------------------------------------------------
                     cmb_root = os.path.join(metrics_dir, f"combined_{semantic_id}")
-                    mode_dir = os.path.join(cmb_root, "auto" if is_auto else "manual")
+                    mode_dir = os.path.join(cmb_root, "auto" if is_auto else "ET")
                     os.makedirs(mode_dir, exist_ok=True)
 
                     # --------------------------------------------------
                     # Build FULL-image combined mask + bbox crop
                     # --------------------------------------------------
                     if not is_auto:
-                        # ---------- MANUAL ----------
+                        # ---------- ET ----------
                         bb   = cmb.get("mask_bbox")
                         crop = cmb.get("mask_crop")
                         if not bb or crop is None:
@@ -1511,7 +2213,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         os.path.join(
                             mode_dir,
                             "gt_vs_auto_mask_global.png"
-                            if is_auto else "gt_vs_manual_mask_global.png",
+                            if is_auto else "gt_vs_et_mask_global.png",
                         ),
                         bbox=[x0, y0, x1 - x0, y1 - y0],
                         original_image=self.original_image,
@@ -1547,8 +2249,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         derived_mid_global=derived,
                         e1_global=e1,
                         e2_global=e2,
-                        out_normals_name="auto_normals.png" if is_auto else "manual_normals.png",
-                        out_iou_name="gt_vs_auto_mask.png" if is_auto else "gt_vs_manual_mask.png",
+                        out_normals_name="auto_normals.png" if is_auto else "et_normals.png",
+                        out_iou_name="gt_vs_auto_mask.png" if is_auto else "gt_vs_et_mask.png",
                         out_width_name="widths_colormap_on_crop_auto.png"
                                     if is_auto else "widths_colormap_on_crop.png",
                     )
@@ -1587,23 +2289,23 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
             return agg
 
-        # ---- MANUAL masks ----
+        # ---- ET masks ----
         agg_manual = _compute_and_record_atomic_metrics(
             atomic_src=atomic,
             combined_src=combined_map,
             crack_type="atomic",
-            supervision="manual",
+            supervision="ET",
             method="geodesic",
         )
         agg_manual |= _compute_and_record_combined_metrics(
             combined_src=combined_map,
             atomic_src_for_auto=None,
             crack_type="combined",
-            supervision="manual",
+            supervision="ET",
             method="geodesic",
         )
 
-        # TOTAL (manual)
+        # TOTAL (ET)
         if int(agg_manual.sum()) > 0:
             base_total = compute_mask_metrics(gt_full, agg_manual)
             bnd_total  = boundary_fscore(gt_full, agg_manual, tau=2.0)
@@ -1615,10 +2317,10 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 base=base_total,
                 bnd=bnd_total,
                 surf=surf_total,
-                supervision="manual",
+                supervision="ET",
                 method="geodesic",
             )
-        _save_total_overlay((agg_manual > 0).astype(np.uint8), supervision="manual", method="geodesic")
+        _save_total_overlay((agg_manual > 0).astype(np.uint8), supervision="ET", method="geodesic")
 
         # ---- AUTO masks (optional) ----
         agg_auto = np.zeros((H, W), np.uint8)
@@ -1668,7 +2370,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             _save_total_overlay((agg_auto > 0).astype(np.uint8), supervision="auto", method="geodesic")
 
         # ------------------------------------------------------------------
-        # 7) SAVE MASK METRICS CSV (single file; manual + auto + baselines)
+        # 7) SAVE MASK METRICS CSV (single file; ET + auto + baselines)
         # ------------------------------------------------------------------
         baseline_pred_masks = {}
         baseline_root = (
@@ -1681,7 +2383,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             for method_name, pred_full in baseline_pred_masks.items():
                 _compute_and_record_baseline_total(method_name, pred_full)
 
-        variant_masks = [("manual:geodesic", (agg_manual > 0).astype(np.uint8))]
+        variant_masks = [("ET:geodesic", (agg_manual > 0).astype(np.uint8))]
         if include_auto and agg_auto.any():
             variant_masks.append(("auto:geodesic", (agg_auto > 0).astype(np.uint8)))
         for method_name, pred in baseline_pred_masks.items():
@@ -1693,7 +2395,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         print(f"[DEBUG MASK] wrote → {out_csv}")
 
         # ------------------------------------------------------------------
-        # 8) WIDTH DIFF CHARTS (manual + optional auto) — unified prep
+        # 8) WIDTH DIFF CHARTS (ET + optional auto) — unified prep
         # ------------------------------------------------------------------
         try:
             totals_lookup = {}
@@ -1762,334 +2464,6 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     "timing": cmb.get("timing", {}),
                 }
             return out
-
-        def _build_depth_payload_from_gt_supervision(gt_sup_root_local):
-            """
-            Build depth_distridge evaluation payloads from existing gt_supervision.json.
-            Returns:
-                (atomic_dict, combined_dict)
-            """
-            import os
-            import json
-            import numpy as np
-
-            def _split_packed_xy(raw):
-                segs = []
-                cur = []
-                if raw is None:
-                    return segs
-                for p in (raw or []):
-                    try:
-                        x, y = p
-                    except Exception:
-                        x, y = None, None
-                    if x is None or y is None:
-                        if len(cur) >= 2:
-                            segs.append(np.asarray(cur, float))
-                        cur = []
-                        continue
-                    try:
-                        xf = float(x)
-                        yf = float(y)
-                    except Exception:
-                        continue
-                    if np.isfinite(xf) and np.isfinite(yf):
-                        cur.append([xf, yf])
-                if len(cur) >= 2:
-                    segs.append(np.asarray(cur, float))
-                return segs
-
-            def _pack_segs_with_nan(segs):
-                out = []
-                for i, S in enumerate(segs or []):
-                    arr = np.asarray(S, float)
-                    if arr.ndim != 2 or arr.shape[1] != 2 or len(arr) < 2:
-                        continue
-                    if i > 0:
-                        out.append([None, None])
-                    out.extend(arr.tolist())
-                return out
-
-            def _flatten_numeric_1d(raw):
-                out = []
-
-                def _rec(x):
-                    if x is None:
-                        return
-                    if isinstance(x, np.ndarray):
-                        if x.ndim == 0:
-                            try:
-                                v = float(x.item())
-                                if np.isfinite(v):
-                                    out.append(v)
-                            except Exception:
-                                pass
-                            return
-                        for vv in x.reshape(-1):
-                            _rec(vv)
-                        return
-                    if isinstance(x, (list, tuple)):
-                        for vv in x:
-                            _rec(vv)
-                        return
-                    try:
-                        v = float(x)
-                    except Exception:
-                        return
-                    if np.isfinite(v):
-                        out.append(v)
-
-                _rec(raw)
-                return out
-
-            def _normal_edge_points_from_normals(normals_obj):
-                if not isinstance(normals_obj, dict):
-                    return {}
-                e1x = normals_obj.get("edge1_x", []) or []
-                e1y = normals_obj.get("edge1_y", []) or []
-                e2x = normals_obj.get("edge2_x", []) or []
-                e2y = normals_obj.get("edge2_y", []) or []
-                n = min(len(e1x), len(e1y), len(e2x), len(e2y))
-                e1, e2 = [], []
-                for i in range(n):
-                    try:
-                        x1, y1 = float(e1x[i]), float(e1y[i])
-                        x2, y2 = float(e2x[i]), float(e2y[i])
-                    except Exception:
-                        continue
-                    if not (np.isfinite(x1) and np.isfinite(y1) and np.isfinite(x2) and np.isfinite(y2)):
-                        continue
-                    e1.append([x1, y1])
-                    e2.append([x2, y2])
-                if len(e1) < 2 or len(e2) < 2:
-                    return {}
-                return {"edge1": e1, "edge2": e2}
-
-            def _inflate_crop_to_full(mask_crop, bbox):
-                """
-                Convert local crop + bbox to full mask (smallest valid full mask).
-                bbox format: [x, y, w, h]
-                """
-                if mask_crop is None or bbox is None:
-                    return None
-                try:
-                    m = np.asarray(mask_crop)
-                    bx, by, bw, bh = map(int, bbox)
-                except Exception:
-                    return None
-                if m.ndim != 2 or m.size == 0:
-                    return None
-
-                m = m.astype(bool)
-                bx = max(0, bx)
-                by = max(0, by)
-                H = by + m.shape[0]
-                W = bx + m.shape[1]
-                full = np.zeros((H, W), dtype=bool)
-                y1 = by + m.shape[0]
-                x1 = bx + m.shape[1]
-                full[by:y1, bx:x1] = m
-                return full
-
-            def _as_bbox_xywh(bb):
-                if not (isinstance(bb, (list, tuple)) and len(bb) == 4):
-                    return None
-                try:
-                    x, y, w, h = map(int, bb)
-                except Exception:
-                    return None
-                if w <= 0 or h <= 0:
-                    return None
-                return [x, y, w, h]
-
-            def _bbox_from_segs(segs, pad=3):
-                pts = []
-                for S in (segs or []):
-                    arr = np.asarray(S, float)
-                    if arr.ndim != 2 or arr.shape[1] != 2 or len(arr) < 2:
-                        continue
-                    arr = arr[np.isfinite(arr).all(axis=1)]
-                    if len(arr) >= 2:
-                        pts.append(arr)
-                if not pts:
-                    return None
-                P = np.vstack(pts)
-                x0 = int(np.floor(np.min(P[:, 0]) - pad))
-                y0 = int(np.floor(np.min(P[:, 1]) - pad))
-                x1 = int(np.ceil(np.max(P[:, 0]) + pad))
-                y1 = int(np.ceil(np.max(P[:, 1]) + pad))
-                w = int(max(1, x1 - x0 + 1))
-                h = int(max(1, y1 - y0 + 1))
-                return [x0, y0, w, h]
-
-            def _crop_from_full_mask(full_u8, bbox_xywh):
-                bb = _as_bbox_xywh(bbox_xywh)
-                if bb is None:
-                    return None, None
-                x, y, w, h = bb
-                Hf, Wf = full_u8.shape[:2]
-                x0 = max(0, int(x))
-                y0 = max(0, int(y))
-                x1 = min(Wf, int(x + w))
-                y1 = min(Hf, int(y + h))
-                if x1 <= x0 or y1 <= y0:
-                    return None, None
-                crop = (np.asarray(full_u8[y0:y1, x0:x1]) > 0).astype(np.uint8)
-                return crop, [int(x0), int(y0), int(crop.shape[1]), int(crop.shape[0])]
-
-            sup_json = os.path.join(gt_sup_root_local or "", "gt_supervision.json")
-            if not os.path.isfile(sup_json):
-                print(f"[DEPTH PAYLOAD] missing supervision: {sup_json}")
-                return {}, {}
-
-            try:
-                with open(sup_json, "r", encoding="utf-8") as f:
-                    sup = json.load(f)
-            except Exception as e:
-                print(f"[DEPTH PAYLOAD] failed to read {sup_json}: {e}")
-                return {}, {}
-
-            cracks = sup.get("cracks", []) if isinstance(sup, dict) else []
-            if not isinstance(cracks, list):
-                return {}, {}
-
-            atomic_out = {}
-            combined_out = {}
-            masks_ok = 0
-
-            for c in cracks:
-                if not isinstance(c, dict):
-                    continue
-                kind = str(c.get("kind") or "").lower()
-                cid = str(c.get("id", "")).strip()
-                if not cid:
-                    continue
-
-                normals_obj = c.get("gt_normals_depth_centered")
-                if not isinstance(normals_obj, dict) or not normals_obj:
-                    normals_obj = c.get("depth_normals", {})
-                if not isinstance(normals_obj, dict):
-                    normals_obj = {}
-
-                normal_edges = _normal_edge_points_from_normals(normals_obj)
-                pred_widths = _flatten_numeric_1d(normals_obj.get("width_px", []))
-                pred_widths = [float(v) for v in pred_widths] if len(pred_widths) >= 2 else None
-                crop_u8 = None
-                safe_bbox = None
-                full_mask = None
-
-                raw_bbox = _as_bbox_xywh(c.get("mask_bbox"))
-                raw_crop = c.get("mask_crop")
-
-                if raw_crop is not None and raw_bbox is not None:
-                    crop_arr = np.asarray(raw_crop)
-                    if crop_arr.ndim == 2 and crop_arr.size > 0:
-                        crop_u8 = (crop_arr > 0).astype(np.uint8)
-                        full_mask = _inflate_crop_to_full(crop_u8, raw_bbox)
-                        bx = max(0, int(raw_bbox[0]))
-                        by = max(0, int(raw_bbox[1]))
-                        safe_bbox = [int(bx), int(by), int(crop_u8.shape[1]), int(crop_u8.shape[0])]
-
-                if (crop_u8 is None or safe_bbox is None) and raw_bbox is not None:
-                    crop_fallback, bbox_fallback = _crop_from_full_mask(gt_full, raw_bbox)
-                    if crop_fallback is not None and bbox_fallback is not None:
-                        crop_u8 = crop_fallback
-                        safe_bbox = bbox_fallback
-                        full_mask = _inflate_crop_to_full(crop_u8, safe_bbox)
-
-                if crop_u8 is None or safe_bbox is None:
-                    depth_mid_any = c.get("depth_midline", c.get("midline_depth_centered"))
-                    depth_segs_any = _split_packed_xy(depth_mid_any)
-                    bbox_mid = _bbox_from_segs(depth_segs_any, pad=3)
-                    if bbox_mid is not None:
-                        crop_fallback, bbox_fallback = _crop_from_full_mask(gt_full, bbox_mid)
-                        if crop_fallback is not None and bbox_fallback is not None:
-                            crop_u8 = crop_fallback
-                            safe_bbox = bbox_fallback
-                            full_mask = _inflate_crop_to_full(crop_u8, safe_bbox)
-
-                if crop_u8 is None or safe_bbox is None or full_mask is None:
-                    print(f"[DEPTH PAYLOAD] skip {kind}:{cid} missing/invalid mask artifacts after fallback")
-                    continue
-                masks_ok += 1
-
-                if kind == "atomic":
-                    depth_mid = c.get("depth_midline", c.get("midline_depth_centered"))
-                    depth_segs = _split_packed_xy(depth_mid)
-                    if not depth_segs:
-                        arr = np.asarray(depth_mid, float)
-                        if arr.ndim == 2 and arr.shape[1] == 2 and len(arr) >= 2:
-                            depth_segs = [arr]
-                    if not depth_segs:
-                        continue
-
-                    packed = _pack_segs_with_nan(depth_segs)
-                    ent = {
-                        "id": cid,
-                        "source": "depth_distridge",
-                        "midline": packed,
-                        "derived_midline": packed,
-                        "mask_bbox": safe_bbox,
-                        "mask_crop": crop_u8,
-                        "pred_mask": full_mask.astype(np.uint8),
-                        "members": c.get("members", []),
-                        "normal_edge_points": normal_edges,
-                    }
-                    if pred_widths is not None:
-                        ent["pred_widths"] = pred_widths
-                    atomic_out[cid] = ent
-                    continue
-
-                if kind == "combined":
-                    depth_segs = [
-                        np.asarray(S, float)
-                        for S in (c.get("depth_midline_segments") or [])
-                        if S is not None and len(S) >= 2
-                    ]
-                    if not depth_segs:
-                        depth_segs = _split_packed_xy(c.get("depth_midline", c.get("midline_depth_centered")))
-                    if not depth_segs:
-                        continue
-
-                    meta = c.get("depth_midline_segments_meta")
-                    if not isinstance(meta, list) or len(meta) != len(depth_segs):
-                        meta = [
-                            {"branch_id": int(i), "seg_idx": int(i)}
-                            for i in range(len(depth_segs))
-                        ]
-                    else:
-                        fixed = []
-                        for i, m in enumerate(meta):
-                            d = dict(m) if isinstance(m, dict) else {}
-                            d.setdefault("branch_id", int(i))
-                            d.setdefault("seg_idx", int(i))
-                            fixed.append(d)
-                        meta = fixed
-
-                    ent = {
-                        "id": cid,
-                        "source": "depth_distridge",
-                        "members": c.get("members", []),
-                        "mask_bbox": safe_bbox,
-                        "mask_crop": crop_u8,
-                        "pred_mask": full_mask.astype(np.uint8),
-                        "midline_segments": [np.asarray(S, float).tolist() for S in depth_segs],
-                        "midline_segments_meta": [dict(m) for m in meta],
-                        "derived_midline_segments": [np.asarray(S, float).tolist() for S in depth_segs],
-                        "derived_midline_segments_meta": [dict(m) for m in meta],
-                        "derived_midline": _pack_segs_with_nan(depth_segs),
-                        "normal_edge_points": normal_edges,
-                        "dominance_meta": c.get("dominance_meta"),
-                    }
-                    if pred_widths is not None:
-                        ent["pred_widths"] = pred_widths
-                    combined_out[cid] = ent
-
-            print(
-                f"[DEPTH PAYLOAD] built atomic={len(atomic_out)} combined={len(combined_out)} masks=OK({masks_ok}) "
-                f"from {sup_json}"
-            )
-            return atomic_out, combined_out
 
         # ------------------------------------------------------------------
         # WIDTH METRICS — TOTAL (atomic + combined merged)
@@ -2575,7 +2949,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 width_baseline_root
                 and os.path.isdir(width_baseline_root)
                 and combined_aug is not None
-                and midline_type == "manual"
+                and str(midline_type) == "ET"
             ):
                 print("[WIDTH] running baselines")
                 try:
@@ -2601,37 +2975,96 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         # ------------------------------------------------------------------
         # DRIVER
         # ------------------------------------------------------------------
+        def _payload_stats(atomic_src, combined_src):
+            a_count = int(len(atomic_src or {}))
+            c_count = int(len(combined_src or {}))
+            c_seg_count = 0
+            for _cid, _cr in (combined_src or {}).items():
+                if not isinstance(_cr, dict):
+                    continue
+                mseg = _cr.get("midline_segments", None)
+                if isinstance(mseg, list) and mseg:
+                    c_seg_count += int(sum(1 for s in mseg if isinstance(s, (list, tuple)) and len(s) >= 2))
+                elif _cr.get("midline") is not None:
+                    c_seg_count += 1
+            n_segments = int(a_count + c_seg_count)
+            gt_entries = 0
+            try:
+                sup_json_local = os.path.join(gt_sup_root, "gt_supervision.json")
+                if os.path.isfile(sup_json_local):
+                    with open(sup_json_local, "r", encoding="utf-8") as _f:
+                        _sup = json.load(_f) or {}
+                    gt_entries = int(len(_sup.get("cracks", []) or []))
+            except Exception:
+                gt_entries = 0
+            coverage_pct = float(100.0 * n_segments / max(1, gt_entries))
+            return n_segments, coverage_pct
+
+        mode = str(width_eval_mode or "dt_best_et").strip().lower()
+        selected_best_non_dt = str(best_method_key or "").strip()
         try:
             print("[DEBUG METRICS] width comparisons (total) ...")
+            if mode not in {"et_only", "dt_best_et"}:
+                print(f"[DEBUG WIDTH] unknown width_eval_mode={mode}, defaulting to dt_best_et")
+                mode = "dt_best_et"
+            if mode == "dt_best_et" and not selected_best_non_dt:
+                selected_best_non_dt = self._load_best_ablation_method(best_json_path=best_selection_path)
+            if mode == "dt_best_et":
+                print(f"[WIDTH DRIVER] best_method = {selected_best_non_dt}")
 
-            # MANUAL
+            # ET
             combined_for_width = _prep_combined_for_width(combined_map)
+            et_segments, et_cov = _payload_stats(atomic, combined_for_width)
+            print(f"[WIDTH DRIVER] method=ET segments={et_segments} coverage_pct={et_cov:.2f}")
             _run_width_eval_total(
                 atomic_src=atomic,
                 combined_src=combined_for_width,
-                midline_type="manual",
+                midline_type="ET",
                 width_baseline_root=getattr(self, "width_baseline_img_folder", None),
             )
 
-            # AUTO
-            if include_auto and auto_atomic:
-                combined_auto_for_width = _prep_combined_for_width(auto_combined_map)
-                _run_width_eval_total(
-                    atomic_src=auto_atomic,
-                    combined_src=combined_auto_for_width,
-                    midline_type="auto"
+            if mode == "dt_best_et":
+                # DT (method-specific from GT supervision)
+                dt_atomic, dt_combined = self._build_method_payload_from_gt_supervision(
+                    gt_sup_root_local=gt_sup_root,
+                    gt_full=gt_full,
+                    method_key="dt",
                 )
+                if dt_atomic or dt_combined:
+                    dt_segments, dt_cov = _payload_stats(dt_atomic, dt_combined)
+                    print(f"[WIDTH DRIVER] method=dt segments={dt_segments} coverage_pct={dt_cov:.2f}")
+                    _run_width_eval_total(
+                        atomic_src=dt_atomic,
+                        combined_src=dt_combined,
+                        midline_type="dt",
+                        width_baseline_root=None,
+                    )
+                else:
+                    print("[WIDTH] dt skipped: no method payload in gt_supervision.json")
 
-            # DEPTH_DISTRIDGE (from existing gt_supervision.json)
-            depth_atomic, depth_combined = _build_depth_payload_from_gt_supervision(gt_sup_root)
-            if depth_atomic or depth_combined:
-                _run_width_eval_total(
-                    atomic_src=depth_atomic,
-                    combined_src=depth_combined,
-                    midline_type="depth_distridge",
-                )
-            else:
-                print("[WIDTH] depth_distridge skipped: no depth payload in gt_supervision.json")
+                # BEST_NON_DT (global persisted choice)
+                if selected_best_non_dt and selected_best_non_dt != "dt":
+                    best_atomic, best_combined = self._build_method_payload_from_gt_supervision(
+                        gt_sup_root_local=gt_sup_root,
+                        gt_full=gt_full,
+                        method_key=selected_best_non_dt,
+                    )
+                    if best_atomic or best_combined:
+                        best_segments, best_cov = _payload_stats(best_atomic, best_combined)
+                        print(
+                            f"[WIDTH DRIVER] method={selected_best_non_dt} "
+                            f"segments={best_segments} coverage_pct={best_cov:.2f}"
+                        )
+                        _run_width_eval_total(
+                            atomic_src=best_atomic,
+                            combined_src=best_combined,
+                            midline_type=str(selected_best_non_dt),
+                            width_baseline_root=None,
+                        )
+                    else:
+                        print(f"[WIDTH] best_non_dt={selected_best_non_dt} skipped: no method payload in gt_supervision.json")
+                else:
+                    print(f"[WIDTH] best_non_dt unavailable/invalid: {selected_best_non_dt}")
 
         except Exception as e:
             print(f"[DEBUG WIDTH] failed: {e}")
@@ -2647,7 +3080,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             csv_path=dist_csv,
             out_dir=dist_out,
             # optional filters you can toggle:
-            # filter_midline_type="manual",
+            # filter_midline_type="ET",
             # filter_gt_tier="combined_unfiltered",
             title_suffix="(All images)",
         )
@@ -2663,7 +3096,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 crack_map,
                 crack_type,
                 *,
-                supervision,           # "manual" or "auto"
+                supervision,           # "ET" or "auto"
                 prefer_semantic_id=False,
             ):
                 for cid, cr in (crack_map or {}).items():
@@ -2692,7 +3125,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
                     row = {
                         "crack_type": crack_type,        # atomic / combined
-                        "supervision": supervision,      # manual / auto
+                        "supervision": supervision,      # ET / auto
                         "algo_variant": algo_variant,    # new / old / None
                         "crack_id": crack_id,
                     }
@@ -2706,18 +3139,18 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     )
 
             # -----------------------------
-            # MANUAL
+            # ET
             # -----------------------------
             _accum_timing(
                 atomic,
                 "atomic",
-                supervision="manual",
+                supervision="ET",
                 prefer_semantic_id=False,
             )
             _accum_timing(
                 combined_map,
                 "combined",
-                supervision="manual",
+                supervision="ET",
                 prefer_semantic_id=True,
             )
 
@@ -2737,6 +3170,48 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     supervision="auto",
                     prefer_semantic_id=True,
                 )
+
+            # -----------------------------
+            # DT / BEST_NON_DT (from GT supervision method_variants timing)
+            # -----------------------------
+            def _accum_method_variant_timing(method_key, supervision_label):
+                import os
+                import json
+                mkey = str(method_key or "").strip()
+                if not mkey:
+                    return
+                sup_json = os.path.join(gt_sup_root, "gt_supervision.json")
+                if not os.path.isfile(sup_json):
+                    return
+                try:
+                    with open(sup_json, "r", encoding="utf-8") as f:
+                        sup = json.load(f) or {}
+                except Exception:
+                    return
+                cracks = sup.get("cracks", []) if isinstance(sup, dict) else []
+                for cr in cracks:
+                    if not isinstance(cr, dict):
+                        continue
+                    kind = str(cr.get("kind", "unknown"))
+                    cid = str(cr.get("id", ""))
+                    mvs = cr.get("method_variants", {}) if isinstance(cr.get("method_variants", {}), dict) else {}
+                    mv = mvs.get(mkey, {}) if isinstance(mvs.get(mkey, {}), dict) else {}
+                    tdict = mv.get("timing", {}) if isinstance(mv.get("timing", {}), dict) else {}
+                    if not tdict:
+                        continue
+                    row = {
+                        "crack_type": str(kind),
+                        "supervision": str(supervision_label),
+                        "algo_variant": str(mkey),
+                        "crack_id": cid,
+                    }
+                    row.update(tdict)
+                    timing_rows.append(row)
+
+            if mode == "dt_best_et":
+                _accum_method_variant_timing("dt", "dt")
+                if selected_best_non_dt and selected_best_non_dt != "dt":
+                    _accum_method_variant_timing(selected_best_non_dt, selected_best_non_dt)
 
             if timing_rows:
                 timing_df = pd.DataFrame(timing_rows)
@@ -2779,7 +3254,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
     # ===============================================================
     # === Smoke test edge worker (cropped + light aware) ============
     # ===============================================================
-    def smoke_test_edges_for_manual(self, crack_id, edge_params=None, color_channel=None):
+    def smoke_test_edges_for_et(self, crack_id, edge_params=None, color_channel=None):
         import os, numpy as np, traceback, cv2
 
         from edge_workers import edge_param_worker
@@ -2874,7 +3349,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
             # unified midline (always the one we WANT the worker to use)
             midline_global  = man_xy_g,
-            midline_type    = "manual",
+            midline_type    = "ET",
 
             bbox            = (x, y, w, h),
             params          = edge_params,
@@ -2891,7 +3366,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             crack_id        = str(crack_id),
 
             # legacy tag — optional, no longer used for behavior
-            source          = "manual",
+            source          = "ET",
         )
 
         # -----------------------------------------------------------
@@ -2943,6 +3418,14 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
         print(f"[smoke] ✅ edges ok for cid{crack_id}")
         return True
+
+    # Backward-compatible alias
+    def smoke_test_edges_for_manual(self, crack_id, edge_params=None, color_channel=None):
+        return self.smoke_test_edges_for_et(
+            crack_id=crack_id,
+            edge_params=edge_params,
+            color_channel=color_channel,
+        )
 
     # ---- 0) tiny shorthands -------------------------------------------------------
     def _image_base(self):
@@ -3044,7 +3527,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         - Reads cid{crack_id}.json
         - If prefer_auto_best=True and auto_best.midline exists and is valid,
           uses that as the midline.
-        - Otherwise falls back to the manual midline.
+        - Otherwise falls back to the ET midline.
 
         Returns a payload dict used directly by edge_param_worker.
         """
@@ -3061,7 +3544,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             return None
 
         #print(f'[ANN KEYS] {ann.get("source", "None")}')
-        src = (ann.get("source") or "manual").lower()
+        src = (ann.get("source") or "ET").lower()
 
         # ---------------------------------------------------------
         # Global image + GT (for global overlay)
@@ -3088,14 +3571,14 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         self.active_bbox = [xmin, ymin, xmax, ymax]
 
         # ---------------------------------------------------------
-        # 2. Choose midline: manual vs auto_best
+        # 2. Choose midline: ET vs auto_best
         # ---------------------------------------------------------
         man_xy_g = np.asarray(ann.get("midline", []), float)
         auto_xy_g = None
         if "auto_best" in ann and isinstance(ann["auto_best"], dict):
             auto_xy_g = np.asarray(ann["auto_best"].get("midline", []), float)
 
-        midline_type = "manual"
+        midline_type = "ET"
         mid_xy_g = man_xy_g
 
         def _valid_mid(arr):
@@ -3105,7 +3588,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             midline_type = "auto_best"
             mid_xy_g = auto_xy_g
         elif not _valid_mid(man_xy_g):
-            print(f"[extract_edge_inputs] cid={cid} ❌ no valid manual midline; prefer_auto_best={prefer_auto_best}")
+            print(f"[extract_edge_inputs] cid={cid} ❌ no valid ET midline; prefer_auto_best={prefer_auto_best}")
             return None
 
         print(
@@ -3300,7 +3783,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 payload["geom_cache_path"] = geom_path
 
             # DEBUG: log what midline type we're using
-            midline_type = payload.get("midline_type", "manual")
+            midline_type = payload.get("midline_type", "ET")
             src_tag = payload.get("src_tag", "?")
             n_pts = len(payload.get("midline_global", []))
             print(
@@ -3393,10 +3876,40 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         self.metric_annotations = load_snapshot_from_files(self.save_folder, base_name)
         return rows
 
+    # Backward-compatible alias
+    def generate_auto_variants_for_manual_parallel(
+        self,
+        crack_id,
+        g_variants=None,
+        cache_key=None,
+        force_recompute=True,
+        cpu_max_workers=None,
+        color_channel=None,
+        edge_params_fixed=None,
+        *,
+        os_ablation=False,
+        smoke_test=True,
+        os_modes=("old", "new"),
+        save_os_cost_png=True,
+    ):
+        return self.generate_auto_variants_for_et_parallel(
+            crack_id=crack_id,
+            g_variants=g_variants,
+            cache_key=cache_key,
+            force_recompute=force_recompute,
+            cpu_max_workers=cpu_max_workers,
+            color_channel=color_channel,
+            edge_params_fixed=edge_params_fixed,
+            os_ablation=os_ablation,
+            smoke_test=smoke_test,
+            os_modes=os_modes,
+            save_os_cost_png=save_os_cost_png,
+        )
+
     # ---------- crack_tool.py (DROP-IN ADDITION inside the class) ----------
     # ---- 6) Auto variants generation (SAVE ONLY TO PER-CRACK FILES) --------------
     # ---------- crack_tool.py (REPLACE the whole function) ----------
-    def generate_auto_variants_for_manual_parallel(
+    def generate_auto_variants_for_et_parallel(
         self,
         crack_id,
         g_variants=None,
@@ -4254,7 +4767,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             row = {"image": base_name, "combined_id": cmb_id}
             if getattr(self, "current_mask", None) is not None:
                 from helpers.metrics import mask_iou
-                row["iou_manual_vs_gt"] = mask_iou(m_manual, self.current_mask)
+                row["iou_et_vs_gt"] = mask_iou(m_manual, self.current_mask)
                 row["iou_auto_vs_gt"]   = mask_iou(m_auto,   self.current_mask)
             rows.append(row)
 

@@ -3,15 +3,62 @@ import os
 import numpy as np
 import cv2
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, label as ndi_label
 
 from helpers.metrics import normals_from_mask_for_midline, resample_by_arclength
+
+DEBUG_CC_TRACE = True
+DEBUG_TARGET_IMAGE = "42"
+DEBUG_TARGET_BRANCHES = None
+USE_CC_RESTRICT_FOR_SOLVER = True
+
+
+def _cc_dbg(base_name, branch_id=None):
+    if str(base_name) != str(DEBUG_TARGET_IMAGE):
+        return False
+    if DEBUG_TARGET_BRANCHES is None:
+        return True
+    try:
+        return int(branch_id) in {int(x) for x in DEBUG_TARGET_BRANCHES}
+    except Exception:
+        return False
 
 
 def _arr_to_list(a):
     if a is None:
         return []
     return np.asarray(a).tolist()
+
+
+def _dbg_coord(tag, mid_xy, mask_u8, bbox_xywh=None):
+    mid = np.asarray(mid_xy, float)
+    m = np.asarray(mask_u8)
+    if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) == 0 or m.ndim < 2:
+        print(f"[COORD][WARN] {tag} invalid mid/mask input", flush=True)
+        return
+
+    h, w = m.shape[:2]
+    xmin, xmax = float(np.min(mid[:, 0])), float(np.max(mid[:, 0]))
+    ymin, ymax = float(np.min(mid[:, 1])), float(np.max(mid[:, 1]))
+
+    inside = (
+        (mid[:, 0] >= 0) & (mid[:, 0] < w) &
+        (mid[:, 1] >= 0) & (mid[:, 1] < h)
+    )
+    inside_ratio = float(np.mean(inside)) if inside.size else 0.0
+
+    print(
+        f"[COORD] {tag} | "
+        f"mask={w}x{h} | "
+        f"mid_x=[{xmin:.1f},{xmax:.1f}] mid_y=[{ymin:.1f},{ymax:.1f}] | "
+        f"inside={inside_ratio:.3f}",
+        flush=True,
+    )
+    if bbox_xywh is not None and len(bbox_xywh) == 4:
+        x, y, bw, bh = [int(v) for v in bbox_xywh]
+        print(f"[COORD] {tag} | bbox=({x},{y},{bw},{bh})", flush=True)
+    if inside_ratio < 0.9:
+        print(f"[COORD][WARN] {tag} mid not aligned with mask", flush=True)
 
 
 def build_centering_domain_mask(*, crack_mask_u8, territory_u8=None, mode="soft"):
@@ -386,13 +433,46 @@ def _closest_valid_xy_in_mask(xy, mask_bool):
     return (int(xs[idx]), int(ys[idx]))
 
 
-def _compute_dijkstra_midline(mid_xy, costmap_f32, domain_u8):
+def snap_to_domain_local(pt_local, dom_u8):
+    """
+    pt_local: [x, y] in local crop coordinates
+    dom_u8: local-domain mask, shape (H, W)
+    returns [x, y] in local crop coordinates
+    """
+    dom = (np.asarray(dom_u8) > 0)
+    if dom.ndim != 2:
+        return None
+    H, W = dom.shape[:2]
+    x = float(pt_local[0])
+    y = float(pt_local[1])
+    xi = int(round(x))
+    yi = int(round(y))
+    if 0 <= xi < W and 0 <= yi < H and dom[yi, xi]:
+        return np.array([x, y], dtype=float)
+    ys, xs = np.nonzero(dom)
+    if len(xs) == 0:
+        return None
+    d2 = (xs.astype(float) - x) ** 2 + (ys.astype(float) - y) ** 2
+    k = int(np.argmin(d2))
+    return np.array([float(xs[k]), float(ys[k])], dtype=float)
+
+
+def _compute_dijkstra_midline(
+    mid_xy,
+    costmap_f32,
+    domain_u8,
+    *,
+    method_key=None,
+    base_name=None,
+    branch_id=None,
+):
     t0 = time.perf_counter()
     result_meta = {
         "dijkstra_s": 0.0,
         "backend": None,
         "reason": None,
         "path_cost": None,
+        "cc_debug": {},
     }
 
     S = np.asarray(mid_xy, float)
@@ -405,21 +485,115 @@ def _compute_dijkstra_midline(mid_xy, costmap_f32, domain_u8):
         result_meta["reason"] = "empty_domain"
         return None, result_meta
 
-    start_xy = _closest_valid_xy_in_mask(S[0], dom)
-    end_xy = _closest_valid_xy_in_mask(S[-1], dom)
-    if start_xy is None or end_xy is None:
+    H, W = dom.shape[:2]
+    start_local = np.asarray(S[0], float)
+    end_local = np.asarray(S[-1], float)
+    dbg_on = bool(DEBUG_CC_TRACE) and _cc_dbg(base_name, branch_id)
+
+    def _check(pt):
+        x, y = int(round(float(pt[0]))), int(round(float(pt[1])))
+        in_bounds = (0 <= x < W) and (0 <= y < H)
+        return bool(in_bounds and dom[y, x]), x, y
+
+    start_valid_before, sx0, sy0 = _check(start_local)
+    end_valid_before, ex0, ey0 = _check(end_local)
+
+    cc_n, cc_labels = cv2.connectedComponents(dom.astype(np.uint8))
+    cc_sizes = []
+    for lab in range(1, int(cc_n)):
+        cc_sizes.append((int(lab), int(np.sum(cc_labels == lab))))
+    cc_sizes = sorted(cc_sizes, key=lambda t: t[1], reverse=True)
+    start_cc_before = int(cc_labels[sy0, sx0]) if start_valid_before else 0
+    end_cc_before = int(cc_labels[ey0, ex0]) if end_valid_before else 0
+    if dbg_on:
+        print(
+            f"[CC_TRACE] branch={branch_id} mk={method_key} "
+            f"shape={tuple(dom.shape)} cc={int(cc_n - 1)} sizes={cc_sizes[:5]}",
+            flush=True,
+        )
+        print(
+            f"[CC_ENDPT] branch={branch_id} mk={method_key} "
+            f"start_valid={int(start_valid_before)} end_valid={int(end_valid_before)} "
+            f"start_cc_before={start_cc_before} end_cc_before={end_cc_before}",
+            flush=True,
+        )
+
+    start_snapped = snap_to_domain_local(start_local, dom)
+    end_snapped = snap_to_domain_local(end_local, dom)
+    if start_snapped is None or end_snapped is None:
         result_meta["reason"] = "no_valid_endpoints"
         return None, result_meta
+    if not (0 <= start_snapped[0] < W and 0 <= start_snapped[1] < H):
+        raise RuntimeError(f"snapped start left local frame: {start_snapped.tolist()} vs {(W, H)}")
+    if not (0 <= end_snapped[0] < W and 0 <= end_snapped[1] < H):
+        raise RuntimeError(f"snapped end left local frame: {end_snapped.tolist()} vs {(W, H)}")
 
-    sx, sy = start_xy
-    ex, ey = end_xy
+    sx, sy = int(round(float(start_snapped[0]))), int(round(float(start_snapped[1])))
+    ex, ey = int(round(float(end_snapped[0]))), int(round(float(end_snapped[1])))
+    start_cc_after = int(cc_labels[sy, sx]) if (0 <= sx < W and 0 <= sy < H and dom[sy, sx]) else 0
+    end_cc_after = int(cc_labels[ey, ex]) if (0 <= ex < W and 0 <= ey < H and dom[ey, ex]) else 0
+    same_cc = bool(start_cc_after > 0 and start_cc_after == end_cc_after)
+    if dbg_on:
+        print(
+            f"[CC_SNAP] branch={branch_id} mk={method_key} "
+            f"start_after={start_snapped.tolist()} end_after={end_snapped.tolist()} "
+            f"start_cc_after={start_cc_after} end_cc_after={end_cc_after}",
+            flush=True,
+        )
+        print(
+            f"[CC_PAIR] branch={branch_id} mk={method_key} "
+            f"same_cc={same_cc} start_cc={start_cc_after} end_cc={end_cc_after}",
+            flush=True,
+        )
+
+    domain_for_solver = dom.copy()
+    chosen_cc = 0
+    cc_fix_reason = None
+    if bool(USE_CC_RESTRICT_FOR_SOLVER):
+        if start_cc_after > 0 and end_cc_after > 0:
+            if start_cc_after == end_cc_after:
+                chosen_cc = int(start_cc_after)
+            else:
+                cc_fix_reason = "different_endpoint_ccs"
+        elif start_cc_after > 0:
+            chosen_cc = int(start_cc_after)
+        elif end_cc_after > 0:
+            chosen_cc = int(end_cc_after)
+        else:
+            cc_fix_reason = "no_valid_endpoint_cc"
+
+        if chosen_cc > 0:
+            domain_for_solver = (cc_labels == int(chosen_cc)).astype(bool)
+            if dbg_on:
+                print(
+                    f"[CC_FIX] branch={branch_id} mk={method_key} "
+                    f"chosen_cc={chosen_cc} size={int(np.sum(domain_for_solver))}",
+                    flush=True,
+                )
+        elif dbg_on:
+            print(
+                f"[CC_FIX][SKIP] branch={branch_id} mk={method_key} reason={cc_fix_reason}",
+                flush=True,
+            )
+
+    start_valid_solver = bool(0 <= sx < W and 0 <= sy < H and domain_for_solver[sy, sx] > 0)
+    end_valid_solver = bool(0 <= ex < W and 0 <= ey < H and domain_for_solver[ey, ex] > 0)
+    if dbg_on and (not start_valid_solver or not end_valid_solver):
+        print(
+            f"[CC_FIX][WARN] branch={branch_id} mk={method_key} "
+            f"endpoint invalid after restriction start={int(start_valid_solver)} end={int(end_valid_solver)}",
+            flush=True,
+        )
+
+    route_cost = np.asarray(costmap_f32, np.float32).copy()
+    route_cost[~domain_for_solver] = np.float32(1e6)
     path_xy = None
 
     try:
         from skimage.graph import route_through_array
 
         path_rc, total_cost = route_through_array(
-            np.asarray(costmap_f32, np.float32),
+            route_cost,
             start=(int(sy), int(sx)),
             end=(int(ey), int(ex)),
             fully_connected=True,
@@ -435,8 +609,52 @@ def _compute_dijkstra_midline(mid_xy, costmap_f32, domain_u8):
     if path_xy is None or len(path_xy) < 2:
         result_meta["reason"] = result_meta["reason"] or "empty_path"
         result_meta["dijkstra_s"] = float(time.perf_counter() - t0)
+        result_meta["cc_debug"] = {
+            "shape_hw": [int(H), int(W)],
+            "cc_count": int(cc_n - 1),
+            "cc_sizes_top5": [[int(l), int(s)] for l, s in cc_sizes[:5]],
+            "start_before": [float(start_local[0]), float(start_local[1])],
+            "end_before": [float(end_local[0]), float(end_local[1])],
+            "start_after": [float(start_snapped[0]), float(start_snapped[1])],
+            "end_after": [float(end_snapped[0]), float(end_snapped[1])],
+            "start_valid_before": bool(start_valid_before),
+            "end_valid_before": bool(end_valid_before),
+            "start_cc_before": int(start_cc_before),
+            "end_cc_before": int(end_cc_before),
+            "start_cc_after": int(start_cc_after),
+            "end_cc_after": int(end_cc_after),
+            "same_cc_after": bool(same_cc),
+            "chosen_cc": int(chosen_cc),
+            "cc_fix_reason": cc_fix_reason,
+            "use_cc_restrict": bool(USE_CC_RESTRICT_FOR_SOLVER),
+        }
         return None, result_meta
 
+    if dbg_on:
+        print(
+            f"[PATH LOCAL] first={path_xy[0].tolist()} last={path_xy[-1].tolist()} n={len(path_xy)}",
+            flush=True,
+        )
+
+    result_meta["cc_debug"] = {
+        "shape_hw": [int(H), int(W)],
+        "cc_count": int(cc_n - 1),
+        "cc_sizes_top5": [[int(l), int(s)] for l, s in cc_sizes[:5]],
+        "start_before": [float(start_local[0]), float(start_local[1])],
+        "end_before": [float(end_local[0]), float(end_local[1])],
+        "start_after": [float(start_snapped[0]), float(start_snapped[1])],
+        "end_after": [float(end_snapped[0]), float(end_snapped[1])],
+        "start_valid_before": bool(start_valid_before),
+        "end_valid_before": bool(end_valid_before),
+        "start_cc_before": int(start_cc_before),
+        "end_cc_before": int(end_cc_before),
+        "start_cc_after": int(start_cc_after),
+        "end_cc_after": int(end_cc_after),
+        "same_cc_after": bool(same_cc),
+        "chosen_cc": int(chosen_cc),
+        "cc_fix_reason": cc_fix_reason,
+        "use_cc_restrict": bool(USE_CC_RESTRICT_FOR_SOLVER),
+    }
     result_meta["dijkstra_s"] = float(time.perf_counter() - t0)
     return path_xy, result_meta
 
@@ -984,12 +1202,6 @@ METHOD_SPECS = {
         "use_depth": True,
         "use_color": False,
     },
-    "dt_ridge_color": {
-        "label": "DT + Ridge/Valley + Color",
-        "use_rgb": True,
-        "use_depth": False,
-        "use_color": True,
-    },
     "dt_ridge_color_depth": {
         "label": "DT + Ridge/Valley + Color + Depth",
         "use_rgb": True,
@@ -1002,8 +1214,8 @@ ENABLE_DEPTH_PRIOR = True
 ENABLE_PATH_REFINE = True
 ENABLE_PATH_POSTPROCESS = False
 PRINT_DT_PATH_DIAGNOSTICS = True
-# Stage-1 parallelism: run method-family variants concurrently per call.
-ENABLE_METHOD_PARALLEL = True
+# Stage-1 refactor: keep serial-by-default for easier validation.
+ENABLE_METHOD_PARALLEL = False
 METHOD_PARALLEL_MAX_WORKERS = 8
 ENABLE_COSTMAP_SMOOTH = True
 COSTMAP_SMOOTH_SIGMA = 1.0
@@ -1104,8 +1316,6 @@ def _build_ridge_valley_method_costmaps(
 
         costmaps["dt_ridge_valley"] = np.full_like(dtn, inf, dtype=np.float32)
         costmaps["dt_ridge_valley"][dom] = (dt_bad[dom] * rgb_bad[dom]).astype(np.float32)
-        costmaps["dt_ridge_color"] = np.full_like(dtn, inf, dtype=np.float32)
-        costmaps["dt_ridge_color"][dom] = (dt_bad[dom] * rgb_bad[dom]).astype(np.float32)
 
         if depth_term is not None:
             costmaps["dt_ridge_valley_depth"] = np.full_like(dtn, inf, dtype=np.float32)
@@ -1135,8 +1345,6 @@ def _build_ridge_valley_method_costmaps(
 
         costmaps["dt_ridge_valley"] = np.full_like(dtn, inf, dtype=np.float32)
         costmaps["dt_ridge_valley"][dom] = (dt_bad[dom] * rgb_bad[dom]).astype(np.float32)
-        costmaps["dt_ridge_color"] = np.full_like(dtn, inf, dtype=np.float32)
-        costmaps["dt_ridge_color"][dom] = (dt_bad[dom] * rgb_bad[dom]).astype(np.float32)
 
         if depth_term is not None:
             costmaps["dt_ridge_valley_depth"] = np.full_like(dtn, inf, dtype=np.float32)
@@ -1163,35 +1371,231 @@ def _build_ridge_valley_method_costmaps(
     }
 
 
-def _run_single_midline_method(
+def _precompute_method_shared_inputs(
     *,
-    method_key,
-    method_spec,
     mid_xy,
-    mask_u8,
-    domain_u8,
-    dt_norm,
-    dt_float,
+    crack_mask_u8,
+    domain_u8=None,
     image_rgb=None,
     depth_full=None,
     depth_crop=None,
     depth_bbox_xywh=None,
     full_image_hw=None,
+):
+    t0 = time.perf_counter()
+
+    mid_global = np.asarray(mid_xy, float)
+    mask_u8 = (np.asarray(crack_mask_u8) > 0).astype(np.uint8)
+
+    if domain_u8 is None:
+        domain = mask_u8.copy()
+    else:
+        domain = (np.asarray(domain_u8) > 0).astype(np.uint8)
+    if not np.any(domain):
+        domain = mask_u8.copy()
+
+    dt_float, dt_norm, t_dt = _compute_dt_for_domain(
+        domain,
+        full_image_hw=full_image_hw,
+    )
+
+    domain_local = np.asarray(domain, np.uint8)
+    mask_local = np.asarray(mask_u8, np.uint8)
+    dt_float_local = np.asarray(dt_float, np.float32)
+    dt_norm_local = np.asarray(dt_norm, np.float32)
+    mid_local = np.asarray(mid_global, float).copy()
+    frame_offset_xy = None
+
+    if depth_bbox_xywh is not None and len(depth_bbox_xywh) == 4:
+        bx, by, bw, bh = [int(v) for v in depth_bbox_xywh]
+        print(
+            f"[FRAME] shared bbox_global=({bx},{by}) size=({bw},{bh})",
+            flush=True,
+        )
+        if bw > 0 and bh > 0:
+            frame_offset_xy = np.array([float(bx), float(by)], dtype=float)
+            if (
+                domain_local.shape[0] >= by + bh
+                and domain_local.shape[1] >= bx + bw
+                and (domain_local.shape[0] != bh or domain_local.shape[1] != bw)
+            ):
+                domain_local = np.asarray(domain_local[by:by + bh, bx:bx + bw], np.uint8)
+                dt_float_local = np.asarray(dt_float_local[by:by + bh, bx:bx + bw], np.float32)
+                dt_norm_local = np.asarray(dt_norm_local[by:by + bh, bx:bx + bw], np.float32)
+                mid_local[:, 0] -= float(bx)
+                mid_local[:, 1] -= float(by)
+                if mask_local.shape[0] >= by + bh and mask_local.shape[1] >= bx + bw:
+                    mask_local = np.asarray(mask_local[by:by + bh, bx:bx + bw], np.uint8)
+    else:
+        print(
+            f"[FRAME] shared bbox_global=(0,0) size=({int(domain_local.shape[1])},{int(domain_local.shape[0])})",
+            flush=True,
+        )
+
+    _dbg_coord(
+        tag="shared_precompute",
+        mid_xy=mid_local,
+        mask_u8=mask_local,
+        bbox_xywh=depth_bbox_xywh,
+    )
+
+    dom_nz = int(np.count_nonzero(domain_local))
+    _, ncc = ndi_label(domain_local > 0)
+    print(
+        f"[DOMAIN] shared | nz={dom_nz} | cc={int(ncc)}",
+        flush=True,
+    )
+
+    shared_timing = {
+        "dt_compute_s": float((t_dt or {}).get("compute_s", 0.0)),
+        "depth_align_s": 0.0,
+        "depth_recess_s": 0.0,
+        "rgb_align_s": 0.0,
+        "rgb_cues_s": 0.0,
+        "total_precompute_s": 0.0,
+    }
+
+    need_depth = bool(ENABLE_DEPTH_PRIOR) and any(
+        bool(v.get("use_depth", False)) for v in METHOD_SPECS.values()
+    )
+    need_rgb = any(bool(v.get("use_rgb", False)) for v in METHOD_SPECS.values())
+    use_color_any = any(bool(v.get("use_color", False)) for v in METHOD_SPECS.values())
+
+    depth_bundle = {
+        "available": False,
+        "depth_local": None,
+        "depth_norm": None,
+        "recess_norm": None,
+        "align_meta": {},
+        "recess_meta": {},
+        "reason": None,
+    }
+    if need_depth:
+        t_align0 = time.perf_counter()
+        depth_local, depth_align_meta = _extract_depth_crop_for_bbox_or_domain(
+            domain_u8=domain_local,
+            depth_full=depth_full,
+            depth_crop=depth_crop,
+            depth_bbox_xywh=depth_bbox_xywh,
+            full_image_hw=full_image_hw,
+            context_pad_px=(int(CUE_CONTEXT_PAD_PX) if bool(ENABLE_CUE_BBOX_CONTEXT) else 0),
+        )
+        shared_timing["depth_align_s"] = float(time.perf_counter() - t_align0)
+        depth_bundle["align_meta"] = depth_align_meta if isinstance(depth_align_meta, dict) else {}
+
+        if depth_local is None:
+            depth_bundle["reason"] = (depth_align_meta or {}).get("reason", "depth_align_failed")
+        else:
+            print(
+                f"[DEPTH OK] shared min={float(np.nanmin(depth_local)):.4f} "
+                f"max={float(np.nanmax(depth_local)):.4f} "
+                f"mean={float(np.nanmean(depth_local)):.4f}"
+            )
+            depth_norm, recess_norm, depth_sig_meta = _compute_depth_recess_signal(
+                depth_local,
+                domain_local,
+                dt_norm=None,
+            )
+            shared_timing["depth_recess_s"] = float((depth_sig_meta or {}).get("compute_s", 0.0))
+            depth_bundle.update({
+                "available": True,
+                "depth_local": np.asarray(depth_local, np.float32),
+                "depth_norm": np.asarray(depth_norm, np.float32),
+                "recess_norm": np.asarray(recess_norm, np.float32),
+                "recess_meta": depth_sig_meta if isinstance(depth_sig_meta, dict) else {},
+                "reason": None,
+            })
+
+    rgb_bundle = {
+        "available": False,
+        "gray": None,
+        "rgb_trench_norm": None,
+        "ridge_norm": None,
+        "valley_norm": None,
+        "edge_suppress_norm": None,
+        "align_meta": {},
+        "cue_meta": {},
+        "reason": None,
+    }
+    if need_rgb:
+        t_rgb_align0 = time.perf_counter()
+        if bool(ENABLE_CUE_BBOX_CONTEXT):
+            gray, gray_meta = _extract_image_crop_for_bbox_or_domain(
+                domain_u8=domain_local,
+                image_rgb_or_gray=image_rgb,
+                image_bbox_xywh=depth_bbox_xywh,
+                full_image_hw=full_image_hw,
+                context_pad_px=int(CUE_CONTEXT_PAD_PX),
+            )
+        else:
+            gray = _prepare_gray_image(image_rgb, domain_local.shape[:2])
+            gray_meta = {}
+        shared_timing["rgb_align_s"] = float(time.perf_counter() - t_rgb_align0)
+        rgb_bundle["align_meta"] = gray_meta if isinstance(gray_meta, dict) else {}
+
+        if gray is None:
+            rgb_bundle["reason"] = "missing_rgb_image"
+        else:
+            t_rgb_cues0 = time.perf_counter()
+            rgb_trench_norm, valley_norm, ridge_norm, edge_suppress_norm, rgb_meta = _compute_rgb_trench_signal(
+                gray,
+                domain_local,
+                image_rgb=image_rgb if use_color_any else None,
+            )
+            shared_timing["rgb_cues_s"] = float(time.perf_counter() - t_rgb_cues0)
+            rgb_bundle.update({
+                "available": True,
+                "gray": np.asarray(gray, np.float32),
+                "rgb_trench_norm": np.asarray(rgb_trench_norm, np.float32),
+                "ridge_norm": np.asarray(ridge_norm, np.float32),
+                "valley_norm": np.asarray(valley_norm, np.float32),
+                "edge_suppress_norm": np.asarray(edge_suppress_norm, np.float32),
+                "cue_meta": rgb_meta if isinstance(rgb_meta, dict) else {},
+                "reason": None,
+            })
+
+    shared_timing["total_precompute_s"] = float(time.perf_counter() - t0)
+
+    return {
+        "mid_global": np.asarray(mid_global, float),
+        "mid_local": np.asarray(mid_local, float),
+        "mask_u8": np.asarray(mask_local, np.uint8),
+        "domain_u8": np.asarray(domain_local, np.uint8),
+        "dt_float": np.asarray(dt_float_local, np.float32),
+        "dt_norm": np.asarray(dt_norm_local, np.float32),
+        "frame_offset_xy": None if frame_offset_xy is None else np.asarray(frame_offset_xy, float),
+        "timing": shared_timing,
+        "depth": depth_bundle,
+        "rgb": rgb_bundle,
+    }
+
+
+def _run_single_midline_method(
+    *,
+    method_key,
+    method_spec,
+    shared,
     max_radius=60,
     endpoint_mode="atomic",
-    dt_compute_s=0.0,
     w_dt=1.0,
     w_geo=1.0,
     w_depth=1.0,
     eps=1e-3,
+    debug_base_name=None,
+    debug_branch_id=None,
 ):
     t0_method = time.perf_counter()
-    dom = (np.asarray(domain_u8) > 0).astype(np.uint8)
-    dtn = np.asarray(dt_norm, np.float32)
-    mid = np.asarray(mid_xy, float)
+
+    dom = (np.asarray(shared.get("domain_u8")) > 0).astype(np.uint8)
+    dtn = np.asarray(shared.get("dt_norm"), np.float32)
+    mid = np.asarray(shared.get("mid_local"), float)
+    mask_local = np.asarray(shared.get("mask_u8"), np.uint8)
+    mid_global = np.asarray(shared.get("mid_global", mid), float)
+    frame_offset_xy = shared.get("frame_offset_xy", None)
+    shared_timing = shared.get("timing", {}) if isinstance(shared.get("timing", {}), dict) else {}
 
     timing = {
-        "dt_compute_s": float(dt_compute_s),
+        "dt_compute_s": float(shared_timing.get("dt_compute_s", 0.0)),
         "depth_align_s": 0.0,
         "depth_recess_s": 0.0,
         "costmap_s": 0.0,
@@ -1247,89 +1651,75 @@ def _run_single_midline_method(
         timing["total_s"] = float(time.perf_counter() - t0_method)
         return out
 
+    def _valid(pt, dom_arr):
+        x, y = int(round(float(pt[0]))), int(round(float(pt[1])))
+        return (
+            0 <= y < dom_arr.shape[0]
+            and 0 <= x < dom_arr.shape[1]
+            and dom_arr[y, x] > 0
+        )
+
+    start = mid[0]
+    end = mid[-1]
+    sv = _valid(start, dom)
+    ev = _valid(end, dom)
+    if bool(DEBUG_CC_TRACE) and _cc_dbg(debug_base_name, debug_branch_id):
+        print(
+            f"[ENDPTS] {method_key} | "
+            f"start_valid={int(sv)} end_valid={int(ev)}",
+            flush=True,
+        )
+        if not sv or not ev:
+            print(f"[ENDPTS][WARN] {method_key} endpoint outside domain", flush=True)
+
     dom_b = (np.asarray(dom) > 0)
+
+    depth_bundle = shared.get("depth", {}) if isinstance(shared.get("depth", {}), dict) else {}
     use_depth = bool(method_spec.get("use_depth", False))
     if use_depth and not bool(ENABLE_DEPTH_PRIOR):
         out["meta"]["depth_disabled"] = True
         use_depth = False
 
-    use_rgb = bool(method_spec.get("use_rgb", False))
-    use_color = bool(method_spec.get("use_color", False))
-    depth_local = None
-    depth_align_meta = {}
+    recess_norm = None
     if use_depth:
-        t_align0 = time.perf_counter()
-        depth_local, depth_align_meta = _extract_depth_crop_for_bbox_or_domain(
-            domain_u8=dom,
-            depth_full=depth_full,
-            depth_crop=depth_crop,
-            depth_bbox_xywh=depth_bbox_xywh,
-            full_image_hw=full_image_hw,
-            context_pad_px=(int(CUE_CONTEXT_PAD_PX) if bool(ENABLE_CUE_BBOX_CONTEXT) else 0),
-        )
-        timing["depth_align_s"] = float(time.perf_counter() - t_align0)
-        if depth_local is None:
-            out["meta"]["reason"] = (depth_align_meta or {}).get("reason", "depth_align_failed")
-            _log_method_failure(method_key, "depth_align_failed", depth_align_meta if isinstance(depth_align_meta, dict) else {})
-            if str(method_key) in ("dt_depth", "dt_ridge_valley_depth"):
+        timing["depth_align_s"] = float(shared_timing.get("depth_align_s", 0.0))
+        timing["depth_recess_s"] = float(shared_timing.get("depth_recess_s", 0.0))
+        if not bool(depth_bundle.get("available", False)):
+            out["meta"]["reason"] = str(depth_bundle.get("reason", "depth_precompute_failed"))
+            _log_method_failure(method_key, "depth_precompute_failed", depth_bundle)
+            if str(method_key) in ("dt_depth", "dt_ridge_valley_depth", "dt_ridge_color_depth"):
                 raise RuntimeError(f"[CRITICAL] Depth required but failed for {method_key}")
             timing["total_s"] = float(time.perf_counter() - t0_method)
             return out
-        print(
-            f"[DEPTH OK] method={method_key} "
-            f"min={float(np.nanmin(depth_local)):.4f} "
-            f"max={float(np.nanmax(depth_local)):.4f} "
-            f"mean={float(np.nanmean(depth_local)):.4f}"
-        )
 
-    recess_norm = None
-    depth_norm = None
-    depth_sig_meta = {}
-    if use_depth:
-        depth_norm, recess_norm, depth_sig_meta = _compute_depth_recess_signal(
-            depth_local,
-            dom,
-            dt_norm=None,
-        )
-        timing["depth_recess_s"] = float(depth_sig_meta.get("compute_s", 0.0))
-        out["debug"]["depth_norm"] = np.asarray(depth_norm, np.float32)
+        recess_norm = depth_bundle.get("recess_norm")
+        out["debug"]["depth_norm"] = np.asarray(depth_bundle.get("depth_norm"), np.float32)
         out["debug"]["recess_norm"] = np.asarray(recess_norm, np.float32)
 
+    rgb_bundle = shared.get("rgb", {}) if isinstance(shared.get("rgb", {}), dict) else {}
+    use_rgb = bool(method_spec.get("use_rgb", False))
     ridge_norm = None
     valley_norm = None
+    rgb_cue_norm = None
     if use_rgb:
-        if bool(ENABLE_CUE_BBOX_CONTEXT):
-            gray, gray_meta = _extract_image_crop_for_bbox_or_domain(
-                domain_u8=dom,
-                image_rgb_or_gray=image_rgb,
-                image_bbox_xywh=depth_bbox_xywh,
-                full_image_hw=full_image_hw,
-                context_pad_px=int(CUE_CONTEXT_PAD_PX),
-            )
-            if isinstance(gray_meta, dict):
-                out["meta"]["rgb_align"] = gray_meta
-        else:
-            gray = _prepare_gray_image(image_rgb, dom.shape[:2])
-        if gray is None:
-            out["meta"]["reason"] = "missing_rgb_image"
-            _log_method_failure(method_key, "missing_rgb_image")
+        if not bool(rgb_bundle.get("available", False)):
+            out["meta"]["reason"] = str(rgb_bundle.get("reason", "rgb_precompute_failed"))
+            _log_method_failure(method_key, "rgb_precompute_failed", rgb_bundle)
             timing["total_s"] = float(time.perf_counter() - t0_method)
             return out
-        rgb_trench_norm, valley_norm, ridge_norm, edge_suppress_norm, _rgb_meta = _compute_rgb_trench_signal(
-            gray,
-            dom,
-            image_rgb=image_rgb if use_color else None,
-        )
+        ridge_norm = rgb_bundle.get("ridge_norm")
+        valley_norm = rgb_bundle.get("valley_norm")
+        rgb_cue_norm = rgb_bundle.get("rgb_trench_norm")
         out["debug"]["ridge_norm"] = np.asarray(ridge_norm, np.float32)
         out["debug"]["valley_norm"] = np.asarray(valley_norm, np.float32)
-        out["debug"]["rgb_cue_norm"] = np.asarray(rgb_trench_norm, np.float32)
-        out["debug"]["edge_suppress_norm"] = np.asarray(edge_suppress_norm, np.float32)
+        out["debug"]["rgb_cue_norm"] = np.asarray(rgb_cue_norm, np.float32)
+        out["debug"]["edge_suppress_norm"] = np.asarray(rgb_bundle.get("edge_suppress_norm"), np.float32)
 
     costmaps, score_debug, cost_meta = _build_ridge_valley_method_costmaps(
         dom,
         dtn,
         method_key=str(method_key),
-        rgb_trench_norm=(out["debug"]["rgb_cue_norm"] if use_rgb else None),
+        rgb_trench_norm=rgb_cue_norm,
         ridge_norm=ridge_norm,
         valley_norm=valley_norm,
         recess_norm=recess_norm,
@@ -1352,9 +1742,16 @@ def _run_single_midline_method(
             costmaps["selected"] = np.asarray(costmap, np.float32)
 
     route_domain = np.asarray(dom, np.uint8).copy()
-
     route_costmap = np.asarray(costmap, np.float32)
-    path_raw, dijkstra_meta = _compute_dijkstra_midline(mid, route_costmap, route_domain)
+
+    path_raw, dijkstra_meta = _compute_dijkstra_midline(
+        mid,
+        route_costmap,
+        route_domain,
+        method_key=str(method_key),
+        base_name=debug_base_name,
+        branch_id=debug_branch_id,
+    )
     timing["dijkstra_s"] = float(dijkstra_meta.get("dijkstra_s", 0.0))
     if path_raw is None or len(path_raw) < 2:
         out["meta"]["reason"] = "empty_path"
@@ -1366,13 +1763,15 @@ def _run_single_midline_method(
         timing["total_s"] = float(time.perf_counter() - t0_method)
         return out
 
-    if bool(PRINT_DT_PATH_DIAGNOSTICS):
-        raw_np = np.asarray(path_raw, np.float32)
-        uniq_last10 = int(np.unique(np.round(raw_np[-10:], 3), axis=0).shape[0]) if len(raw_np) >= 10 else int(len(raw_np))
+    if frame_offset_xy is not None and (bool(DEBUG_CC_TRACE) and _cc_dbg(debug_base_name, debug_branch_id)):
+        path_global_dbg = np.asarray(path_raw, float) + frame_offset_xy.reshape(1, 2)
         print(
-            f"[DT RAW] method={method_key} npts={len(raw_np)} "
-            f"first={raw_np[:1].tolist()} last={raw_np[-1:].tolist()} "
-            f"unique_last10={uniq_last10}"
+            f"[PATH GLOBAL] first={path_global_dbg[0].tolist()} last={path_global_dbg[-1].tolist()}",
+            flush=True,
+        )
+        print(
+            f"[COMPARE] path_start vs user_start dist={float(np.linalg.norm(path_global_dbg[0] - mid_global[0])):.3f}",
+            flush=True,
         )
 
     path_refined = np.asarray(path_raw, float)
@@ -1387,7 +1786,7 @@ def _run_single_midline_method(
             ).astype(np.float32)
         score_for_refine[dom_b] = np.clip(score_for_refine[dom_b], 0.0, 1.0)
         score_for_refine[~dom_b] = 0.0
-        score_ref_smooth = np.asarray(score_for_refine, np.float32)  # no smoothing
+        score_ref_smooth = np.asarray(score_for_refine, np.float32)
         path_refined = _refine_path_sobel(
             path_raw,
             score_ref_smooth,
@@ -1410,14 +1809,29 @@ def _run_single_midline_method(
     normals_diag = {}
     normals, normals_diag, t_normals = _compute_normals_for_midline(
         mid_xy=path_post,
-        crack_mask_u8=mask_u8,
+        crack_mask_u8=mask_local,
         max_radius=max_radius,
         diag_out=normals_diag,
         endpoint_mode=endpoint_mode,
     )
     timing["normals_s"] = float(t_normals.get("compute_s", 0.0))
 
-    out["midline"] = np.asarray(path_post, float)
+    path_out = np.asarray(path_post, float)
+    if frame_offset_xy is not None:
+        path_out = path_out + frame_offset_xy.reshape(1, 2)
+        if isinstance(normals, dict):
+            for ex_key, ey_key in (("edge1_x", "edge1_y"), ("edge2_x", "edge2_y")):
+                try:
+                    ex = np.asarray(normals.get(ex_key, []), float)
+                    ey = np.asarray(normals.get(ey_key, []), float)
+                    if ex.size:
+                        normals[ex_key] = (ex + float(frame_offset_xy[0])).tolist()
+                    if ey.size:
+                        normals[ey_key] = (ey + float(frame_offset_xy[1])).tolist()
+                except Exception:
+                    continue
+
+    out["midline"] = np.asarray(path_out, float)
     out["normals"] = normals
     out["normals_diag"] = normals_diag
     out["debug"]["dt_term"] = score_debug.get("dt_term")
@@ -1427,6 +1841,7 @@ def _run_single_midline_method(
     out["debug"]["rgb_cue_norm"] = score_debug.get("rgb_cue_term")
     out["debug"]["costmap"] = np.asarray(route_costmap, np.float32)
     out["debug"]["selected_cost_key"] = str(selected_key)
+    out["debug"]["cc_debug"] = dijkstra_meta.get("cc_debug", {}) if isinstance(dijkstra_meta, dict) else {}
     out["debug"]["costmaps"] = {}
     if isinstance(costmaps, dict):
         for k, v in costmaps.items():
@@ -1441,9 +1856,12 @@ def _run_single_midline_method(
     if isinstance(costmaps, dict) and "selected_key" in costmaps:
         out["debug"]["costmaps"]["selected_key"] = str(costmaps.get("selected_key"))
     out["debug"]["score_for_refine"] = np.asarray(score_for_refine, np.float32) if score_for_refine is not None else None
+
     out["meta"]["reason"] = None
-    out["meta"]["depth_align"] = depth_align_meta if isinstance(depth_align_meta, dict) else {}
-    out["meta"]["depth_recess"] = depth_sig_meta if isinstance(depth_sig_meta, dict) else {}
+    out["meta"]["depth_align"] = depth_bundle.get("align_meta", {}) if isinstance(depth_bundle, dict) else {}
+    out["meta"]["depth_recess"] = depth_bundle.get("recess_meta", {}) if isinstance(depth_bundle, dict) else {}
+    out["meta"]["rgb_align"] = rgb_bundle.get("align_meta", {}) if isinstance(rgb_bundle, dict) else {}
+    out["meta"]["rgb_cues"] = rgb_bundle.get("cue_meta", {}) if isinstance(rgb_bundle, dict) else {}
     out["meta"]["costmap"] = cost_meta if isinstance(cost_meta, dict) else {}
     out["meta"]["dijkstra"] = dijkstra_meta if isinstance(dijkstra_meta, dict) else {}
     out["meta"]["route_domain"] = {
@@ -1451,11 +1869,6 @@ def _run_single_midline_method(
         "route_domain_nonzero": int(np.count_nonzero(route_domain)),
     }
     timing["total_s"] = float(time.perf_counter() - t0_method)
-    #print(
-    #    f"[MIDLINE OK] method={method_key} "
-    #    f"points={len(path_post)} "
-    #    f"cost={selected_key}"
-    #)
     return out
 
 
@@ -1479,57 +1892,47 @@ def compute_midline_method_variants_and_normals(
     w_depth=None,
     diag_out=None,
     endpoint_mode="atomic",
+    debug_base_name=None,
+    debug_branch_id=None,
 ):
     """
-    Compute the 4-method thesis family in one pass:
+    Compute the 5-method thesis family in one pass:
       dt
       dt_depth
       dt_ridge_valley
       dt_ridge_valley_depth
+      dt_ridge_color_depth
     """
     if snap_kwargs is None:
         snap_kwargs = {}
 
-    mask_u8 = (np.asarray(crack_mask_u8) > 0).astype(np.uint8)
-    # DE NOVO DOMAIN: no territory prior / no manual-midline influence.
-    if domain_u8 is None:
-        domain = mask_u8.copy()
-    else:
-        domain = (np.asarray(domain_u8) > 0).astype(np.uint8)
-    if not np.any(domain):
-        domain = mask_u8.copy()
-
-    dt_float, dt_norm, t_dt = _compute_dt_for_domain(
-        domain,
+    shared = _precompute_method_shared_inputs(
+        mid_xy=np.asarray(mid_xy, float),
+        crack_mask_u8=crack_mask_u8,
+        domain_u8=domain_u8,
+        image_rgb=image_rgb,
+        depth_full=depth_full,
+        depth_crop=depth_crop,
+        depth_bbox_xywh=depth_bbox_xywh,
         full_image_hw=full_image_hw,
     )
+
     methods = {}
     method_items = list(METHOD_SPECS.items())
 
     def _run_one_method(mkey, mspec):
-        d_crop = depth_crop if bool(mspec.get("use_depth", False)) else None
-        d_full = depth_full if bool(mspec.get("use_depth", False)) else None
-
         return _run_single_midline_method(
             method_key=mkey,
             method_spec=mspec,
-            mid_xy=np.asarray(mid_xy, float),
-            mask_u8=mask_u8,
-            domain_u8=domain,
-            dt_norm=dt_norm,
-            dt_float=dt_float,
-            image_rgb=image_rgb,
-            depth_full=d_full,
-            depth_crop=d_crop,
-            depth_bbox_xywh=depth_bbox_xywh,
-            full_image_hw=full_image_hw,
+            shared=shared,
             max_radius=max_radius,
             endpoint_mode=endpoint_mode,
-            dt_compute_s=float(t_dt.get("compute_s", 0.0)),
             w_dt=float(w_dt),
             w_geo=float(depth_alpha if w_geo is None else w_geo),
             w_depth=float(depth_beta if w_depth is None else w_depth),
             eps=float(depth_eps),
+            debug_base_name=debug_base_name,
+            debug_branch_id=debug_branch_id,
         )
 
     use_parallel = bool(ENABLE_METHOD_PARALLEL) and len(method_items) > 1
@@ -1562,11 +1965,7 @@ def compute_midline_method_variants_and_normals(
 
     result = {
         "methods": methods,
-        "shared": {
-            "domain_u8": (np.asarray(domain) > 0).astype(np.uint8),
-            "dt_float": np.asarray(dt_float, np.float32),
-            "dt_norm": np.asarray(dt_norm, np.float32),
-        },
+        "shared": shared,
     }
     return result
 
@@ -1613,7 +2012,9 @@ def compute_midline_methods_and_normals(
 
     methods = res.get("methods", {}) if isinstance(res, dict) else {}
     m_dt = methods.get("dt", {}) if isinstance(methods.get("dt", {}), dict) else {}
-    m_depth = methods.get("dt_ridge_valley_depth", {}) if isinstance(methods.get("dt_ridge_valley_depth", {}), dict) else {}
+    m_depth = methods.get("dt_ridge_color_depth", {}) if isinstance(methods.get("dt_ridge_color_depth", {}), dict) else {}
+    if m_depth.get("midline") is None:
+        m_depth = methods.get("dt_ridge_valley_depth", {}) if isinstance(methods.get("dt_ridge_valley_depth", {}), dict) else {}
     if m_depth.get("midline") is None:
         m_depth = methods.get("dt_depth", {}) if isinstance(methods.get("dt_depth", {}), dict) else {}
     shared = res.get("shared", {}) if isinstance(res.get("shared", {}), dict) else {}
@@ -1629,21 +2030,39 @@ def compute_midline_methods_and_normals(
     try:
         domain_u8_used = shared.get("domain_u8", None)
         dt_float_used = shared.get("dt_float", None)
+        frame_offset_xy = shared.get("frame_offset_xy", None)
+        mid_local_for_center = np.asarray(shared.get("mid_local", mid_xy), float)
+        mask_local_for_center = (np.asarray(shared.get("mask_u8", crack_mask_u8)) > 0).astype(np.uint8)
         if domain_u8_used is not None and dt_float_used is not None:
-            centered_midline, t_centered = _compute_dt_ridge_midline(
-                np.asarray(mid_xy, float),
+            centered_midline_local, t_centered = _compute_dt_ridge_midline(
+                mid_local_for_center,
                 np.asarray(domain_u8_used, np.uint8),
                 np.asarray(dt_float_used, np.float32),
                 snap_kwargs or {},
             )
             centered_snap_s = float((t_centered or {}).get("snap_s", 0.0))
             centered_normals, centered_normals_diag, t_center_normals = _compute_normals_for_midline(
-                mid_xy=np.asarray(centered_midline, float),
-                crack_mask_u8=(np.asarray(crack_mask_u8) > 0).astype(np.uint8),
+                mid_xy=np.asarray(centered_midline_local, float),
+                crack_mask_u8=mask_local_for_center,
                 max_radius=max_radius,
                 diag_out=centered_normals_diag,
                 endpoint_mode=endpoint_mode,
             )
+            centered_midline = np.asarray(centered_midline_local, float)
+            if frame_offset_xy is not None:
+                off = np.asarray(frame_offset_xy, float).reshape(1, 2)
+                centered_midline = centered_midline + off
+                if isinstance(centered_normals, dict):
+                    for ex_key, ey_key in (("edge1_x", "edge1_y"), ("edge2_x", "edge2_y")):
+                        try:
+                            ex = np.asarray(centered_normals.get(ex_key, []), float)
+                            ey = np.asarray(centered_normals.get(ey_key, []), float)
+                            if ex.size:
+                                centered_normals[ex_key] = (ex + float(off[0, 0])).tolist()
+                            if ey.size:
+                                centered_normals[ey_key] = (ey + float(off[0, 1])).tolist()
+                        except Exception:
+                            continue
             centered_normals_s = float((t_center_normals or {}).get("compute_s", 0.0))
     except Exception:
         centered_midline = None

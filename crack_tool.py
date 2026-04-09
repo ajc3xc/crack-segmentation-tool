@@ -72,6 +72,72 @@ def _force_pyqt5_qt_plugin_paths():
     if os.path.isdir(platform_dir):
         os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = platform_dir
 
+
+def debug_plot_all_atomics(image, atomic_cracks, title="DEBUG ATOMICS", out_png=None, show=False):
+    """
+    Visualize raw atomic truth directly on the full image:
+      - bbox in cyan
+      - midline in lime
+      - endpoints in red
+      - bbox center in yellow
+      - midline centroid in magenta
+    """
+    if image is None:
+        return
+    img = np.asarray(image)
+    if img.ndim < 2:
+        return
+    H, W = img.shape[:2]
+
+    fig, ax = plt.subplots(figsize=(10, 12), dpi=180)
+    ax.imshow(img)
+
+    for cr in (atomic_cracks or []):
+        if not isinstance(cr, dict):
+            continue
+        scid = cr.get("id", "?")
+        bbox = cr.get("mask_bbox", None)
+        mid = cr.get("midline", None)
+        color_mid = plt.cm.tab10(int(scid) % 10) if str(scid).isdigit() else "lime"
+
+        if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+            try:
+                x, y, bw, bh = [int(v) for v in bbox]
+                rect = plt.Rectangle((x, y), bw, bh, edgecolor="cyan", facecolor="none", linewidth=2)
+                ax.add_patch(rect)
+                ax.text(x, y - 5, f"ID {scid}", color="cyan", fontsize=9, weight="bold")
+                ax.scatter(x + bw / 2.0, y + bh / 2.0, c="yellow", s=18)
+            except Exception:
+                pass
+
+        try:
+            arr = np.asarray(mid, float)
+            if arr.ndim == 2 and arr.shape[0] > 0 and arr.shape[1] == 2:
+                ax.plot(arr[:, 0], arr[:, 1], color=color_mid, linewidth=2)
+                ax.scatter(arr[0, 0], arr[0, 1], c="red", s=25)
+                ax.scatter(arr[-1, 0], arr[-1, 1], c="red", s=25)
+                ax.scatter(float(np.mean(arr[:, 0])), float(np.mean(arr[:, 1])), c="magenta", s=18)
+        except Exception:
+            pass
+
+    ax.set_title(title)
+    ax.set_xlim([0, W])
+    ax.set_ylim([H, 0])
+    ax.axis("off")
+    plt.tight_layout()
+
+    if out_png:
+        try:
+            os.makedirs(os.path.dirname(out_png), exist_ok=True)
+            fig.savefig(out_png, bbox_inches="tight")
+            print(f"[DEBUG ATOMICS] wrote {out_png}")
+        except Exception as e:
+            print(f"[DEBUG ATOMICS] failed to write {out_png}: {e}")
+
+    if show:
+        plt.show()
+    plt.close(fig)
+
 class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, CombineClearSegments, CrackUtils, Ui_MainWindow):
     def setupUi(self, MainWindow):
         super().setupUi(MainWindow)
@@ -85,7 +151,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         
         self.combine_segments_button.clicked.connect(self.combine_segments)
         #self.man_only_metrics_button.clicked.connect(lambda: self.run_mask_metrics(display=True))
-        self.man_only_metrics_button.clicked.connect(lambda: self.run_manual_metrics_current_image_quick(tau_px=3.0, crack_id=None))
+        self.man_only_metrics_button.clicked.connect(lambda: self.run_et_metrics_current_image_quick(tau_px=3.0, crack_id=None))
         #self.man_auto_metrics_button.clicked.connect(lambda: self.batch_run_metrics_global(sample_frac=.2,max_images=10,seed=0,cpu_max_workers=8,apply_to_sample=False,edges_only=False))
         self.man_auto_metrics_button.clicked.connect(
             lambda: self.run_full_metrics_current_image(
@@ -750,7 +816,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             max_images=10,             # cap for calibration phase
             seed=0,
             edge_grid=None,            # if None → sensible default below
-            g_variants=None,           # if None → defaults inside generate_auto_variants_for_manual_parallel
+            g_variants=None,           # if None → defaults inside generate_auto_variants_for_et_parallel
             cpu_max_workers=4,
             apply_to_sample=False,     # False → apply global params to ALL images; True → sampled set only
             edges_only=False,          # True → skip RS3; parallelize edge masks/tracking per crack
@@ -1082,7 +1148,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
 
                     for cid in valid_manual_ids:
                         try:
-                            pack = self.generate_auto_variants_for_manual_parallel(
+                            pack = self.generate_auto_variants_for_et_parallel(
                                 crack_id=cid,
                                 g_variants=g_variants,
                                 edge_params_fixed=global_best_edge,
@@ -1222,25 +1288,44 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         edge_parallel_workers=None,
         rs3_strategy="full",
         rs3_fixed_family=None,
+        image_indices=None,
+        base_names=None,
+        recompute_best_non_dt=True,
     ):
         """
-        GLOBAL METRICS DRIVER
-
-        PHASE A1: Edge sweep → global_best_edge
-        PHASE A2: (optional) RS3 midline calibration → global_best_rs3
-        PHASE B: Apply to all images
-
-        NEW BEHAVIOR:
-        • No per-image RS3 fallback.
-        • If global RS3 fails → RS3 completely disabled for batch.
-        • Pipeline continues safely using only edge tracking + manual midlines.
+        Unified global runner:
+        1) export GT supervision + ablation rows
+        2) aggregate length-only RS3 and persist BEST_NON_DT
+        3) run DT/BEST/ET width evaluation on requested images
         """
-        import os, json, random, time
-        import numpy as np, pandas as pd
-        from helpers import metrics
-        from helpers.variant_optimizer import (
-            optimize_across_dataset,
-            apply_family_to_image,
+        import random
+
+        resolved_indices = image_indices
+        resolved_indices = [43]
+        if resolved_indices is None and base_names is None and bool(apply_to_sample):
+            n_total = int(len(getattr(self, "image_names", []) or []))
+            if n_total > 0:
+                k = max(1, int(round(float(sample_frac) * float(n_total))))
+                if max_images is not None:
+                    try:
+                        k = min(k, int(max_images))
+                    except Exception:
+                        pass
+                k = max(1, min(k, n_total))
+                rng = random.Random(int(seed))
+                resolved_indices = sorted(rng.sample(list(range(n_total)), k))
+                print(f"[batch dt_best_et] sampled {len(resolved_indices)}/{n_total} images")
+
+        # New unified pipeline entrypoint (shared with quick/single-image path).
+        edge_params = {"window_half_size": 45, "mu": 0.0, "l": 5, "p": 14, "seg_mode": "new"}
+        return self._batch_run_metrics_global_dt_best_et(
+            image_indices=resolved_indices,
+            base_names=base_names,
+            edge_params=edge_params,
+            export_supervision=True,
+            display=False,
+            edge_parallel_workers=edge_parallel_workers,
+            recompute_best=bool(recompute_best_non_dt),
         )
 
         # ------------------------------------------------------------------
@@ -2054,7 +2139,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                         if len(man) < 2:
                             continue
 
-                        pack = self.generate_auto_variants_for_manual_parallel(
+                        pack = self.generate_auto_variants_for_et_parallel(
                             crack_id=cid,
                             g_variants=rs3_g_variants_run,
                             edge_params_fixed=global_best_edge,
@@ -2212,7 +2297,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                         t_auto_start = time.perf_counter()
                         for cid in valid_ids:
                             try:
-                                pack = self.generate_auto_variants_for_manual_parallel(
+                                pack = self.generate_auto_variants_for_et_parallel(
                                     crack_id=cid,
                                     g_variants=rs3_g_variants_run,
                                     edge_params_fixed=global_best_edge,
@@ -2264,7 +2349,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                         t_edge_parallel = time.perf_counter() - t_edge_parallel_start
 
                     # ---- Final mask + width metrics ----
-                    # Here we WANT manual vs auto (TOTAL/TOTAL_AUTO, combined vs combined_auto, etc.)
+                    # Here we WANT ET vs auto (TOTAL/TOTAL_AUTO, combined vs combined_auto, etc.)
                     t_metrics_start = time.perf_counter()
                     try:
                         self.compute_mask_and_width_metrics_for_image(
@@ -2394,8 +2479,92 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             print(f"[GT_SUP] no annotation JSON for {base_name}")
             return
 
-        with open(ann_path, "r", encoding="utf-8") as f:
-            ann_json = json.load(f)
+        def _bbox_snapshot_from_atomic(atomic_map):
+            out = {}
+            for _cid, _cr in (atomic_map or {}).items():
+                if not isinstance(_cr, dict):
+                    continue
+                bb = _cr.get("mask_bbox", [])
+                if isinstance(bb, (list, tuple)):
+                    out[str(_cid)] = tuple(bb)
+                else:
+                    out[str(_cid)] = tuple()
+            return out
+
+        def _check_bbox_mutation(stage_name, atomic_map, ref_snapshot):
+            mutated = []
+            for _cid, _cr in (atomic_map or {}).items():
+                if not isinstance(_cr, dict):
+                    continue
+                curr = tuple((_cr.get("mask_bbox", []) or []))
+                prev = tuple(ref_snapshot.get(str(_cid), tuple()))
+                if curr != prev:
+                    mutated.append((str(_cid), prev, curr))
+            if mutated:
+                print(f"\n[ERROR] BBOX MUTATION DETECTED @ {stage_name}")
+                for _cid, _prev, _curr in mutated:
+                    print(f"  atomic {_cid}: {_prev} -> {_curr}")
+            else:
+                print(f"[CHECK] No bbox mutation @ {stage_name}")
+
+        # Optional one-shot bbox repair called from GT supervision export.
+        DEBUG_CALL_BBOX_REPAIR_IN_GT_SUP = True
+        repaired_ann_json = None
+        if DEBUG_CALL_BBOX_REPAIR_IN_GT_SUP:
+            try:
+                from pathlib import Path
+                from tools.repair_atomic_bboxes import repair_bboxes as _repair_atomic_bboxes
+
+                gt_sup_root = os.path.join(self.save_folder, "supervision", base_name)
+                gt_sup_analysis = os.path.join(gt_sup_root, "analysis")
+                os.makedirs(gt_sup_analysis, exist_ok=True)
+
+                image_path = None
+                try:
+                    if hasattr(self, "image_names") and isinstance(getattr(self, "image_names", None), list):
+                        image_path = self.image_names[self.n]
+                except Exception:
+                    image_path = None
+
+                before_png = os.path.join(gt_sup_analysis, "bbox_repair_before.png")
+                after_png = os.path.join(gt_sup_analysis, "bbox_repair_after.png")
+
+                repaired_count, repaired_data = _repair_atomic_bboxes(
+                    json_path=Path(ann_path),
+                    contain_thresh=0.8,
+                    weak_thresh=0.3,
+                    image_path=(Path(image_path) if image_path else None),
+                    before_png=Path(before_png),
+                    after_png=Path(after_png),
+                    return_data=True,
+                )
+                print(
+                    f"[GT_SUP] bbox repair executed from export_gt_supervision_for_current_image "
+                    f"(changed={int(repaired_count)})"
+                )
+
+                # Commit repaired state into live in-memory annotation (no heavy change_image()).
+                if isinstance(repaired_data, dict):
+                    repaired_ann_json = repaired_data
+                    self.annotation = repaired_data
+                    ann_root_live = self.annotation.setdefault("annotations", {})
+                    self.combined_cracks = ann_root_live.get("combined_cracks", {}) or {}
+                    try:
+                        # Refresh light-weight snapshot structures from repaired authoring state.
+                        self._sync_metrics_snapshot_from_authoring(
+                            refresh_combine=False,
+                            persist=False,
+                        )
+                    except Exception as _se:
+                        print(f"[GT_SUP] snapshot refresh after bbox repair skipped: {_se}")
+            except Exception as _e:
+                print(f"[GT_SUP] bbox repair skipped/fail: {_e}")
+
+        if isinstance(repaired_ann_json, dict):
+            ann_json = repaired_ann_json
+        else:
+            with open(ann_path, "r", encoding="utf-8") as f:
+                ann_json = json.load(f)
 
         authoring_atomic = (
             ann_json.get("annotations", {}) or {}
@@ -2414,11 +2583,35 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             if _is_manual(cr)
         }
 
+        try:
+            atomic_debug_list = []
+            for _cid, _cr in atomic.items():
+                if not isinstance(_cr, dict):
+                    continue
+                atomic_debug_list.append({
+                    "id": str(_cid),
+                    "mask_bbox": _cr.get("mask_bbox"),
+                    "midline": _cr.get("midline", []),
+                })
+            raw_dbg_png = os.path.join(self.save_folder, f"{base_name}_raw_json_atomics_debug.png")
+            debug_plot_all_atomics(
+                self.original_image,
+                atomic_debug_list,
+                title=f"RAW JSON DEBUG - {base_name}",
+                out_png=raw_dbg_png,
+                show=False,
+            )
+        except Exception as _e:
+            print(f"[DEBUG ATOMICS] failed to render raw json view: {_e}")
+
         print(f"[GT_SUP] using {len(atomic)} manual atomics for {base_name}")
 
         if not atomic:
             print("[GT_SUP] no manual atomics, aborting.")
             return
+
+        bbox_snapshot = _bbox_snapshot_from_atomic(atomic)
+        _check_bbox_mutation("post-repair", atomic, bbox_snapshot)
 
         # -----------------------------------------
         # GT grouping (midlines + GT mask + endpoints)
@@ -2429,12 +2622,14 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             H=H,
             W=W,
         )
+        _check_bbox_mutation("after-midline", atomic, bbox_snapshot)
 
         print(f"[GT_SUP] GT grouping produced {len(combined_groups)} combined groups.")
 
         # -----------------------------------------
         # Export manual GT supervision (atomic+combined)
         # -----------------------------------------
+        _check_bbox_mutation("before-export", atomic, bbox_snapshot)
         _export_gt_sup(
             base_name=base_name,
             save_root=self.save_folder,
@@ -2447,174 +2642,43 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             depth_full=getattr(self, "current_depth", None),
         )
 
-        print(f"[GT_SUP] Finished GT supervision export for {base_name}")
+        print(f"[EXPORT] GT supervision -> {len(atomic)} cracks ({base_name})")
      
-    def run_manual_metrics_current_image_quick(self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True):
+    def run_et_metrics_current_image_quick(self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True):
         """
-        Minimal smoke test for manual cracks.
-        Uses helpers.metrics for all real computations.
-        Just fixes:
-        - combined refresh
-        - per-CID overlay path (no top-level clutter)
-        - midline drawn on gt_normals
-        - total/global summary + midline metrics call
+        Single-image DT/BEST/ET runner using the shared batch-compatible path.
         """
-        import os, time, numpy as np, traceback, cv2
-        from helpers.metrics import reconstruct_manual_mask_from_edges
+        import time
 
         if not getattr(self, "name", None):
-            print("[metrics] ⚠ no image loaded — aborting smoke test.")
+            print("[metrics] no image loaded")
             return
 
-        base_name = os.path.splitext(os.path.basename(self.name))[0]
-        image_dir = os.path.join(self.save_folder, "metrics", base_name)
-        os.makedirs(image_dir, exist_ok=True)
-        print(f"\n[SMOKE] ===== running minimal metrics for {base_name} =====")
-        t_total_start = time.perf_counter()
+        t0 = time.perf_counter()
+        idx = int(getattr(self, "n", 0))
+        edge_params = {"window_half_size": 45, "mu": 0.0, "l": 5, "p": 14, "seg_mode": "new"}
 
-        # --- 1) refresh combined snapshot ---
-        try:
-            self._purge_metrics_for_current_image()
-            self._sync_metrics_snapshot_from_authoring(refresh_combine=True, persist=False)
-        except Exception as e:
-            traceback.print_exc()
-            print(f"[SMOKE] snapshot sync failed: {e}")
-            return
+        res = self._run_metrics_for_image_idx(
+            idx,
+            edge_params=edge_params,
+            export_supervision=True,
+            display=bool(display),
+            width_eval_mode="dt_best_et",
+            best_method_key=None,  # load from persisted global best file
+            edge_parallel_workers=None,
+        )
+        print(f"[SMOKE] result={res}")
+        print(f"[SMOKE] elapsed={time.perf_counter() - t0:.2f}s")
 
-        # 🔍 ADD THIS ↓↓↓
-        print("[DEBUG SNAPSHOT] after sync:")
-        try:
-            ann_json_path = os.path.join(self.save_folder, f"{base_name}.json")
-            print(f"[DEBUG SNAPSHOT] expected annotation path: {ann_json_path}")
-            if os.path.exists(ann_json_path):
-                with open(ann_json_path, "r") as f:
-                    ann_json = json.load(f)
-                print(f"[DEBUG SNAPSHOT] top-level keys: {list(ann_json.keys())}")
-                anns = ann_json.get("annotations", {})
-                print(f"[DEBUG SNAPSHOT] annotations keys: {list(anns.keys())}")
-                print(f"[DEBUG SNAPSHOT] combined_cracks len = {len(anns.get('combined_cracks', {}))}")
-                print(f"[DEBUG SNAPSHOT] combined len = {len(anns.get('combined', {}))}")
-            else:
-                print("[DEBUG SNAPSHOT] ❌ no annotation JSON found at path")
-        except Exception as e:
-            print(f"[DEBUG SNAPSHOT] failed to read JSON: {e}")
+    # Backward-compatible alias
+    def run_manual_metrics_current_image_quick(self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True):
+        return self.run_et_metrics_current_image_quick(
+            tau_px=tau_px,
+            crack_id=crack_id,
+            display=display,
+            do_param_sweep=do_param_sweep,
+        )
 
-        atomic = self._metric_atomic()
-        if not atomic:
-            print("[SMOKE] ❌ no cracks found in snapshot")
-            return
-
-        best_edge = {"window_half_size":45, "mu":0.0, "l":5, "p":14}
-
-        # --- 2) run edge workers where needed ---
-        need_ids = []
-        for cid, cr in atomic.items():
-            src = (cr.get("source") or "").lower()
-            if src.startswith("auto") or src == "combined":
-                continue
-            mid = np.asarray(cr.get("midline", []), float)
-            if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 2:
-                continue
-            #ge = cr.get("geodesic_edges", {}) or {}
-            #has_e1 = isinstance(ge.get("edge1"), list) and len(ge.get("edge1")) > 1
-            #has_e2 = isinstance(ge.get("edge2"), list) and len(ge.get("edge2")) > 1
-            #if not (has_e1 and has_e2):
-            #    need_ids.append(cid)
-            need_ids.append(cid)
-
-        print(f"[SMOKE] manual cracks needing edges: {need_ids}")
-        for cid in need_ids:
-            try:
-                self.smoke_test_edges_for_manual(cid, edge_params=best_edge)
-            except Exception as e:
-                traceback.print_exc()
-                print(f"[SMOKE] ❌ edge smoke failed for cid={cid}: {e}")
-
-        # --- 3) use existing metric pipeline ---
-        try:
-            print("[SMOKE] running mask/width metrics ...")
-            self.compute_mask_and_width_metrics_for_image(display=display, export_supervision=True)
-        except Exception as e:
-            traceback.print_exc()
-            print(f"[SMOKE] mask/width stage failed: {e}")
-
-        # --- 4) move per-CID overlay into its folder + redraw midline on gt_normals ---
-        '''try:
-            H, W = self.original_image.shape[:2]
-            gt_full = (self.current_mask > 0).astype(np.uint8) if getattr(self, "current_mask", None) is not None else np.zeros((H, W), np.uint8)
-            ann = self._metric_atomic()
-
-            from helpers.plot_metrics import save_gt_vs_manual_overlay
-
-            for cid, crack in ann.items():
-                src = (crack.get("source") or "").lower()
-                if src.startswith("auto") or src == "combined":
-                    continue
-
-                # ---------------------------------------------------------
-                # 1. Get full predicted mask for this atomic crack
-                # ---------------------------------------------------------
-                pred_mask_full = reconstruct_manual_mask_from_edges(crack, H, W)
-                if pred_mask_full is None:
-                    continue
-                pred_mask_full = (pred_mask_full > 0).astype(np.uint8)
-
-                # ---------------------------------------------------------
-                # 2. Compute the true atomic bbox (same logic as combined)
-                # ---------------------------------------------------------
-                ys, xs = np.where(pred_mask_full > 0)
-                if xs.size == 0:
-                    continue
-
-                x0 = max(xs.min() - 5, 0)
-                y0 = max(ys.min() - 5, 0)
-                x1 = min(xs.max() + 5, W)
-                y1 = min(ys.max() + 5, H)
-
-                bbox = [x0, y0, x1 - x0, y1 - y0]
-
-                # ---------------------------------------------------------
-                # 3. Save into cidXX directory
-                # ---------------------------------------------------------
-                cid_dir = os.path.join(image_dir, f"cid{cid}")
-                os.makedirs(cid_dir, exist_ok=True)
-
-                # ---------------------------------------------------------
-                # 4. Unified overlay helper (identical to combined)
-                # ---------------------------------------------------------
-                save_gt_vs_manual_overlay(
-                    H,
-                    W,
-                    gt_full,             # full GT mask
-                    pred_mask_full,      # full predicted mask
-                    os.path.join(cid_dir, "gt_vs_manual_mask_global.png"),
-                    bbox=bbox,           # <<< SAME BEHAVIOR AS COMBINED
-                    original_image=self.original_image,
-                )
-
-                # add midline to gt_normals if it exists
-                normals_path = os.path.join(cid_dir, "gt_normals.png")
-                if os.path.exists(normals_path):
-                    ml = np.asarray(crack.get("midline", []), float)
-                    if ml.ndim == 2 and len(ml) > 1:
-                        img = cv2.imread(normals_path)
-                        cv2.polylines(img, [ml.astype(np.int32)], False, (0,0,255), 1, cv2.LINE_AA)
-                        cv2.imwrite(normals_path, img)
-
-                print(f"[SMOKE] wrote mask overlay → {cid_dir}")
-        except Exception as e:
-            print(f"[SMOKE] overlay debug failed: {e}")
-
-        # --- 5) run existing midline metric CSV (in helpers.metrics) ---
-        #try:
-        #    compute_midline_metrics_for_image(self)
-        #except Exception as e:
-        #    print(f"[SMOKE] midline metrics failed: {e}")
-
-        self.dump_global_midline_and_mask_overlays(thickness_px=3)
-        total_time = time.perf_counter() - t_total_start
-        print(f"[SMOKE] ✅ completed minimal metrics in {total_time:.2f}s\n")'''
-         
     def _rs3_cache_complete_for_image(self, g_variants=None) -> bool:
         """
         Strict cache completeness check for quick-mode RS3 skip.
@@ -3015,7 +3079,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                 if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 2:
                     continue
 
-                pack = self.generate_auto_variants_for_manual_parallel(
+                pack = self.generate_auto_variants_for_et_parallel(
                     crack_id=cid,
                     g_variants=rs3_g_variants_run,
                     edge_params_fixed=best_edge,

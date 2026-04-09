@@ -4456,7 +4456,7 @@ def compare_widths_for_aligned_cracks(
         m = str(run_mode).lower()
         t = str(run_midline_type).lower()
 
-        if t == "manual" and g == "orig":
+        if t in {"manual", "et"} and g == "orig":
             return False
         if m == "atomic" and g == "orig":
             return False

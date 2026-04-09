@@ -812,7 +812,7 @@ def _aggregate_width_metrics(
     def _classify(row):
         if str(row["method_family"]) == "baseline":
             return "baseline"
-        if str(row["midline_type"]) == "manual":
+        if str(row["midline_type"]).lower() in {"manual", "et"}:
             return "manual"
         return "auto"
 
@@ -1105,7 +1105,7 @@ def _aggregate_midline_metrics(
             def _src_class(row):
                 if str(row.get("method_family", "")).lower() == "baseline":
                     return "baseline"
-                if str(row.get("midline_type", "")).lower() == "manual":
+                if str(row.get("midline_type", "")).lower() in {"manual", "et"}:
                     return "manual"
                 return "auto"
 
@@ -2311,7 +2311,7 @@ def _aggregate_gt_component_timings(
 
     eval_set = {str(x) for x in (evaluated_images or set())}
     center_files = glob.glob(os.path.join(supervision_root, "**", "gt_centering", "timing.csv"), recursive=True)
-    depth_files = glob.glob(os.path.join(supervision_root, "**", "depth_distridge", "timing.csv"), recursive=True)
+    depth_files = glob.glob(os.path.join(supervision_root, "**", "multi_cue", "timing.csv"), recursive=True)
 
     def _collect(files: List[str]) -> pd.DataFrame:
         frames = []
@@ -2344,9 +2344,9 @@ def _aggregate_gt_component_timings(
         center_df.to_csv(p, index=False)
         outputs["dataset_gt_centering_timing_all_csv"] = p
     if not depth_df.empty:
-        p = os.path.join(out_dir, "dataset_depth_distridge_timing_all.csv")
+        p = os.path.join(out_dir, "dataset_multi_cue_timing_all.csv")
         depth_df.to_csv(p, index=False)
-        outputs["dataset_depth_distridge_timing_all_csv"] = p
+        outputs["dataset_multi_cue_timing_all_csv"] = p
 
     if not center_df.empty or not depth_df.empty:
         _log(
@@ -2506,7 +2506,7 @@ def _plot_dataset_full_timing_overview(
             "baseline_width": "#ff7f0e",
             "manual": "#d62728",
             "auto": "#9467bd",
-            "depth_distridge": "#17becf",
+            "multi_cue": "#17becf",
             "gt_centering": "#1f77b4",
             "gt_supervision": "#8c564b",
             "gt_subtiming": "#7f7f7f",
@@ -2779,9 +2779,9 @@ def _plot_dataset_full_timing_overview(
             float(np.std(gt_sum_arr) * np.sqrt(max(1, gt_sum_arr.size))) if gt_sum_arr.size else 0.0,
         )
 
-    df_depth = _safe_read(os.path.join(out_dir, "dataset_depth_distridge_timing_all.csv"))
+    df_depth = _safe_read(os.path.join(out_dir, "dataset_multi_cue_timing_all.csv"))
     if (df_depth is None) or df_depth.empty:
-        df_depth = _safe_read(os.path.join(out_dir, "depth_distridge", "timing.csv"))
+        df_depth = _safe_read(os.path.join(out_dir, "multi_cue", "timing.csv"))
     df_depth_gen = _safe_read(os.path.join(out_dir, "dataset_depth_generation_timing_all.csv"))
     df_depth_gen_roll = _safe_read(os.path.join(out_dir, "dataset_depth_generation_timing_rollup.csv"))
     if df_depth is not None and not df_depth.empty:
@@ -2819,19 +2819,19 @@ def _plot_dataset_full_timing_overview(
 
         _add(
             mean_rows,
-            "depth_distridge",
+            "multi_cue",
             pd.to_numeric(dd.get("depth_total_with_generation_sec"), errors="coerce").mean(),
-            "depth_distridge",
+            "multi_cue",
             float(np.nanstd(pd.to_numeric(dd.get("depth_total_with_generation_sec"), errors="coerce").to_numpy(float))),
         )
         _add(
             sum_rows,
-            "depth_distridge",
+            "multi_cue",
             pd.to_numeric(
                 dd["depth_total_with_generation_sec"],
                 errors="coerce",
             ).sum(),
-            "depth_distridge",
+            "multi_cue",
             float(
                 np.nanstd(pd.to_numeric(dd.get("depth_total_with_generation_sec"), errors="coerce").to_numpy(float))
                 * np.sqrt(max(1, int(np.isfinite(pd.to_numeric(dd.get("depth_total_with_generation_sec"), errors="coerce")).sum())))
@@ -2840,8 +2840,8 @@ def _plot_dataset_full_timing_overview(
         dg_arr = pd.to_numeric(dd.get("depth_generation_s"), errors="coerce").to_numpy(float)
         dg_arr = dg_arr[np.isfinite(dg_arr)]
         if dg_arr.size:
-            _add(mean_rows, "depth_generation", float(np.mean(dg_arr)), "depth_distridge", float(np.std(dg_arr)))
-            _add(sum_rows, "depth_generation", float(np.sum(dg_arr)), "depth_distridge", float(np.std(dg_arr) * np.sqrt(dg_arr.size)))
+            _add(mean_rows, "depth_generation", float(np.mean(dg_arr)), "multi_cue", float(np.std(dg_arr)))
+            _add(sum_rows, "depth_generation", float(np.sum(dg_arr)), "multi_cue", float(np.std(dg_arr) * np.sqrt(dg_arr.size)))
         df_depth = dd
 
     if mean_rows:
@@ -2871,7 +2871,7 @@ def _plot_dataset_full_timing_overview(
         df_mean = pd.DataFrame(mean_rows)
         seg_subset = df_mean[df_mean["category"].isin(["baseline_seg", "manual", "auto"])].to_dict("records")
         width_subset = df_mean[
-            df_mean["category"].isin(["baseline_width", "manual", "auto", "depth_distridge", "gt_centering"])
+            df_mean["category"].isin(["baseline_width", "manual", "auto", "multi_cue", "gt_centering"])
         ].to_dict("records")
         outputs["seg_chart"] = _plot_algorithm_overview(
             seg_subset,
@@ -2892,7 +2892,7 @@ def _plot_dataset_full_timing_overview(
         "Dataset GT Centering Components",
         os.path.join(out_dir, "dataset_gt_centering_components.png"),
     )
-    outputs["depth_distridge_components_chart"] = _plot_components(
+    outputs["multi_cue_components_chart"] = _plot_components(
         df_depth,
         [
             "depth_generation_s",
@@ -2904,7 +2904,7 @@ def _plot_dataset_full_timing_overview(
             "normals_depth_s",
         ],
         "Dataset Depth Distridge Components",
-        os.path.join(out_dir, "dataset_depth_distridge_components.png"),
+        os.path.join(out_dir, "dataset_multi_cue_components.png"),
     )
 
     # Atomic vs combined charts
@@ -2913,10 +2913,10 @@ def _plot_dataset_full_timing_overview(
         "GT Centering Atomic vs Combined",
         os.path.join(out_dir, "dataset_gt_centering_atomic_vs_combined.png"),
     )
-    outputs["depth_distridge_atomic_vs_combined_chart"] = _plot_atomic_vs_combined(
+    outputs["multi_cue_atomic_vs_combined_chart"] = _plot_atomic_vs_combined(
         df_depth,
         "Depth Distridge Atomic vs Combined",
-        os.path.join(out_dir, "dataset_depth_distridge_atomic_vs_combined.png"),
+        os.path.join(out_dir, "dataset_multi_cue_atomic_vs_combined.png"),
     )
 
     _log(verbose, f"[timing] mean_rows={len(mean_rows)} sum_rows={len(sum_rows)}")
@@ -3213,9 +3213,9 @@ def summarize_dataset_metrics(
             "width_chart",
             "overview_chart",
             "gt_centering_components_chart",
-            "depth_distridge_components_chart",
+            "multi_cue_components_chart",
             "gt_centering_atomic_vs_combined_chart",
-            "depth_distridge_atomic_vs_combined_chart",
+            "multi_cue_atomic_vs_combined_chart",
         }:
             return True
         return False

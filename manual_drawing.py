@@ -1181,17 +1181,42 @@ class ManualDrawing(CrackUtils):
                 poly_mask = np.zeros((H, W), np.uint8)
                 cv2.fillPoly(poly_mask, drawn_loops, 255)
 
-                # 1) find first final crack that overlaps the drawn region
+                # 1) choose the final crack with maximum overlap.
+                # This avoids "first overlap wins" ownership errors.
+                best_overlap_px = 0
+                best_real_overlap_px = 0
                 for kind, cid, crack in iter_final_cracks():
-                    # Allow bbox-only atomics to be selected as target.
-                    full_old = reconstruct_full_mask(crack, allow_bbox_proxy=True)
-                    if np.any(cv2.bitwise_and(full_old, poly_mask)):
+                    # Allow bbox-only atomics to be selected as candidates.
+                    full_proxy = reconstruct_full_mask(crack, allow_bbox_proxy=True)
+                    overlap_proxy = int(np.count_nonzero(cv2.bitwise_and(full_proxy, poly_mask)))
+                    if overlap_proxy <= 0:
+                        continue
+
+                    # Secondary score uses real stored mask only.
+                    full_real = reconstruct_full_mask(crack, allow_bbox_proxy=False)
+                    overlap_real = int(np.count_nonzero(cv2.bitwise_and(full_real, poly_mask)))
+
+                    print(
+                        f"[MANUAL_SAVE][TARGET_SCORE] kind={kind} id={cid} "
+                        f"overlap_proxy={overlap_proxy} overlap_real={overlap_real}"
+                    )
+
+                    if (
+                        overlap_proxy > best_overlap_px
+                        or (overlap_proxy == best_overlap_px and overlap_real > best_real_overlap_px)
+                    ):
+                        best_overlap_px = overlap_proxy
+                        best_real_overlap_px = overlap_real
                         target_kind, target_id, target_crack = kind, cid, crack
-                        break
 
                 if target_crack is None:
                     print("[MANUAL_SAVE] EARLY RETURN — no overlapping final crack found")
                     return
+
+                print(
+                    f"[MANUAL_SAVE][TARGET_PICK] kind={target_kind} id={target_id} "
+                    f"best_overlap_proxy={best_overlap_px} best_overlap_real={best_real_overlap_px}"
+                )
 
                 # 2) union new region into that crack's mask
                 # Union from real stored mask only (avoid expanding to full bbox proxy).
@@ -1253,73 +1278,98 @@ class ManualDrawing(CrackUtils):
             error(e)
                  
     def commit_manual_midlines_full(self):
-        """
-        Update existing manual_poly cracks with a valid mask_bbox only.
-        Do NOT store mask_crop here (edge rasterization is produced later by the worker).
-        """
-        import numpy as np, json
+        import numpy as np
 
         ann = self.annotation.setdefault("annotations", {})
         atomic = ann.setdefault("atomic_cracks", {})
+        boxes = (ann.get("box") or {})
 
         def _norm_pair(pA, pB, r=6):
             return (round(float(pA[0]), r), round(float(pA[1]), r),
                     round(float(pB[0]), r), round(float(pB[1]), r))
 
-        # reverse lookup: user_points -> crack id
+        def _inside_ratio(mid, bb_xyxy):
+            xmin, ymin, xmax, ymax = bb_xyxy
+            xs = mid[:, 0]
+            ys = mid[:, 1]
+            inside = (xs >= xmin) & (xs <= xmax) & (ys >= ymin) & (ys <= ymax)
+            return float(np.mean(inside)) if len(mid) else 0.0
+
+        def _area(bb_xyxy):
+            xmin, ymin, xmax, ymax = bb_xyxy
+            return float(max(0, xmax - xmin) * max(0, ymax - ymin))
+
         pair_to_id = {}
         for cid, cr in atomic.items():
             up = cr.get("user_points") or []
             if len(up) == 2:
                 pair_to_id[_norm_pair(up[0], up[1])] = cid
                 pair_to_id[_norm_pair(up[1], up[0])] = cid
-        print(f"[DEBUG FULL] built pair_to_id for {len(pair_to_id)//2} cracks")
 
         points = getattr(self, "all_selected_points", None) or getattr(self, "user_points", []) or []
         mm = dict(getattr(self, "manual_midlines_tmp", {}) or {})
-        print(f"[DEBUG FULL] processing {len(mm)} manual midlines")
 
         updated = 0
+        skipped = 0
+
+        all_boxes = []
+        for bid, rec in boxes.items():
+            bb = rec.get("bounding_box")
+            if not isinstance(bb, list) or len(bb) != 2:
+                continue
+            (xmin, ymin), (xmax, ymax) = bb
+            all_boxes.append((str(bid), [int(xmin), int(ymin), int(xmax), int(ymax)]))
+
         for k, _poly in mm.items():
             if isinstance(k, tuple) and len(k) == 2:
                 i1, i2 = map(int, k)
             elif isinstance(k, str) and "_" in k:
-                try: i1, i2 = map(int, k.split("_"))
-                except ValueError: continue
+                try:
+                    i1, i2 = map(int, k.split("_"))
+                except ValueError:
+                    continue
             else:
                 continue
 
             if not (0 <= i1 < len(points) and 0 <= i2 < len(points)) or i1 == i2:
                 continue
+
             p1, p2 = tuple(points[i1]), tuple(points[i2])
             norm_key = _norm_pair(p1, p2)
-
             if norm_key not in pair_to_id:
-                print(f"[ERROR FULL] ❌ No existing crack found for pair {p1}->{p2} (key={k})")
                 continue
 
             cid = pair_to_id[norm_key]
             crack = atomic[cid]
 
-            # choose bbox that contains both endpoints (use your existing get_all_bounding_boxes)
-            bbox = None
-            for xmin, ymin, xmax, ymax in self.get_all_bounding_boxes():
-                if (xmin <= p1[0] <= xmax and ymin <= p1[1] <= ymax and
-                    xmin <= p2[0] <= xmax and ymin <= p2[1] <= ymax):
-                    bbox = [int(xmin), int(ymin), int(xmax - xmin), int(ymax - ymin)]
-                    break
-            if bbox is None:
-                print(f"[WARN FULL] no bbox found for {p1}->{p2}; skipping")
+            mid = np.asarray(crack.get("midline", []), float)
+            if mid.ndim != 2 or len(mid) < 2:
+                skipped += 1
                 continue
 
-            crack["mask_bbox"] = bbox
-            #crack.pop("mask_crop", None)  # ensure we don't leave stale crops
-            updated += 1
-            print(f"[MEM FULL] ✅ id={cid} mask_bbox={bbox} (no mask_crop)")
+            candidates = []
+            for bid, bb_xyxy in all_boxes:
+                score = _inside_ratio(mid, bb_xyxy)
+                if score > 0.5:
+                    candidates.append((bid, bb_xyxy, score, _area(bb_xyxy)))
 
-        print(f"[SUMMARY FULL] updated {updated}/{len(mm)} manual midlines")
- 
-    # in select_save_end_points
+            if not candidates:
+                print(f"[BBOX REMAP][SKIP] id={cid} no containing box")
+                skipped += 1
+                continue
+
+            best_bid, best_bb, best_score, _ = min(candidates, key=lambda t: t[3])
+            xmin, ymin, xmax, ymax = best_bb
+            bbox = [xmin, ymin, xmax - xmin, ymax - ymin]
+
+            old_bbox = crack.get("mask_bbox")
+            crack["mask_bbox"] = bbox
+            crack["bbox_source"] = f"box:{best_bid}"
+            print(f"[BBOX REMAP] id={cid} old={old_bbox} new={bbox} box_id={best_bid} score={best_score:.3f}")
+            updated += 1
+
+        print(f"[BBOX REMAP] updated={updated} skipped={skipped}")
+
     def select_save_end_points(self):
         """
         Select endpoints + manual midlines and immediately save annotation.
@@ -1342,3 +1392,5 @@ class ManualDrawing(CrackUtils):
             plt.show()
         except Exception as e:
             error(e)
+
+
