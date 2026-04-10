@@ -5,6 +5,9 @@ matplotlib.rcParams.update({
     "text.kerning_factor": 0,
     "font.family": "DejaVu Sans",
     "axes.unicode_minus": False,
+    "path.simplify": True,
+    "path.simplify_threshold": 1.0,
+                "savefig.dpi": 180,
 })
 
 import matplotlib.pyplot as plt
@@ -73,7 +76,7 @@ def plot_edges_and_normals(
     else:
         crop_rgb = crop[:, :, ::-1]
 
-    fig, ax = plt.subplots(figsize=(9, 9), dpi=320)
+    fig, ax = plt.subplots(figsize=(9, 9))
     ax.imshow(crop_rgb)
 
     # ------------------------------
@@ -309,7 +312,7 @@ def plot_edges_and_normals(
 
     ax.axis("off")
     plt.tight_layout(pad=0)
-    fig.savefig(out_png, dpi=350, bbox_inches="tight", pad_inches=0)
+    fig.savefig(out_png, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
 
 # -------------------- GT NORMALS + OVERLAY HELPERS --------------------
@@ -338,7 +341,7 @@ def plot_gt_normals_on_gtbw(gt_mask_u8, derived_midline_xy, midline_xy, e1, e2, 
     H, W = gt_mask_u8.shape[:2]
     #_pdbg(f"start shape=({H},{W}) out={out_png}")
     #_pdbg("figure:create:start")
-    fig, ax = plt.subplots(figsize=(7, 7), dpi=320)
+    fig, ax = plt.subplots(figsize=(7, 7))
     #_pdbg("figure:create:done")
     #_pdbg("imshow:start")
     ax.imshow(gt_mask_u8, cmap='gray', interpolation='nearest')
@@ -392,7 +395,7 @@ def plot_gt_normals_on_gtbw(gt_mask_u8, derived_midline_xy, midline_xy, e1, e2, 
     plt.tight_layout(pad=0)
     #_pdbg("tight_layout:done")
     #_pdbg("savefig:start")
-    fig.savefig(out_png, dpi=320, bbox_inches="tight", pad_inches=0)
+    fig.savefig(out_png, bbox_inches="tight", pad_inches=0)
     #_pdbg("savefig:done")
     #_pdbg("close_fig:start")
     plt.close(fig)
@@ -501,7 +504,7 @@ def debug_plot_gt_preview(mask_bin, mid_xy, e1_xy=None, e2_xy=None, out_png=None
     plt.title(title); plt.axis("equal"); plt.tight_layout()
     if out_png:
         os.makedirs(os.path.dirname(out_png), exist_ok=True)
-        plt.savefig(out_png, dpi=180)
+        plt.savefig(out_png)
         plt.close()
     else:
         plt.show()
@@ -662,7 +665,7 @@ def plot_mask_normals(midline, e1x, e1y, e2x, e2y, mask, contours=None,
     if show:
         plt.show()
     elif out_path:
-        plt.savefig(out_path, dpi=200); plt.close()
+        plt.savefig(out_path); plt.close()
         
 def plot_width_differences(midline, w_mask, w_edge, mask, contours=None,
                         spacing_px=20, show=True, out_path=None, crack_label=""):
@@ -724,7 +727,7 @@ def plot_width_differences(midline, w_mask, w_edge, mask, contours=None,
     if show:
         plt.show()
     elif out_path:
-        plt.savefig(out_path, dpi=200)
+        plt.savefig(out_path)
         plt.close()
 
     return diffs
@@ -794,7 +797,7 @@ def plot_core_timing_bars(metrics_dir):
             vals.append(np.nansum(combined_df["build_combined_sec"].apply(_to_num)))
 
         if labels:
-            fig, ax = plt.subplots(figsize=(8, 4), dpi=160)
+            fig, ax = plt.subplots(figsize=(8, 4))
             xs = np.arange(len(labels))
             ax.bar(xs, vals)
             ax.set_xticks(xs)
@@ -807,7 +810,7 @@ def plot_core_timing_bars(metrics_dir):
 
             out_core = os.path.join(metrics_dir, supervision, f"timings_core_{supervision}.png")
             plt.tight_layout()
-            plt.savefig(out_core, dpi=160, bbox_inches="tight")
+            plt.savefig(out_core, bbox_inches="tight")
             plt.close()
             print("[TIMING_PLOT] wrote:", out_core)
 
@@ -832,7 +835,7 @@ def plot_core_timing_bars(metrics_dir):
 
             crack_ids = [_fmt_id(x) for x in atomic_df["crack_id"]]
             fig2, ax2 = plt.subplots(
-                figsize=(6 + len(crack_ids) * 1.5, 4), dpi=160
+                figsize=(6 + len(crack_ids) * 1.5, 4)
             )
             xs = np.arange(len(crack_ids))
 
@@ -863,7 +866,7 @@ def plot_core_timing_bars(metrics_dir):
                 metrics_dir, supervision, f"timings_edges_tracking_{supervision}.png"
             )
             plt.tight_layout()
-            plt.savefig(out_atomic, dpi=160, bbox_inches="tight")
+            plt.savefig(out_atomic, bbox_inches="tight")
             plt.close()
             print("[TIMING_PLOT] wrote:", out_atomic)
 
@@ -883,7 +886,7 @@ def plot_core_timing_bars(metrics_dir):
 
 
             fig3, ax3 = plt.subplots(
-                figsize=(6 + len(combined_df) * 1.5, 4), dpi=160
+                figsize=(6 + len(combined_df) * 1.5, 4)
             )
             xs = np.arange(len(combined_df))
 
@@ -924,6 +927,9 @@ def plot_core_timing_bars(metrics_dir):
                 metrics_dir, supervision, f"timings_combined_{supervision}.png"
             )
             plt.tight_layout()
-            plt.savefig(out_comb, dpi=160, bbox_inches="tight")
+            plt.savefig(out_comb, bbox_inches="tight")
             plt.close()
             print("[TIMING_PLOT] wrote:", out_comb)
+
+
+

@@ -260,50 +260,16 @@ def compute_length_weighted_metrics(d_vals, s_vals, *, debug=False):
 def _nn_dists(A, B):
     """
     Compute nearest-neighbor distances from each point in A to the closest point in B.
-    Automatically uses GPU (CuPy + cupyx.scipy.spatial.cKDTree) if available,
-    otherwise falls back to SciPy's CPU cKDTree.
-
-    Returns
-    -------
-    dists : np.ndarray of shape (len(A),)
-        Euclidean distances.
+    CPU cKDTree only (lower overhead and more stable for these metric sizes).
     """
     import numpy as np
-    try:
-        import cupy as cp
-        from cupyx.scipy.spatial import cKDTree as GPU_KDTree
-        CUPY_AVAILABLE = True
-        gpu = True
-        try:
-            # detect CUDA presence
-            _ = cp.cuda.runtime.getDeviceCount()
-            if _ <= 0:
-                gpu = False
-        except Exception:
-            gpu = False
-    except ImportError:
-        CUPY_AVAILABLE = False
-        gpu = False
-
     if A is None or B is None or len(A) == 0 or len(B) == 0:
         return np.zeros((len(A),), dtype=float)
-
-    if gpu:
-        try:
-            A_gpu = cp.asarray(A, dtype=cp.float32)
-            B_gpu = cp.asarray(B, dtype=cp.float32)
-            tree = GPU_KDTree(B_gpu)
-            dists, _ = tree.query(A_gpu, k=1)
-            return cp.asnumpy(dists)
-        except Exception as e:
-            print(f"[nn_dists][warn] GPU KDTree failed → falling back to CPU: {e}")
-
-    # CPU fallback (SciPy)
     try:
         from scipy.spatial import cKDTree as CPU_KDTree
-        tree = CPU_KDTree(B)
-        dists, _ = tree.query(A, k=1)
-        return dists
+        tree = CPU_KDTree(np.asarray(B, float))
+        dists, _ = tree.query(np.asarray(A, float), k=1)
+        return np.asarray(dists, float)
     except Exception as e:
         print(f"[nn_dists][warn] CPU KDTree failed, using brute force: {e}")
         A = np.asarray(A, float)
@@ -311,6 +277,41 @@ def _nn_dists(A, B):
         diff = A[:, None, :] - B[None, :, :]
         dists = np.sqrt(np.sum(diff ** 2, axis=2))
         return np.min(dists, axis=1)
+
+
+def _nn_bidirectional(A, B):
+    """
+    One-pass bidirectional nearest-neighbor query with shared KDTree builds.
+    Returns dAB, dBA, idxAB, idxBA.
+    """
+    import numpy as np
+    A = _finite_xy(A)
+    B = _finite_xy(B)
+    if len(A) == 0 or len(B) == 0:
+        return (
+            np.zeros((len(A),), float),
+            np.zeros((len(B),), float),
+            np.full((len(A),), -1, int),
+            np.full((len(B),), -1, int),
+        )
+    try:
+        from scipy.spatial import cKDTree
+        treeB = cKDTree(B)
+        dAB, idxAB = treeB.query(A, k=1)
+        treeA = cKDTree(A)
+        dBA, idxBA = treeA.query(B, k=1)
+        return np.asarray(dAB, float), np.asarray(dBA, float), np.asarray(idxAB, int), np.asarray(idxBA, int)
+    except Exception as e:
+        print(f"[_nn_bidirectional][warn] cKDTree failed, using brute force: {e}")
+        diffAB = A[:, None, :] - B[None, :, :]
+        dmatAB = np.sqrt(np.sum(diffAB ** 2, axis=2))
+        idxAB = np.argmin(dmatAB, axis=1)
+        dAB = dmatAB[np.arange(len(A)), idxAB]
+        diffBA = B[:, None, :] - A[None, :, :]
+        dmatBA = np.sqrt(np.sum(diffBA ** 2, axis=2))
+        idxBA = np.argmin(dmatBA, axis=1)
+        dBA = dmatBA[np.arange(len(B)), idxBA]
+        return np.asarray(dAB, float), np.asarray(dBA, float), np.asarray(idxAB, int), np.asarray(idxBA, int)
 
 
 def nn_mean_bidirectional(A, B):
@@ -384,25 +385,20 @@ def frechet_discrete_ds(A, B):
     # DP table of size (n x m)
     ca = np.full((n, m), np.inf, dtype=float)
 
-    # helper to compute Euclidean distance quickly
-    def dist(i, j):
-        dx = A[i, 0] - B[j, 0]
-        dy = A[i, 1] - B[j, 1]
-        return np.hypot(dx, dy)
-
-    ca[0, 0] = dist(0, 0)
+    ca[0, 0] = np.hypot(A[0, 0] - B[0, 0], A[0, 1] - B[0, 1])
     # first column
     for i in range(1, n):
-        ca[i, 0] = max(ca[i-1, 0], dist(i, 0))
+        ca[i, 0] = max(ca[i-1, 0], np.hypot(A[i, 0] - B[0, 0], A[i, 1] - B[0, 1]))
     # first row
     for j in range(1, m):
-        ca[0, j] = max(ca[0, j-1], dist(0, j))
+        ca[0, j] = max(ca[0, j-1], np.hypot(A[0, 0] - B[j, 0], A[0, 1] - B[j, 1]))
 
     # fill DP
     for i in range(1, n):
         Ai = A[i]  # small locality win
+        drow = np.hypot(Ai[0] - B[:, 0], Ai[1] - B[:, 1])
         for j in range(1, m):
-            d = np.hypot(Ai[0] - B[j, 0], Ai[1] - B[j, 1])
+            d = drow[j]
             ca[i, j] = max(min(ca[i-1, j], ca[i-1, j-1], ca[i, j-1]), d)
 
     return float(ca[n-1, m-1])
@@ -445,9 +441,14 @@ def orthogonal_deviation(manual_xy_resampled, auto_xy):
     norm = np.column_stack([-d[:,1], d[:,0]])
     nlen = np.maximum(1e-9, np.sqrt((norm**2).sum(1)))
     n = norm / nlen[:,None]
-    # nearest auto → signed projection
-    d2 = ((M[:,None,:] - A[None,:,:])**2).sum(2)
-    idx = d2.argmin(1)
+    # nearest auto → signed projection (KDTree, no O(n*m) dense matrix)
+    try:
+        from scipy.spatial import cKDTree
+        treeA = cKDTree(A)
+        _, idx = treeA.query(M, k=1)
+    except Exception:
+        d2 = ((M[:, None, :] - A[None, :, :]) ** 2).sum(2)
+        idx = d2.argmin(1)
     v = A[idx] - M
     signed = (v * n).sum(1)
     absd = np.abs(signed)
@@ -10196,22 +10197,36 @@ def compute_midline_metrics(auto_xy, man_xy, tau=3.0):
     # --- Caller-owned resampling for sampling-dependent ops ---
     A_dense = _resample_by_arclen(A, N=400)
     B_dense = _resample_by_arclen(B, N=400)
-    A_ds = _resample_by_arclen(A, N=min(600, len(A)))
-    B_ds = _resample_by_arclen(B, N=min(600, len(B)))
+    # Reuse dense resampling for Fréchet to avoid redundant resample passes.
+    A_ds = A_dense
+    B_ds = B_dense
+
+    dAB, dBA, _idxAB, _idxBA = _nn_bidirectional(A, B)
+    if dAB.size and dBA.size:
+        nn_bi = float(np.mean(dAB) + np.mean(dBA))
+        hd_max = float(max(np.max(dAB), np.max(dBA)))
+        hd_p95 = float(max(np.percentile(dAB, 95), np.percentile(dBA, 95)))
+        cov_a = float(np.mean(dAB <= float(tau)))
+        cov_b = float(np.mean(dBA <= float(tau)))
+    else:
+        nn_bi = np.nan
+        hd_max = np.inf
+        hd_p95 = np.inf
+        cov_a = 0.0
+        cov_b = 0.0
 
     out = {
-        "nn_mean_bidirectional": _unwrap(nn_mean_bidirectional(A, B)),
-        "hausdorff_max":    _unwrap(hausdorff_max(A, B)),
+        "nn_mean_bidirectional": nn_bi,
+        "hausdorff_max":    hd_max,
         "frechet_discrete_ds": float("nan"),
         "mean_tan_angle_error_deg": _unwrap(mean_tangent_angle_error_degs(A_dense, B_dense)),
         "relative_length_error":  _unwrap(relative_length_error(A, B)),
     }
-    
-    cov = coverage_at_tau(A, B, tau_px=tau)
-    out["coverage_A_to_B"] = float(cov["A_to_B"])
-    out["coverage_B_to_A"] = float(cov["B_to_A"])
-    out["coverage_min"]    = float(min(cov["A_to_B"], cov["B_to_A"]))
-    out["hausdorff_p95"] = hausdorff_p95(A, B)
+
+    out["coverage_A_to_B"] = cov_a
+    out["coverage_B_to_A"] = cov_b
+    out["coverage_min"] = float(min(cov_a, cov_b))
+    out["hausdorff_p95"] = hd_p95
 
     # --- Fréchet (optional but standard) ---
     try:

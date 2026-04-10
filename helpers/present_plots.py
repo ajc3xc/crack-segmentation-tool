@@ -7,6 +7,9 @@ matplotlib.rcParams.update({
     "text.kerning_factor": 0,
     "font.family": "DejaVu Sans",
     "axes.unicode_minus": False,
+    "path.simplify": True,
+    "path.simplify_threshold": 1.0,
+    "savefig.dpi": 180,
 })
 
 import matplotlib.pyplot as plt
@@ -42,7 +45,7 @@ def plot_iou_vs_bf1_scatter(metrics_csv, out_png, *, supervision=None):
     is_atomic = (df["crack_type"].astype(str) == "atomic").values
     markers = np.where(is_atomic, "o", "s")
 
-    plt.figure(figsize=(6, 5), dpi=160)
+    plt.figure(figsize=(6, 5))
 
     if assd is not None and len(assd) == len(iou):
         # two scatters so marker changes still work with a single colorbar
@@ -71,7 +74,7 @@ def plot_assd_hd95_box(metrics_csv, out_png):
     dfi = df[df["crack_type"].isin(["atomic","combined"])].copy()
     if dfi.empty or ("ASSD" not in dfi or "HD95" not in dfi): return
     data = [dfi["ASSD"].astype(float).values, dfi["HD95"].astype(float).values]
-    plt.figure(figsize=(5,4), dpi=160)
+    plt.figure(figsize=(5,4))
     plt.boxplot(data, labels=["ASSD","HD95"])
     plt.ylabel("pixels")
     plt.title("Surface distance distribution")
@@ -112,7 +115,7 @@ def plot_width_summary_triplet(metrics_dir, base_name, out_png):
     x = np.arange(len(methods))
     width = 0.25
 
-    fig, ax = plt.subplots(1, 2, figsize=(9, 4), dpi=160)
+    fig, ax = plt.subplots(1, 2, figsize=(9, 4))
 
     # LEFT – grouped MAE/RMSE/Bias
     ax0 = ax[0]
@@ -151,7 +154,7 @@ def plot_width_summary_triplet(metrics_dir, base_name, out_png):
                      fontsize=9, fontweight="bold")  # <— bold value
 
     plt.tight_layout()
-    plt.savefig(out_png, dpi=160, bbox_inches="tight")
+    plt.savefig(out_png, bbox_inches="tight")
     plt.close()
 
 def plot_mask_metrics_triplet(metrics_dir, base_name, supervision, out_png):
@@ -215,7 +218,7 @@ def plot_mask_metrics_triplet(metrics_dir, base_name, supervision, out_png):
                    [fp, tn]], float)
 
     # --- PLOT: 1 row × 3 columns ---
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4), dpi=160)
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
 
     # ------------------------------
     # Column 0: Region metrics
@@ -257,7 +260,7 @@ def plot_mask_metrics_triplet(metrics_dir, base_name, supervision, out_png):
     axes[2].set_title("Confusion matrix", fontsize=13, fontweight="bold")
 
     plt.tight_layout()
-    plt.savefig(out_png, dpi=160, bbox_inches="tight")
+    plt.savefig(out_png, bbox_inches="tight")
     plt.close(fig)
 
 def plot_midline_edge_metrics_bars(midline_csv, out_png):
@@ -268,7 +271,7 @@ def plot_midline_edge_metrics_bars(midline_csv, out_png):
     if not picks: return
     means = df[picks].astype(float).mean()
     stds  = df[picks].astype(float).std()
-    plt.figure(figsize=(6,4), dpi=160)
+    plt.figure(figsize=(6,4))
     x = np.arange(len(picks))
     plt.bar(x, means.values, yerr=stds.values)
     plt.xticks(x, picks, rotation=12)
@@ -311,7 +314,7 @@ def plot_surface_distance_histogram(metrics_csv, out_png, *, supervision=None):
 
     # TOTAL-only variants often have 1 sample; use bars instead of histogram.
     if assd.size <= 1 and hd95.size <= 1:
-        plt.figure(figsize=(5, 4), dpi=160)
+        plt.figure(figsize=(5, 4))
         vals = [
             float(assd[0]) if assd.size else np.nan,
             float(hd95[0]) if hd95.size else np.nan,
@@ -327,7 +330,7 @@ def plot_surface_distance_histogram(metrics_csv, out_png, *, supervision=None):
         plt.close()
         return
 
-    plt.figure(figsize=(8, 4), dpi=160)
+    plt.figure(figsize=(8, 4))
     plt.hist(assd, bins=30, alpha=0.6, label="ASSD")
     plt.hist(hd95, bins=30, alpha=0.6, label="HD95")
     plt.title("Surface distance histogram")
@@ -379,7 +382,7 @@ def plot_total_mask_metrics_card(metrics_csv, out_png):
         "HD95": _get("HD95", "hd95"),
     }
 
-    fig, ax = plt.subplots(1, 2, figsize=(9, 4), dpi=160)
+    fig, ax = plt.subplots(1, 2, figsize=(9, 4))
     ax[0].bar(list(region.keys()), list(region.values()))
     ax[0].set_ylim(0, 1)
     ax[0].set_title("TOTAL region/boundary")
@@ -474,7 +477,7 @@ def plot_size_vs_iou_scatter(metrics_csv, out_png, *, supervision=None, x_mode="
     ctype = df.loc[keep, "crack_type"].astype(str).values
     is_atomic = (ctype == "atomic")
 
-    plt.figure(figsize=(6, 5), dpi=160)
+    plt.figure(figsize=(6, 5))
     plt.scatter(x[is_atomic], y[is_atomic], s=55, alpha=0.9, marker="o", label="atomic")
     plt.scatter(x[~is_atomic], y[~is_atomic], s=55, alpha=0.9, marker="s", label="combined")
 
@@ -531,7 +534,7 @@ def plot_error_contribution_bars(metrics_csv, out_png, *, supervision=None, whic
     df2["share"] = df2[which] / total
     df2 = df2.sort_values("share", ascending=False).head(int(topk))
 
-    plt.figure(figsize=(8, 4.8), dpi=160)
+    plt.figure(figsize=(8, 4.8))
     plt.barh(df2["label"].values[::-1], (100.0 * df2["share"].values[::-1]))
     plt.xlabel(f"% of total {which.upper()}")
     title = f"Top contributors to {which.upper()}"
@@ -583,7 +586,7 @@ def plot_under_overfill_scatter(metrics_csv, out_png, *, supervision=None):
     ctype = df.loc[keep, "crack_type"].astype(str).values
     is_atomic = (ctype == "atomic")
 
-    plt.figure(figsize=(6.2, 5.2), dpi=160)
+    plt.figure(figsize=(6.2, 5.2))
     plt.scatter(x[is_atomic], y[is_atomic], s=s[is_atomic], alpha=0.8, marker="o", label="atomic")
     plt.scatter(x[~is_atomic], y[~is_atomic], s=s[~is_atomic], alpha=0.8, marker="s", label="combined")
 
@@ -610,7 +613,7 @@ def plot_boundary_pr_curve(metrics_csv, out_png):
     prec = df["boundary_precision"].astype(float)
     rec  = df["boundary_recall"].astype(float)
 
-    plt.figure(figsize=(5,5), dpi=160)
+    plt.figure(figsize=(5,5))
     plt.plot(rec, prec, "o-", alpha=0.8)
     plt.xlabel("Boundary Recall")
     plt.ylabel("Boundary Precision")
@@ -630,7 +633,7 @@ def plot_midline_angle_distribution(midline_csv, out_png):
 
     ang = df["mean_tan_angle_error_deg"].astype(float)
 
-    plt.figure(figsize=(6,4), dpi=160)
+    plt.figure(figsize=(6,4))
     plt.hist(ang, bins=40, color="royalblue", alpha=0.8)
     plt.xlabel("Angle error (deg)")
     plt.ylabel("count")
@@ -647,7 +650,7 @@ def plot_width_error_distribution(width_diffs_csv, out_png):
 
     diffs = df["width_diff_px"].astype(float)
 
-    plt.figure(figsize=(6,4), dpi=160)
+    plt.figure(figsize=(6,4))
     plt.hist(diffs, bins=50, alpha=0.8, color="salmon")
     plt.xlabel("Geodesic width − GT width (px)")
     plt.title("Width error distribution")
@@ -672,14 +675,14 @@ def plot_confusion_matrix(df, out_png):
     cm = np.array([[tp, fn],
                    [fp, tn]], float)
 
-    fig, ax = plt.subplots(figsize=(4, 4), dpi=160)
+    fig, ax = plt.subplots(figsize=(4, 4))
     sns.heatmap(cm, annot=True, fmt=".0f", cmap="Blues",
                 xticklabels=["Pred +","Pred -"],
                 yticklabels=["GT +","GT -"],
                 ax=ax)
     ax.set_title("Confusion matrix (aggregated)", fontweight="bold")
     plt.tight_layout()
-    plt.savefig(out_png, dpi=160)
+    plt.savefig(out_png)
     plt.close()
 
 def plot_crack_statistics_overview(metrics_dir, base_name, out_png):
@@ -693,7 +696,7 @@ def plot_crack_statistics_overview(metrics_dir, base_name, out_png):
 
     df = pd.read_csv(csv)
 
-    fig, ax = plt.subplots(1, 3, figsize=(12, 4), dpi=160)
+    fig, ax = plt.subplots(1, 3, figsize=(12, 4))
 
     # Length histogram
     if "mid_length" in df:
@@ -712,7 +715,7 @@ def plot_crack_statistics_overview(metrics_dir, base_name, out_png):
         ax[2].set_title("Atomic vs Combined count", fontweight="bold")
 
     plt.tight_layout()
-    plt.savefig(out_png, dpi=160)
+    plt.savefig(out_png)
     plt.close()
 
 ##################################################################
@@ -897,14 +900,14 @@ def plot_width_diff_histogram(width_diffs_csv, out_png, title=None, bins=60, vli
     if vlim is not None:
         diffs = np.clip(diffs, -float(vlim), float(vlim))
 
-    plt.figure(figsize=(6, 4), dpi=160)
+    plt.figure(figsize=(6, 4))
     plt.hist(diffs, bins=bins, alpha=0.85)
     plt.axvline(0.0, linewidth=1)
     plt.xlabel("Pred width − GT width (px)")
     plt.ylabel("count")
     plt.title(title or "Width diff histogram")
     plt.tight_layout()
-    plt.savefig(out_png, dpi=160, bbox_inches="tight")
+    plt.savefig(out_png, bbox_inches="tight")
     plt.close()
     print("[WIDTH HIST] wrote:", out_png)
 
@@ -953,7 +956,7 @@ def plot_width_diff_histogram(width_diffs_csv, out_png, title=None, bins=60, vli
     x = np.arange(len(metrics))
     w = 0.35
 
-    fig, ax = plt.subplots(figsize=(8, 4), dpi=160)
+    fig, ax = plt.subplots(figsize=(8, 4))
 
     for i, row in d.iterrows():
         vals = [row[m] for m in metrics]
@@ -966,7 +969,7 @@ def plot_width_diff_histogram(width_diffs_csv, out_png, title=None, bins=60, vli
     ax.legend()
 
     plt.tight_layout()
-    plt.savefig(out_png, dpi=160, bbox_inches="tight")
+    plt.savefig(out_png, bbox_inches="tight")
     plt.close()
 
     print("[WIDTH BAR] wrote:", out_png)'''
@@ -1031,7 +1034,7 @@ def plot_gt_width_vs_delta_w_scatter(
         gt = gt[idx]
         dw = dw[idx]
 
-    fig, ax = plt.subplots(figsize=(6, 5), dpi=160)
+    fig, ax = plt.subplots(figsize=(6, 5))
 
     ax.scatter(gt, dw, s=s, alpha=alpha)
 
@@ -1046,7 +1049,7 @@ def plot_gt_width_vs_delta_w_scatter(
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(out_png, dpi=160, bbox_inches="tight")
+    plt.savefig(out_png, bbox_inches="tight")
     plt.close()
 
     print("[WIDTH SCATTER] wrote:", out_png)
@@ -1072,7 +1075,7 @@ def plot_relative_width_error_kde(
 
     rel = np.abs(diff) / np.maximum(gt, eps)
 
-    plt.figure(figsize=(6, 4), dpi=160)
+    plt.figure(figsize=(6, 4))
     sns.kdeplot(
         rel,
         fill=True,
@@ -1087,7 +1090,7 @@ def plot_relative_width_error_kde(
         plt.legend()
 
     plt.tight_layout()
-    plt.savefig(out_png, dpi=160, bbox_inches="tight")
+    plt.savefig(out_png, bbox_inches="tight")
     plt.close()
 
 def plot_width_error_hexbin(
@@ -1107,7 +1110,7 @@ def plot_width_error_hexbin(
     keep = np.isfinite(gt) & np.isfinite(diff)
     gt, diff = gt[keep], diff[keep]
 
-    plt.figure(figsize=(6, 5), dpi=160)
+    plt.figure(figsize=(6, 5))
 
     hb = plt.hexbin(
         gt,
@@ -1126,7 +1129,7 @@ def plot_width_error_hexbin(
     plt.title("Width error vs crack thickness")
 
     plt.tight_layout()
-    plt.savefig(out_png, dpi=160, bbox_inches="tight")
+    plt.savefig(out_png, bbox_inches="tight")
     plt.close()
 
 
@@ -1264,7 +1267,6 @@ def plot_edge_sweep_summary(
     fig, (ax1, ax2) = plt.subplots(
         1, 2,
         figsize=(14.0, 5.2),
-        dpi=160,
         gridspec_kw=dict(width_ratios=[1.15, 1.45]),
     )
 
@@ -1670,7 +1672,6 @@ def _plot_single_crack_geometry(
         nrows=nrows,
         ncols=ncols,
         figsize=(4 * ncols, 4 * nrows),
-        dpi=220,
     )
 
     if nrows == 1:
@@ -1849,7 +1850,7 @@ def plot_rs3_sweep_summary(
     # ==================================================
     # 1) RAW PARETO SCATTER
     # ==================================================
-    plt.figure(figsize=(7.0, 5.5), dpi=160)
+    plt.figure(figsize=(7.0, 5.5))
 
     for fam, g in D.groupby("family"):
         plt.scatter(
@@ -1914,7 +1915,7 @@ def plot_rs3_sweep_summary(
     P = pd.DataFrame(rows).sort_values("score").reset_index(drop=True)
     x = np.arange(len(P))
 
-    plt.figure(figsize=(7.5, 4.5), dpi=160)
+    plt.figure(figsize=(7.5, 4.5))
     plt.bar(x, P["log_nn_mean_bidirectional"], label="log(nn_mean_bidirectional)")
     plt.bar(x, P["log_hausdorff_max"], bottom=P["log_nn_mean_bidirectional"], label="0.5·log(Hausdorff)")
     plt.bar(
@@ -1964,7 +1965,7 @@ def plot_rs3_sweep_summary(
         .sort_values(ascending=False)
     )
 
-    plt.figure(figsize=(3.8, 2.8), dpi=160)
+    plt.figure(figsize=(3.8, 2.8))
     plt.bar(
         [_pretty_xtick(f) for f in wins.index],
         wins.values,
@@ -1997,7 +1998,7 @@ def plot_rs3_sweep_summary(
     # ==================================================
     # 5) OS-MODE ABLATION
     # ==================================================
-    plt.figure(figsize=(5.0, 4.5), dpi=160)
+    plt.figure(figsize=(5.0, 4.5))
     sns.boxplot(data=D, x="os_mode", y="score_mid", showfliers=False)
     sns.stripplot(
         data=D,
@@ -2120,7 +2121,7 @@ def plot_rs3_timing_summary(
     # Helper: stacked bar with clean legend
     # ------------------------------------------------------------
     def _stacked_bar(outfile, title, parts):
-        fig, ax = plt.subplots(figsize=(5.4, 4.8), dpi=160)
+        fig, ax = plt.subplots(figsize=(5.4, 4.8))
         bottom = 0.0
         for name, val, color in parts:
             ax.bar([0], [val], bottom=[bottom],
@@ -2262,6 +2263,7 @@ def plot_rs3_midline_diagnostics(
     compare_mode="all",
     group_cols=("midline_type", "geometry_type"),
     max_groups=10,
+    include_diagnostic_metrics=True,
 ):
     """
     Midline diagnostic plotting.
@@ -2362,7 +2364,7 @@ def plot_rs3_midline_diagnostics(
         plt.title(title)
         plt.legend(fontsize=8, framealpha=0.9)
         plt.tight_layout()
-        plt.savefig(os.path.join(out_dir, filename), dpi=200)
+        plt.savefig(os.path.join(out_dir, filename))
         plt.close()
 
     def _plot_boxplots(metrics, filename, plot_title):
@@ -2399,7 +2401,7 @@ def plot_rs3_midline_diagnostics(
 
         plt.title(title)
         plt.tight_layout()
-        plt.savefig(os.path.join(out_dir, filename), dpi=200)
+        plt.savefig(os.path.join(out_dir, filename))
         plt.close()
 
     if compare_mode == "grouped":
@@ -2407,33 +2409,114 @@ def plot_rs3_midline_diagnostics(
     else:
         _plot_boxplots(primary_metrics, "primary_midline_metrics.png", "Midline Primary Metrics")
 
-    if compare_mode == "grouped":
-        _plot_grouped_bars(diagnostic_metrics, "diagnostic_bars_grouped.png", "Midline Diagnostic Metrics (grouped)")
-    else:
-        rows = []
-        for m in diagnostic_metrics:
-            vals = pd.to_numeric(df[m], errors="coerce").dropna().values
-            if not len(vals):
-                continue
-            rows.append({"metric": m, "mean": float(np.mean(vals)), "std": float(np.std(vals))})
+    if include_diagnostic_metrics:
+        if compare_mode == "grouped":
+            _plot_grouped_bars(diagnostic_metrics, "diagnostic_bars_grouped.png", "Midline Diagnostic Metrics (grouped)")
+        else:
+            rows = []
+            for m in diagnostic_metrics:
+                vals = pd.to_numeric(df[m], errors="coerce").dropna().values
+                if not len(vals):
+                    continue
+                rows.append({"metric": m, "mean": float(np.mean(vals)), "std": float(np.std(vals))})
 
-        if rows:
-            dfd = pd.DataFrame(rows)
-            plt.figure(figsize=(1.6 * len(dfd), 4))
-            plt.bar(dfd["metric"], dfd["mean"], yerr=dfd["std"], capsize=5)
-            plt.ylabel("value")
+            if rows:
+                dfd = pd.DataFrame(rows)
+                plt.figure(figsize=(1.6 * len(dfd), 4))
+                plt.bar(dfd["metric"], dfd["mean"], yerr=dfd["std"], capsize=5)
+                plt.ylabel("value")
 
-            title = "Midline Diagnostic Metrics (distribution summary)"
-            if selected_family is not None:
-                title = "RS3 " + title
-            if title_suffix:
-                title += f" — {title_suffix}"
+                title = "Midline Diagnostic Metrics (distribution summary)"
+                if selected_family is not None:
+                    title = "RS3 " + title
+                if title_suffix:
+                    title += f" - {title_suffix}"
 
-            plt.title(title)
-            plt.xticks(rotation=30, ha="right")
-            plt.tight_layout()
-            plt.savefig(os.path.join(out_dir, "diagnostic_bars.png"), dpi=200)
-            plt.close()
+                plt.title(title)
+                plt.xticks(rotation=30, ha="right")
+                plt.tight_layout()
+                plt.savefig(os.path.join(out_dir, "diagnostic_bars.png"))
+                plt.close()
+
+
+def plot_rs3_midline_decomposition(
+    *,
+    df_all,
+    out_path,
+    group_col="variant_id",
+    title="Midline Metrics - Full Decomposition (All Metrics)",
+):
+    """
+    Edge-decomposition style stacked chart for all midline metrics by method/group.
+    """
+    import os
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    df = df_all.copy() if isinstance(df_all, pd.DataFrame) else pd.DataFrame()
+    if df.empty or group_col not in df.columns:
+        return
+
+    primary = [
+        "score_mid",
+        "nn_mean_bidirectional",
+        "hausdorff_max",
+        "coverage_min",
+    ]
+    secondary = [
+        "relative_length_error",
+        "orth_mean",
+        "orth_std",
+        "curvature_rms_ratio",
+        "mean_tan_angle_error_deg",
+        "frechet_discrete_ds",
+    ]
+    metrics = [m for m in (primary + secondary) if m in df.columns]
+    if not metrics:
+        return
+
+    agg = (
+        df.groupby(group_col, dropna=False)[metrics]
+        .mean(numeric_only=True)
+        .reset_index()
+    )
+    if agg.empty:
+        return
+
+    labels = agg[group_col].astype(str).tolist()
+    x = np.arange(len(labels), dtype=float)
+    bottom = np.zeros(len(labels), float)
+
+    fig_w = max(10.0, 1.2 * len(labels))
+    fig, ax = plt.subplots(figsize=(fig_w, 6.0))
+    cmap = plt.get_cmap("tab20")
+
+    for i, m in enumerate(metrics):
+        vals = pd.to_numeric(agg[m], errors="coerce").to_numpy(float)
+        vals = np.where(np.isfinite(vals), vals, 0.0)
+        ax.bar(
+            x,
+            vals,
+            width=0.62,
+            bottom=bottom,
+            label=m,
+            color=cmap(i % 20),
+            alpha=0.88,
+        )
+        bottom += vals
+
+    ax.plot(x, bottom, "ko", markersize=4, label="total")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_ylabel("metric contribution (stacked)")
+    ax.set_title(title)
+    ax.grid(axis="y", alpha=0.2)
+    ax.legend(fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1.0))
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
 
 
 def plot_midline_length_score_relationship(
@@ -2520,7 +2603,7 @@ def plot_midline_length_score_relationship(
 
     # Continuous view: scatter
     try:
-        plt.figure(figsize=(8.0, 5.2), dpi=200)
+        plt.figure(figsize=(8.0, 5.2))
         for g in keep_groups:
             sub = df[df["_group"] == g]
             if sub.empty:
@@ -2542,7 +2625,7 @@ def plot_midline_length_score_relationship(
             plt.legend(fontsize=7, framealpha=0.9)
         plt.grid(True, alpha=0.25)
         plt.tight_layout()
-        plt.savefig(os.path.join(out_dir, f"{prefix}_scatter.png"), dpi=200)
+        plt.savefig(os.path.join(out_dir, f"{prefix}_scatter.png"))
         plt.close()
     except Exception:
         pass
@@ -2615,7 +2698,7 @@ def plot_midline_length_score_relationship(
         df_bins.to_csv(bins_csv, index=False)
 
         try:
-            plt.figure(figsize=(8.4, 5.4), dpi=200)
+            plt.figure(figsize=(8.4, 5.4))
             for g in keep_groups:
                 sub = df_bins[df_bins["group"] == str(g)].copy()
                 if sub.empty:
@@ -2634,7 +2717,7 @@ def plot_midline_length_score_relationship(
                 plt.legend(fontsize=7, framealpha=0.9)
             plt.grid(True, alpha=0.25)
             plt.tight_layout()
-            plt.savefig(os.path.join(out_dir, f"{prefix}_binned.png"), dpi=200)
+            plt.savefig(os.path.join(out_dir, f"{prefix}_binned.png"))
             plt.close()
         except Exception:
             pass
@@ -2830,7 +2913,7 @@ def plot_width_distribution_report(
             hues = []
 
         # Prepare plot
-        plt.figure(figsize=(8, 4), dpi=200)
+        plt.figure(figsize=(8, 4))
 
         if not hues:
             y = []
@@ -2919,3 +3002,6 @@ def plot_width_distribution_report(
         "n_groups": int(len(agg)),
         "used_scipy": bool(_has_scipy),
     }
+
+
+

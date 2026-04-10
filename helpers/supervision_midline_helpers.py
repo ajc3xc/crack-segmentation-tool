@@ -1957,8 +1957,21 @@ def compute_midline_method_variants_and_normals(
             methods[str(mkey)] = _run_one_method(mkey, mspec)
 
     for mkey in METHOD_SPECS.keys():
-        res = methods.get(str(mkey), {}) if isinstance(methods.get(str(mkey), {}), dict) else {}
+        if not isinstance(methods.get(str(mkey)), dict):
+            methods[str(mkey)] = {}
+        res = methods.get(str(mkey), {})
+        res.setdefault("midline", None)
+        res.setdefault("normals", None)
+        res.setdefault("normals_diag", {})
+        res.setdefault("debug", {})
+        res.setdefault("timing", {})
+        res.setdefault("meta", {"status": "missing"})
+        if not isinstance(res.get("meta"), dict):
+            res["meta"] = {"status": "missing"}
+        res["meta"].setdefault("status", "ok" if res.get("midline") is not None else "missing")
         if res.get("midline") is None:
+            res["meta"]["status"] = "failed"
+            res["meta"]["reason"] = (res.get("meta", {}) or {}).get("reason", "unknown")
             print(f"[METHOD DROPPED] {mkey} -> {(res.get('meta', {}) or {}).get('reason')}")
         #else:
             #print(f"[METHOD ADDED] {mkey} OK")
@@ -2165,4 +2178,3 @@ def compute_centered_midline_and_normals(
         diag_out=diag_out,
         endpoint_mode=endpoint_mode,
     )
-
