@@ -178,3 +178,8 @@ cracktools/__pycache__/os.cpython-310.pyc
 *.mp4
 *.webm
 repomix*
+goofy-kilby
+**/*kilby*
+.claude/**
+C:\Users\13144\Documents\Masters_Thesis\CURRENT_PROJECT_CODE\.claude\worktrees\goofy-kilby
+metrics_engine.py

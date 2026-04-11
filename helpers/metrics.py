@@ -4894,7 +4894,7 @@ def compare_widths_for_aligned_cracks(
     os.makedirs(opsec_dir, exist_ok=True)
 
     # Debug-only forensic trace for Stage 4.5 -> Stage 5 provenance.
-    DEBUG_TOPOLOGY_TRACE = True
+    DEBUG_TOPOLOGY_TRACE = False
 
     # ---------------- local: predicted width trace extraction ----------------
     def _get_pred_width_full(crack_obj, midline_concat_pts, widths_geo_fallback):
@@ -5795,8 +5795,9 @@ def compare_widths_for_aligned_cracks(
     for cid, crack in crack_iter:
         print(f"\n[WIDTH DEBUG] {mode.upper()} cid={cid}")
         cid_opsec_dir = os.path.join(opsec_dir, f"cid{cid}") if mode == "combined" else None
-        if DEBUG_TOPOLOGY_TRACE and mode == "combined":
-            topo_dbg_dir = cid_opsec_dir
+        # Always define this path; some Stage-5 paths reference it even when
+        # DEBUG_TOPOLOGY_TRACE is disabled.
+        topo_dbg_dir = cid_opsec_dir if mode == "combined" else output_dir
 
         mid_segs, mid_meta, derived_segs, derived_meta, bite_pred, pred_members = _extract_segments_and_meta(crack, cid_dbg=cid)
         if not derived_segs:

@@ -23,6 +23,8 @@ DEBUG_LEVEL = 1
 DEBUG_TARGET = "cid1"   # set failing image key
 DEBUG_SPLIT = True      # branch -> segment split diagnostics
 DEBUG_SUPPRESS = True   # suppression diagnostics
+ENABLE_ABLATION_DEBUG_PLOTS = True
+ENABLE_COMBINED_METHOD_DEBUG_PLOTS = True
 DEBUG_LIGHT = True      # minimal high-level logs
 PER_ATOMIC_METHOD_DEBUG = False  # keep False: use aggregated atomic-all method plots instead
 METHODS_RS3 = [
@@ -4423,6 +4425,7 @@ def export_gt_supervision_for_image(
             combined_endpoint_mode = "combined"
             if combined_endpoint_mode == "combined":
                 seg_work_items = []
+                branch_specs = []
                 for bi, idxs in branch_seg_indices.items():
                     if _branch_kill_dbg(base_name, int(bi)):
                         print(f"[KILL CHECK] entering branch {int(bi)} for image={base_name}", flush=True)
@@ -4434,7 +4437,6 @@ def export_gt_supervision_for_image(
                     mask_use = np.asarray(cache.get("mask_local"), np.uint8)
                     rgb_use = np.asarray(cache.get("rgb_local"))
                     depth_use = cache.get("depth_local", None)
-
                     segs_branch = [np.asarray(segs[i], float) for i in idxs]
                     if not segs_branch:
                         continue
@@ -4447,14 +4449,12 @@ def export_gt_supervision_for_image(
                             if Sseg.ndim == 2 and Sseg.shape[1] == 2 and len(Sseg) >= 2:
                                 print(f"[SEG {int(j)}] len={len(Sseg)}")
                                 print(f"   start={Sseg[0].tolist()} end={Sseg[-1].tolist()}")
-
                         d = np.linalg.norm(np.diff(S_branch, axis=0), axis=1) if len(S_branch) >= 2 else np.asarray([], float)
                         jumps = np.where(d > 20.0)[0] if d.size else np.asarray([], int)
                         print(f"[STACKED] len={len(S_branch)}")
                         print(f"[JUMPS] count={int(len(jumps))} idx={jumps.tolist()}")
                         if d.size:
                             print(f"[MAX STEP] {float(np.max(d)):.2f}")
-
                         iso_dir = os.path.join(sup_root, "analysis", "gt_branch_isolation")
                         raw_png, stacked_png = _plot_gt_branch_isolation(
                             segs_branch=segs_branch,
@@ -4466,7 +4466,6 @@ def export_gt_supervision_for_image(
                         print(f"[GT_DEBUG] raw plot -> {raw_png}")
                         print(f"[GT_DEBUG] stacked plot -> {stacked_png}")
                         raise RuntimeError("[HALT] stopping after GT branch geometry inspection")
-
                     if DEBUG_SPLIT and _dbg(base_name):
                         _dlog(
                             1,
@@ -4478,7 +4477,10 @@ def export_gt_supervision_for_image(
                     S_local = S_branch.copy()
                     S_local[:, 0] -= float(bx)
                     S_local[:, 1] -= float(by)
+                    branch_specs.append((int(bi), idxs, bx, by, mask_use, rgb_use, depth_use, S_local, S_branch))
 
+                def _run_branch_centering(spec):
+                    bi, idxs, bx, by, mask_use, rgb_use, depth_use, S_local, S_branch = spec
                     t_mid0 = time.perf_counter()
                     center_res = compute_midline_method_variants_and_normals(
                         mid_xy=S_local,
@@ -4499,7 +4501,26 @@ def export_gt_supervision_for_image(
                         debug_base_name=base_name,
                         debug_branch_id=int(bi),
                     )
-                    accP["mid"] += float(time.perf_counter() - t_mid0)
+                    elapsed = float(time.perf_counter() - t_mid0)
+                    return bi, idxs, bx, by, mask_use, S_branch, center_res, elapsed
+
+                n_branches = len(branch_specs)
+                branch_results = [None] * n_branches
+                if n_branches > 1:
+                    with ThreadPoolExecutor(max_workers=n_branches) as ex:
+                        fut_map = {ex.submit(_run_branch_centering, spec): i for i, spec in enumerate(branch_specs)}
+                        for fut in as_completed(fut_map):
+                            i = fut_map[fut]
+                            branch_results[i] = fut.result()
+                else:
+                    for i, spec in enumerate(branch_specs):
+                        branch_results[i] = _run_branch_centering(spec)
+
+                for result in branch_results:
+                    if result is None:
+                        continue
+                    bi, idxs, bx, by, mask_use, S_branch, center_res, elapsed = result
+                    accP["mid"] += elapsed
                     _acc_nested_timing(
                         combined_timing_blob,
                         _timing_by_method(
@@ -4521,8 +4542,9 @@ def export_gt_supervision_for_image(
                             _dlog(
                                 1,
                                 f"[SPLIT_IN] branch={int(bi)} mk={str(_mk)} "
-                                f"| mid_len={_mlen} | n_segs={len(segs_branch)}",
+                                f"| mid_len={_mlen} | n_segs={len(np.asarray(S_branch, float))}",
                             )
+
                     for _mk, _mv in methods_local.items():
                         if not isinstance(_mv, dict):
                             continue

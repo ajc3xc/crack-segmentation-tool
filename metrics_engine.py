@@ -64,7 +64,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
     ###################################################################
     ##    METRICS FUNCTIONS
     ###################################################################   
-    def summarize_dataset_metrics(self):
+    def summarize_dataset_metrics(self, image_filter=None):
         """
         Dataset-level aggregation wrapper.
 
@@ -103,6 +103,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             out_dir=out_dir,
             baseline_roots=baseline_roots,
             depth_timing_csv=depth_timing_csv,
+            image_filter=image_filter,
             verbose=True,
         )
 
@@ -1544,6 +1545,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             * BEST_NON_DT (from persisted global selection)
         """
         import os, json, numpy as np, pandas as pd, traceback, cv2
+        import threading
         from helpers.metrics import (
             compute_mask_metrics,
             boundary_fscore,
@@ -1565,6 +1567,14 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         #from helpers.plot_metrics import save_gt_vs_manual_overlay
         from helpers.supervision import export_gt_supervision_for_image as _export_gt_sup
         #from cracktools.segmentation import generate_mask_from_edges
+
+        # Master dissertation-quality output flag.
+        # Flip to True for full export runs with all heavy debug/summary plots.
+        DISSERTATION_QUALITY_PLOTS = False
+        ENABLE_GT_VS_MASK_OVERLAY = DISSERTATION_QUALITY_PLOTS
+        ENABLE_COMBINED_DEBUG_PLOT = DISSERTATION_QUALITY_PLOTS
+        ENABLE_MASK_COMPARISON_GRID = DISSERTATION_QUALITY_PLOTS
+        ENABLE_DECK_PLOTS = DISSERTATION_QUALITY_PLOTS
 
         print(f"[DEBUG METRICS] ===== START for {getattr(self, 'name', '?')} =====")
         if include_auto:
@@ -1878,6 +1888,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 os.makedirs(mode_dir, exist_ok=True)
 
                 def _cb(**dbg):
+                    if not ENABLE_COMBINED_DEBUG_PLOT:
+                        return
                     try:
                         plot_combined_debug(
                             original_image=self.original_image,
@@ -1923,6 +1935,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             return out
 
         timing_rows_driver = []
+        _driver_timing_lock = threading.Lock()
 
         def _record_driver_timing(step, seconds, *, midline_type="", variant_id="", crack_type=""):
             try:
@@ -1931,14 +1944,15 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 return
             if not np.isfinite(sec):
                 return
-            timing_rows_driver.append({
-                "image": str(base_name),
-                "step": str(step),
-                "seconds": float(sec),
-                "midline_type": str(midline_type or ""),
-                "variant_id": str(variant_id or ""),
-                "crack_type": str(crack_type or ""),
-            })
+            with _driver_timing_lock:
+                timing_rows_driver.append({
+                    "image": str(base_name),
+                    "step": str(step),
+                    "seconds": float(sec),
+                    "midline_type": str(midline_type or ""),
+                    "variant_id": str(variant_id or ""),
+                    "crack_type": str(crack_type or ""),
+                })
 
         t_cmb0 = time.perf_counter()
         combined_map = _rebuild_combined_map_for_mode(mode_label="ET", atomic_src=atomic)
@@ -2041,6 +2055,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             return out
 
         def _save_total_overlay(pred_full, supervision, method):
+            if not ENABLE_GT_VS_MASK_OVERLAY:
+                return
             try:
                 out_dir = os.path.join(metrics_dir, "mask_comparisons")
                 os.makedirs(out_dir, exist_ok=True)
@@ -2454,18 +2470,19 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     # --------------------------------------------------
                     # 🔁 RESTORED: Global GT vs Pred overlay
                     # --------------------------------------------------
-                    save_gt_vs_manual_overlay(
-                        H, W,
-                        gt_full,
-                        combined_mask,
-                        os.path.join(
-                            mode_dir,
-                            "gt_vs_auto_mask_global.png"
-                            if is_auto else "gt_vs_et_mask_global.png",
-                        ),
-                        bbox=[x0, y0, x1 - x0, y1 - y0],
-                        original_image=self.original_image,
-                    )
+                    if ENABLE_GT_VS_MASK_OVERLAY:
+                        save_gt_vs_manual_overlay(
+                            H, W,
+                            gt_full,
+                            combined_mask,
+                            os.path.join(
+                                mode_dir,
+                                "gt_vs_auto_mask_global.png"
+                                if is_auto else "gt_vs_et_mask_global.png",
+                            ),
+                            bbox=[x0, y0, x1 - x0, y1 - y0],
+                            original_image=self.original_image,
+                        )
 
                     # --------------------------------------------------
                     # 🔁 RESTORED: Normals + width overlays
@@ -2487,21 +2504,22 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     if e1 is None or e2 is None or (mid is None and derived is None):
                         e1 = e2 = mid = derived = None
 
-                    _plot_normals_and_width_overlay_on_crop(
-                        out_dir=mode_dir,
-                        gt_crop=gt_crop,
-                        pred_crop=pred_crop,
-                        x0=x0,
-                        y0=y0,
-                        mid_global=mid,
-                        derived_mid_global=derived,
-                        e1_global=e1,
-                        e2_global=e2,
-                        out_normals_name="auto_normals.png" if is_auto else "et_normals.png",
-                        out_iou_name="gt_vs_auto_mask.png" if is_auto else "gt_vs_et_mask.png",
-                        out_width_name="widths_colormap_on_crop_auto.png"
-                                    if is_auto else "widths_colormap_on_crop.png",
-                    )
+                    if ENABLE_GT_VS_MASK_OVERLAY:
+                        _plot_normals_and_width_overlay_on_crop(
+                            out_dir=mode_dir,
+                            gt_crop=gt_crop,
+                            pred_crop=pred_crop,
+                            x0=x0,
+                            y0=y0,
+                            mid_global=mid,
+                            derived_mid_global=derived,
+                            e1_global=e1,
+                            e2_global=e2,
+                            out_normals_name="auto_normals.png" if is_auto else "et_normals.png",
+                            out_iou_name="gt_vs_auto_mask.png" if is_auto else "gt_vs_et_mask.png",
+                            out_width_name="widths_colormap_on_crop_auto.png"
+                                        if is_auto else "widths_colormap_on_crop.png",
+                        )
 
                     # --------------------------------------------------
                     # Metrics (bbox-level ONLY)
@@ -2647,23 +2665,24 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         # ------------------------------------------------------------------
         # 8) WIDTH DIFF CHARTS (ET + optional auto) — unified prep
         # ------------------------------------------------------------------
-        try:
-            t_mcg0 = time.perf_counter()
-            totals_lookup = {}
-            if not df_mask.empty:
-                df_total = df_mask[df_mask["crack_type"].astype(str).str.upper() == "TOTAL"].copy()
-                for _, rr in df_total.iterrows():
-                    k = f"{rr.get('supervision', '')}:{rr.get('method', 'geodesic')}"
-                    totals_lookup[k] = rr.to_dict()
+        if ENABLE_MASK_COMPARISON_GRID:
+            try:
+                t_mcg0 = time.perf_counter()
+                totals_lookup = {}
+                if not df_mask.empty:
+                    df_total = df_mask[df_mask["crack_type"].astype(str).str.upper() == "TOTAL"].copy()
+                    for _, rr in df_total.iterrows():
+                        k = f"{rr.get('supervision', '')}:{rr.get('method', 'geodesic')}"
+                        totals_lookup[k] = rr.to_dict()
 
-            _plot_mask_comparison_grid(
-                variant_masks=variant_masks,
-                totals_lookup=totals_lookup,
-                out_png=os.path.join(metrics_dir, "mask_comparison_grid.png"),
-            )
-            _record_driver_timing("mask_comparison_grid_s", time.perf_counter() - t_mcg0)
-        except Exception as e:
-            print(f"[DEBUG MASK] comparison grid failed: {e}")
+                _plot_mask_comparison_grid(
+                    variant_masks=variant_masks,
+                    totals_lookup=totals_lookup,
+                    out_png=os.path.join(metrics_dir, "mask_comparison_grid.png"),
+                )
+                _record_driver_timing("mask_comparison_grid_s", time.perf_counter() - t_mcg0)
+            except Exception as e:
+                print(f"[DEBUG MASK] comparison grid failed: {e}")
 
         def _prep_combined_for_width(combined_src):
             """
@@ -3204,22 +3223,25 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             for vid, pack in variants.items():
                 a = pack.get("atomic")
                 c = pack.get("combined")
-
+                inner_tasks = []
                 if a is not None and run_atomic_width_eval:
-                    _run_one_mode(
-                        variant_id=vid,
-                        crack_type="atomic",
-                        payload={"atomic_cracks": a},
-                    )
-                elif a is not None and not run_atomic_width_eval:
+                    inner_tasks.append(("atomic", {"atomic_cracks": a}))
+                elif a is not None:
                     print(f"[WIDTH] skipping atomic eval for {midline_type} (run_atomic_width_eval=False)")
-
                 if c is not None:
-                    _run_one_mode(
-                        variant_id=vid,
-                        crack_type="combined",
-                        payload={"combined_cracks": c},
-                    )
+                    inner_tasks.append(("combined", {"combined_cracks": c}))
+
+                if len(inner_tasks) > 1:
+                    with ThreadPoolExecutor(max_workers=2) as _ipool:
+                        _ifuts = [
+                            _ipool.submit(lambda ct=ct, pl=pl: _run_one_mode(variant_id=vid, crack_type=ct, payload=pl))
+                            for ct, pl in inner_tasks
+                        ]
+                        for _if in as_completed(_ifuts):
+                            _if.result()
+                else:
+                    for ct, pl in inner_tasks:
+                        _run_one_mode(variant_id=vid, crack_type=ct, payload=pl)
 
             # ------------------------------------------------------------
             # Run baseline variants (COMBINED, AUTHORITATIVE)
@@ -3347,9 +3369,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 else:
                     print(f"[WIDTH] best_non_dt unavailable/invalid: {selected_best_non_dt}")
 
-            # --- build task list and run width evals in parallel ---
-            _width_tasks = []
-            _width_tasks.append(("ET", atomic, combined_for_width, getattr(self, "width_baseline_img_folder", None)))
+            _width_tasks = [("ET", atomic, combined_for_width, getattr(self, "width_baseline_img_folder", None))]
             if dt_atomic or dt_combined:
                 _width_tasks.append(("dt", dt_atomic, dt_combined, None))
             if best_atomic or best_combined:
@@ -3365,17 +3385,16 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 )
                 _record_driver_timing("width_eval_total_s", time.perf_counter() - t0, midline_type=mtype)
 
-            t_parallel0 = time.perf_counter()
+            t_par0 = time.perf_counter()
             if len(_width_tasks) > 1:
                 print(f"[WIDTH DRIVER] running {len(_width_tasks)} width evals in parallel (ThreadPool)")
-                with ThreadPoolExecutor(max_workers=len(_width_tasks)) as _wex:
-                    _wfuts = [_wex.submit(_run_width_task, *t) for t in _width_tasks]
-                    for _wf in as_completed(_wfuts):
-                        _wf.result()  # re-raise any exception
+                with ThreadPoolExecutor(max_workers=len(_width_tasks)) as ex:
+                    futs = [ex.submit(_run_width_task, *t) for t in _width_tasks]
+                    for f in as_completed(futs):
+                        f.result()
             else:
-                for t in _width_tasks:
-                    _run_width_task(*t)
-            _record_driver_timing("width_eval_parallel_wall_s", time.perf_counter() - t_parallel0)
+                _run_width_task(*_width_tasks[0])
+            _record_driver_timing("width_eval_parallel_wall_s", time.perf_counter() - t_par0)
 
         except Exception as e:
             print(f"[DEBUG WIDTH] failed: {e}")
@@ -3555,15 +3574,16 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         # ------------------------------------------------------------------
         # 10) FINAL SUMMARY / PRESENTATION PLOTS
         # ------------------------------------------------------------------
-        try:
-            from helpers.present_plots import build_deck_plots_for_image
-            print("[DEBUG PLOT] building deck-ready summary plots ...")
-            t_deck0 = time.perf_counter()
-            build_deck_plots_for_image(metrics_dir, base_name)
-            _record_driver_timing("build_deck_plots_for_image_s", time.perf_counter() - t_deck0)
-        except Exception as e:
-            print(f"[DEBUG PLOT] deck plots failed: {e}")
-            traceback.print_exc()
+        if ENABLE_DECK_PLOTS:
+            try:
+                from helpers.present_plots import build_deck_plots_for_image
+                print("[DEBUG PLOT] building deck-ready summary plots ...")
+                t_deck0 = time.perf_counter()
+                build_deck_plots_for_image(metrics_dir, base_name)
+                _record_driver_timing("build_deck_plots_for_image_s", time.perf_counter() - t_deck0)
+            except Exception as e:
+                print(f"[DEBUG PLOT] deck plots failed: {e}")
+                traceback.print_exc()
 
         try:
             if timing_rows_driver:

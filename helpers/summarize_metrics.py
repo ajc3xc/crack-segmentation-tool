@@ -154,9 +154,9 @@ def _parse_width_summary_context(rel_path: str) -> Tuple[str, str, str]:
     method_family = "model"
     midline_type = "unknown"
 
-    if len(parts) >= 2 and parts[0] in ("manual", "auto"):
+    if len(parts) >= 2 and parts[0] in ("manual", "auto", "et", "ET"):
         midline_type = parts[0]
-    elif len(parts) >= 3 and parts[1] in ("manual", "auto"):
+    elif len(parts) >= 3 and parts[1] in ("manual", "auto", "et", "ET"):
         baseline_method = str(parts[0])
         method_family = "baseline"
         midline_type = parts[1]
@@ -182,6 +182,16 @@ def _parse_midline_context(rel_path: str) -> Tuple[str, str, str]:
         midline_type = parts[0]
 
     return midline_type, method_family, baseline_method
+
+
+def _is_et_like(midline_type: str) -> bool:
+    return str(midline_type or "").strip().lower() in {"manual", "et"}
+
+
+def _display_midline_label(midline_type: str) -> str:
+    if _is_et_like(midline_type):
+        return "ET"
+    return str(midline_type or "")
 
 
 def _aggregate_mask_metrics(
@@ -404,7 +414,7 @@ def _aggregate_mask_metrics(
                 s = str(v or "").strip()
                 sl = s.lower()
                 if sl.startswith("manual:"):
-                    return "manual"
+                    return "ET"
                 if sl.startswith("auto:"):
                     return "auto"
                 if sl.startswith("baseline:"):
@@ -416,7 +426,7 @@ def _aggregate_mask_metrics(
             def _variant_class(v: str) -> str:
                 sl = str(v or "").strip().lower()
                 if sl.startswith("manual:"):
-                    return "manual"
+                    return "ET"
                 if sl.startswith("auto:"):
                     return "auto"
                 if sl.startswith("baseline:"):
@@ -426,14 +436,14 @@ def _aggregate_mask_metrics(
             var_labels = [_pretty_variant(v) for v in total["variant"].astype(str).tolist()]
             cls_vals = [_variant_class(v) for v in total["variant"].astype(str).tolist()]
             cls_color = {
-                "manual": "#1f77b4",
+                "ET": "#1f77b4",
                 "auto": "#ff7f0e",
                 "baseline": "#2ca02c",
                 "other": "#7f7f7f",
             }
             var_colors = [cls_color.get(c, "#7f7f7f") for c in cls_vals]
             legend_items = [
-                ("manual", cls_color["manual"]),
+                ("ET", cls_color["ET"]),
                 ("auto", cls_color["auto"]),
                 ("baseline", cls_color["baseline"]),
             ]
@@ -489,7 +499,7 @@ def _aggregate_mask_metrics(
                     return s.iloc[0]
 
                 picks = [
-                    ("manual", _pick_row("manual:")),
+                    ("ET", _pick_row("manual:")),
                     ("sam3", _pick_row("baseline:sam3")),
                     ("hrsegnet", _pick_row("baseline:hrsegnet")),
                 ]
@@ -508,7 +518,7 @@ def _aggregate_mask_metrics(
                     hd95_vals.append(h)
 
                 if labels:
-                    cmap = {"manual": "#4c78a8", "sam3": "#f28e2b", "hrsegnet": "#2ca02c"}
+                    cmap = {"ET": "#4c78a8", "sam3": "#f28e2b", "hrsegnet": "#2ca02c"}
                     bar_cols = [cmap.get(x, "#777777") for x in labels]
                     x = np.arange(len(labels), dtype=float)
                     fig, axes = plt.subplots(1, 2, figsize=(8.8, 4.2), dpi=180, sharex=True)
@@ -523,7 +533,7 @@ def _aggregate_mask_metrics(
                     for ax in axes:
                         ax.set_xticks(x)
                         ax.set_xticklabels(labels, rotation=20, ha="right")
-                    fig.suptitle("Dataset Mask Error Comparison: manual vs sam3 vs hrsegnet", fontsize=11, fontweight="bold")
+                    fig.suptitle("Dataset Mask Error Comparison: ET vs sam3 vs hrsegnet", fontsize=11, fontweight="bold")
                     plt.tight_layout()
                     out_png = os.path.join(out_dir, "dataset_mask_assd_hd95_manual_sam3_hrsegnet.png")
                     fig.savefig(out_png, bbox_inches="tight")
@@ -550,7 +560,7 @@ def _aggregate_width_metrics(
     COLOR_MAP = {
         "baseline": "#2ca02c",  # green
         "auto": "#1f77b4",      # blue
-        "manual": "#d62728",    # red
+        "ET": "#d62728",        # red
     }
 
     def _plot_metric_bar_iqr_outliers(
@@ -586,8 +596,8 @@ def _aggregate_width_metrics(
             mt0 = str(g.get("midline_type", pd.Series([""])).astype(str).iloc[0]).lower() if "midline_type" in g.columns else ""
             if mf0 == "baseline":
                 source_class = "baseline"
-            elif mt0 == "manual":
-                source_class = "manual"
+            elif _is_et_like(mt0):
+                source_class = "ET"
             else:
                 source_class = "auto"
             q1 = float(np.percentile(v, 25))
@@ -631,7 +641,7 @@ def _aggregate_width_metrics(
         ax.set_title(title)
         ax.grid(axis="y", alpha=0.2)
         legend_handles = [
-            Patch(facecolor=COLOR_MAP["manual"], edgecolor="none", label="manual"),
+            Patch(facecolor=COLOR_MAP["ET"], edgecolor="none", label="ET"),
             Patch(facecolor=COLOR_MAP["auto"], edgecolor="none", label="auto"),
             Patch(facecolor=COLOR_MAP["baseline"], edgecolor="none", label="baseline"),
             Patch(facecolor="#f58518", edgecolor="none", label="IQR"),
@@ -712,7 +722,7 @@ def _aggregate_width_metrics(
                 continue
             mf0 = str(g.get("method_family", pd.Series([""])).astype(str).iloc[0]).lower() if "method_family" in g.columns else ""
             mt0 = str(g.get("midline_type", pd.Series([""])).astype(str).iloc[0]).lower() if "midline_type" in g.columns else ""
-            cls_map[m] = "baseline" if mf0 == "baseline" else ("manual" if mt0 == "manual" else "auto")
+            cls_map[m] = "baseline" if mf0 == "baseline" else ("ET" if _is_et_like(mt0) else "auto")
         for box, m in zip(parts["boxes"], med_order):
             box.set_facecolor(COLOR_MAP.get(cls_map.get(m, "auto"), "#4c78a8"))
             box.set_alpha(0.65)
@@ -722,7 +732,7 @@ def _aggregate_width_metrics(
         ax.set_xticklabels(med_order, rotation=35, ha="right", fontsize=8)
         ax.grid(axis="y", alpha=0.2)
         legend_handles = [
-            Patch(facecolor=COLOR_MAP["manual"], edgecolor="none", label="manual"),
+            Patch(facecolor=COLOR_MAP["ET"], edgecolor="none", label="ET"),
             Patch(facecolor=COLOR_MAP["auto"], edgecolor="none", label="auto"),
             Patch(facecolor=COLOR_MAP["baseline"], edgecolor="none", label="baseline"),
         ]
@@ -812,8 +822,8 @@ def _aggregate_width_metrics(
     def _classify(row):
         if str(row["method_family"]) == "baseline":
             return "baseline"
-        if str(row["midline_type"]).lower() in {"manual", "et"}:
-            return "manual"
+        if _is_et_like(row["midline_type"]):
+            return "ET"
         return "auto"
 
     grouped["source_class"] = grouped.apply(_classify, axis=1)
@@ -899,7 +909,7 @@ def _aggregate_width_metrics(
     rmse_col = "rmse_px_mean" if "rmse_px_mean" in grouped.columns else None
     total_grouped = grouped[grouped["crack_type"].astype(str).str.upper() == "TOTAL"].copy()
     plot_grouped = total_grouped if not total_grouped.empty else grouped
-    legend_items = [(k, v) for k, v in [("manual", COLOR_MAP["manual"]), ("auto", COLOR_MAP["auto"]), ("baseline", COLOR_MAP["baseline"])]
+    legend_items = [(k, v) for k, v in [("ET", COLOR_MAP["ET"]), ("auto", COLOR_MAP["auto"]), ("baseline", COLOR_MAP["baseline"])]
                     if k in set(plot_grouped["source_class"].astype(str).tolist())]
 
     if mae_col:
@@ -944,10 +954,86 @@ def _aggregate_width_metrics(
         )
         outputs["width_rmse_box_png"] = out_png_box
 
+    outputs.update(_plot_width_metrics_with_without_et(all_df, out_dir, verbose=verbose))
+
     # Additional distribution-aware plots: mean bar + IQR + outlier dots.
     # separate distribution plot files removed; canonical by_method plots include IQR/outliers
 
     _log(verbose, f"[summarize] width summary rows={len(all_df)}")
+    return outputs
+
+
+def _plot_width_metrics_with_without_et(
+    df_width: pd.DataFrame,
+    out_dir: str,
+    *,
+    verbose: bool = False,
+) -> Dict[str, str]:
+    outputs: Dict[str, str] = {}
+    if df_width is None or df_width.empty or "mae_px" not in df_width.columns:
+        return outputs
+
+    def _build_method_name(df: pd.DataFrame) -> pd.Series:
+        if {"method_family", "baseline_method", "midline_type"}.issubset(df.columns):
+            mf = df["method_family"].astype(str)
+            bm = df["baseline_method"].astype(str)
+            mt = df["midline_type"].astype(str).map(_display_midline_label)
+            return np.where(
+                mf.str.lower().eq("baseline"),
+                bm.where(bm.str.len() > 0, "baseline"),
+                mt.where(mt.str.len() > 0, "model"),
+            )
+        return df.get("midline_type", pd.Series(["unknown"] * len(df))).astype(str)
+
+    for exclude_et, suffix in ((False, "all"), (True, "no_et")):
+        d = df_width.copy()
+        d["midline_type_norm"] = d.get("midline_type", pd.Series([""] * len(d))).astype(str)
+        if exclude_et:
+            d = d[~d["midline_type_norm"].map(_is_et_like)].copy()
+        d["mae_px"] = pd.to_numeric(d["mae_px"], errors="coerce")
+        d = d[np.isfinite(d["mae_px"])].copy()
+        if d.empty:
+            continue
+
+        d["method_name"] = _build_method_name(d)
+        rows = []
+        for m, g in d.groupby("method_name", dropna=False):
+            v = pd.to_numeric(g["mae_px"], errors="coerce").to_numpy(float)
+            v = v[np.isfinite(v)]
+            if v.size == 0:
+                continue
+            q1 = float(np.percentile(v, 25))
+            q3 = float(np.percentile(v, 75))
+            rows.append({
+                "method_name": str(m),
+                "mean": float(np.mean(v)),
+                "q1": q1,
+                "q3": q3,
+            })
+        if not rows:
+            continue
+        plot_df = pd.DataFrame(rows).sort_values("mean", ascending=True)
+
+        fig_w = max(8.0, 0.5 * len(plot_df))
+        fig, ax = plt.subplots(figsize=(fig_w, 4.6), dpi=160)
+        x = np.arange(len(plot_df), dtype=float)
+        y = plot_df["mean"].to_numpy(float)
+        lo = np.clip(y - plot_df["q1"].to_numpy(float), 0.0, None)
+        hi = np.clip(plot_df["q3"].to_numpy(float) - y, 0.0, None)
+        ax.bar(x, y, color="#4c78a8", alpha=0.88)
+        ax.errorbar(x, y, yerr=np.vstack([lo, hi]), fmt="none", ecolor="#f58518", elinewidth=1.2, capsize=3)
+        ax.set_xticks(x)
+        ax.set_xticklabels(plot_df["method_name"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
+        ax.set_ylabel("abs width error (px)")
+        ax.set_title("Dataset width metrics (mean ± IQR)" + (" (without ET)" if exclude_et else ""))
+        ax.grid(axis="y", alpha=0.2)
+        plt.tight_layout()
+        out_png = os.path.join(out_dir, f"dataset_width_metrics_{suffix}.png")
+        fig.savefig(out_png, bbox_inches="tight", dpi=150)
+        plt.close(fig)
+        outputs[f"width_metrics_{suffix}_png"] = out_png
+
+    _log(verbose, f"[summarize] width metrics plots generated: {list(outputs.keys())}")
     return outputs
 
 
@@ -1105,8 +1191,8 @@ def _aggregate_midline_metrics(
             def _src_class(row):
                 if str(row.get("method_family", "")).lower() == "baseline":
                     return "baseline"
-                if str(row.get("midline_type", "")).lower() in {"manual", "et"}:
-                    return "manual"
+                if _is_et_like(row.get("midline_type", "")):
+                    return "ET"
                 return "auto"
 
             d0["source_class"] = d0.apply(_src_class, axis=1)
@@ -1184,7 +1270,7 @@ def _aggregate_midline_metrics(
 
                 top = rank_df.head(20).copy()
                 top["label"] = top.get("method_name", pd.Series(["unknown"] * len(top))).astype(str)
-                color_map = {"manual": "#d62728", "auto": "#1f77b4", "baseline": "#2ca02c"}
+                color_map = {"ET": "#d62728", "auto": "#1f77b4", "baseline": "#2ca02c"}
                 colors = [color_map.get(str(c), "#4c78a8") for c in top["source_class"].astype(str).tolist()]
                 fig_w = max(10.0, 0.55 * len(top))
                 fig, ax = plt.subplots(figsize=(fig_w, 5.0), dpi=180)
@@ -1197,7 +1283,7 @@ def _aggregate_midline_metrics(
                 ax.set_title("Dataset Midline RS3-Style Score (combined, lower is better)")
                 ax.grid(axis="y", alpha=0.2)
                 legend_handles = [
-                    Patch(facecolor=color_map["manual"], edgecolor="none", label="manual"),
+                    Patch(facecolor=color_map["ET"], edgecolor="none", label="ET"),
                     Patch(facecolor=color_map["auto"], edgecolor="none", label="auto"),
                     Patch(facecolor=color_map["baseline"], edgecolor="none", label="baseline"),
                 ]
@@ -1207,6 +1293,33 @@ def _aggregate_midline_metrics(
                 fig.savefig(out_png, bbox_inches="tight")
                 plt.close(fig)
                 outputs["midline_score_ranked_png"] = out_png
+
+                rank_no_et = rank_df[~rank_df["source_class"].astype(str).str.upper().isin(["ET", "MANUAL"])].copy()
+                if not rank_no_et.empty:
+                    rank_no_et = rank_no_et.sort_values("score_mid_wmean", ascending=True)
+                    rank_no_et_csv = os.path.join(out_dir, "dataset_midline_score_ranked_no_et.csv")
+                    rank_no_et.to_csv(rank_no_et_csv, index=False)
+                    outputs["midline_score_ranked_no_et_csv"] = rank_no_et_csv
+
+                    top_no_et = rank_no_et.head(20).copy()
+                    top_no_et["label"] = top_no_et.get("method_name", pd.Series(["unknown"] * len(top_no_et))).astype(str)
+                    colors_no_et = [color_map.get(str(c), "#4c78a8") for c in top_no_et["source_class"].astype(str).tolist()]
+                    fig_w2 = max(10.0, 0.55 * len(top_no_et))
+                    fig2, ax2 = plt.subplots(figsize=(fig_w2, 5.0), dpi=180)
+                    x2 = np.arange(len(top_no_et), dtype=float)
+                    vals2 = top_no_et["score_mid_wmean"].astype(float).to_numpy(float)
+                    ax2.bar(x2, vals2, color=colors_no_et, alpha=0.88)
+                    ax2.set_xticks(x2)
+                    ax2.set_xticklabels(top_no_et["label"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
+                    ax2.set_ylabel("score_mid_wmean")
+                    ax2.set_title("Dataset Midline RS3-Style Score (combined, no ET)")
+                    ax2.grid(axis="y", alpha=0.2)
+                    ax2.legend(handles=legend_handles, loc="best", framealpha=0.9, fontsize=8)
+                    plt.tight_layout()
+                    out_png_no_et = os.path.join(out_dir, "dataset_midline_score_ranked_no_et.png")
+                    fig2.savefig(out_png_no_et, bbox_inches="tight")
+                    plt.close(fig2)
+                    outputs["dataset_midline_score_ranked_no_et_png"] = out_png_no_et
 
     _log(verbose, f"[summarize] midline rows={len(all_df)}")
     return outputs
@@ -2504,6 +2617,7 @@ def _plot_dataset_full_timing_overview(
         colors = {
             "baseline_seg": "#2ca02c",
             "baseline_width": "#ff7f0e",
+            "ET": "#d62728",
             "manual": "#d62728",
             "auto": "#9467bd",
             "multi_cue": "#17becf",
@@ -2722,8 +2836,10 @@ def _plot_dataset_full_timing_overview(
                 mean_sec = float(np.sum(per_row[ok] * w[ok]) / np.sum(w[ok])) if np.any(ok) else float(np.nanmean(per_row))
             else:
                 mean_sec = float(np.nanmean(per_row))
-            _add(mean_rows, sup, mean_sec, sup, s)
-            _add(sum_rows, sup, total_sec, sup, float(s * np.sqrt(max(1, n))))
+            method_label = "ET" if sup == "manual" else sup
+            category_label = "ET" if sup == "manual" else sup
+            _add(mean_rows, method_label, mean_sec, category_label, s)
+            _add(sum_rows, method_label, total_sec, category_label, float(s * np.sqrt(max(1, n))))
 
     # GT supervision timing rollup (dataset-level): explicit atomic/combined rows.
     df_sup = _safe_read(os.path.join(out_dir, "dataset_gt_supervision_timings.csv"))
@@ -2869,9 +2985,9 @@ def _plot_dataset_full_timing_overview(
     # Segmentation-only and width/midline subset charts (mean metric).
     if mean_rows:
         df_mean = pd.DataFrame(mean_rows)
-        seg_subset = df_mean[df_mean["category"].isin(["baseline_seg", "manual", "auto"])].to_dict("records")
+        seg_subset = df_mean[df_mean["category"].isin(["baseline_seg", "manual", "ET", "auto"])].to_dict("records")
         width_subset = df_mean[
-            df_mean["category"].isin(["baseline_width", "manual", "auto", "multi_cue", "gt_centering"])
+            df_mean["category"].isin(["baseline_width", "manual", "ET", "auto", "multi_cue", "gt_centering"])
         ].to_dict("records")
         outputs["seg_chart"] = _plot_algorithm_overview(
             seg_subset,
@@ -2937,13 +3053,13 @@ def _aggregate_invalid_matches(
         midline_type = "unknown"
         crack_type = "unknown"
         method = "unknown"
-        if len(parts) >= 1 and parts[0] in ("manual", "auto"):
-            midline_type = parts[0]
+        if len(parts) >= 1 and parts[0] in ("manual", "auto", "et", "ET"):
+            midline_type = _display_midline_label(parts[0])
             crack_type = parts[1] if len(parts) >= 2 else "unknown"
             method = str(midline_type)
-        elif len(parts) >= 2 and parts[1] in ("manual", "auto"):
+        elif len(parts) >= 2 and parts[1] in ("manual", "auto", "et", "ET"):
             baseline = str(parts[0])
-            midline_type = str(parts[1])
+            midline_type = _display_midline_label(str(parts[1]))
             crack_type = parts[2] if len(parts) >= 3 else "unknown"
             method = f"{baseline}:{midline_type}"
         elif len(parts) >= 1:
@@ -3094,12 +3210,226 @@ def _aggregate_invalid_matches(
     return outputs
 
 
+def _plot_multicue_ablation(
+    df_width: Optional[pd.DataFrame],
+    df_midline: Optional[pd.DataFrame],
+    out_dir: str,
+    *,
+    verbose: bool = False,
+) -> Dict[str, str]:
+    outputs: Dict[str, str] = {}
+    if df_width is None or df_width.empty:
+        return outputs
+
+    multicue_methods = ["ET", "dt", "dt_depth", "dt_ridge_valley", "dt_ridge_valley_depth", "dt_ridge_color_depth"]
+
+    def _norm_method(v: str) -> str:
+        s = str(v or "").strip()
+        if _is_et_like(s):
+            return "ET"
+        return s
+
+    w = df_width.copy()
+    if "midline_type" not in w.columns:
+        return outputs
+    w["method"] = w["midline_type"].map(_norm_method)
+    w["crack_type_norm"] = w.get("crack_type", pd.Series([""] * len(w))).astype(str).str.lower()
+    w = w[w["crack_type_norm"].str.contains("combined", na=False)].copy()
+    w = w[w["method"].isin(multicue_methods)].copy()
+    if w.empty:
+        return outputs
+
+    m = (df_midline.copy() if isinstance(df_midline, pd.DataFrame) else pd.DataFrame())
+    if not m.empty and "midline_type" in m.columns:
+        m["method"] = m["midline_type"].map(_norm_method)
+        m = m[m["method"].isin(multicue_methods)].copy()
+        if "crack_type" in m.columns:
+            m = m[m["crack_type"].astype(str).str.lower().str.contains("combined", na=False)].copy()
+
+    variants = [(False, "with_et"), (True, "no_et")]
+    for drop_et, suffix in variants:
+        ww = w.copy()
+        mm = m.copy()
+        if drop_et:
+            ww = ww[ww["method"] != "ET"].copy()
+            if not mm.empty:
+                mm = mm[mm["method"] != "ET"].copy()
+        if ww.empty:
+            continue
+
+        methods = [x for x in multicue_methods if (not drop_et or x != "ET") and x in set(ww["method"].astype(str))]
+        if not methods:
+            continue
+
+        fig, axes = plt.subplots(2, 1, figsize=(max(9.0, 1.2 * len(methods)), 8.0), dpi=170, height_ratios=[1.2, 1.0])
+        ax0, ax1 = axes
+
+        if not mm.empty and "score_mid" in mm.columns:
+            score_df = mm.copy()
+            score_df["score_mid"] = pd.to_numeric(score_df["score_mid"], errors="coerce")
+            score_df = score_df[np.isfinite(score_df["score_mid"])].copy()
+            if "geometry_type" not in score_df.columns:
+                score_df["geometry_type"] = "all"
+            geos = sorted(score_df["geometry_type"].astype(str).unique().tolist())
+            bottoms = np.zeros(len(methods), dtype=float)
+            cmap = plt.get_cmap("tab20")
+            for j, gname in enumerate(geos):
+                vals = []
+                for method in methods:
+                    sub = score_df[(score_df["method"] == method) & (score_df["geometry_type"].astype(str) == gname)]
+                    vals.append(float(pd.to_numeric(sub["score_mid"], errors="coerce").mean()) if not sub.empty else 0.0)
+                vals = np.asarray(vals, float)
+                ax0.bar(np.arange(len(methods)), vals, bottom=bottoms, color=cmap(j % 20), alpha=0.85, label=str(gname))
+                bottoms += vals
+            ax0.set_ylabel("stacked score_mid (mean)")
+            ax0.legend(loc="best", fontsize=8, framealpha=0.9)
+        else:
+            vals = []
+            for method in methods:
+                sub = ww[ww["method"] == method]
+                v = pd.to_numeric(sub.get("mae_px"), errors="coerce").to_numpy(float)
+                v = v[np.isfinite(v)]
+                vals.append(float(np.mean(v)) if v.size else 0.0)
+            ax0.bar(np.arange(len(methods)), vals, color="#4c78a8", alpha=0.85)
+            ax0.set_ylabel("MAE (px)")
+        ax0.set_xticks(np.arange(len(methods)))
+        ax0.set_xticklabels(methods, rotation=25, ha="right")
+        ax0.set_title("Multi-cue Ablation (combined)")
+        ax0.grid(axis="y", alpha=0.2)
+
+        metric_sources = []
+        if "mae_px" in ww.columns:
+            metric_sources.append(("abs_width_error_px", ww, "mae_px"))
+        for mcol in ("nn_mean_bidirectional", "hausdorff_max", "coverage_min", "precision_tau", "recall_tau", "f1_tau", "mean_tan_angle_error_deg"):
+            if not mm.empty and mcol in mm.columns:
+                metric_sources.append((mcol, mm, mcol))
+        metric_sources = metric_sources[:8]
+
+        if metric_sources:
+            x = np.arange(len(metric_sources), dtype=float)
+            width = 0.8 / max(1, len(methods))
+            for i, method in enumerate(methods):
+                means = []
+                iqr = []
+                for _, df_src, col in metric_sources:
+                    sub = df_src[df_src["method"] == method]
+                    v = pd.to_numeric(sub[col], errors="coerce").to_numpy(float)
+                    v = v[np.isfinite(v)]
+                    if v.size == 0:
+                        means.append(np.nan)
+                        iqr.append(0.0)
+                    else:
+                        means.append(float(np.mean(v)))
+                        iqr.append(float(np.percentile(v, 75) - np.percentile(v, 25)))
+                means_arr = np.asarray(means, float)
+                iqr_arr = np.asarray(iqr, float)
+                xpos = x - 0.4 + (i + 0.5) * width
+                ax1.errorbar(xpos, means_arr, yerr=iqr_arr, fmt="o-", linewidth=1.0, markersize=3, capsize=2, label=method)
+            ax1.set_xticks(x)
+            ax1.set_xticklabels([m[0] for m in metric_sources], rotation=25, ha="right", fontsize=8)
+            ax1.set_ylabel("mean ± IQR")
+            ax1.grid(axis="y", alpha=0.2)
+            ax1.legend(loc="best", fontsize=7, ncol=2)
+
+        plt.tight_layout()
+        out_png = os.path.join(out_dir, f"dataset_multicue_ablation_{suffix}.png")
+        fig.savefig(out_png, bbox_inches="tight")
+        plt.close(fig)
+        outputs[f"dataset_multicue_ablation_{suffix}_png"] = out_png
+
+    _log(verbose, f"[summarize] multicue ablation outputs: {list(outputs.keys())}")
+    return outputs
+
+
+def _plot_gt_supervision_timing_detail(out_dir: str, *, verbose: bool = False) -> Dict[str, str]:
+    outputs: Dict[str, str] = {}
+    df_sup = _safe_read_csv(os.path.join(out_dir, "dataset_gt_supervision_timings.csv"))
+    df_center = _safe_read_csv(os.path.join(out_dir, "dataset_gt_centering_timing_all.csv"))
+    df_multi = _safe_read_csv(os.path.join(out_dir, "dataset_multi_cue_timing_all.csv"))
+    if df_sup is None and df_center is None and df_multi is None:
+        return outputs
+
+    if df_center is not None and not df_center.empty:
+        if "image" in df_center.columns and "atomic_centering_sec" in df_center.columns and "combined_centering_sec" in df_center.columns:
+            d = df_center.copy()
+            d["image"] = d["image"].astype(str)
+            a = pd.to_numeric(d["atomic_centering_sec"], errors="coerce").fillna(0.0)
+            c = pd.to_numeric(d["combined_centering_sec"], errors="coerce").fillna(0.0)
+            x = np.arange(len(d), dtype=float)
+            fig_w = max(9.0, 0.35 * len(d))
+            fig, ax = plt.subplots(figsize=(fig_w, 4.2), dpi=170)
+            ax.bar(x, a.to_numpy(float), color="#4c78a8", label="atomic_centering_sec")
+            ax.bar(x, c.to_numpy(float), bottom=a.to_numpy(float), color="#f28e2b", label="combined_centering_sec")
+            ax.set_xticks(x)
+            ax.set_xticklabels(d["image"].tolist(), rotation=35, ha="right", fontsize=8)
+            ax.set_ylabel("seconds")
+            ax.set_title("GT centering time per image")
+            ax.grid(axis="y", alpha=0.2)
+            ax.legend(loc="best", fontsize=8)
+            plt.tight_layout()
+            out_png = os.path.join(out_dir, "dataset_timing_gt_centering.png")
+            fig.savefig(out_png, bbox_inches="tight")
+            plt.close(fig)
+            outputs["dataset_timing_gt_centering_png"] = out_png
+
+    if df_multi is not None and not df_multi.empty:
+        method_cols = [c for c in df_multi.columns if ("costmap" in str(c).lower() or "dijkstra" in str(c).lower())]
+        if method_cols:
+            sums = []
+            labels = []
+            for c in sorted(method_cols):
+                vals = pd.to_numeric(df_multi[c], errors="coerce").to_numpy(float)
+                vals = vals[np.isfinite(vals)]
+                if vals.size:
+                    labels.append(str(c))
+                    sums.append(float(np.sum(vals)))
+            if sums:
+                fig, ax = plt.subplots(figsize=(max(8.0, 0.45 * len(labels)), 4.2), dpi=170)
+                ax.bar(np.arange(len(labels)), sums, color="#59a14f", alpha=0.88)
+                ax.set_xticks(np.arange(len(labels)))
+                ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
+                ax.set_ylabel("total seconds")
+                ax.set_title("Per multi-cue method total time")
+                ax.grid(axis="y", alpha=0.2)
+                plt.tight_layout()
+                out_png = os.path.join(out_dir, "dataset_timing_multicue_per_method.png")
+                fig.savefig(out_png, bbox_inches="tight")
+                plt.close(fig)
+                outputs["dataset_timing_multicue_per_method_png"] = out_png
+
+    if df_sup is not None and not df_sup.empty:
+        d = df_sup.copy()
+        d["component"] = d["component"].astype(str)
+        d["mean_sec"] = pd.to_numeric(d.get("mean_sec"), errors="coerce")
+        d = d[np.isfinite(d["mean_sec"])].copy()
+        if not d.empty:
+            d = d.sort_values("mean_sec", ascending=False).head(12)
+            labels = d["component"].tolist()
+            vals = d["mean_sec"].to_numpy(float)
+            fig, ax = plt.subplots(figsize=(max(8.0, 0.48 * len(labels)), 4.2), dpi=170)
+            ax.bar(np.arange(len(labels)), vals, color="#9c755f", alpha=0.88)
+            ax.set_xticks(np.arange(len(labels)))
+            ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
+            ax.set_ylabel("seconds")
+            ax.set_title("Pre-step shared components")
+            ax.grid(axis="y", alpha=0.2)
+            plt.tight_layout()
+            out_png = os.path.join(out_dir, "dataset_timing_prestep_components.png")
+            fig.savefig(out_png, bbox_inches="tight")
+            plt.close(fig)
+            outputs["dataset_timing_prestep_components_png"] = out_png
+
+    _log(verbose, f"[summarize] gt timing detail outputs: {list(outputs.keys())}")
+    return outputs
+
+
 def summarize_dataset_metrics(
     save_folder: str,
     *,
     out_dir: Optional[str] = None,
     baseline_roots: Optional[List[str]] = None,
     depth_timing_csv: Optional[str] = None,
+    image_filter: Optional[List[str]] = None,
     verbose: bool = True,
 ) -> Dict[str, object]:
     """
@@ -3129,6 +3459,10 @@ def summarize_dataset_metrics(
         os.makedirs(out_dir, exist_ok=True)
 
     image_dirs = _list_image_metric_dirs(metrics_root)
+    if image_filter is not None:
+        filter_set = {str(f) for f in image_filter}
+        image_dirs = [d for d in image_dirs if os.path.basename(d) in filter_set]
+        _log(verbose, f"[summarize] image_filter active: {len(image_dirs)} image(s) kept from filter={filter_set}")
     evaluated_images_set = {os.path.basename(p) for p in image_dirs}
     report: Dict[str, object] = {
         "metrics_root": metrics_root,
@@ -3195,6 +3529,10 @@ def summarize_dataset_metrics(
             verbose=verbose,
         )
     )
+    df_width_all = _safe_read_csv(os.path.join(out_dir, "dataset_width_summary_all.csv"))
+    df_midline_all = _safe_read_csv(os.path.join(out_dir, "dataset_midline_metrics_all.csv"))
+    outputs.update(_plot_multicue_ablation(df_width_all, df_midline_all, out_dir, verbose=verbose))
+    outputs.update(_plot_gt_supervision_timing_detail(out_dir, verbose=verbose))
 
     # Organize timing-related summary artifacts under a dedicated subfolder.
     timing_dir = os.path.join(out_dir, "timing")
