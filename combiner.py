@@ -4,6 +4,13 @@ from __future__ import annotations
 import os, math
 import numpy as np
 import cv2
+import matplotlib
+matplotlib.use("Agg")
+matplotlib.rcParams.update({
+    "figure.max_open_warning": 0,
+    "path.simplify": True,
+    "path.simplify_threshold": 1.0,
+})
 
 # --- imports that exist in your tree; keep both fallbacks ---
 from cracktools.segmentation import edge_masks, edges_tracking
@@ -182,7 +189,7 @@ def plot_greedy_branch_debug(
         ax_b.set_ylim(yb1, yb0)
 
     plt.tight_layout()
-    plt.savefig(out_path, dpi=200)
+    plt.savefig(out_path, dpi=100)
     plt.close(fig)
 
 
@@ -563,7 +570,7 @@ def _opsec_plot_mask_bbox_only(
     ax.set_title(title or "MASK / BBOX OPSEC")
     ax.axis("off")
 
-    fig.savefig(out_path, bbox_inches="tight")
+    fig.savefig(out_path)
     plt.close(fig)
 
 def _atomic_mask_global(cr, H, W, debug_dir=None):
@@ -1591,7 +1598,7 @@ def dominant_segments_from_group(
         ax.axis("off")
 
         out = os.path.join(debug_dir, f"{debug_tag}_final.png")
-        fig.savefig(out, bbox_inches="tight", dpi=200)
+        fig.savefig(out, dpi=100)
         plt.close(fig)
 
     # -----------------------------
@@ -1784,7 +1791,7 @@ def plot_branch_territory_debug_pre(
     ax.axis("off")
 
     out = os.path.join(debug_dir, out_filename or f"{debug_tag}_pre.png")
-    fig.savefig(out, bbox_inches="tight", dpi=200)
+    fig.savefig(out, dpi=100)
     plt.close(fig)
 
 

@@ -2651,7 +2651,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
      
     def run_et_metrics_current_image_quick(
         self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True,
-        *, best_method_key=None, reexport=False, run_atomic_width_eval: bool = False,
+        *, best_method_key=None, reexport=True, run_atomic_width_eval: bool = False,
     ):
         """
         Single-image DT/BEST/ET runner using the shared batch-compatible path.
@@ -2682,7 +2682,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
     # Backward-compatible alias
     def run_manual_metrics_current_image_quick(
         self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True,
-        *, best_method_key=None, reexport=False, run_atomic_width_eval: bool = False,
+        *, best_method_key=None, reexport=True, run_atomic_width_eval: bool = False,
     ):
         return self.run_et_metrics_current_image_quick(
             tau_px=tau_px,

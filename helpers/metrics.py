@@ -17,6 +17,8 @@ matplotlib.rcParams.update({
     "text.kerning_factor": 0,
     "font.family": "DejaVu Sans",
     "axes.unicode_minus": False,
+    "path.simplify": True,
+    "path.simplify_threshold": 1.0,
 })
 
 import matplotlib.pyplot as plt
@@ -1034,7 +1036,7 @@ def _plot_gt_normals(mask_bin, mid_xy, e1_xy, e2_xy, out_png, title):
     plt.title(title)
     plt.axis('equal')
     plt.tight_layout()
-    plt.savefig(out_png, dpi=200)
+    plt.savefig(out_png, dpi=100)
     plt.close()
 
 import base64
@@ -1321,7 +1323,7 @@ def _plot_seg_provenance(
         keep = np.concatenate([keep, pad], axis=0)
     miss = ~keep
 
-    fig, ax = plt.subplots(figsize=(7, 3), dpi=220)
+    fig, ax = plt.subplots(figsize=(7, 3), dpi=100)
     ax.set_title(title, fontsize=10)
     ax.axis("off")
     ax.plot(S[:, 0], S[:, 1], lw=1.0, alpha=0.25, color="black")
@@ -1354,7 +1356,7 @@ def _plot_seg_provenance(
             _plot_runs(bite, color=(0.95, 0.6, 0.05), lw=2.8)
 
     try:
-        fig.savefig(out_png, bbox_inches="tight")
+        fig.savefig(out_png)
     finally:
         plt.close(fig)
 
@@ -3101,7 +3103,7 @@ def compute_projected_width_diffs(
 
                 mask_crop = gt_full[y0c:y1c, x0c:x1c]
 
-                fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
+                fig, ax = plt.subplots(figsize=(6, 6), dpi=150)
                 ax.set_facecolor("white")
                 ax.imshow(
                     mask_crop,
@@ -3162,7 +3164,7 @@ def compute_projected_width_diffs(
                     f"{base_name}_{method}_width_baseline_projected_overlay.png",
                 )
 
-                fig.savefig(out_path, dpi=200, bbox_inches="tight")
+                fig.savefig(out_path, dpi=150)
                 plt.close(fig)
 
                 print(f"[BASELINE B1] wrote overlay: {out_path}")
@@ -3241,7 +3243,7 @@ def compute_projected_width_diffs(
 
             gt_crop = gt_full[y0c:y1c, x0c:x1c]
 
-            fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
+            fig, ax = plt.subplots(figsize=(6, 6), dpi=100)
             ax.set_facecolor("white")
             ax.imshow(
                 gt_crop,
@@ -3350,7 +3352,7 @@ def compute_projected_width_diffs(
                 out_dir,
                 f"{base_name}_{support_method}_b1_projection_diagnostics.png",
             )
-            fig.savefig(out_path, dpi=200, bbox_inches="tight")
+            fig.savefig(out_path, dpi=100)
             plt.close(fig)
             print(f"[BASELINE B1] wrote projection diagnostics: {out_path}")
         except Exception as e:
@@ -3797,7 +3799,7 @@ def _debug_plot_correspondence_single(
     )
 
     fig.tight_layout()
-    fig.savefig(out_path, dpi=200)
+    fig.savefig(out_path, dpi=100)
     plt.close(fig)
 
     print(f"[CORRESP DEBUG] wrote {out_path}")
@@ -5184,19 +5186,29 @@ def compare_widths_for_aligned_cracks(
 
         return out
 
-    def _branch_shared_length(branch_obj, shared_ids):
+    def _branch_shared_length(branch_obj, shared_ids, *, allow_none_atomic=False):
         L = 0.0
         for Sx, mx in zip(branch_obj.get("segs", []), branch_obj.get("meta", [])):
             if Sx is None or len(Sx) < 2:
                 continue
             mmx = mx if isinstance(mx, dict) else {}
             aid = mmx.get("atomic_id", None)
-            if aid is None or str(aid) not in shared_ids:
+            if aid is None:
+                if not allow_none_atomic:
+                    continue
+            elif str(aid) not in shared_ids:
                 continue
             L += _poly_length(np.asarray(Sx, float))
         return float(L)
 
-    def _greedy_match_branches_geom(gt_br, pr_br, *, lambda_seg=0.20, return_diag=False):
+    def _greedy_match_branches_geom(
+        gt_br,
+        pr_br,
+        *,
+        lambda_seg=0.20,
+        return_diag=False,
+        allow_multi_pred_per_gt=False,
+    ):
         """
         Shared-support objective:
         final_score = min(Lp_shared, Lg_shared) * (1 + lambda_seg * ns/max(np,ng,1))
@@ -5205,6 +5217,10 @@ def compare_widths_for_aligned_cracks(
         scored_candidates = []
         shared_candidates = []
         pred_branch_ids = {int(p["branch_id"]) for p in (pr_br or [])}
+        gt_all_no_atomics = bool(gt_br) and all(
+            len({str(a) for a in (g.get("atomic_ids") or set())}) == 0
+            for g in (gt_br or [])
+        )
 
         for g in (gt_br or []):
             g_id = int(g["branch_id"])
@@ -5212,12 +5228,16 @@ def compare_widths_for_aligned_cracks(
             for p in (pr_br or []):
                 p_id = int(p["branch_id"])
                 Ap = {str(a) for a in (p.get("atomic_ids") or set())}
-                As = sorted(Ap & Ag)
+                As = sorted(Ap) if gt_all_no_atomics else sorted(Ap & Ag)
                 if not As:
                     continue
 
                 Lp_shared = _branch_shared_length(p, set(As))
-                Lg_shared = _branch_shared_length(g, set(As))
+                Lg_shared = (
+                    float(g.get("length", 0.0))
+                    if gt_all_no_atomics
+                    else _branch_shared_length(g, set(As))
+                )
                 L_shared = float(min(Lp_shared, Lg_shared))
 
                 ns = int(len(As))
@@ -5256,7 +5276,9 @@ def compare_widths_for_aligned_cracks(
         for c in scored_candidates:
             gb = int(c["gt_branch_id"])
             pb = int(c["pr_branch_id"])
-            if gb in used_g or pb in used_p:
+            if pb in used_p:
+                continue
+            if (not allow_multi_pred_per_gt) and (gb in used_g):
                 continue
             used_g.add(gb)
             used_p.add(pb)
@@ -5272,6 +5294,7 @@ def compare_widths_for_aligned_cracks(
             "shared_candidates": shared_candidates,
             "pred_no_shared": set(pred_branch_ids - pred_with_shared),
             "pred_zero_shared_length": set(pred_with_shared - pred_with_scored),
+            "gt_all_no_atomics": bool(gt_all_no_atomics),
         }
         return matches, diag
 
@@ -5314,6 +5337,49 @@ def compare_widths_for_aligned_cracks(
             or gt_entry_obj.get("segments_meta")
             or ((gt_entry_obj.get("dominance_meta") or {}).get("segments_meta") or [])
         )
+
+        # === DIAG: trace what meta source and atomic_id values were loaded ===
+        _dom_seg_meta_diag = ((gt_entry_obj.get("dominance_meta") or {}).get("segments_meta") or [])
+        print(f"[EXTRACT META DIAG] kind={gt_entry_obj.get('kind','?')} id={gt_entry_obj.get('id','?')}")
+        print(f"[EXTRACT META DIAG]   midline_segments_meta present={gt_entry_obj.get('midline_segments_meta') is not None}")
+        print(f"[EXTRACT META DIAG]   dominance_meta present={gt_entry_obj.get('dominance_meta') is not None}")
+        print(f"[EXTRACT META DIAG]   dominance_meta.segments_meta len={len(_dom_seg_meta_diag)}")
+        for _i, _dsm in enumerate(_dom_seg_meta_diag[:4]):
+            print(f"[EXTRACT META DIAG]   dom_seg_meta[{_i}] = {_dsm}")
+        print(f"[EXTRACT META DIAG]   resolved meta source len={len(meta) if isinstance(meta, list) else 'NOT_LIST'}")
+        for _i, _m in enumerate((meta or [])[:4]):
+            print(f"[EXTRACT META DIAG]   meta[{_i}] atomic_id={(_m or {}).get('atomic_id','MISSING')} branch_id={(_m or {}).get('branch_id','MISSING')}")
+        # === END DIAG ===
+
+        # Backfill atomic_id from dominance_meta.segments_meta when the primary
+        # meta source (often midline_segments_meta) does not carry atomic tags.
+        if isinstance(meta, list):
+            dom_seg_meta = (
+                (gt_entry_obj.get("dominance_meta") or {}).get("segments_meta") or []
+            )
+            for i, m in enumerate(meta):
+                if isinstance(m, dict) and m.get("atomic_id") is None and i < len(dom_seg_meta):
+                    dsm = dom_seg_meta[i]
+                    if isinstance(dsm, dict):
+                        if dsm.get("atomic_id") is not None:
+                            m["atomic_id"] = str(dsm["atomic_id"])
+                        elif isinstance(dsm.get("atomic_ids"), (list, tuple)) and dsm.get("atomic_ids"):
+                            aid0 = dsm.get("atomic_ids")[0]
+                            if aid0 is not None:
+                                m["atomic_id"] = str(aid0)
+                                m.setdefault("atomic_ids", [str(a) for a in dsm.get("atomic_ids") if a is not None])
+
+                # Secondary fallback: infer primary atomic_id from atomic_ids list already on meta.
+                if isinstance(m, dict) and m.get("atomic_id") is None:
+                    aid_list = m.get("atomic_ids")
+                    if isinstance(aid_list, (list, tuple)) and aid_list:
+                        aid0 = aid_list[0]
+                        if aid0 is not None:
+                            m["atomic_id"] = str(aid0)
+
+        # === DIAG: confirm what atomic_ids look like after backfill ===
+        print(f"[EXTRACT META POST-BACKFILL]   meta atomic_ids after backfill: {[(_m or {}).get('atomic_id') for _m in (meta or [])[:4]]}")
+        # === END DIAG ===
 
         if not isinstance(meta, list):
             meta = []
@@ -6158,7 +6224,7 @@ def compare_widths_for_aligned_cracks(
                 print(f"[GT_SUP DEBUG] cid={cid} bite EMPTY")
                 return
 
-            fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
+            fig, ax = plt.subplots(figsize=(6, 6), dpi=100)
             ax.set_title(f"GT SUP — RAW DOMINANCE (cid={cid})")
             ax.axis("off")
 
@@ -6181,7 +6247,7 @@ def compare_widths_for_aligned_cracks(
 
             os.makedirs(out_dir, exist_ok=True)
             out = os.path.join(out_dir, "gt_sup_dom_raw.png")
-            fig.savefig(out, bbox_inches="tight")
+            fig.savefig(out)
             plt.close(fig)
 
             print(f"[GT_SUP DEBUG] wrote {out}")
@@ -6202,7 +6268,7 @@ def compare_widths_for_aligned_cracks(
             if S is None or len(S) < 2:
                 continue
             aid = m.get("atomic_id")
-            if aid is None or str(aid) not in effective_members:
+            if aid is not None and str(aid) not in effective_members:
                 print(f"[STAGE2 EXCL] cid={cid} level=atomic atomic={aid} reason=not_in_effective_members")
                 log_invalid(
                     image=base_name,
@@ -6336,19 +6402,29 @@ def compare_widths_for_aligned_cracks(
 
             return out
 
-        def _branch_shared_length(branch_obj, shared_ids):
+        def _branch_shared_length(branch_obj, shared_ids, *, allow_none_atomic=False):
             L = 0.0
             for Sx, mx in zip(branch_obj.get("segs", []), branch_obj.get("meta", [])):
                 if Sx is None or len(Sx) < 2:
                     continue
                 mmx = mx if isinstance(mx, dict) else {}
                 aid = mmx.get("atomic_id", None)
-                if aid is None or str(aid) not in shared_ids:
+                if aid is None:
+                    if not allow_none_atomic:
+                        continue
+                elif str(aid) not in shared_ids:
                     continue
                 L += _poly_length(np.asarray(Sx, float))
             return float(L)
 
-        def _greedy_match_branches_geom(gt_br, pr_br, *, lambda_seg=0.20, return_diag=False):
+        def _greedy_match_branches_geom(
+            gt_br,
+            pr_br,
+            *,
+            lambda_seg=0.20,
+            return_diag=False,
+            allow_multi_pred_per_gt=False,
+        ):
             """
             Shared-support objective:
             final_score = min(Lp_shared, Lg_shared) * (1 + lambda_seg * ns/max(np,ng,1))
@@ -6357,6 +6433,10 @@ def compare_widths_for_aligned_cracks(
             scored_candidates = []
             shared_candidates = []
             pred_branch_ids = {int(p["branch_id"]) for p in (pr_br or [])}
+            gt_all_no_atomics = bool(gt_br) and all(
+                len({str(a) for a in (g.get("atomic_ids") or set())}) == 0
+                for g in (gt_br or [])
+            )
 
             for g in (gt_br or []):
                 g_id = int(g["branch_id"])
@@ -6364,12 +6444,16 @@ def compare_widths_for_aligned_cracks(
                 for p in (pr_br or []):
                     p_id = int(p["branch_id"])
                     Ap = {str(a) for a in (p.get("atomic_ids") or set())}
-                    As = sorted(Ap & Ag)
+                    As = sorted(Ap) if gt_all_no_atomics else sorted(Ap & Ag)
                     if not As:
                         continue
 
                     Lp_shared = _branch_shared_length(p, set(As))
-                    Lg_shared = _branch_shared_length(g, set(As))
+                    Lg_shared = (
+                        float(g.get("length", 0.0))
+                        if gt_all_no_atomics
+                        else _branch_shared_length(g, set(As))
+                    )
                     L_shared = float(min(Lp_shared, Lg_shared))
 
                     ns = int(len(As))
@@ -6408,7 +6492,9 @@ def compare_widths_for_aligned_cracks(
             for c in scored_candidates:
                 gb = int(c["gt_branch_id"])
                 pb = int(c["pr_branch_id"])
-                if gb in used_g or pb in used_p:
+                if pb in used_p:
+                    continue
+                if (not allow_multi_pred_per_gt) and (gb in used_g):
                     continue
                 used_g.add(gb)
                 used_p.add(pb)
@@ -6424,6 +6510,7 @@ def compare_widths_for_aligned_cracks(
                 "shared_candidates": shared_candidates,
                 "pred_no_shared": set(pred_branch_ids - pred_with_shared),
                 "pred_zero_shared_length": set(pred_with_shared - pred_with_scored),
+                "gt_all_no_atomics": bool(gt_all_no_atomics),
             }
             return matches, diag
 
@@ -6458,6 +6545,7 @@ def compare_widths_for_aligned_cracks(
                     if aid is None:
                         gt_missing_atomic_segs.append(np.asarray(Sg, float))
                         gt_missing_atomic_meta.append(dict(mg))
+                        print(f"[STAGE2 META DIAG] seg#{i} full meta dict = {mg}")
                         print(f"[STAGE2 DBG] HOLD GT seg#{i} atomic=None (fallback candidate)")
                         continue
 
@@ -6520,11 +6608,16 @@ def compare_widths_for_aligned_cracks(
 
         if pr_br:
             if gt_br:
+                gt_all_no_atomics_for_match = bool(gt_br) and all(
+                    len(g.get("atomic_ids") or set()) == 0
+                    for g in gt_br
+                )
                 matches, branch_diag = _greedy_match_branches_geom(
                     gt_br,
                     pr_br,
                     lambda_seg=0.20,
                     return_diag=True,
+                    allow_multi_pred_per_gt=gt_all_no_atomics_for_match,
                 )
             else:
                 matches = []
@@ -6918,7 +7011,7 @@ def compare_widths_for_aligned_cracks(
             fig, axes = plt.subplots(
                 1, 2,
                 figsize=(10, 5),
-                dpi=200,
+                dpi=100,
                 sharex=True,
                 sharey=True
             )
@@ -6985,7 +7078,7 @@ def compare_widths_for_aligned_cracks(
             )
 
             out = os.path.join(out_dir, "stage2_prune.png")
-            fig.savefig(out, bbox_inches="tight", dpi=200)
+            fig.savefig(out, dpi=100)
             plt.close(fig)
 
             print(f"[STAGE2 OPSEC] wrote {out}")
@@ -7203,7 +7296,7 @@ def compare_widths_for_aligned_cracks(
                     print(f"[STAGE4] {title}: clip window does not intersect bite bbox -> skip")
                     return
 
-            fig, ax = plt.subplots(figsize=(6, 6), dpi=220)
+            fig, ax = plt.subplots(figsize=(6, 6), dpi=100)
             ax.set_title(title, fontsize=12)
             ax.axis("off")
 
@@ -7230,7 +7323,7 @@ def compare_widths_for_aligned_cracks(
                 )
             )
 
-            fig.savefig(out_png, bbox_inches="tight")
+            fig.savefig(out_png)
             plt.close(fig)
             print(f"[STAGE4] wrote {out_png}")
 
@@ -7319,7 +7412,7 @@ def compare_widths_for_aligned_cracks(
             overlay[..., 0] = GT.astype(np.float32)  # R
             overlay[..., 2] = PR.astype(np.float32)  # B
 
-            fig, ax = plt.subplots(figsize=(7, 6), dpi=220)
+            fig, ax = plt.subplots(figsize=(7, 6), dpi=100)
             ax.set_title("Stage4 overlay in GT bite-local frame (GT=R, Pred=B)", fontsize=11)
             ax.imshow(overlay, interpolation="nearest")
             ax.axis("off")
@@ -7335,7 +7428,7 @@ def compare_widths_for_aligned_cracks(
                 )
             )
 
-            fig.savefig(out_png, bbox_inches="tight")
+            fig.savefig(out_png)
             plt.close(fig)
             print(f"[STAGE4] wrote {out_png}")
 
@@ -7559,7 +7652,7 @@ def compare_widths_for_aligned_cracks(
         # Plot
         # ----------------------------
         fig, axes = plt.subplots(
-            1, 2, figsize=(12, 6), dpi=240, sharex=True, sharey=True
+            1, 2, figsize=(12, 6), dpi=100, sharex=True, sharey=True
         )
 
         axes[0].set_title("Stage 4 — GT supervision", fontsize=10)
@@ -7672,7 +7765,7 @@ def compare_widths_for_aligned_cracks(
             f"stage4_dominance_bite_{midline_type}_{mode}.png",
         )
         os.makedirs(cid_opsec_dir, exist_ok=True)
-        fig.savefig(outB, bbox_inches="tight")
+        fig.savefig(outB)
         plt.close(fig)
 
         print(f"[OPSEC] Stage-4 dominance plot written: {outB}")
@@ -8529,7 +8622,7 @@ def compare_widths_for_aligned_cracks(
             # --------------------------------------------------
             # figure
             # --------------------------------------------------
-            fig, axes = plt.subplots(1, 2, figsize=(10, 5), dpi=200, sharex=True, sharey=True)
+            fig, axes = plt.subplots(1, 2, figsize=(10, 5), dpi=100, sharex=True, sharey=True)
 
             axes[0].set_title("GT supervision (Stage 5, dominance-resolved)", fontsize=10)
             axes[1].set_title("Prediction (Stage 5, dominance-resolved)", fontsize=10)
@@ -8614,7 +8707,7 @@ def compare_widths_for_aligned_cracks(
 
             os.makedirs(cid_opsec_dir, exist_ok=True)
             out = os.path.join(cid_opsec_dir, "stage5_geom_provenance.png")
-            fig.savefig(out, bbox_inches="tight", dpi=200)
+            fig.savefig(out, dpi=100)
             plt.close(fig)
 
             print(f"[OPSEC STAGE5 PLOT] wrote: {out}")

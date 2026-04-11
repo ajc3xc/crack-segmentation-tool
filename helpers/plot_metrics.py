@@ -7,7 +7,7 @@ matplotlib.rcParams.update({
     "axes.unicode_minus": False,
     "path.simplify": True,
     "path.simplify_threshold": 1.0,
-                "savefig.dpi": 180,
+                "savefig.dpi": 150,
 })
 
 import matplotlib.pyplot as plt

@@ -624,6 +624,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 continue
 
             meta = mv.get("midline_segments_meta")
+            dom_segs_meta = ((c.get("dominance_meta") or {}).get("segments_meta") or [])
+            members = [str(m) for m in (c.get("members") or []) if m is not None]
             if not isinstance(meta, list) or len(meta) != len(method_segs):
                 meta = [{"branch_id": int(i), "seg_idx": int(i)} for i in range(len(method_segs))]
             else:
@@ -634,6 +636,16 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     d.setdefault("seg_idx", int(i))
                     fixed.append(d)
                 meta = fixed
+
+            # Backfill atomic_id for method variants that do not carry per-segment atomic tags.
+            for i, m in enumerate(meta):
+                if m.get("atomic_id") is None and i < len(dom_segs_meta):
+                    dsm = dom_segs_meta[i]
+                    if isinstance(dsm, dict) and dsm.get("atomic_id") is not None:
+                        m["atomic_id"] = str(dsm["atomic_id"])
+                # Fallback when dominance metadata is missing/incomplete.
+                if m.get("atomic_id") is None and i < len(members):
+                    m["atomic_id"] = str(members[i])
 
             ent = {
                 "id": cid,
@@ -800,7 +812,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             r = self._run_metrics_for_image_idx(
                 idx,
                 edge_params=edge_params,
-                export_supervision=False,
+                export_supervision=True,
                 display=display,
                 width_eval_mode="dt_best_et",
                 best_method_key=best_non_dt,
@@ -1589,6 +1601,28 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     gt_mask=gt_full,
                     depth_full=getattr(self, "current_depth", None),
                 )
+
+                # DIAG: verify what was written to gt_supervision.json
+                try:
+                    import json as _json
+                    gt_sup_json_path = os.path.join(gt_sup_root, "gt_supervision.json")
+                    with open(gt_sup_json_path, "r", encoding="utf-8") as _f:
+                        _written = _json.load(_f)
+                    for _c in (_written.get("cracks") or []):
+                        if str(_c.get("kind", "")).lower() == "combined":
+                            _msm = _c.get("midline_segments_meta") or []
+                            _dsm = (_c.get("dominance_meta") or {}).get("segments_meta") or []
+                            print(f"[EXPORT DIAG] combined id={_c.get('id')} midline_segments_meta len={len(_msm)}")
+                            for _i, _m in enumerate(_msm[:4]):
+                                print(
+                                    f"[EXPORT DIAG]   msm[{_i}] atomic_id={(_m or {}).get('atomic_id','MISSING')} "
+                                    f"branch_id={(_m or {}).get('branch_id','MISSING')}"
+                                )
+                            print(f"[EXPORT DIAG]   dominance_meta.segments_meta len={len(_dsm)}")
+                            for _i, _m in enumerate(_dsm[:4]):
+                                print(f"[EXPORT DIAG]   dsm[{_i}] atomic_id={(_m or {}).get('atomic_id','MISSING')}")
+                except Exception as _de:
+                    print(f"[EXPORT DIAG] failed: {_de}")
 
                 print(f"\n[DEBUG METRICS] GT supervision export completed for {base_name}\n")
 

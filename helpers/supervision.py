@@ -3166,6 +3166,7 @@ def export_gt_supervision_for_image(
         stitched_meta = []
         for bid in sorted(branch_groups.keys()):
             segs_b = branch_groups[bid]
+            meta_b = branch_meta.get(bid, [])
             S_chain, ok_chain, reason_chain = stitch_branch_segments(
                 segs_b,
                 max_jump=10.0,
@@ -3174,12 +3175,39 @@ def export_gt_supervision_for_image(
             if not ok_chain or S_chain is None or len(np.asarray(S_chain, float)) < 2:
                 print(f"[WARN] stitch failed for branch {int(bid)}: {reason_chain}")
                 continue
+
+            # Preserve atomic membership provenance on stitched GT branches.
+            atomic_ids = []
+            seen_atomic = set()
+            for mm in meta_b:
+                mm = mm if isinstance(mm, dict) else {}
+                # Prefer explicit atomic_ids list when present.
+                aid_list = mm.get("atomic_ids")
+                if isinstance(aid_list, (list, tuple)):
+                    for a in aid_list:
+                        if a is None:
+                            continue
+                        a_s = str(a)
+                        if a_s not in seen_atomic:
+                            atomic_ids.append(a_s)
+                            seen_atomic.add(a_s)
+                aid = mm.get("atomic_id")
+                if aid is not None:
+                    a_s = str(aid)
+                    if a_s not in seen_atomic:
+                        atomic_ids.append(a_s)
+                        seen_atomic.add(a_s)
+
             stitched_segs.append(np.asarray(S_chain, float))
-            stitched_meta.append({
+            meta_rec = {
                 "branch_id": int(bid),
                 "seg_idx": 0,
                 "stitched": True,
-            })
+            }
+            if atomic_ids:
+                meta_rec["atomic_ids"] = list(atomic_ids)
+                meta_rec["atomic_id"] = str(atomic_ids[0])
+            stitched_meta.append(meta_rec)
 
         print(f"[DEBUG] returning {len(stitched_segs)} stitched branches")
         return stitched_segs, stitched_meta
