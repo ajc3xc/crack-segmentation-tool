@@ -5142,14 +5142,36 @@ def compare_widths_for_aligned_cracks(
                 continue
             m = m if isinstance(m, dict) else {}
 
+            def _meta_atomic_ids(mm):
+                out_ids = []
+                aid0 = mm.get("atomic_id", None)
+                if aid0 is not None:
+                    out_ids.append(str(aid0))
+                aid_list = mm.get("atomic_ids", None)
+                if isinstance(aid_list, (list, tuple, set)):
+                    for a in aid_list:
+                        if a is not None:
+                            out_ids.append(str(a))
+                # preserve order while removing duplicates
+                return list(dict.fromkeys(out_ids))
+
             if scope_members is not None:
-                aid = m.get("atomic_id", None)
-                if aid is not None and str(aid) not in scope_members:
+                a_ids = _meta_atomic_ids(m)
+                if a_ids and not any(a in scope_members for a in a_ids):
                     continue
 
-            k = _endpoint_pair_key(S, snap=5.0)
-            if k is None:
-                continue
+            # Prefer explicit branch namespace when present (critical for ET split segments);
+            # fallback to endpoint pairing only when branch_id is unavailable.
+            bid_raw = m.get("branch_id", None)
+            if bid_raw is not None:
+                try:
+                    k = ("branch_id", int(bid_raw))
+                except Exception:
+                    k = ("branch_id", str(bid_raw))
+            else:
+                k = _endpoint_pair_key(S, snap=5.0)
+                if k is None:
+                    continue
             groups.setdefault(k, []).append((np.asarray(S, float), dict(m)))
 
         out = []
@@ -5172,6 +5194,11 @@ def compare_widths_for_aligned_cracks(
                 aid = mm.get("atomic_id", None)
                 if aid is not None:
                     aids.add(str(aid))
+                aid_list = mm.get("atomic_ids", None)
+                if isinstance(aid_list, (list, tuple, set)):
+                    for a in aid_list:
+                        if a is not None:
+                            aids.add(str(a))
 
             out.append(
                 {
@@ -6357,15 +6384,34 @@ def compare_widths_for_aligned_cracks(
                     continue
                 m = m if isinstance(m, dict) else {}
 
+                def _meta_atomic_ids(mm):
+                    out_ids = []
+                    aid0 = mm.get("atomic_id", None)
+                    if aid0 is not None:
+                        out_ids.append(str(aid0))
+                    aid_list = mm.get("atomic_ids", None)
+                    if isinstance(aid_list, (list, tuple, set)):
+                        for a in aid_list:
+                            if a is not None:
+                                out_ids.append(str(a))
+                    return list(dict.fromkeys(out_ids))
+
                 # optional: drop segments that are out of scope
                 if scope_members is not None:
-                    aid = m.get("atomic_id", None)
-                    if aid is not None and str(aid) not in scope_members:
+                    a_ids = _meta_atomic_ids(m)
+                    if a_ids and not any(a in scope_members for a in a_ids):
                         continue
 
-                k = _endpoint_pair_key(S, snap=5.0)
-                if k is None:
-                    continue
+                bid_raw = m.get("branch_id", None)
+                if bid_raw is not None:
+                    try:
+                        k = ("branch_id", int(bid_raw))
+                    except Exception:
+                        k = ("branch_id", str(bid_raw))
+                else:
+                    k = _endpoint_pair_key(S, snap=5.0)
+                    if k is None:
+                        continue
                 groups.setdefault(k, []).append((np.asarray(S, float), dict(m)))
 
             out = []
@@ -6390,6 +6436,11 @@ def compare_widths_for_aligned_cracks(
                     aid = mm.get("atomic_id", None)
                     if aid is not None:
                         aids.add(str(aid))
+                    aid_list = mm.get("atomic_ids", None)
+                    if isinstance(aid_list, (list, tuple, set)):
+                        for a in aid_list:
+                            if a is not None:
+                                aids.add(str(a))
 
                 out.append({
                     "branch_id": int(bi),   # synthetic, stable only inside this call
@@ -6612,12 +6663,13 @@ def compare_widths_for_aligned_cracks(
                     len(g.get("atomic_ids") or set()) == 0
                     for g in gt_br
                 )
+                et_multi_match = str(variant_id or "").strip().lower().startswith("et")
                 matches, branch_diag = _greedy_match_branches_geom(
                     gt_br,
                     pr_br,
                     lambda_seg=0.20,
                     return_diag=True,
-                    allow_multi_pred_per_gt=gt_all_no_atomics_for_match,
+                    allow_multi_pred_per_gt=(gt_all_no_atomics_for_match or et_multi_match),
                 )
             else:
                 matches = []
@@ -7059,16 +7111,32 @@ def compare_widths_for_aligned_cracks(
                         )
                     )
 
-            axes[1].legend(
-                handles=[
-                    Line2D([0], [0], color=col_keep, lw=3, label="Kept segments"),
-                    Line2D([0], [0], color=col_drop, lw=3, label="Dropped segments"),
-                    Line2D([0], [0], color="dodgerblue", lw=1.5, label="BBox"),
-                ],
-                loc="lower right",
-                fontsize=8,
-                framealpha=0.9,
+            legend_items = []
+            has_kept = any(S is not None and len(S) >= 2 for S in (gt_kept or [])) or any(
+                S is not None and len(S) >= 2 for S in (pred_kept or [])
             )
+            has_drop = any(S is not None and len(S) >= 2 for S in (gt_dropped or [])) or any(
+                S is not None and len(S) >= 2 for S in (pred_dropped or [])
+            )
+            has_bbox = bool(bb)
+
+            if has_kept:
+                legend_items.append(Line2D([0], [0], color=col_keep, lw=3, label="Kept segments"))
+            if has_drop:
+                legend_items.append(Line2D([0], [0], color=col_drop, lw=3, label="Dropped segments"))
+            if has_bbox:
+                legend_items.append(Line2D([0], [0], color="dodgerblue", lw=1.5, label="BBox"))
+
+            if legend_items:
+                axes[1].legend(
+                    handles=legend_items,
+                    loc="lower right",
+                    fontsize=6,
+                    framealpha=0.8,
+                    markerscale=0.7,
+                    handlelength=1.5,
+                    borderpad=0.5,
+                )
 
             member_str = ", ".join(sorted(effective_members)) if effective_members else ", ".join(sorted(pred_members))
             fig.suptitle(
@@ -7746,19 +7814,24 @@ def compare_widths_for_aligned_cracks(
             S2 = np.asarray(S, float) - np.array([x0, y0], float)
             axes[1].plot(S2[:, 0], S2[:, 1], color=col, lw=2.3, zorder=5)
 
-        # dominance legend
-        legend_handles += [
-            Line2D([0], [0], color="#e41a1c", lw=6, label="GT-only loss"),
-            Line2D([0], [0], color="#377eb8", lw=6, label="Pred-only loss"),
-            Line2D([0], [0], color="#984ea3", lw=6, label="GT ∩ Pred"),
-        ]
+        # dominance legend (dynamic: only include present overlays)
+        if np.any(dom_label == 1):
+            legend_handles.append(Line2D([0], [0], color="#e41a1c", lw=6, label="GT-only loss"))
+        if np.any(dom_label == 2):
+            legend_handles.append(Line2D([0], [0], color="#377eb8", lw=6, label="Pred-only loss"))
+        if np.any(dom_label == 3):
+            legend_handles.append(Line2D([0], [0], color="#984ea3", lw=6, label="GT ∩ Pred"))
 
-        axes[1].legend(
-            handles=legend_handles,
-            loc="lower right",
-            fontsize=8,
-            framealpha=0.9,
-        )
+        if legend_handles:
+            axes[1].legend(
+                handles=legend_handles,
+                loc="lower right",
+                fontsize=6,
+                framealpha=0.8,
+                markerscale=0.7,
+                handlelength=1.5,
+                borderpad=0.5,
+            )
 
         outB = os.path.join(
             cid_opsec_dir,
@@ -8281,68 +8354,88 @@ def compare_widths_for_aligned_cracks(
                 gt_seg_len = int(len(gt_match_seg))
                 gt_match_mode = "segment_local_match_strict"
             else:
-                stage5_unmatched_skips += 1
-                b_only = key[0]
-                n_same_branch = int(
-                    np.sum(
-                        [
-                            1
-                            for k_stage5, arr_stage5 in gt_bucket.items()
-                            if isinstance(k_stage5, tuple) and len(k_stage5) == 2 and int(k_stage5[0]) == int(b_only)
-                            for _ in arr_stage5
-                        ]
-                    )
-                )
-                if len(gt_list) > 0:
-                    reason = "gt_already_consumed"
-                else:
-                    reason = "no_gt_match_strict"
+                # Fallback: for secondary sub-segments, try (branch_id, 0) and allow reuse.
+                fallback_processed = False
+                fallback_key = (key[0], 0)
+                if key[1] != 0 and fallback_key != key:
+                    fb_list = gt_bucket.get(fallback_key, [])
+                    fb_list_avail = [rec for rec in fb_list if id(rec) not in used_gt_ids]
+                    if fb_list_avail:
+                        rec0 = fb_list_avail[0]
+                        # Intentionally do NOT mark as used: GT seg_idx=0 may absorb multiple sub-segments.
+                        gt_match_seg = np.asarray(rec0.get("pts", None), float)
+                        gtw = np.asarray(
+                            rec0.get("width", np.full((len(gt_match_seg),), np.nan, float)),
+                            float,
+                        ).reshape(-1)
+                        if gtw.size == len(gt_match_seg):
+                            gt_seg_len = int(len(gt_match_seg))
+                            gt_match_mode = "branch_fallback_seg0"
+                            fallback_processed = True
 
-                print(
-                    f"[STAGE5 STRICT SKIP] cid={cid} branch_id={branch_dbg} seg_idx={seg_idx_dbg} "
-                    f"reason={reason} key={key}"
-                )
-                log_invalid(
-                    image=base_name,
-                    cid=cid,
-                    level="atomic",
-                    reason=reason,
-                    length=_polyline_length(pts),
-                    n_segments=1,
-                    pred_members=pred_members,
-                    gt_members=gt_members,
-                    overlap=overlap,
-                    entity_id=atomic_dbg,
-                    branch_id=branch_dbg,
-                    extra_info=f"key={key}",
-                )
-                if DEBUG_TOPOLOGY_TRACE:
-                    _append_csv_row(
-                        stage5_strict_skip_csv,
-                        [
-                            str(base_name),
-                            str(cid),
-                            str(branch_dbg),
-                            str(seg_idx_dbg),
-                            int(L),
-                            str(reason),
-                            int(pred_total_pts),
-                            int(gt_total_pts),
-                            int(n_same_branch),
-                        ],
-                        header=[
-                            "image",
-                            "cid",
-                            "branch_id",
-                            "seg_idx",
-                            "L_geom",
-                            "reason",
-                            "pred_len_total",
-                            "gt_len_total",
-                            "num_gt_candidates_same_branch",
-                        ],
+                if not fallback_processed:
+                    stage5_unmatched_skips += 1
+                    b_only = key[0]
+                    n_same_branch = int(
+                        np.sum(
+                            [
+                                1
+                                for k_stage5, arr_stage5 in gt_bucket.items()
+                                if isinstance(k_stage5, tuple) and len(k_stage5) == 2 and int(k_stage5[0]) == int(b_only)
+                                for _ in arr_stage5
+                            ]
+                        )
                     )
-                continue
+                    if len(gt_list) > 0:
+                        reason = "gt_already_consumed"
+                    else:
+                        reason = "no_gt_match_strict"
+
+                    print(
+                        f"[STAGE5 STRICT SKIP] cid={cid} branch_id={branch_dbg} seg_idx={seg_idx_dbg} "
+                        f"reason={reason} key={key}"
+                    )
+                    log_invalid(
+                        image=base_name,
+                        cid=cid,
+                        level="atomic",
+                        reason=reason,
+                        length=_polyline_length(pts),
+                        n_segments=1,
+                        pred_members=pred_members,
+                        gt_members=gt_members,
+                        overlap=overlap,
+                        entity_id=atomic_dbg,
+                        branch_id=branch_dbg,
+                        extra_info=f"key={key}",
+                    )
+                    if DEBUG_TOPOLOGY_TRACE:
+                        _append_csv_row(
+                            stage5_strict_skip_csv,
+                            [
+                                str(base_name),
+                                str(cid),
+                                str(branch_dbg),
+                                str(seg_idx_dbg),
+                                int(L),
+                                str(reason),
+                                int(pred_total_pts),
+                                int(gt_total_pts),
+                                int(n_same_branch),
+                            ],
+                            header=[
+                                "image",
+                                "cid",
+                                "branch_id",
+                                "seg_idx",
+                                "L_geom",
+                                "reason",
+                                "pred_len_total",
+                                "gt_len_total",
+                                "num_gt_candidates_same_branch",
+                            ],
+                        )
+                    continue
 
             # Orientation diagnostic (debug-only): detect local segment reversal.
             orient_flag = "unknown"
@@ -8566,8 +8659,17 @@ def compare_widths_for_aligned_cracks(
             pred_undef_other_segs = []
             pred_full_segs = []
 
+            # Use pred_der_dom_segs directly (same Stage-5 source family as GT side).
+            for S_seg, m_seg in zip(pred_der_dom_segs or [], pred_der_dom_meta or []):
+                if S_seg is None or len(S_seg) < 2:
+                    continue
+                pred_full_segs.append(np.asarray(S_seg, float))
+
+            # Also collect nonfinite runs from width_pairs for overlay detail.
             for wp in (width_pairs or []):
                 if str(wp.get("cid", "")) != str(cid):
+                    continue
+                if str(wp.get("crack_type", "")) != "combined":
                     continue
                 pts_ok = wp.get("pts", None)
                 pw_ok = wp.get("predw", None)
@@ -8575,9 +8677,7 @@ def compare_widths_for_aligned_cracks(
                     continue
 
                 k, uo = _split_pred_nonfinite(pts_ok, pw_ok, min_pts=2)
-                pred_kept_segs.extend(k)
                 pred_undef_other_segs.extend(uo)
-                pred_full_segs.append(np.asarray(pts_ok, float))
             # NO topology pruning allowed:
             # Stage 2 + Stage 4.5 fully define geometry survival.
 
@@ -8689,15 +8789,37 @@ def compare_widths_for_aligned_cracks(
                                 edgecolor="dodgerblue", lw=1.5)
                 )
 
-            legend_items = [
-                Line2D([0],[0], color=col_keep,  lw=2.5, label="Stage-5 geometry (kept)"),
-                Line2D([0],[0], color=col_undef, lw=2.2, label="Pred undef / other nonfinite"),
-                Line2D([0],[0], color=col_bite,  lw=2.0, label="Dominance-bite (union)"),
-                Line2D([0],[0], color="#e41a1c", lw=6, label="GT-only loss (overlay)"),
-                Line2D([0],[0], color="#377eb8", lw=6, label="Pred-only loss (overlay)"),
-                Line2D([0],[0], color="#984ea3", lw=6, label="GT ∩ Pred (overlay)"),
-            ]
-            axes[1].legend(handles=legend_items, loc="lower right", fontsize=7, framealpha=0.9)
+            legend_items = []
+            has_kept = any(S is not None and len(S) >= 2 for S in pred_full_segs)
+            has_undef = any(S is not None and len(S) >= 2 for S in pred_undef_other_segs)
+            has_bite = any(S is not None and len(S) >= 2 for S in bite_pruned_pred_segs)
+            has_gt_only = bool(np.any(dom_crop == 1))
+            has_pred_only = bool(np.any(dom_crop == 2))
+            has_both = bool(np.any(dom_crop == 3))
+
+            if has_kept:
+                legend_items.append(Line2D([0], [0], color=col_keep, lw=2.5, label="Stage-5 geometry (kept)"))
+            if has_undef:
+                legend_items.append(Line2D([0], [0], color=col_undef, lw=2.2, label="Pred undef / other nonfinite"))
+            if has_bite:
+                legend_items.append(Line2D([0], [0], color=col_bite, lw=2.0, label="Dominance-bite (union)"))
+            if has_gt_only:
+                legend_items.append(Line2D([0], [0], color="#e41a1c", lw=6, label="GT-only loss (overlay)"))
+            if has_pred_only:
+                legend_items.append(Line2D([0], [0], color="#377eb8", lw=6, label="Pred-only loss (overlay)"))
+            if has_both:
+                legend_items.append(Line2D([0], [0], color="#984ea3", lw=6, label="GT ∩ Pred (overlay)"))
+
+            if legend_items:
+                axes[1].legend(
+                    handles=legend_items,
+                    loc="lower right",
+                    fontsize=6,
+                    framealpha=0.8,
+                    markerscale=0.7,
+                    handlelength=1.5,
+                    borderpad=0.5,
+                )
 
             fig.suptitle(
                 f"Stage-5 Geometry Provenance (Dominance-resolved @ 4.5) — cid={cid}",
@@ -9250,6 +9372,7 @@ def compare_widths_for_aligned_cracks(
             s_orig       = np.asarray(s_orig[:m0], float)
             predw_orig   = np.asarray(predw_orig[:m0], float)
             gtruthw_orig = np.asarray(gtruthw_orig[:m0], float)
+            pts_orig = np.asarray(pred_pts[:m0], float)
             
             # ============================================================
             # DISTRIBUTIONAL WIDTH SUMMARY (Regime A)
@@ -9530,14 +9653,14 @@ def compare_widths_for_aligned_cracks(
                 if np.count_nonzero(m_orig) < 2:
                     m_orig = np.ones_like(s_orig, dtype=bool)
 
-                pts_orig_run   = np.asarray(pts[m_orig], float)
+                pts_orig_run   = np.asarray(pts_orig[m_orig], float)
                 predw_orig_run = np.asarray(predw_orig[m_orig], float)
                 gtw_orig_run   = np.asarray(gtruthw_orig[m_orig], float)
                 s_orig_run     = np.asarray(s_orig[m_orig], float)
 
                 # Fallback (should rarely trigger, but keeps plots alive)
                 if pts_orig_run.shape[0] < 2:
-                    pts_orig_run   = np.asarray(pts, float)
+                    pts_orig_run   = np.asarray(pts_orig, float)
                     predw_orig_run = np.asarray(predw_orig, float)
                     gtw_orig_run   = np.asarray(gtruthw_orig, float)
                     s_orig_run     = np.asarray(s_orig, float)
