@@ -2655,7 +2655,7 @@ def plot_midline_length_score_relationship(
                 continue
             sub["_len_bin"] = pd.cut(sub[length_col], bins=edges, include_lowest=True)
 
-        for bin_key, gb in sub.groupby("_len_bin", dropna=False):
+        for bin_key, gb in sub.groupby("_len_bin", dropna=False, observed=False):
             vals_len = pd.to_numeric(gb[length_col], errors="coerce").values
             vals_sc = pd.to_numeric(gb[score_col], errors="coerce").values
             mask = np.isfinite(vals_len) & np.isfinite(vals_sc)

@@ -45,7 +45,7 @@ from helpers import save_load_files
 from combine_clear_segments import *
 import cracktools as ct
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import itertools, pandas as pd, os
 from edge_workers import *
 
@@ -687,8 +687,84 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
     ):
         import os
         import time
+        import csv
         import numpy as np
         from helpers import metrics as metrics_mod
+
+        def _safe_float(v, default=np.nan):
+            try:
+                fv = float(v)
+                if np.isfinite(fv):
+                    return float(fv)
+            except Exception:
+                pass
+            return float(default)
+
+        def _read_first_row_csv(path):
+            if not os.path.isfile(path):
+                return {}
+            try:
+                with open(path, "r", encoding="utf-8", newline="") as f:
+                    rows = list(csv.DictReader(f))
+                return rows[0] if rows else {}
+            except Exception:
+                return {}
+
+        def _sum_numeric_by_supervision(csv_path):
+            """
+            Sum *_s columns per supervision from metrics/timings_core.csv.
+            """
+            out = {}
+            if not os.path.isfile(csv_path):
+                return out
+            try:
+                with open(csv_path, "r", encoding="utf-8", newline="") as f:
+                    rows = list(csv.DictReader(f))
+                for r in rows:
+                    sup = str(r.get("supervision", "unknown"))
+                    out.setdefault(sup, 0.0)
+                    for k, v in r.items():
+                        if not isinstance(k, str):
+                            continue
+                        if not k.endswith("_s"):
+                            continue
+                        fv = _safe_float(v, default=np.nan)
+                        if np.isfinite(fv):
+                            out[sup] += float(fv)
+            except Exception:
+                return {}
+            return out
+
+        def _read_driver_timing_csv(csv_path):
+            """
+            Read per-step driver timings from metrics/timings_driver.csv.
+            Returns:
+              - step_totals: dict[str,float] summed by step
+              - rows: list[dict] raw rows
+            """
+            step_totals = {}
+            rows_out = []
+            if not os.path.isfile(csv_path):
+                return step_totals, rows_out
+            try:
+                with open(csv_path, "r", encoding="utf-8", newline="") as f:
+                    rows = list(csv.DictReader(f))
+                for r in rows:
+                    step = str(r.get("step", "unknown"))
+                    sec = _safe_float(r.get("seconds", np.nan), default=np.nan)
+                    if not np.isfinite(sec):
+                        continue
+                    step_totals[step] = float(step_totals.get(step, 0.0) + float(sec))
+                    rows_out.append({
+                        "step": step,
+                        "seconds": float(sec),
+                        "midline_type": str(r.get("midline_type", "")),
+                        "variant_id": str(r.get("variant_id", "")),
+                        "crack_type": str(r.get("crack_type", "")),
+                    })
+            except Exception:
+                return {}, []
+            return step_totals, rows_out
 
         if not (0 <= int(idx) < len(getattr(self, "image_names", []) or [])):
             return {"ok": False, "reason": "bad_index", "idx": idx}
@@ -696,13 +772,16 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         orig_n = int(getattr(self, "n", 0))
         t0 = time.perf_counter()
         base_name = None
+        timing_breakdown = {}
         try:
             self.n = int(idx)
             self.change_image()
             base_name = self._image_base()
 
+            t_sync0 = time.perf_counter()
             self._purge_metrics_for_current_image()
             self._sync_metrics_snapshot_from_authoring(refresh_combine=True, persist=True)
+            timing_breakdown["snapshot_sync_s"] = float(time.perf_counter() - t_sync0)
 
             atomic = dict(self._metric_atomic() or {})
             manual_ids = []
@@ -715,14 +794,20 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     manual_ids.append(cid)
 
             if manual_ids and bool(run_edge_tracking):
+                t_edge0 = time.perf_counter()
                 self.run_edge_tracking_parallel(
                     crack_ids=manual_ids,
                     cpu_max_workers=edge_parallel_workers,
                     edge_params_fixed=(edge_params or {"window_half_size": 45, "mu": 0.0, "l": 5, "p": 14, "seg_mode": "new"}),
                 )
+                timing_breakdown["edge_tracking_s"] = float(time.perf_counter() - t_edge0)
             elif not manual_ids:
                 print(f"[RUN IMAGE] {base_name}: no ET cracks with valid midline")
+                timing_breakdown["edge_tracking_s"] = 0.0
+            else:
+                timing_breakdown["edge_tracking_s"] = 0.0
 
+            t_metrics0 = time.perf_counter()
             self.compute_mask_and_width_metrics_for_image(
                 display=bool(display),
                 export_supervision=bool(export_supervision),
@@ -730,6 +815,73 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 best_method_key=best_method_key,
                 run_atomic_width_eval=bool(run_atomic_width_eval),
             )
+            timing_breakdown["metrics_total_s"] = float(time.perf_counter() - t_metrics0)
+
+            # Pull GT supervision sub-timings (when export runs) from per-image supervision CSVs.
+            if base_name:
+                gt_sup_root = os.path.join(self.save_folder, "supervision", base_name)
+                analysis_dir = os.path.join(gt_sup_root, "analysis")
+                dt_track_dir = os.path.join(gt_sup_root, "dt_track")
+                fused_track_dir = os.path.join(gt_sup_root, "fused_track")
+
+                gt_compute = _read_first_row_csv(os.path.join(analysis_dir, "gt_compute_timing.csv"))
+                gt_center = _read_first_row_csv(os.path.join(analysis_dir, "gt_centering_timing.csv"))
+                dt_track = _read_first_row_csv(os.path.join(dt_track_dir, "timing.csv"))
+                depth_track = _read_first_row_csv(os.path.join(fused_track_dir, "timing.csv"))
+
+                gt_sup_timing = {}
+                if gt_compute:
+                    gt_sup_timing.update({
+                        "atomic_compute_sec": _safe_float(gt_compute.get("atomic_compute_sec"), default=0.0),
+                        "noncombined_atomic_compute_sec": _safe_float(gt_compute.get("noncombined_atomic_compute_sec"), default=0.0),
+                        "combined_compute_sec": _safe_float(gt_compute.get("combined_compute_sec"), default=0.0),
+                        "combined_plus_noncombined_atomics_sec": _safe_float(gt_compute.get("combined_plus_noncombined_atomics_sec"), default=0.0),
+                        "compute_total_sec": _safe_float(gt_compute.get("compute_total_sec"), default=0.0),
+                    })
+                if gt_center:
+                    gt_sup_timing.update({
+                        "atomic_centering_sec": _safe_float(gt_center.get("atomic_centering_sec"), default=0.0),
+                        "noncombined_atomic_centering_sec": _safe_float(gt_center.get("noncombined_atomic_centering_sec"), default=0.0),
+                        "combined_centering_sec": _safe_float(gt_center.get("combined_centering_sec"), default=0.0),
+                        "combined_plus_noncombined_atomics_centering_sec": _safe_float(gt_center.get("combined_plus_noncombined_atomics_centering_sec"), default=0.0),
+                        "centering_total_sec": _safe_float(gt_center.get("centering_total_sec"), default=0.0),
+                    })
+                if dt_track:
+                    gt_sup_timing.update({
+                        "dt_compute_s": _safe_float(dt_track.get("dt_compute_s"), default=0.0),
+                        "centered_snap_s": _safe_float(dt_track.get("centered_snap_s"), default=0.0),
+                        "normals_centered_s": _safe_float(dt_track.get("normals_centered_s"), default=0.0),
+                    })
+                if depth_track:
+                    gt_sup_timing.update({
+                        "depth_align_s": _safe_float(depth_track.get("depth_align_s"), default=0.0),
+                        "depth_recess_s": _safe_float(depth_track.get("depth_recess_s"), default=0.0),
+                        "depth_costmap_s": _safe_float(depth_track.get("depth_costmap_s"), default=0.0),
+                        "depth_dijkstra_s": _safe_float(depth_track.get("depth_dijkstra_s"), default=0.0),
+                        "depth_postprocess_s": _safe_float(depth_track.get("depth_postprocess_s"), default=0.0),
+                        "normals_depth_s": _safe_float(depth_track.get("normals_depth_s"), default=0.0),
+                    })
+                    gt_sup_timing["multi_cue_total_s"] = (
+                        gt_sup_timing.get("depth_align_s", 0.0)
+                        + gt_sup_timing.get("depth_recess_s", 0.0)
+                        + gt_sup_timing.get("depth_costmap_s", 0.0)
+                        + gt_sup_timing.get("depth_dijkstra_s", 0.0)
+                        + gt_sup_timing.get("depth_postprocess_s", 0.0)
+                    )
+                if gt_sup_timing:
+                    timing_breakdown["gt_supervision"] = gt_sup_timing
+
+                # Pull core metric timings grouped by supervision label (et/dt/baseline/best/etc.)
+                metrics_dir = os.path.join(self.save_folder, "metrics", str(base_name))
+                core_sup = _sum_numeric_by_supervision(os.path.join(metrics_dir, "timings_core.csv"))
+                if core_sup:
+                    timing_breakdown["width_mask_core_by_supervision_s"] = core_sup
+
+                driver_steps, driver_rows = _read_driver_timing_csv(os.path.join(metrics_dir, "timings_driver.csv"))
+                if driver_steps:
+                    timing_breakdown["width_driver_step_s"] = driver_steps
+                if driver_rows:
+                    timing_breakdown["width_driver_rows"] = driver_rows
 
             return {
                 "ok": True,
@@ -737,6 +889,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 "idx": int(idx),
                 "cracks": int(len(manual_ids)),
                 "elapsed_s": float(time.perf_counter() - t0),
+                "timing_breakdown": timing_breakdown,
             }
         except Exception as e:
             return {
@@ -745,6 +898,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 "idx": int(idx),
                 "reason": str(e),
                 "elapsed_s": float(time.perf_counter() - t0),
+                "timing_breakdown": timing_breakdown,
             }
         finally:
             try:
@@ -909,7 +1063,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         import itertools
         import numpy as np
         import pandas as pd
-        from concurrent.futures import ProcessPoolExecutor, as_completed
+        from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
         from edge_workers import edge_param_worker
 
         base = self.extract_edge_inputs_for_subcrack(crack_id)
@@ -1768,11 +1922,33 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 out[str(ccid)] = rebuilt
             return out
 
+        timing_rows_driver = []
+
+        def _record_driver_timing(step, seconds, *, midline_type="", variant_id="", crack_type=""):
+            try:
+                sec = float(seconds)
+            except Exception:
+                return
+            if not np.isfinite(sec):
+                return
+            timing_rows_driver.append({
+                "image": str(base_name),
+                "step": str(step),
+                "seconds": float(sec),
+                "midline_type": str(midline_type or ""),
+                "variant_id": str(variant_id or ""),
+                "crack_type": str(crack_type or ""),
+            })
+
+        t_cmb0 = time.perf_counter()
         combined_map = _rebuild_combined_map_for_mode(mode_label="ET", atomic_src=atomic)
+        _record_driver_timing("rebuild_combined_ET_s", time.perf_counter() - t_cmb0)
 
         auto_combined_map = {}
         if include_auto and auto_atomic:
+            t_cmb_auto0 = time.perf_counter()
             auto_combined_map = _rebuild_combined_map_for_mode(mode_label="auto", atomic_src=auto_atomic)
+            _record_driver_timing("rebuild_combined_auto_s", time.perf_counter() - t_cmb_auto0)
 
         # ------------------------------------------------------------------
         # 5–8) MASK METRICS + WIDTH METRICS (UNIFIED; minimal duplication)
@@ -2451,9 +2627,11 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         )
         if baseline_root:
             print(f"[DEBUG MASK] loading baselines from: {baseline_root}")
+            t_baseline0 = time.perf_counter()
             baseline_pred_masks = _load_baseline_masks_for_image(baseline_root, base_name)
             for method_name, pred_full in baseline_pred_masks.items():
                 _compute_and_record_baseline_total(method_name, pred_full)
+            _record_driver_timing("baseline_mask_metrics_s", time.perf_counter() - t_baseline0)
 
         variant_masks = [("ET:geodesic", (agg_manual > 0).astype(np.uint8))]
         if include_auto and agg_auto.any():
@@ -2470,6 +2648,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         # 8) WIDTH DIFF CHARTS (ET + optional auto) — unified prep
         # ------------------------------------------------------------------
         try:
+            t_mcg0 = time.perf_counter()
             totals_lookup = {}
             if not df_mask.empty:
                 df_total = df_mask[df_mask["crack_type"].astype(str).str.upper() == "TOTAL"].copy()
@@ -2482,6 +2661,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 totals_lookup=totals_lookup,
                 out_png=os.path.join(metrics_dir, "mask_comparison_grid.png"),
             )
+            _record_driver_timing("mask_comparison_grid_s", time.perf_counter() - t_mcg0)
         except Exception as e:
             print(f"[DEBUG MASK] comparison grid failed: {e}")
 
@@ -2915,6 +3095,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
                 base_tag = base_name if variant_id == "main" else f"{base_name}__{variant_id}"
 
+                t_cmp0 = time.perf_counter()
                 ret = compare_widths_for_aligned_cracks(
                     payload,
                     gt_full,
@@ -2927,6 +3108,13 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     normals_plot=False,
                     gt_sup_root=gt_sup_root,
                     variant_id=variant_id,
+                )
+                _record_driver_timing(
+                    "compare_widths_for_aligned_cracks_s",
+                    time.perf_counter() - t_cmp0,
+                    midline_type=midline_type,
+                    variant_id=variant_id,
+                    crack_type=crack_type,
                 )
 
                 if not ret:
@@ -2946,6 +3134,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 os.makedirs(out_dir, exist_ok=True)
 
                 if width_rows:
+                    t_wexp0 = time.perf_counter()
                     export_width_metrics_all(
                         metrics_dir_local,
                         base_tag,
@@ -2953,8 +3142,16 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         midline_type,
                         crack_type=crack_type,
                     )
+                    _record_driver_timing(
+                        "export_width_metrics_all_s",
+                        time.perf_counter() - t_wexp0,
+                        midline_type=midline_type,
+                        variant_id=variant_id,
+                        crack_type=crack_type,
+                    )
 
                 if midline_rows:
+                    t_mexp0 = time.perf_counter()
                     export_midline_metrics_all(
                         metrics_dir_local,
                         base_tag,
@@ -2962,6 +3159,13 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         midline_type,
                         crack_type=crack_type,
                         variant_id=variant_id,
+                    )
+                    _record_driver_timing(
+                        "export_midline_metrics_all_s",
+                        time.perf_counter() - t_mexp0,
+                        midline_type=midline_type,
+                        variant_id=variant_id,
+                        crack_type=crack_type,
                     )
 
                 '''from helpers.present_plots import plot_width_summary_bars
@@ -3104,59 +3308,74 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             if mode == "dt_best_et":
                 print(f"[WIDTH DRIVER] best_method = {selected_best_non_dt}")
 
-            # ET
+            # --- build payloads (sequential: fast disk reads) ---
             combined_for_width = _prep_combined_for_width(combined_map)
             et_segments, et_cov = _payload_stats(atomic, combined_for_width)
             print(f"[WIDTH DRIVER] method=ET segments={et_segments} coverage_pct={et_cov:.2f}")
-            _run_width_eval_total(
-                atomic_src=atomic,
-                combined_src=combined_for_width,
-                midline_type="ET",
-                width_baseline_root=getattr(self, "width_baseline_img_folder", None),
-            )
 
+            dt_atomic, dt_combined = None, None
+            best_atomic, best_combined = None, None
             if mode == "dt_best_et":
-                # DT (method-specific from GT supervision)
+                t_payload_dt0 = time.perf_counter()
                 dt_atomic, dt_combined = self._build_method_payload_from_gt_supervision(
                     gt_sup_root_local=gt_sup_root,
                     gt_full=gt_full,
                     method_key="dt",
                 )
+                _record_driver_timing("payload_dt_s", time.perf_counter() - t_payload_dt0)
                 if dt_atomic or dt_combined:
                     dt_segments, dt_cov = _payload_stats(dt_atomic, dt_combined)
                     print(f"[WIDTH DRIVER] method=dt segments={dt_segments} coverage_pct={dt_cov:.2f}")
-                    _run_width_eval_total(
-                        atomic_src=dt_atomic,
-                        combined_src=dt_combined,
-                        midline_type="dt",
-                        width_baseline_root=None,
-                    )
                 else:
                     print("[WIDTH] dt skipped: no method payload in gt_supervision.json")
+                    dt_atomic, dt_combined = None, None
 
-                # BEST_NON_DT (global persisted choice)
                 if selected_best_non_dt and selected_best_non_dt != "dt":
+                    t_payload_best0 = time.perf_counter()
                     best_atomic, best_combined = self._build_method_payload_from_gt_supervision(
                         gt_sup_root_local=gt_sup_root,
                         gt_full=gt_full,
                         method_key=selected_best_non_dt,
                     )
+                    _record_driver_timing("payload_best_s", time.perf_counter() - t_payload_best0)
                     if best_atomic or best_combined:
                         best_segments, best_cov = _payload_stats(best_atomic, best_combined)
-                        print(
-                            f"[WIDTH DRIVER] method={selected_best_non_dt} "
-                            f"segments={best_segments} coverage_pct={best_cov:.2f}"
-                        )
-                        _run_width_eval_total(
-                            atomic_src=best_atomic,
-                            combined_src=best_combined,
-                            midline_type=f"best_{selected_best_non_dt}",
-                            width_baseline_root=None,
-                        )
+                        print(f"[WIDTH DRIVER] method={selected_best_non_dt} segments={best_segments} coverage_pct={best_cov:.2f}")
                     else:
                         print(f"[WIDTH] best_non_dt={selected_best_non_dt} skipped: no method payload in gt_supervision.json")
+                        best_atomic, best_combined = None, None
                 else:
                     print(f"[WIDTH] best_non_dt unavailable/invalid: {selected_best_non_dt}")
+
+            # --- build task list and run width evals in parallel ---
+            _width_tasks = []
+            _width_tasks.append(("ET", atomic, combined_for_width, getattr(self, "width_baseline_img_folder", None)))
+            if dt_atomic or dt_combined:
+                _width_tasks.append(("dt", dt_atomic, dt_combined, None))
+            if best_atomic or best_combined:
+                _width_tasks.append((f"best_{selected_best_non_dt}", best_atomic, best_combined, None))
+
+            def _run_width_task(mtype, a_src, c_src, baseline_root):
+                t0 = time.perf_counter()
+                _run_width_eval_total(
+                    atomic_src=a_src,
+                    combined_src=c_src,
+                    midline_type=mtype,
+                    width_baseline_root=baseline_root,
+                )
+                _record_driver_timing("width_eval_total_s", time.perf_counter() - t0, midline_type=mtype)
+
+            t_parallel0 = time.perf_counter()
+            if len(_width_tasks) > 1:
+                print(f"[WIDTH DRIVER] running {len(_width_tasks)} width evals in parallel (ThreadPool)")
+                with ThreadPoolExecutor(max_workers=len(_width_tasks)) as _wex:
+                    _wfuts = [_wex.submit(_run_width_task, *t) for t in _width_tasks]
+                    for _wf in as_completed(_wfuts):
+                        _wf.result()  # re-raise any exception
+            else:
+                for t in _width_tasks:
+                    _run_width_task(*t)
+            _record_driver_timing("width_eval_parallel_wall_s", time.perf_counter() - t_parallel0)
 
         except Exception as e:
             print(f"[DEBUG WIDTH] failed: {e}")
@@ -3168,6 +3387,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         dist_csv = os.path.join(metrics_dir, "width_distribution_summary.csv")
         dist_out = os.path.join(metrics_dir, "distribution_report")
 
+        t_dist0 = time.perf_counter()
         plot_width_distribution_report(
             csv_path=dist_csv,
             out_dir=dist_out,
@@ -3176,6 +3396,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             # filter_gt_tier="combined_unfiltered",
             title_suffix="(All images)",
         )
+        _record_driver_timing("plot_width_distribution_report_s", time.perf_counter() - t_dist0)
 
             
         # ------------------------------------------------------------------
@@ -3320,7 +3541,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 print(timing_df[["crack_type", "supervision", "algo_variant", "crack_id"]])
 
                 from helpers.plot_metrics import plot_core_timing_bars
+                t_ctb0 = time.perf_counter()
                 plot_core_timing_bars(metrics_dir)
+                _record_driver_timing("plot_core_timing_bars_s", time.perf_counter() - t_ctb0)
 
             else:
                 print("[TIMING DBG] no timing rows collected")
@@ -3335,10 +3558,21 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         try:
             from helpers.present_plots import build_deck_plots_for_image
             print("[DEBUG PLOT] building deck-ready summary plots ...")
+            t_deck0 = time.perf_counter()
             build_deck_plots_for_image(metrics_dir, base_name)
+            _record_driver_timing("build_deck_plots_for_image_s", time.perf_counter() - t_deck0)
         except Exception as e:
             print(f"[DEBUG PLOT] deck plots failed: {e}")
             traceback.print_exc()
+
+        try:
+            if timing_rows_driver:
+                df_driver_t = pd.DataFrame(timing_rows_driver)
+                out_driver_csv = os.path.join(metrics_dir, "timings_driver.csv")
+                df_driver_t.to_csv(out_driver_csv, index=False)
+                print(f"[TIMING DRIVER] wrote CSV: {out_driver_csv}")
+        except Exception as e:
+            print(f"[TIMING DRIVER] failed to write CSV: {e}")
 
         print(f"[DEBUG METRICS] ===== END for {base_name} =====")
         return {}
@@ -3806,7 +4040,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         import os, time
         import numpy as np
         import pandas as pd
-        from concurrent.futures import ProcessPoolExecutor, as_completed
+        from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
         from edge_workers import edge_param_worker
         from helpers.metrics import set_tracked_edges_for_crack, load_snapshot_from_files

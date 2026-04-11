@@ -4490,12 +4490,34 @@ def compare_widths_for_aligned_cracks(
     """
 
     import os, json
+    import concurrent.futures as _cf
     import numpy as np
     import matplotlib.pyplot as plt
     from matplotlib.colors import TwoSlopeNorm
     #from helpers.metrics import normals_from_mask_for_midline
 
     os.makedirs(metrics_dir, exist_ok=True)
+    _plot_executor = _cf.ThreadPoolExecutor(max_workers=4)
+    _plot_futures = []
+
+    def _async_savefig(fig, path, dpi=100):
+        """Submit fig.savefig to thread pool; close fig after save."""
+        def _do(f, p, d):
+            try:
+                f.savefig(p, dpi=d, bbox_inches="tight")
+            finally:
+                import matplotlib.pyplot as _plt
+                _plt.close(f)
+        _plot_futures.append(_plot_executor.submit(_do, fig, path, dpi))
+
+    def _drain_async_savefigs():
+        # Drain all deferred savefigs before returning
+        for _f in _plot_futures:
+            try:
+                _f.result(timeout=60)
+            except Exception as _e:
+                print(f"[ASYNC SAVEFIG] failed: {_e}")
+        _plot_executor.shutdown(wait=False)
 
     # ---------------- variant tag (output isolation only) ----------------
     variant_id = str(variant_id or "main").strip()
@@ -6274,8 +6296,7 @@ def compare_widths_for_aligned_cracks(
 
             os.makedirs(out_dir, exist_ok=True)
             out = os.path.join(out_dir, "gt_sup_dom_raw.png")
-            fig.savefig(out)
-            plt.close(fig)
+            _async_savefig(fig, out, dpi=100)
 
             print(f"[GT_SUP DEBUG] wrote {out}")
 
@@ -7146,8 +7167,7 @@ def compare_widths_for_aligned_cracks(
             )
 
             out = os.path.join(out_dir, "stage2_prune.png")
-            fig.savefig(out, dpi=100)
-            plt.close(fig)
+            _async_savefig(fig, out, dpi=100)
 
             print(f"[STAGE2 OPSEC] wrote {out}")
 
@@ -7391,8 +7411,7 @@ def compare_widths_for_aligned_cracks(
                 )
             )
 
-            fig.savefig(out_png)
-            plt.close(fig)
+            _async_savefig(fig, out_png, dpi=100)
             print(f"[STAGE4] wrote {out_png}")
 
         def _paste_pred_into_gt_frame(*, gt_bbox, gt_union, pred_bbox, pred_union):
@@ -7496,8 +7515,7 @@ def compare_widths_for_aligned_cracks(
                 )
             )
 
-            fig.savefig(out_png)
-            plt.close(fig)
+            _async_savefig(fig, out_png, dpi=100)
             print(f"[STAGE4] wrote {out_png}")
 
         # ----------------------------
@@ -7838,8 +7856,7 @@ def compare_widths_for_aligned_cracks(
             f"stage4_dominance_bite_{midline_type}_{mode}.png",
         )
         os.makedirs(cid_opsec_dir, exist_ok=True)
-        fig.savefig(outB)
-        plt.close(fig)
+        _async_savefig(fig, outB, dpi=100)
 
         print(f"[OPSEC] Stage-4 dominance plot written: {outB}")
             
@@ -8829,8 +8846,7 @@ def compare_widths_for_aligned_cracks(
 
             os.makedirs(cid_opsec_dir, exist_ok=True)
             out = os.path.join(cid_opsec_dir, "stage5_geom_provenance.png")
-            fig.savefig(out, dpi=100)
-            plt.close(fig)
+            _async_savefig(fig, out, dpi=100)
 
             print(f"[OPSEC STAGE5 PLOT] wrote: {out}")
 
@@ -9919,8 +9935,7 @@ def compare_widths_for_aligned_cracks(
                 )
 
                 out = os.path.join(part2_metrics_dir, f"part2_topK_width_metrics_{mode}_{midline_type}.png")
-                fig.savefig(out, bbox_inches="tight", dpi=200)
-                plt.close(fig)
+                _async_savefig(fig, out, dpi=200)
                 print(f"[PART2] wrote: {out}")
 
                 # ------------------------------------------------------------
@@ -10054,8 +10069,7 @@ def compare_widths_for_aligned_cracks(
                             part2_resample_dir,
                             f"part2_resample_aggregated_WORST_cid{worst_cid}_{worst_ct}_{worst_mt}.png"
                         )
-                        fig.savefig(out, bbox_inches="tight", dpi=200)
-                        plt.close(fig)
+                        _async_savefig(fig, out, dpi=200)
                         print(f"[PART2] wrote: {out}")
 
                 # ------------------------------------------------------------
@@ -10170,6 +10184,7 @@ def compare_widths_for_aligned_cracks(
     # ---------------- plotting ----------------
     if not coords:
         print("[WIDTH DEBUG] nothing to plot")
+        _drain_async_savefigs()
         return [], []
 
     bbox = _union_bboxes(bboxes)
@@ -10211,6 +10226,7 @@ def compare_widths_for_aligned_cracks(
     all_d = all_d[np.isfinite(all_d)]
     if all_d.size == 0:
         print("[WIDTH DEBUG] no finite diffs")
+        _drain_async_savefigs()
         return rows, midline_metric_rows
 
     '''vmin, vmax = np.percentile(all_d, [5, 95])
@@ -10315,8 +10331,7 @@ def compare_widths_for_aligned_cracks(
 
     os.makedirs(out_dir, exist_ok=True)
 
-    fig.savefig(out, dpi=200, bbox_inches="tight", pad_inches=0)
-    plt.close(fig)
+    _async_savefig(fig, out, dpi=200)
     
     # ============================================================
     # MIDLINE DIAGNOSTIC PLOTS (COMBINED / AUTO)
@@ -10425,6 +10440,7 @@ def compare_widths_for_aligned_cracks(
             print(f"[MIDLINE METRICS] plotting failed: {e}")
 
 
+    _drain_async_savefigs()
     return rows, midline_metric_rows
 
 # ============================================================================

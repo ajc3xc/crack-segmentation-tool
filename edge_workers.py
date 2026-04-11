@@ -696,7 +696,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                 midline=midline_xy_crop,
                 mu=int(P["mu"]), l=int(P["l"]), p=int(P["p"]),
                 return_normal_edges=True,
-                prefer_gpu=True,
+                prefer_gpu=False,
                 mode=seg_mode,
                 debug_dir=dbg_dir
             )

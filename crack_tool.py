@@ -2677,6 +2677,59 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             run_atomic_width_eval=bool(run_atomic_width_eval),
         )
         print(f"[SMOKE] result={res}")
+        try:
+            tb = res.get("timing_breakdown", {}) if isinstance(res, dict) else {}
+            if isinstance(tb, dict) and tb:
+                print("[SMOKE TIMING] major groups (s):")
+                for k in ("snapshot_sync_s", "edge_tracking_s", "metrics_total_s"):
+                    if k in tb:
+                        try:
+                            print(f"  - {k}: {float(tb[k]):.3f}")
+                        except Exception:
+                            print(f"  - {k}: {tb[k]}")
+                gt_sup = tb.get("gt_supervision", {})
+                if isinstance(gt_sup, dict) and gt_sup:
+                    print("[SMOKE TIMING] gt_supervision:")
+                    for k, v in gt_sup.items():
+                        try:
+                            print(f"  - {k}: {float(v):.3f}")
+                        except Exception:
+                            print(f"  - {k}: {v}")
+                core = tb.get("width_mask_core_by_supervision_s", {})
+                if isinstance(core, dict) and core:
+                    print("[SMOKE TIMING] core by supervision:")
+                    for sup, sec in sorted(core.items(), key=lambda kv: str(kv[0])):
+                        try:
+                            print(f"  - {sup}: {float(sec):.3f}")
+                        except Exception:
+                            print(f"  - {sup}: {sec}")
+                drv = tb.get("width_driver_step_s", {})
+                if isinstance(drv, dict) and drv:
+                    print("[SMOKE TIMING] width driver step totals:")
+                    for step, sec in sorted(drv.items(), key=lambda kv: str(kv[0])):
+                        try:
+                            print(f"  - {step}: {float(sec):.3f}")
+                        except Exception:
+                            print(f"  - {step}: {sec}")
+                try:
+                    mtotal = float(tb.get("metrics_total_s", 0.0))
+                    rows = tb.get("width_driver_rows", [])
+                    if isinstance(rows, list) and rows:
+                        known = float(
+                            sum(
+                                float(r.get("seconds", 0.0))
+                                for r in rows
+                                if str(r.get("step", "")) not in ("compare_widths_for_aligned_cracks_s",)
+                            )
+                        )
+                    else:
+                        known = float(sum(float(v) for v in (drv or {}).values()))
+                    metrics_unaccounted = float(mtotal - known)
+                    print(f"[SMOKE TIMING] metrics_unaccounted_s ~= {max(0.0, metrics_unaccounted):.3f}")
+                except Exception:
+                    pass
+        except Exception as _tim_e:
+            print(f"[SMOKE TIMING] parse failed: {_tim_e}")
         print(f"[SMOKE] elapsed={time.perf_counter() - t0:.2f}s")
 
     # Backward-compatible alias

@@ -589,7 +589,9 @@ def _run_geodesic(metric_array, seeds, tips, sides, dims, strict=True, prefer_gp
     Run a Riemann2 geodesic; if prefer_gpu and CuPy available, do it on GPU and
     return NumPy (y,x) track. Soft-retry with flattened metric if tip miss > tol.
     """
-    use_gpu = bool(prefer_gpu and _CUPY)
+    # Force CPU mode globally for stability in this environment.
+    # (CUDA path can fail with mixed NumPy/CuPy metric internals.)
+    use_gpu = False
     xp = cp if use_gpu else np
 
     # Keep FP64 to preserve results 1:1 with CPU
