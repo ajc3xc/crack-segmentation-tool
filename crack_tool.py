@@ -1124,7 +1124,10 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
 
                     t_metrics_start = time.perf_counter()
                     try:
-                        self.compute_mask_and_width_metrics_for_image(display=False)
+                        self.compute_mask_and_width_metrics_for_image(
+                            display=False,
+                            export_supervision=True,
+                        )
                     except Exception as e:
                         print(f"[apply] mask/width stage failed: {e}")
                     t_metrics = time.perf_counter() - t_metrics_start
@@ -1178,7 +1181,10 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                     # --- Compute mask/width metrics ---
                     t_metrics_start = time.perf_counter()
                     try:
-                        self.compute_mask_and_width_metrics_for_image(display=False)
+                        self.compute_mask_and_width_metrics_for_image(
+                            display=False,
+                            export_supervision=True,
+                        )
                     except Exception as e:
                         print(f"[apply] mask/width stage failed: {e}")
                     t_metrics = time.perf_counter() - t_metrics_start
@@ -1301,7 +1307,6 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         import random
 
         resolved_indices = image_indices
-        resolved_indices = [43]
         if resolved_indices is None and base_names is None and bool(apply_to_sample):
             n_total = int(len(getattr(self, "image_names", []) or []))
             if n_total > 0:
@@ -2644,7 +2649,10 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
 
         print(f"[EXPORT] GT supervision -> {len(atomic)} cracks ({base_name})")
      
-    def run_et_metrics_current_image_quick(self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True):
+    def run_et_metrics_current_image_quick(
+        self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True,
+        *, best_method_key=None, reexport=False, run_atomic_width_eval: bool = False,
+    ):
         """
         Single-image DT/BEST/ET runner using the shared batch-compatible path.
         """
@@ -2661,22 +2669,29 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         res = self._run_metrics_for_image_idx(
             idx,
             edge_params=edge_params,
-            export_supervision=True,
+            export_supervision=bool(reexport),
             display=bool(display),
             width_eval_mode="dt_best_et",
-            best_method_key=None,  # load from persisted global best file
+            best_method_key=best_method_key,
             edge_parallel_workers=None,
+            run_atomic_width_eval=bool(run_atomic_width_eval),
         )
         print(f"[SMOKE] result={res}")
         print(f"[SMOKE] elapsed={time.perf_counter() - t0:.2f}s")
 
     # Backward-compatible alias
-    def run_manual_metrics_current_image_quick(self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True):
+    def run_manual_metrics_current_image_quick(
+        self, tau_px=3.0, crack_id=None, display=True, do_param_sweep=True,
+        *, best_method_key=None, reexport=False, run_atomic_width_eval: bool = False,
+    ):
         return self.run_et_metrics_current_image_quick(
             tau_px=tau_px,
             crack_id=crack_id,
             display=display,
             do_param_sweep=do_param_sweep,
+            best_method_key=best_method_key,
+            reexport=reexport,
+            run_atomic_width_eval=run_atomic_width_eval,
         )
 
     def _rs3_cache_complete_for_image(self, g_variants=None) -> bool:

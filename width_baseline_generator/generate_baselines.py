@@ -1863,7 +1863,7 @@ def _plot_per_baseline_metric_boxplots(df_method: pd.DataFrame, out_dir: str) ->
             continue
 
         fig, ax = plt.subplots(figsize=(10, 5), dpi=200)
-        ax.boxplot(series_list, labels=labels, showfliers=True, patch_artist=False)
+        ax.boxplot(series_list, tick_labels=labels, showfliers=True, patch_artist=False)
         ax.set_title(f"{method} — Distribution of Summary Metrics Across Images")
         ax.set_ylabel("value")
         ax.grid(axis="y", alpha=0.20)
@@ -1950,7 +1950,7 @@ def _plot_dataset_concatenated_subplots(
     ax_h.legend(fontsize=8)
 
     if box_data:
-        ax_b.boxplot(box_data, labels=box_labels, showfliers=True, patch_artist=False)
+        ax_b.boxplot(box_data, tick_labels=box_labels, showfliers=True, patch_artist=False)
     ax_b.set_ylabel("value")
     ax_b.set_title("Baseline Width Distribution Boxplots")
     ax_b.grid(axis="y", alpha=0.20)

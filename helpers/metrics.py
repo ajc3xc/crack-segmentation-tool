@@ -263,6 +263,7 @@ def _nn_dists(A, B):
     CPU cKDTree only (lower overhead and more stable for these metric sizes).
     """
     import numpy as np
+    B1_DIAGNOSTIC_DEBUG = True
     if A is None or B is None or len(A) == 0 or len(B) == 0:
         return np.zeros((len(A),), dtype=float)
     try:
@@ -2030,7 +2031,7 @@ def _project_support_indices_core(
     supp,
     mid_xy,
     *,
-    max_nn_dist_px=6.0,
+    max_nn_dist_px=15.0,
     use_support_mask=True,
     domain_mask=None,
     bbox=None,
@@ -2159,7 +2160,7 @@ def project_indices_to_support(
     supp,
     mid_xy,
     *,
-    max_nn_dist_px=6.0,
+    max_nn_dist_px=10.0,
     use_support_mask=True,
     domain_mask=None,
     bbox=None,
@@ -2223,7 +2224,7 @@ def project_widths_to_support(
     supp,
     mid_xy,
     *,
-    max_nn_dist_px=6.0,
+    max_nn_dist_px=15.0,
     use_support_mask=True,
     domain_mask=None,
     bbox=None,
@@ -2297,6 +2298,7 @@ def compute_projected_width_diffs(
       - Width source: baseline width map sampled along GT midline
       - Skeleton disagreement is NOT penalized here
     """
+    B1_DIAGNOSTIC_DEBUG = True
     import numpy as np
 
     if not isinstance(gt_payload, dict):
@@ -2512,45 +2514,107 @@ def compute_projected_width_diffs(
                     pass
             return domain.astype(bool)
 
-        # Combined: try to enforce branch ownership. If explicit branch labels are
-        # missing, approximate branch domain from same-branch GT segments.
+        # Combined: use pre-computed branch territory from dominance_meta.
+        # This was built by dominant_segments_from_group with radius = max(4, min(1.2 * half_width, 50))
+        # and is the authoritative spatial extent for each branch.
         branch_id = None
         if isinstance(seg_meta, dict):
             branch_id = _safe_int(seg_meta.get("branch_id"), None)
+        territory_applied = False
         if branch_id is None:
+            print(f"[DOMAIN DBG] cid={cid} branch={branch_id} territory_applied={territory_applied} domain_nnz={int(np.sum(domain))}")
             return domain.astype(bool)
 
-        branch_seed = np.zeros_like(domain, dtype=bool)
-        for Sx, mx in zip(gt_mid_parts, gt_mid_meta):
-            b = _safe_int((mx or {}).get("branch_id"), None) if isinstance(mx, dict) else None
-            if b is None or int(b) != int(branch_id):
-                continue
-            branch_seed |= _segment_seed_mask(Sx, H, W)
+        try:
+            dom_meta = cr.get("dominance_meta") if isinstance(cr, dict) else None
+            if isinstance(dom_meta, dict):
+                terr_by_branch = dom_meta.get("branch_territory") or {}
+                terr_entry = terr_by_branch.get(str(int(branch_id)))
+                bite_bbox = (dom_meta.get("bite") or {}).get("bbox")  # [bx0, by0, bw, bh] global xywh
+                if (
+                    isinstance(terr_entry, dict)
+                    and terr_entry.get("packbits_b64")
+                    and isinstance(bite_bbox, (list, tuple))
+                    and len(bite_bbox) == 4
+                ):
+                    terr_crop = _decode_packbits_b64_to_mask(
+                        terr_entry["packbits_b64"],
+                        terr_entry["shape"],
+                    )
+                    bx0, by0, bw, bh = [int(v) for v in bite_bbox]
+                    terr_full = np.zeros((H, W), dtype=bool)
+                    bx1 = min(bx0 + bw, W)
+                    by1 = min(by0 + bh, H)
+                    ch = min(terr_crop.shape[0], by1 - by0)
+                    cw = min(terr_crop.shape[1], bx1 - bx0)
+                    if ch > 0 and cw > 0:
+                        terr_full[by0:by0 + ch, bx0:bx0 + cw] = (terr_crop[:ch, :cw] > 0)
+                    if np.any(terr_full):
+                        domain &= terr_full
+                        territory_applied = True
+        except Exception:
+            pass
 
-        if np.any(branch_seed):
-            try:
+        if not territory_applied:
+            # Fallback: width-adaptive dilation from wmap, matching combiner's scale
+            seg_arr = _finite_xy(gt_seg) if gt_seg is not None else np.empty((0, 2), float)
+            dil_px = 30  # safe default
+            if len(seg_arr) > 0:
+                ys_s = np.clip(np.round(seg_arr[:, 1]).astype(int), 0, H - 1)
+                xs_s = np.clip(np.round(seg_arr[:, 0]).astype(int), 0, W - 1)
+                wvals = np.asarray(wmap)[ys_s, xs_s]
+                wvals = wvals[np.isfinite(wvals) & (wvals > 0)]
+                if len(wvals) > 0:
+                    half_w = float(np.median(wvals)) / 2.0
+                    dil_px = int(np.clip(int(1.2 * half_w), 8, 60))
+            branch_seed = np.zeros_like(domain, dtype=bool)
+            for Sx, mx in zip(gt_mid_parts, gt_mid_meta):
+                b = _safe_int((mx or {}).get("branch_id"), None) if isinstance(mx, dict) else None
+                if b is None or int(b) != int(branch_id):
+                    continue
+                branch_seed |= _segment_seed_mask(Sx, H, W)
+            if np.any(branch_seed):
                 from scipy.ndimage import binary_dilation
-                branch_region = binary_dilation(branch_seed, iterations=4)
-            except Exception:
-                branch_region = branch_seed
-            domain &= branch_region.astype(bool)
+                domain &= binary_dilation(branch_seed, iterations=dil_px).astype(bool)
 
+        print(f"[DOMAIN DBG] cid={cid} branch={branch_id} territory_applied={territory_applied} domain_nnz={int(np.sum(domain))}")
         return domain.astype(bool)
 
-    def _get_segment_bbox(crack_type, cr, seg_xy, seg_meta, H, W):
+    def _expand_bbox_xywh(bb, H, W, pad=0):
+        bb = _safe_bbox_xywh(bb, H, W)
+        if bb is None:
+            return None
+        try:
+            pad_i = int(max(0, int(pad)))
+        except Exception:
+            pad_i = 0
+        if pad_i <= 0:
+            return bb
+        x, y, w, h = bb
+        x0 = int(np.clip(x - pad_i, 0, W))
+        y0 = int(np.clip(y - pad_i, 0, H))
+        x1 = int(np.clip(x + w + pad_i, 0, W))
+        y1 = int(np.clip(y + h + pad_i, 0, H))
+        if x1 <= x0 or y1 <= y0:
+            return bb
+        return (x0, y0, x1 - x0, y1 - y0)
+
+    def _get_segment_bbox(crack_type, cr, seg_xy, seg_meta, H, W, pad_override=None):
         ctype = str(crack_type).lower()
         if ctype == "atomic":
             bb = _safe_bbox_xywh((cr or {}).get("mask_bbox"), H, W)
             if bb is not None:
-                return bb
-            return _tight_bbox_from_seg(seg_xy, H, W, pad=4)
+                return _expand_bbox_xywh(bb, H, W, pad=pad_override or 0)
+            pad_seg = int(pad_override) if pad_override is not None else 4
+            return _tight_bbox_from_seg(seg_xy, H, W, pad=pad_seg)
 
         if isinstance(seg_meta, dict):
             for k in ("branch_bbox", "bbox", "mask_bbox", "pred_mask_bbox"):
                 bb = _safe_bbox_xywh(seg_meta.get(k), H, W)
                 if bb is not None:
-                    return bb
-        return _tight_bbox_from_seg(seg_xy, H, W, pad=4)
+                    return _expand_bbox_xywh(bb, H, W, pad=pad_override or 0)
+        pad_seg = int(pad_override) if pad_override is not None else 4
+        return _tight_bbox_from_seg(seg_xy, H, W, pad=pad_seg)
 
     def _normalize_baseline_record(method_name, rec_obj):
         method_s = str(method_name)
@@ -2634,7 +2698,9 @@ def compute_projected_width_diffs(
             fam["support_method"] = method
         if fam["support_method"] is None:
             fam["support_method"] = method
-        if not rec["is_skeleton_method"]:
+        _m = str(method).lower()
+        _allow_skel_width_method = False
+        if (not _m.startswith("skel_")) or _allow_skel_width_method:
             fam["width_methods"].append(method)
 
     # Keep only families that have width methods to evaluate.
@@ -2645,6 +2711,20 @@ def compute_projected_width_diffs(
     width_methods = sorted({m for fam in families.values() for m in fam["width_methods"]})
     dbg_by_method = {m: dict(dbg_template) for m in width_methods}
     overlays_by_method = {m: {"coords": [], "diffs": []} for m in width_methods}
+    diagnostics_by_family = {
+        fk: {
+            "coords": [],
+            "radii": [],
+            "pts_success": [],
+            "pts_radius_rejected": [],
+            "pts_wmap_nan": [],
+            "pts_pre_projection": [],
+            "pts_no_support": [],
+            "skel_available_segs": [],
+            "pts_dists": [],
+        }
+        for fk in families.keys()
+    }
 
     fam_dbg = {
         k: {
@@ -2736,6 +2816,31 @@ def compute_projected_width_diffs(
             if gt_widths_seg.size < 2:
                 continue
 
+            # Per-segment adaptive projection radius based on local GT width.
+            _finite_gtw = gt_widths_seg[np.isfinite(gt_widths_seg)]
+            if _finite_gtw.size >= 1:
+                _median_gtw = float(np.median(_finite_gtw))
+                _seg_radius = float(np.clip(0.6 * _median_gtw, 6.0, 60.0))
+            else:
+                _seg_radius = 6.0
+                print(f"[B1 PROJ] seg={seg_idx} cid={cid}: no finite GT widths, using fallback radius=6.0")
+
+            # Keep bbox pad coupled to segment projection radius.
+            _seg_bbox_pad = int(np.ceil(_seg_radius)) + 2
+            if B1_DIAGNOSTIC_DEBUG:
+                _finite_gtw_dbg = gt_widths_seg[np.isfinite(gt_widths_seg)]
+                if _finite_gtw_dbg.size > 0:
+                    print(
+                        f"[B1 DBG] cid={cid} seg={seg_idx} "
+                        f"Lseg={len(gt_seg)} "
+                        f"gtw_n_finite={_finite_gtw_dbg.size} "
+                        f"gtw_median={float(np.median(_finite_gtw_dbg)):.2f} "
+                        f"gtw_min={float(np.min(_finite_gtw_dbg)):.2f} "
+                        f"gtw_max={float(np.max(_finite_gtw_dbg)):.2f} "
+                        f"radius={_seg_radius:.2f} "
+                        f"bbox_pad={_seg_bbox_pad}"
+                    )
+
             # Segment-wise projection is computed once per skeleton family and then
             # reused for all width methods in that family.
             for fam_key, fam in families.items():
@@ -2767,18 +2872,147 @@ def compute_projected_width_diffs(
                     seg_meta=seg_meta_i,
                     H=Hm,
                     W=Wm,
+                    pad_override=_seg_bbox_pad,
                 )
+                if B1_DIAGNOSTIC_DEBUG:
+                    supp_support_arr = np.asarray(supp_support).astype(bool)
+                    dom_arr = np.asarray(domain_mask).astype(bool)
+                    n_skel_raw = int(np.count_nonzero(supp_support_arr))
+                    n_skel_in_dom = int(np.count_nonzero(supp_support_arr & dom_arr))
+                    n_dom_total = int(np.count_nonzero(dom_arr))
+
+                    bbox_mask_dbg = np.zeros_like(supp_support_arr, dtype=bool)
+                    if bbox_seg is not None:
+                        _bx, _by, _bw, _bh = [int(v) for v in bbox_seg]
+                        _bx0 = max(0, _bx)
+                        _by0 = max(0, _by)
+                        _bx1 = min(supp_support_arr.shape[1], _bx + _bw)
+                        _by1 = min(supp_support_arr.shape[0], _by + _bh)
+                        if _bx1 > _bx0 and _by1 > _by0:
+                            bbox_mask_dbg[_by0:_by1, _bx0:_bx1] = True
+                    n_skel_after_bbox = (
+                        int(np.count_nonzero(supp_support_arr & dom_arr & bbox_mask_dbg))
+                        if bbox_seg is not None else n_skel_in_dom
+                    )
+                    print(
+                        f"[B1 DBG] cid={cid} seg={seg_idx} fam={fam_key} "
+                        f"skel_raw={n_skel_raw} "
+                        f"skel_after_domain={n_skel_in_dom} "
+                        f"skel_after_bbox={n_skel_after_bbox} "
+                        f"domain_total={n_dom_total} "
+                        f"bbox_seg={bbox_seg}"
+                    )
+
+                    _gt_head = gt_seg[:3].tolist() if len(gt_seg) >= 3 else gt_seg.tolist()
+                    _gt_bbox = (
+                        float(np.min(gt_seg[:, 0])),
+                        float(np.min(gt_seg[:, 1])),
+                        float(np.max(gt_seg[:, 0])),
+                        float(np.max(gt_seg[:, 1])),
+                    ) if len(gt_seg) >= 1 else None
+
+                    eff_support = supp_support_arr & dom_arr
+                    if bbox_seg is not None and bbox_mask_dbg.any():
+                        eff_support &= bbox_mask_dbg
+                    _ys_dbg, _xs_dbg = np.nonzero(eff_support)
+                    if len(_xs_dbg) >= 3:
+                        _supp_head = list(zip(
+                            _xs_dbg[:3].tolist(),
+                            _ys_dbg[:3].tolist(),
+                        ))
+                    else:
+                        _supp_head = list(zip(_xs_dbg.tolist(), _ys_dbg.tolist()))
+                    _supp_bbox = (
+                        int(np.min(_xs_dbg)), int(np.min(_ys_dbg)),
+                        int(np.max(_xs_dbg)), int(np.max(_ys_dbg)),
+                    ) if len(_xs_dbg) > 0 else None
+
+                    print(
+                        f"[B1 DBG] cid={cid} seg={seg_idx} fam={fam_key} "
+                        f"gt_head_xy={_gt_head} "
+                        f"gt_bbox_xyxy={_gt_bbox}"
+                    )
+                    print(
+                        f"[B1 DBG] cid={cid} seg={seg_idx} fam={fam_key} "
+                        f"supp_head_xy={_supp_head} "
+                        f"supp_bbox_xyxy={_supp_bbox}"
+                    )
 
                 proj = project_indices_to_support(
                     wmap_support,
                     supp_support,
                     gt_seg,
-                    max_nn_dist_px=6.0,
+                    max_nn_dist_px=float(_seg_radius),
                     use_support_mask=True,
                     domain_mask=domain_mask,
                     bbox=bbox_seg,
                     debug=False,
                 )
+                if B1_DIAGNOSTIC_DEBUG:
+                    _valid = np.asarray(proj.get("valid", []), bool)
+                    _finite_mask = np.asarray(proj.get("finite_mask", []), bool)
+                    _dists = np.asarray(proj.get("dists", []), float)
+                    _dists_finite = _dists[np.isfinite(_dists)]
+
+                    if _dists_finite.size > 0:
+                        d_min = float(np.min(_dists_finite))
+                        d_median = float(np.median(_dists_finite))
+                        d_max = float(np.max(_dists_finite))
+                        d_p90 = float(np.percentile(_dists_finite, 90))
+                    else:
+                        d_min = d_median = d_max = d_p90 = float("nan")
+
+                    print(
+                        f"[B1 DBG] cid={cid} seg={seg_idx} fam={fam_key} "
+                        f"n_total={len(gt_seg)} "
+                        f"n_finite_pre={int(np.sum(_finite_mask))} "
+                        f"n_valid={int(np.sum(_valid))} "
+                        f"used_radius={_seg_radius:.2f} "
+                        f"dist_min={d_min:.2f} "
+                        f"dist_median={d_median:.2f} "
+                        f"dist_p90={d_p90:.2f} "
+                        f"dist_max={d_max:.2f}"
+                    )
+
+                diagnostics_by_family[fam_key]["coords"].append(np.asarray(gt_seg, float))
+                diagnostics_by_family[fam_key]["radii"].append(float(_seg_radius))
+                diagnostics_by_family[fam_key]["skel_available_segs"].append(
+                    np.asarray(proj.get("skel_xy", np.empty((0, 2), float)), float)
+                )
+                diagnostics_by_family[fam_key]["pts_dists"].append((
+                    np.asarray(gt_seg, float),
+                    np.asarray(proj.get("dists", np.full(len(gt_seg), np.inf)), float),
+                    float(_seg_radius),
+                ))
+                # Per-point attribution is intentionally computed against the
+                # family's support-method width map (not downstream width methods).
+                finite_pre = np.asarray(proj.get("finite_mask", []), bool)
+                valid_mask = np.asarray(proj.get("valid", []), bool)
+                if finite_pre.size == len(gt_seg) and valid_mask.size == len(gt_seg):
+                    support_widths = sample_widths_from_projected_indices(
+                        np.asarray(support_rec["width_map"]),
+                        proj,
+                    )
+                    finite_out = np.isfinite(np.asarray(support_widths, float))
+                    if finite_out.size != len(gt_seg):
+                        finite_out = np.zeros((len(gt_seg),), dtype=bool)
+
+                    no_support_segment = (
+                        int(np.sum(valid_mask)) == 0 and int(np.sum(finite_pre)) > 0
+                    )
+
+                    for i in range(len(gt_seg)):
+                        pt = (float(gt_seg[i, 0]), float(gt_seg[i, 1]))
+                        if not finite_pre[i]:
+                            diagnostics_by_family[fam_key]["pts_pre_projection"].append(pt)
+                        elif no_support_segment:
+                            diagnostics_by_family[fam_key]["pts_no_support"].append(pt)
+                        elif not valid_mask[i]:
+                            diagnostics_by_family[fam_key]["pts_radius_rejected"].append(pt)
+                        elif not finite_out[i]:
+                            diagnostics_by_family[fam_key]["pts_wmap_nan"].append(pt)
+                        else:
+                            diagnostics_by_family[fam_key]["pts_success"].append(pt)
 
                 for method in fam["width_methods"]:
                     rec_method = norm_maps.get(method)
@@ -2953,6 +3187,174 @@ def compute_projected_width_diffs(
                 print(f"  example cids (no_gt_widths): {dbg_examples['no_gt_widths']}")
             if dbg_examples["pred_widths_too_short"]:
                 print(f"  example cids (pred_widths_too_short): {dbg_examples['pred_widths_too_short']}")
+
+    # --------------------------------------------------
+    # Baseline projection diagnostics (B1), per skeleton family
+    # --------------------------------------------------
+    for fam_key, fam in families.items():
+        support_method = fam.get("support_method")
+        if support_method is None:
+            continue
+        diag = diagnostics_by_family.get(fam_key, {})
+        coords = diag.get("coords", []) or []
+        radii = diag.get("radii", []) or []
+        if not coords:
+            continue
+        if metrics_dir_local is None:
+            continue
+
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.patches import Circle
+            import numpy as np
+            import os
+
+            support_rec = norm_maps.get(str(support_method), None)
+            if support_rec is None:
+                continue
+
+            wmap_support = np.asarray(support_rec.get("width_map"))
+            skel_support = support_rec.get("skel", None)
+            if skel_support is None:
+                skel_support = support_rec.get("support_mask", None)
+            skel_support = np.asarray(skel_support).astype(bool)
+            if wmap_support.ndim != 2 or skel_support.ndim != 2 or wmap_support.shape[:2] != skel_support.shape[:2]:
+                continue
+
+            all_pts = np.vstack(coords)
+            x0, y0 = np.min(all_pts, axis=0)
+            x1, y1 = np.max(all_pts, axis=0)
+            pad = 5.0
+
+            x0p = int(np.floor(x0 - pad))
+            y0p = int(np.floor(y0 - pad))
+            x1p = int(np.ceil(x1 + pad))
+            y1p = int(np.ceil(y1 + pad))
+
+            H, W = gt_full.shape[:2]
+            x0c = max(0, x0p)
+            y0c = max(0, y0p)
+            x1c = min(W, x1p)
+            y1c = min(H, y1p)
+            if x1c <= x0c or y1c <= y0c:
+                continue
+
+            gt_crop = gt_full[y0c:y1c, x0c:x1c]
+
+            fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
+            ax.set_facecolor("white")
+            ax.imshow(
+                gt_crop,
+                cmap="gray",
+                extent=[x0c, x1c, y1c, y0c],
+                interpolation="nearest",
+                alpha=0.4,
+            )
+
+            for S in coords:
+                S = np.asarray(S, float)
+                if S.ndim == 2 and S.shape[1] == 2 and len(S) >= 2:
+                    ax.plot(S[:, 0], S[:, 1], color="black", lw=1.5)
+
+            for S, r in zip(coords, radii):
+                S = np.asarray(S, float)
+                if S.ndim != 2 or S.shape[1] != 2 or len(S) == 0:
+                    continue
+                rr = float(r) if np.isfinite(r) else 0.0
+                if rr <= 0:
+                    continue
+                for i in range(0, len(S), 20):
+                    cxy = S[i]
+                    if not (np.isfinite(cxy[0]) and np.isfinite(cxy[1])):
+                        continue
+                    ax.add_patch(
+                        Circle(
+                            (float(cxy[0]), float(cxy[1])),
+                            radius=rr,
+                            fill=False,
+                            edgecolor="gray",
+                            linewidth=0.6,
+                            alpha=0.15,
+                        )
+                    )
+            # --- Skeleton: gray = filtered out, teal = survived domain+bbox ---
+            ys_s, xs_s = np.where(skel_support)
+            keep_crop = (xs_s >= x0c) & (xs_s < x1c) & (ys_s >= y0c) & (ys_s < y1c)
+            if np.any(keep_crop):
+                ax.scatter(
+                    xs_s[keep_crop],
+                    ys_s[keep_crop],
+                    s=1,
+                    c="#bbbbbb",
+                    alpha=0.5,
+                    zorder=2,
+                    label="skel (filtered out)",
+                )
+
+            avail_segs = diag.get("skel_available_segs", [])
+            if avail_segs:
+                valid_avail = [s for s in avail_segs if len(np.asarray(s, float)) > 0]
+                avail_all = np.vstack(valid_avail) if valid_avail else np.empty((0, 2), float)
+                if len(avail_all) > 0:
+                    ax_keep = (
+                        (avail_all[:, 0] >= x0c) & (avail_all[:, 0] < x1c) &
+                        (avail_all[:, 1] >= y0c) & (avail_all[:, 1] < y1c)
+                    )
+                    if np.any(ax_keep):
+                        ax.scatter(
+                            avail_all[ax_keep, 0],
+                            avail_all[ax_keep, 1],
+                            s=4,
+                            c="#00cc88",
+                            alpha=0.85,
+                            zorder=3,
+                            label="skel (available)",
+                        )
+
+            # --- GT midline colored by NN distance (0..2x radius -> green..red) ---
+            from matplotlib.collections import LineCollection
+            import matplotlib.cm as cm
+
+            pts_dists = diag.get("pts_dists", [])
+            for S, dists, seg_r in pts_dists:
+                S = np.asarray(S, float)
+                dists = np.asarray(dists, float)
+                if len(S) < 2 or len(dists) != len(S):
+                    continue
+                norm_d = np.clip(dists / max(float(seg_r), 1.0), 0.0, 2.0) / 2.0
+                norm_d = np.where(np.isfinite(norm_d), norm_d, 1.0)
+                colors = cm.RdYlGn_r(norm_d)
+                points = S.reshape(-1, 1, 2)
+                segments = np.concatenate([points[:-1], points[1:]], axis=1)
+                lc = LineCollection(segments, colors=colors[:-1], linewidths=2.0, zorder=6)
+                ax.add_collection(lc)
+
+            sm = plt.cm.ScalarMappable(cmap=cm.RdYlGn_r, norm=plt.Normalize(vmin=0, vmax=2))
+            sm.set_array([])
+            plt.colorbar(sm, ax=ax, fraction=0.02, pad=0.01, label="NN dist / radius (capped 2x)")
+
+            ax.set_xlim(x0c, x1c)
+            ax.set_ylim(y1c, y0c)
+            ax.set_aspect("equal")
+            ax.axis("off")
+            ax.set_title(f"{support_method} - B1 projection diagnostics")
+
+            out_dir = os.path.join(
+                metrics_dir_local,
+                str(support_method),
+                midline_type or "unknown",
+                crack_type,
+            )
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = os.path.join(
+                out_dir,
+                f"{base_name}_{support_method}_b1_projection_diagnostics.png",
+            )
+            fig.savefig(out_path, dpi=200, bbox_inches="tight")
+            plt.close(fig)
+            print(f"[BASELINE B1] wrote projection diagnostics: {out_path}")
+        except Exception as e:
+            print(f"[BASELINE B1] projection diagnostics failed for support_method='{support_method}': {e}")
 
     return width_rows
 
@@ -5399,18 +5801,43 @@ def compare_widths_for_aligned_cracks(
                 )
                 continue
 
-            # Part 1 builds native width pairs only.
-            # No interpolation here; Part 2 owns comparison-domain resampling.
+            # Part 1 keeps native correspondence identity but must keep traces usable.
+            # If stream lengths drift, resample widths to geometry length instead of skipping.
             if (len(predw_full_any) != total_geom) or (len(gtw_full_any) != total_geom):
+                def _resample_width_trace_to_len(trace_in, L_out):
+                    arr = np.asarray(trace_in, float).reshape(-1)
+                    L_out = int(L_out)
+                    if L_out <= 0:
+                        return np.asarray([], float)
+                    if arr.size == 0:
+                        out = np.empty((L_out,), float)
+                        out[:] = np.nan
+                        return out
+                    m = np.isfinite(arr)
+                    arr = arr[m]
+                    if arr.size == 0:
+                        out = np.empty((L_out,), float)
+                        out[:] = np.nan
+                        return out
+                    if arr.size == 1:
+                        out = np.empty((L_out,), float)
+                        out[:] = float(arr[0])
+                        return out
+                    if arr.size == L_out:
+                        return arr.astype(float, copy=False)
+                    u_src = np.linspace(0.0, 1.0, num=int(arr.size))
+                    u_dst = np.linspace(0.0, 1.0, num=L_out)
+                    return np.interp(u_dst, u_src, arr).astype(float, copy=False)
+
                 print(
-                    f"[WIDTH DEBUG] atomic cid={cid} -> skip (atomic width length mismatch) "
+                    f"[WIDTH DEBUG] atomic cid={cid} -> align (atomic width length mismatch) "
                     f"pred_len={len(predw_full_any)} gt_len={len(gtw_full_any)} total_geom={total_geom}"
                 )
                 log_invalid(
                     image=base_name,
                     cid=cid,
                     level="group",
-                    reason="atomic_width_length_mismatch",
+                    reason="atomic_width_length_mismatch_resampled",
                     length=float(total_geom),
                     n_segments=int(pred_group_n_segments),
                     pred_members=[str(cid)],
@@ -5426,14 +5853,15 @@ def compare_widths_for_aligned_cracks(
                 _log_failed_segment_row(
                     image=base_name,
                     cid=cid,
-                    reason="atomic_width_length_mismatch",
+                    reason="atomic_width_length_mismatch_resampled",
                     L_geom=int(total_geom),
                     pred_len_total=int(len(predw_full_any)),
                     gt_len_total=int(len(gtw_full_any)),
                     branch_id="atomic",
                     seg_idx="group",
                 )
-                continue
+                predw_full_any = _resample_width_trace_to_len(predw_full_any, total_geom)
+                gtw_full_any = _resample_width_trace_to_len(gtw_full_any, total_geom)
 
             pred_concat_xy = np.vstack([np.asarray(s, float) for s in segs if s is not None and len(s) >= 2])
             gt_geom_aligned = None
@@ -6007,6 +6435,8 @@ def compare_widths_for_aligned_cracks(
         # ============================================================
         if gt_entry is not None:
             gt_segs_all, gt_meta_all = _extract_gt_stream_segments_and_meta(gt_entry, "midline")
+            gt_missing_atomic_segs = []
+            gt_missing_atomic_meta = []
 
             print(
                 f"[STAGE2 DBG] cid={cid} GT segs={len(gt_segs_all)} "
@@ -6025,7 +6455,13 @@ def compare_widths_for_aligned_cracks(
                         print(f"[STAGE2 DBG] SKIP GT seg#{i} atomic={aid} (out-of-scope)")
                         continue
 
-                    if aid is None or str(aid) not in effective_members:
+                    if aid is None:
+                        gt_missing_atomic_segs.append(np.asarray(Sg, float))
+                        gt_missing_atomic_meta.append(dict(mg))
+                        print(f"[STAGE2 DBG] HOLD GT seg#{i} atomic=None (fallback candidate)")
+                        continue
+
+                    if str(aid) not in effective_members:
                         print(f"[STAGE2 DBG] DROP GT seg#{i} atomic={aid} (not in effective set)")
                         continue
 
@@ -6044,6 +6480,27 @@ def compare_widths_for_aligned_cracks(
                             continue
                         gt_pruned_segs.append(np.asarray(Sg, float))
                         gt_pruned_meta.append({})
+
+            if (not gt_pruned_segs) and gt_missing_atomic_segs:
+                gt_pruned_segs.extend(gt_missing_atomic_segs)
+                gt_pruned_meta.extend(gt_missing_atomic_meta)
+                print(
+                    f"[STAGE2 DBG] cid={cid} GT fallback -> kept {len(gt_missing_atomic_segs)} "
+                    f"segments with atomic=None (strict effective-members prune yielded zero)"
+                )
+                log_invalid(
+                    image=base_name,
+                    cid=cid,
+                    level="group",
+                    reason="gt_missing_atomic_id_fallback",
+                    length=float(np.sum([_poly_length(np.asarray(s, float)) for s in gt_missing_atomic_segs])),
+                    n_segments=int(len(gt_missing_atomic_segs)),
+                    pred_members=pred_members,
+                    gt_members=gt_members,
+                    overlap=overlap,
+                    entity_id=cid,
+                    branch_id=None,
+                )
 
             print(f"[STAGE2 DBG] cid={cid} GT kept {len(gt_pruned_segs)} segs after scoped/effective prune")
 
@@ -8318,7 +8775,7 @@ def compare_widths_for_aligned_cracks(
         os.makedirs(part2_resample_dir, exist_ok=True)
 
         if not width_pairs:
-            raise RuntimeError("[PART2 FATAL] width_pairs is empty. Stage-5 must populate derived width_pairs.")
+            print("[PART2] skipped: width_pairs is empty. Stage-5 produced no derived width pairs.")
 
         def _rebuild_pred_mask_from_wp(wp_obj, H_full, W_full):
             pm = np.zeros((H_full, W_full), np.uint8)

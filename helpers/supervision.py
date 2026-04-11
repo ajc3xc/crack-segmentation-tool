@@ -1830,40 +1830,25 @@ def plot_depth_cost_diagnostic(
                         selected_key = k
                     break
 
-        # Always show every available intermediate in fixed order.
-        if "dt" in costmaps_dict:
-            panels.append(("DT cost", _masked_cost(costmaps_dict["dt"]), "inferno"))
+        # Core signals only.
+        if dt_norm is not None:
+            panels.append(("DT", _unit_as_is(dt_norm), "viridis"))
 
         if "ridge_valley" in costmaps_dict:
-            panels.append(("Ridge/Valley cost", _masked_cost(costmaps_dict["ridge_valley"]), "inferno"))
+            panels.append(("Ridge/Valley", _unit_as_is(costmaps_dict["ridge_valley"]), "magma"))
         elif "rgb_cue" in costmaps_dict:
-            panels.append(("RGB cost", _masked_cost(costmaps_dict["rgb_cue"]), "inferno"))
+            panels.append(("RGB cue", _unit_as_is(costmaps_dict["rgb_cue"]), "magma"))
 
         if depth_norm is not None:
             panels.append(("Depth map", _unit_as_is(depth_norm), "viridis"))
 
         if recess_norm is not None:
-            panels.append(("Depth signal", _unit_as_is(recess_norm), "magma"))
-
-        if ("dt" in costmaps_dict) and (recess_norm is not None):
-            try:
-                dt_arr = np.asarray(costmaps_dict["dt"], np.float32)
-                rec_arr = np.asarray(recess_norm, np.float32)
-                if dt_arr.shape[:2] == rec_arr.shape[:2]:
-                    dt_eff = np.clip(dt_arr, 0.0, 1.0) * np.clip(rec_arr, 0.0, 1.0)
-                    panels.append(("DT effective", _unit_as_is(dt_eff), "plasma"))
-            except Exception:
-                pass
+            panels.append(("Depth signal", _unit_as_is(recess_norm), "plasma"))
 
         if selected is not None:
-            panels.append((f"Final cost (used: {selected_key or 'selected'})", _masked_cost(selected), "inferno"))
+            panels.append((f"Final cost ({selected_key or 'selected'})", _masked_cost(selected), "inferno"))
     elif dt_norm is not None:
-        dt_arr = np.asarray(dt_norm, np.float32)
-        dt_cost = np.full_like(dt_arr, np.float32(1e9), dtype=np.float32)
-        valid = (M > 0) & np.isfinite(dt_arr)
-        dt_cost[valid] = 1.0 - np.clip(dt_arr[valid], 0.0, 1.0)
-        panels.append(("DT cost", _masked_cost(dt_cost), "inferno"))
-        panels.append(("Final cost (used)", _masked_cost(dt_cost), "inferno"))
+        panels.append(("DT", _unit_as_is(dt_norm), "viridis"))
 
     panels = [(lbl, arr, cmap) for (lbl, arr, cmap) in panels if arr is not None]
 
@@ -1892,25 +1877,40 @@ def plot_depth_cost_diagnostic(
 
 def build_global_cost_maps(branches, full_shape):
     H, W = full_shape
-    global_cost = np.full((H, W), np.inf, dtype=np.float32)
-    global_dt = np.zeros((H, W), np.float32)
-    global_depth = np.zeros((H, W), np.float32)
-    global_recess = np.zeros((H, W), np.float32)
+    global_cost = np.full((H, W), np.nan, dtype=np.float32)
+    global_dt = np.full((H, W), np.nan, dtype=np.float32)
+    global_rgb = np.full((H, W), np.nan, dtype=np.float32)
+    global_ridge = np.full((H, W), np.nan, dtype=np.float32)
+    global_depth = np.full((H, W), np.nan, dtype=np.float32)
+    global_recess = np.full((H, W), np.nan, dtype=np.float32)
     global_count = np.zeros((H, W), np.float32)
     winner_id = np.full((H, W), -1, np.int32)
 
-    ordered = []
-    for bi, b in enumerate(branches or []):
-        bbox = b.get("bbox", None)
-        area = float(b.get("area", 0.0) or 0.0)
-        if bbox is not None and len(bbox) == 4:
-            y0, y1, x0, x1 = [int(v) for v in bbox]
-            if area <= 0:
-                area = float(max(0, y1 - y0) * max(0, x1 - x0))
-        ordered.append((int(bi), area, b))
-    ordered.sort(key=lambda t: (-float(t[1]), int(t[0])))
+    def _write(dst, src, y0, y1, x0, x1, mode="max"):
+        if src is None:
+            return
+        s = np.asarray(src, np.float32)
+        if s.ndim < 2:
+            return
+        sub = dst[y0:y1, x0:x1]
+        s = s[:sub.shape[0], :sub.shape[1]]
+        valid = np.isfinite(s)
+        if not np.any(valid):
+            return
+        if mode == "min":
+            write = valid & (~np.isfinite(sub) | (s < sub))
+        else:
+            write = valid & (~np.isfinite(sub) | (s > sub))
+        if np.any(write):
+            sub[write] = s[write]
+            dst[y0:y1, x0:x1] = sub
 
-    for bi, _area, b in ordered:
+    ordered = sorted(
+        enumerate(branches or []),
+        key=lambda t: -float((t[1] or {}).get("area", 0.0) or 0.0),
+    )
+
+    for bi, b in ordered:
         bbox = b.get("bbox", None)
         if bbox is None or len(bbox) != 4:
             continue
@@ -1918,61 +1918,47 @@ def build_global_cost_maps(branches, full_shape):
         if y1 <= y0 or x1 <= x0:
             continue
 
-        dt = np.asarray(b.get("dt_norm", None), np.float32) if b.get("dt_norm", None) is not None else None
-        depth = np.asarray(b.get("depth", None), np.float32) if b.get("depth", None) is not None else None
-        recess = np.asarray(b.get("recess_norm", None), np.float32) if b.get("recess_norm", None) is not None else None
-        cost = np.asarray(b.get("final_cost", None), np.float32) if b.get("final_cost", None) is not None else None
-        if cost is None or cost.ndim < 2:
+        # Compute clip extents from whichever map exists first.
+        ref = None
+        for k in ("final_cost", "dt_norm", "rgb", "ridge", "depth", "recess_norm"):
+            v = b.get(k, None)
+            if v is not None:
+                a = np.asarray(v)
+                if a.ndim >= 2:
+                    ref = a
+                    break
+        if ref is None:
             continue
-
-        h, w = cost.shape[:2]
-        yy1 = min(H, y0 + h)
-        xx1 = min(W, x0 + w)
+        yy1 = min(H, y0 + int(ref.shape[0]))
+        xx1 = min(W, x0 + int(ref.shape[1]))
         if yy1 <= y0 or xx1 <= x0:
             continue
-        ph = yy1 - y0
-        pw = xx1 - x0
 
-        cost_p = cost[:ph, :pw]
-        valid = np.isfinite(cost_p)
-        if not np.any(valid):
-            continue
+        cost = b.get("final_cost", None)
+        if cost is not None:
+            c = np.asarray(cost, np.float32)[: (yy1 - y0), : (xx1 - x0)]
+            valid_c = np.isfinite(c)
+            if np.any(valid_c):
+                sub = global_cost[y0:yy1, x0:xx1]
+                write_c = valid_c & (~np.isfinite(sub) | (c < sub))
+                if np.any(write_c):
+                    sub[write_c] = c[write_c]
+                    global_cost[y0:yy1, x0:xx1] = sub
+                    winners = winner_id[y0:yy1, x0:xx1]
+                    winners[write_c] = int(bi)
+                    winner_id[y0:yy1, x0:xx1] = winners
+                global_count[y0:yy1, x0:xx1][valid_c] += 1.0
 
-        gc = global_cost[y0:yy1, x0:xx1]
-        overwrite = valid & (cost_p < gc)
-        if not np.any(overwrite):
-            global_count[y0:yy1, x0:xx1][valid] += 1.0
-            continue
-        gc[overwrite] = cost_p[overwrite]
-        global_cost[y0:yy1, x0:xx1] = gc
-        winners = winner_id[y0:yy1, x0:xx1]
-        winners[overwrite] = int(bi)
-        winner_id[y0:yy1, x0:xx1] = winners
+        _write(global_dt, b.get("dt_norm", None), y0, yy1, x0, xx1, mode="max")
+        _write(global_rgb, b.get("rgb", None), y0, yy1, x0, xx1, mode="max")
+        _write(global_ridge, b.get("ridge", None), y0, yy1, x0, xx1, mode="max")
+        _write(global_depth, b.get("depth", None), y0, yy1, x0, xx1, mode="max")
+        _write(global_recess, b.get("recess_norm", None), y0, yy1, x0, xx1, mode="max")
 
-        global_count[y0:yy1, x0:xx1][valid] += 1.0
-
-        if dt is not None and dt.ndim >= 2:
-            d = dt[:ph, :pw]
-            m = overwrite & np.isfinite(d)
-            gd = global_dt[y0:yy1, x0:xx1]
-            gd[m] = d[m]
-            global_dt[y0:yy1, x0:xx1] = gd
-        if depth is not None and depth.ndim >= 2:
-            d = depth[:ph, :pw]
-            m = overwrite & np.isfinite(d)
-            gd = global_depth[y0:yy1, x0:xx1]
-            gd[m] = d[m]
-            global_depth[y0:yy1, x0:xx1] = gd
-        if recess is not None and recess.ndim >= 2:
-            r = recess[:ph, :pw]
-            m = overwrite & np.isfinite(r)
-            gr = global_recess[y0:yy1, x0:xx1]
-            gr[m] = r[m]
-            global_recess[y0:yy1, x0:xx1] = gr
-
-    global_cost[~np.isfinite(global_cost)] = 0.0
     return {
         "dt": global_dt.astype(np.float32, copy=False),
+        "rgb": global_rgb.astype(np.float32, copy=False),
+        "ridge": global_ridge.astype(np.float32, copy=False),
         "depth": global_depth.astype(np.float32, copy=False),
         "recess": global_recess.astype(np.float32, copy=False),
         "cost": global_cost.astype(np.float32, copy=False),
@@ -1981,18 +1967,168 @@ def build_global_cost_maps(branches, full_shape):
     }
 
 
-def save_global_cost_panel(maps, out_path, title="Global Atomic Cost Panel"):
-    fig, axs = plt.subplots(1, 4, figsize=(18, 5))
-    axs[0].imshow(np.asarray(maps.get("dt", 0), np.float32), cmap="inferno")
-    axs[0].set_title("DT cost")
-    axs[1].imshow(np.asarray(maps.get("depth", 0), np.float32), cmap="viridis")
-    axs[1].set_title("Depth map")
-    axs[2].imshow(np.asarray(maps.get("recess", 0), np.float32), cmap="inferno")
-    axs[2].set_title("Depth signal (recess_norm)")
-    axs[3].imshow(np.asarray(maps.get("cost", 0), np.float32), cmap="inferno")
-    axs[3].set_title("Final cost (MIN fused)")
-    for ax in axs:
+def save_global_cost_panel(
+    maps,
+    out_path,
+    *,
+    crack_mask_u8=None,
+    bbox_xywh=None,
+    title="Global Atomic Cost Panel",
+):
+    import matplotlib.pyplot as plt
+
+    def _norm_cost(arr, mask=None):
+        if arr is None:
+            return None
+        a = np.asarray(arr, np.float32)
+        out = np.full_like(a, np.nan, dtype=np.float32)
+
+        valid = np.isfinite(a) & (a < np.float32(1e8))
+        if mask is not None:
+            m = np.asarray(mask)
+            if m.ndim >= 2 and m.shape[:2] == a.shape[:2]:
+                valid &= (m > 0)
+
+        vals = a[valid]
+        if vals.size == 0:
+            return None
+
+        lo = float(np.percentile(vals, 2))
+        hi = float(np.percentile(vals, 98))
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo + 1e-9:
+            out[valid] = 0.5
+            return out
+        out[valid] = (a[valid] - lo) / (hi - lo)
+        return out
+
+    def _norm_rgb(arr, mask=None):
+        if arr is None:
+            return None
+        a = np.asarray(arr, np.float32)
+        out = np.full_like(a, np.nan, dtype=np.float32)
+        valid = np.isfinite(a)
+        if mask is not None:
+            m = np.asarray(mask)
+            if m.ndim >= 2 and m.shape[:2] == a.shape[:2]:
+                valid &= (m > 0)
+        vals = a[valid]
+        if vals.size == 0:
+            return None
+        lo = float(np.percentile(vals, 5))
+        hi = float(np.percentile(vals, 99.5))
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo + 1e-9:
+            out[valid] = 0.5
+            return out
+        out[valid] = (a[valid] - lo) / (hi - lo)
+        return out
+
+    def _unit(arr, mask=None):
+        if arr is None:
+            return None
+        a = np.asarray(arr, np.float32)
+        out = np.full_like(a, np.nan, dtype=np.float32)
+        valid = np.isfinite(a)
+        if mask is not None:
+            m = np.asarray(mask)
+            if m.ndim >= 2 and m.shape[:2] == a.shape[:2]:
+                valid &= (m > 0)
+        if not np.any(valid):
+            return None
+        out[valid] = np.clip(a[valid], 0.0, 1.0)
+        return out
+
+    maps = maps if isinstance(maps, dict) else {}
+    dt = maps.get("dt", None)
+    depth = maps.get("depth", None)
+    recess = maps.get("recess", None)
+    cost = maps.get("cost", None)
+    rgb = maps.get("rgb", None)
+    ridge = maps.get("ridge", None)
+    if ridge is None:
+        ridge = maps.get("ridge_valley", None)
+
+    H = W = None
+    M = None
+    if crack_mask_u8 is not None:
+        M = (np.asarray(crack_mask_u8) > 0)
+        H, W = M.shape[:2]
+    else:
+        for v in (dt, rgb, ridge, depth, recess, cost):
+            if v is None:
+                continue
+            a = np.asarray(v)
+            if a.ndim >= 2:
+                H, W = a.shape[:2]
+                break
+    if H is None or W is None:
+        H, W = 1, 1
+
+    if bbox_xywh is not None and len(bbox_xywh) == 4:
+        x, y, w, h = map(int, bbox_xywh)
+        pad = 25
+        x0 = max(0, x - pad)
+        y0 = max(0, y - pad)
+        x1 = min(W, x + w + pad)
+        y1 = min(H, y + h + pad)
+    elif M is not None:
+        ys, xs = np.where(M > 0)
+        if xs.size:
+            pad = 25
+            x0 = max(0, int(xs.min()) - pad)
+            y0 = max(0, int(ys.min()) - pad)
+            x1 = min(W, int(xs.max()) + 1 + pad)
+            y1 = min(H, int(ys.max()) + 1 + pad)
+        else:
+            x0, y0, x1, y1 = 0, 0, W, H
+    else:
+        x0, y0, x1, y1 = 0, 0, W, H
+
+    dt_v = _norm_cost(dt, mask=crack_mask_u8)
+    rgb_v = _norm_rgb(rgb, mask=crack_mask_u8)
+    ridge_v = _norm_rgb(ridge, mask=crack_mask_u8)
+    depth_v = _unit(depth, mask=crack_mask_u8)
+    recess_v = _unit(recess, mask=crack_mask_u8)
+    cost_v = _norm_cost(cost, mask=crack_mask_u8)
+
+    def _has_signal(arr):
+        if arr is None:
+            return False
+        a = np.asarray(arr, np.float32)
+        if not np.any(np.isfinite(a)):
+            return False
+        vals = a[np.isfinite(a)]
+        return bool((vals.size > 10) and (float(np.nanstd(vals)) > 1e-6))
+
+    panels = []
+    if _has_signal(dt_v):
+        panels.append(("DT cost", dt_v, "inferno"))
+    if _has_signal(rgb_v):
+        panels.append(("RGB cue", rgb_v, "magma"))
+    if _has_signal(ridge_v):
+        panels.append(("Ridge / Valley", ridge_v, "cividis"))
+    if _has_signal(depth_v):
+        panels.append(("Depth map", depth_v, "viridis"))
+    if _has_signal(recess_v):
+        panels.append(("Depth signal", recess_v, "plasma"))
+    if cost_v is not None and np.any(np.isfinite(cost_v)):
+        panels.append(("Final cost", cost_v, "inferno"))
+
+    if not panels:
+        return
+
+    n = len(panels)
+    fig, axs = plt.subplots(1, n, figsize=(4.5 * n, 4.5), sharex=True, sharey=True)
+    if n == 1:
+        axs = [axs]
+    for ax, (label, arr, cmap) in zip(axs, panels):
+        arr_crop = np.asarray(arr, np.float32)[y0:y1, x0:x1]
+        cmap_obj = plt.cm.get_cmap(cmap).copy()
+        cmap_obj.set_bad(color="black")
+        cmap_obj.set_under(color="black")
+        ax.imshow(arr_crop, cmap=cmap_obj, vmin=0.0, vmax=1.0)
+        ax.set_title(label, fontsize=10)
         ax.axis("off")
+
     fig.suptitle(str(title))
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
@@ -2010,19 +2146,19 @@ def save_overlap_panel(count_map, out_path, title="Overlap Count"):
     plt.close(fig)
 
 
-def save_winner_panel(winner_id_map, out_path, title="Winner Branch Id"):
-    fig = plt.figure(figsize=(6, 5))
-    arr = np.asarray(winner_id_map, np.int32)
-    masked = np.ma.masked_where(arr < 0, arr)
-    cmap = plt.cm.get_cmap("tab20").copy()
-    cmap.set_bad(color="black")
-    plt.imshow(masked, cmap=cmap)
-    plt.title(str(title))
-    plt.colorbar()
-    plt.axis("off")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    fig.savefig(out_path, bbox_inches="tight")
-    plt.close(fig)
+# def save_winner_panel(winner_id_map, out_path, title="Winner Branch Id"):
+#     fig = plt.figure(figsize=(6, 5))
+#     arr = np.asarray(winner_id_map, np.int32)
+#     masked = np.ma.masked_where(arr < 0, arr)
+#     cmap = plt.cm.get_cmap("tab20").copy()
+#     cmap.set_bad(color="black")
+#     plt.imshow(masked, cmap=cmap)
+#     plt.title(str(title))
+#     plt.colorbar()
+#     plt.axis("off")
+#     os.makedirs(os.path.dirname(out_path), exist_ok=True)
+#     fig.savefig(out_path, bbox_inches="tight")
+#     plt.close(fig)
 
 
 def _dom_mask_to_local_array(m, bw, bh):
@@ -2614,7 +2750,7 @@ def export_gt_supervision_for_image(
 
     # Re-enable full centering pipeline for holistic evaluation.
     enable_auto_centering = True
-    auto_centering_debug = True
+    auto_centering_debug = False
 
     if bool(HARD_ISOLATION_DISABLE_CENTERING):
         enable_auto_centering = False
@@ -2769,6 +2905,7 @@ def export_gt_supervision_for_image(
         "dt_ridge_valley_depth": {"slug": "dt_ridge_valley_depth", "label": "DT + Ridge/Valley + Depth", "compare_label": "DT + Ridge/Valley + Depth Midline", "color": "orange"},
         "dt_ridge_color_depth": {"slug": "dt_ridge_color_depth", "label": "DT + Ridge/Valley + RGB + Depth", "compare_label": "DT + Ridge/Valley + RGB + Depth Midline", "color": "lime"},
     }
+    ATOMIC_PER_SEG_DEBUG = False  # temporary: disable per-atomic seg_### debug folders
 
     def _variant_to_json(m):
         if not isinstance(m, dict):
@@ -3306,6 +3443,24 @@ def export_gt_supervision_for_image(
                 k: _variant_to_json(v)
                 for k, v in methods.items()
             }
+            atomic_entry["method_cost_debug"] = {}
+            for mk, mv in methods.items():
+                if not isinstance(mv, dict):
+                    continue
+                dbg_mv = mv.get("debug", {}) if isinstance(mv.get("debug", {}), dict) else {}
+                cmaps_mv = dbg_mv.get("costmaps", {}) if isinstance(dbg_mv.get("costmaps", {}), dict) else {}
+                sel_mv = cmaps_mv.get("selected", None)
+                if sel_mv is None:
+                    sk_mv = str(cmaps_mv.get("selected_key", "dt"))
+                    sel_mv = cmaps_mv.get(sk_mv, cmaps_mv.get("dt", None))
+                atomic_entry["method_cost_debug"][str(mk)] = {
+                    "bbox_xywh": [int(x), int(y), int(w), int(h)],
+                    "dt_norm": dbg_mv.get("dt_norm", None),
+                    "depth_norm": dbg_mv.get("depth_norm", None),
+                    "recess_norm": dbg_mv.get("recess_norm", None),
+                    "costmaps": cmaps_mv,
+                    "selected": sel_mv,
+                }
 
             centered_xy = np.asarray(m1.get("midline", mid_xy), float)
             centered_normals = m1.get("normals", {}) if isinstance(m1.get("normals", {}), dict) else {}
@@ -3373,7 +3528,7 @@ def export_gt_supervision_for_image(
             ]
             atomic_entry["auto_centering_meta"] = auto_meta
 
-            if auto_centering_debug:
+            if auto_centering_debug and ATOMIC_PER_SEG_DEBUG:
                 atomic_dbg_dir = os.path.join(auto_center_root, "atomic", f"seg_{str(scid).zfill(3)}")
                 os.makedirs(atomic_dbg_dir, exist_ok=True)
                 manual_invalid = [~np.isfinite(np.asarray(widths, float))]
@@ -3581,6 +3736,64 @@ def export_gt_supervision_for_image(
                 territory_mask=terr_all,
             )
             t_preview += float(time.perf_counter() - t0)
+
+        atomic_cost_global_dir = os.path.join(auto_center_root, "atomic_global_cost")
+        os.makedirs(atomic_cost_global_dir, exist_ok=True)
+
+        def _first_non_none(*vals):
+            for v in vals:
+                if v is not None:
+                    return v
+            return None
+
+        for mk in METHODS_RS3:
+            style = method_style.get(mk, {})
+            mslug = str(style.get("slug", mk))
+            use_ridge = mk in {"dt_ridge_valley", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
+            use_depth = mk in {"dt_depth", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
+            use_rgb = mk == "dt_ridge_color_depth"
+            branches_for_global = []
+            for oi in sorted(atomic_results.keys()):
+                ae = atomic_results.get(oi, {})
+                dbg_by_method = ae.get("method_cost_debug", {}) if isinstance(ae.get("method_cost_debug", {}), dict) else {}
+                md = dbg_by_method.get(mk, {}) if isinstance(dbg_by_method.get(mk, {}), dict) else {}
+                cmaps = md.get("costmaps", {}) if isinstance(md.get("costmaps", {}), dict) else {}
+                selected = md.get("selected", None)
+                if selected is None:
+                    continue
+                a_sel = np.asarray(selected, np.float32)
+                if a_sel.ndim < 2:
+                    continue
+                bb = md.get("bbox_xywh", ae.get("mask_bbox", None))
+                if not isinstance(bb, (list, tuple)) or len(bb) != 4:
+                    continue
+                x0, y0, bw, bh = [int(v) for v in bb]
+                rgb_src = _first_non_none(cmaps.get("rgb_cue", None), cmaps.get("rgb", None))
+                ridge_src = _first_non_none(cmaps.get("ridge_valley", None), cmaps.get("dt_ridge_valley", None))
+                branches_for_global.append({
+                    "bbox": [int(y0), int(y0 + a_sel.shape[0]), int(x0), int(x0 + a_sel.shape[1])],
+                    "dt_norm": md.get("dt_norm", None),
+                    "rgb": rgb_src if use_rgb else None,
+                    "ridge": ridge_src if use_ridge else None,
+                    "depth": md.get("depth_norm", None) if use_depth else None,
+                    "recess_norm": md.get("recess_norm", None) if use_depth else None,
+                    "final_cost": a_sel,
+                    "area": float(max(0, bw) * max(0, bh)),
+                })
+            if not branches_for_global:
+                continue
+            maps_global = build_global_cost_maps(branches_for_global, (int(H), int(W)))
+            method_dir = os.path.join(atomic_cost_global_dir, mslug)
+            os.makedirs(method_dir, exist_ok=True)
+            _run_timed_plot(
+                save_global_cost_panel,
+                maps=maps_global,
+                out_path=os.path.join(method_dir, "atomic_global_cost_panel.jpg"),
+                crack_mask_u8=gt_mask,
+                bbox_xywh=None,
+                title=f"atomic global [{style.get('label', mk)}]",
+            )
+            # Temporary: disable overlap-count plot emission.
 
     # =====================================================
     # 2) COMBINED  (USE UNION OF USER mask_bbox ONLY)
@@ -4837,24 +5050,38 @@ def export_gt_supervision_for_image(
 
                 def _assemble_full_from_branches(branch_recs, field):
                     shape_hw = np.asarray(crack_mask, np.uint8).shape[:2]
-                    acc = np.zeros(shape_hw, np.float32)
-                    wgt = np.zeros(shape_hw, np.float32)
-                    for _r in (branch_recs or []):
-                        by = int(_r.get("by", 0) or 0)
-                        bx = int(_r.get("bx", 0) or 0)
+                    full = np.full(shape_hw, np.nan, np.float32)
+                    is_cost_field = ("cost" in str(field).lower())
+
+                    def _fetch_arr(_rec):
                         if field == "selected_cost":
-                            cmaps = _r.get("costmaps", {}) if isinstance(_r.get("costmaps", {}), dict) else {}
-                            arr = cmaps.get("selected", None)
-                            if arr is None:
-                                key = str(cmaps.get("selected_key", "dt"))
-                                arr = cmaps.get(key, cmaps.get("dt", None))
-                        else:
-                            arr = _r.get(field, None)
+                            cmaps = _rec.get("costmaps", {}) if isinstance(_rec.get("costmaps", {}), dict) else {}
+                            arr0 = cmaps.get("selected", None)
+                            if arr0 is None:
+                                skey = str(cmaps.get("selected_key", "dt"))
+                                arr0 = cmaps.get(skey, cmaps.get("dt", None))
+                            return arr0
+                        return _rec.get(field, None)
+
+                    ordered = sorted(
+                        (branch_recs or []),
+                        key=lambda _b: -float(
+                            np.prod(np.asarray(_fetch_arr(_b)).shape[:2])
+                            if (_fetch_arr(_b) is not None and np.asarray(_fetch_arr(_b)).ndim >= 2)
+                            else 0.0
+                        ),
+                    )
+
+                    for _r in ordered:
+                        arr = _fetch_arr(_r)
                         if arr is None:
                             continue
                         a = np.asarray(arr, np.float32)
                         if a.ndim < 2:
                             continue
+
+                        by = int(_r.get("by", 0) or 0)
+                        bx = int(_r.get("bx", 0) or 0)
                         h, w = a.shape[:2]
                         y0 = max(0, by)
                         x0 = max(0, bx)
@@ -4862,19 +5089,22 @@ def export_gt_supervision_for_image(
                         x1 = min(shape_hw[1], bx + w)
                         if y1 <= y0 or x1 <= x0:
                             continue
+
                         patch = a[:(y1 - y0), :(x1 - x0)]
+                        sub = full[y0:y1, x0:x1]
                         valid = np.isfinite(patch)
                         if not np.any(valid):
                             continue
-                        acc_view = acc[y0:y1, x0:x1]
-                        wgt_view = wgt[y0:y1, x0:x1]
-                        acc_view[valid] += patch[valid]
-                        wgt_view[valid] += 1.0
-                        acc[y0:y1, x0:x1] = acc_view
-                        wgt[y0:y1, x0:x1] = wgt_view
-                    full = np.full(shape_hw, np.nan, np.float32)
-                    nz = wgt > 0
-                    full[nz] = acc[nz] / wgt[nz]
+
+                        if is_cost_field:
+                            write = valid & (~np.isfinite(sub) | (patch < sub))
+                        else:
+                            write = valid & (~np.isfinite(sub) | (patch > sub))
+                        if not np.any(write):
+                            continue
+
+                        sub[write] = patch[write]
+                        full[y0:y1, x0:x1] = sub
                     return full
 
                 def _assemble_costmap_key_from_branches(branch_recs, cmap_key):
@@ -4917,6 +5147,8 @@ def export_gt_supervision_for_image(
                     mv = methods_for_plot.get(mk, {}) if isinstance(methods_for_plot.get(mk, {}), dict) else {}
                     style = method_style.get(mk, {})
                     mslug = str(style.get("slug", mk))
+                    method_dir = os.path.join(combined_dbg_dir, mslug)
+                    os.makedirs(method_dir, exist_ok=True)
                     mpack_dbg = method_variant_segments.get(mk, {}) if isinstance(method_variant_segments.get(mk, {}), dict) else {}
                     pdbg = mpack_dbg.get("plot_debug", None) if isinstance(mpack_dbg.get("plot_debug", None), dict) else None
                     branch_dbg_list = mpack_dbg.get("plot_debug_branches", []) if isinstance(mpack_dbg.get("plot_debug_branches", []), list) else []
@@ -4940,7 +5172,7 @@ def export_gt_supervision_for_image(
                         continue
 
                     # (1) Overlay-only combined debug (old visual style).
-                    out_overlay = os.path.join(combined_dbg_dir, f"combined_{mslug}_overlay.jpg")
+                    out_overlay = os.path.join(method_dir, "combined_overlay.jpg")
                     _run_timed_plot(
                         plot_combined_overlay_debug,
                         out_path=out_overlay,
@@ -4963,7 +5195,7 @@ def export_gt_supervision_for_image(
                     score_full = _assemble_full_from_branches(branch_dbg_list, "depth_score")
 
                     if selected_full is not None and np.any(np.isfinite(selected_full)):
-                        out_side = os.path.join(combined_dbg_dir, f"combined_{mslug}_side_by_side.jpg")
+                        out_side = os.path.join(method_dir, "combined_side_by_side.jpg")
                         _run_timed_plot(
                             plot_combined_overlay_and_costmap,
                             out_path=out_side,
@@ -4980,9 +5212,21 @@ def export_gt_supervision_for_image(
                         )
 
                     # (3) Global aggregated cost panel (MIN for final cost, AVG for intermediates).
+                    use_ridge = mk in {"dt_ridge_valley", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
+                    use_depth = mk in {"dt_depth", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
+                    use_rgb = mk == "dt_ridge_color_depth"
+
+                    def _first_non_none(*vals):
+                        for v in vals:
+                            if v is not None:
+                                return v
+                        return None
+
                     branches_for_global = []
                     for brec in branch_dbg_list:
                         cmaps = brec.get("costmaps", {}) if isinstance(brec.get("costmaps", {}), dict) else {}
+                        rgb_src = _first_non_none(cmaps.get("rgb_cue", None), cmaps.get("rgb", None))
+                        ridge_src = _first_non_none(cmaps.get("ridge_valley", None), cmaps.get("dt_ridge_valley", None))
                         selected_b = cmaps.get("selected", None)
                         if selected_b is None:
                             sk = str(cmaps.get("selected_key", "dt"))
@@ -4997,37 +5241,42 @@ def export_gt_supervision_for_image(
                         branches_for_global.append({
                             "bbox": [by, by + int(a_sel.shape[0]), bx, bx + int(a_sel.shape[1])],
                             "dt_norm": brec.get("dt_norm"),
-                            "depth": brec.get("depth_norm"),
-                            "recess_norm": brec.get("recess_norm"),
+                            "rgb": rgb_src if use_rgb else None,
+                            "ridge": ridge_src if use_ridge else None,
+                            "depth": brec.get("depth_norm") if use_depth else None,
+                            "recess_norm": brec.get("recess_norm") if use_depth else None,
                             "final_cost": a_sel,
                         })
                     if branches_for_global:
                         maps_global = build_global_cost_maps(branches_for_global, np.asarray(crack_mask, np.uint8).shape[:2])
-                        out_cost_panel = os.path.join(combined_dbg_dir, f"combined_{mslug}_cost_panel.jpg")
+                        print(
+                            f"[GLOBAL SIGNAL CHECK] mk={mk} "
+                            f"rgb_finite={np.any(np.isfinite(maps_global.get('rgb')))} "
+                            f"ridge_finite={np.any(np.isfinite(maps_global.get('ridge')))} "
+                            f"rgb_std={float(np.nanstd(maps_global.get('rgb')) if maps_global.get('rgb') is not None else np.nan):.6f} "
+                            f"ridge_std={float(np.nanstd(maps_global.get('ridge')) if maps_global.get('ridge') is not None else np.nan):.6f}"
+                        )
+                        out_cost_panel = os.path.join(method_dir, "combined_cost_panel.jpg")
                         _run_timed_plot(
                             save_global_cost_panel,
                             maps=maps_global,
                             out_path=out_cost_panel,
+                            crack_mask_u8=crack_mask_clipped,
+                            bbox_xywh=combined_entry.get("mask_bbox"),
                             title=f"combined {tag_name} [{style.get('label', mk)}]",
                         )
-                        out_overlap = os.path.join(combined_dbg_dir, f"combined_{mslug}_overlap_count.jpg")
-                        _run_timed_plot(
-                            save_overlap_panel,
-                            count_map=maps_global.get("count"),
-                            out_path=out_overlap,
-                            title=f"combined {tag_name} overlap count",
-                        )
-                        out_winner = os.path.join(combined_dbg_dir, f"combined_{mslug}_winner_map.jpg")
-                        _save_winner_fn = globals().get("save_winner_panel", None)
-                        if callable(_save_winner_fn):
-                            _run_timed_plot(
-                                _save_winner_fn,
-                                winner_id_map=maps_global.get("winner_id"),
-                                out_path=out_winner,
-                                title=f"combined {tag_name} winner branch id",
-                            )
-                        else:
-                            _dlog(1, "[WARN] save_winner_panel unavailable; skipping winner map.")
+                        # Temporary: disable overlap-count plot emission.
+                        # out_winner = os.path.join(combined_dbg_dir, f"combined_{mslug}_winner_map.jpg")
+                        # _save_winner_fn = globals().get("save_winner_panel", None)
+                        # if callable(_save_winner_fn):
+                        #     _run_timed_plot(
+                        #         _save_winner_fn,
+                        #         winner_id_map=maps_global.get("winner_id"),
+                        #         out_path=out_winner,
+                        #         title=f"combined {tag_name} winner branch id",
+                        #     )
+                        # else:
+                        #     _dlog(1, "[WARN] save_winner_panel unavailable; skipping winner map.")
 
                     # Keep per-branch cost panels in separate folders.
                     if branch_dbg_list:
@@ -5039,10 +5288,10 @@ def export_gt_supervision_for_image(
                                     bidx = int(blob_id.split("_", 1)[1])
                                 except Exception:
                                     bidx = 0
-                            branch_dir = os.path.join(combined_dbg_dir, f"branch_{int(bidx):03d}")
-                            os.makedirs(branch_dir, exist_ok=True)
-                            out_cost = os.path.join(branch_dir, f"{mslug}_cost.png")
+                            out_cost = os.path.join(method_dir, f"branch_{int(bidx):03d}_cost.png")
                             _cm = brec.get("costmaps", {}) if isinstance(brec.get("costmaps", {}), dict) else {}
+                            _rgb_src = _first_non_none(_cm.get("rgb_cue"), _cm.get("rgb"))
+                            _ridge_src = _first_non_none(_cm.get("ridge_valley"), _cm.get("dt_ridge_valley"))
                             print(
                                 f"[COSTMAP KEYS] mk={mk} branch={int(bidx):03d} "
                                 f"keys={sorted(_cm.keys())} "
@@ -5050,21 +5299,47 @@ def export_gt_supervision_for_image(
                                 f"has_recess_norm={brec.get('recess_norm') is not None}"
                             )
                             _run_timed_plot(
-                                plot_depth_cost_diagnostic,
+                                save_global_cost_panel,
+                                maps={
+                                    "dt": np.asarray(brec.get("dt_norm"), np.float32) if brec.get("dt_norm") is not None else None,
+                                    "rgb": (
+                                        np.asarray(_rgb_src, np.float32)
+                                        if (use_rgb and (_rgb_src is not None))
+                                        else None
+                                    ),
+                                    "ridge": (
+                                        np.asarray(_ridge_src, np.float32)
+                                        if (use_ridge and (_ridge_src is not None))
+                                        else None
+                                    ),
+                                    "depth": (
+                                        np.asarray(brec.get("depth_norm"), np.float32)
+                                        if (use_depth and brec.get("depth_norm") is not None)
+                                        else None
+                                    ),
+                                    "recess": (
+                                        np.asarray(brec.get("recess_norm"), np.float32)
+                                        if (use_depth and brec.get("recess_norm") is not None)
+                                        else None
+                                    ),
+                                    "cost": (
+                                        np.asarray(_cm.get("selected"), np.float32)
+                                        if _cm.get("selected") is not None
+                                        else (
+                                            np.asarray(_cm.get(str(_cm.get("selected_key", "dt"))), np.float32)
+                                            if _cm.get(str(_cm.get("selected_key", "dt"))) is not None
+                                            else (np.asarray(_cm.get("dt"), np.float32) if _cm.get("dt") is not None else None)
+                                        )
+                                    ),
+                                },
                                 out_path=out_cost,
-                                crack_mask_u8=np.asarray(brec.get("mask_use"), np.uint8),
-                                dt_norm=np.asarray(brec.get("dt_norm"), np.float32) if brec.get("dt_norm") is not None else np.zeros_like(np.asarray(brec.get("mask_use"), np.uint8), np.float32),
-                                depth_norm=np.asarray(brec.get("depth_norm"), np.float32) if brec.get("depth_norm") is not None else None,
-                                recess_norm=np.asarray(brec.get("recess_norm"), np.float32) if brec.get("recess_norm") is not None else None,
-                                depth_score=np.asarray(brec.get("depth_score"), np.float32) if brec.get("depth_score") is not None else None,
-                                costmaps=brec.get("costmaps"),
+                                crack_mask_u8=np.asarray(brec.get("mask_use"), np.uint8) if brec.get("mask_use") is not None else None,
                                 bbox_xywh=None,
-                                title=f"combined {tag_name}",
-                                method_label=f"{mslug} | branch {int(bidx):03d}",
+                                title=f"combined {tag_name} [{mslug} | branch {int(bidx):03d}]",
                             )
                     elif pdbg is not None:
                         # Backward fallback when branch records are unavailable.
-                        out_cost = os.path.join(combined_dbg_dir, f"costmap_{mslug}.jpg")
+                        out_cost = os.path.join(method_dir, "costmap_fallback.jpg")
                         _run_timed_plot(
                             plot_costmap_debug,
                             out_path=out_cost,
@@ -5257,18 +5532,29 @@ def export_gt_supervision_for_image(
     # 4) WRITE JSON
     # =====================================================
     out_json = os.path.join(sup_root, "gt_supervision.json")
+
+    def _json_default(o):
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        if isinstance(o, (np.integer,)):
+            return int(o)
+        if isinstance(o, (np.floating,)):
+            return float(o)
+        raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+
     json_entries = []
     for _e in (final_entries or []):
         if isinstance(_e, dict):
             _d = dict(_e)
             # Keep runtime diagnostics in memory, but avoid bloating disk JSON.
             _d.pop("auto_centering_meta", None)
+            _d.pop("method_cost_debug", None)
             json_entries.append(_d)
         else:
             json_entries.append(_e)
     t0 = time.perf_counter()
     with open(out_json, "w", encoding="utf-8") as f:
-        json.dump({"cracks": json_entries}, f, indent=2)
+        json.dump({"cracks": json_entries}, f, indent=2, default=_json_default)
     t_json += float(time.perf_counter() - t0)
 
     # =====================================================

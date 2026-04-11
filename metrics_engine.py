@@ -202,6 +202,19 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         persist=True,
         write_plot=True,
     ):
+        """
+        Aggregate per-image GT ablation RS3 into one dataset-level decision.
+
+        Authoritative orchestrator output:
+        - return["best_non_dt"]: selected best non-DT method key (string or None).
+
+        Persisted receipt:
+        - metrics/_calibration/best_ablation_length_only.json
+          (this is what `_load_best_non_dt_method` reads later).
+
+        DataFrame returns:
+        - return["summary_df"] / return["all_df"] are produced for analysis/plotting.
+        """
         import json
         import os
         import numpy as np
@@ -652,10 +665,11 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         idx,
         *,
         edge_params=None,
-        export_supervision=True,
+        export_supervision=False,
         display=False,
         width_eval_mode="dt_best_et",
         best_method_key=None,
+        run_atomic_width_eval=False,
         edge_parallel_workers=None,
         run_edge_tracking=True,
     ):
@@ -702,6 +716,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 export_supervision=bool(export_supervision),
                 width_eval_mode=str(width_eval_mode),
                 best_method_key=best_method_key,
+                run_atomic_width_eval=bool(run_atomic_width_eval),
             )
 
             return {
@@ -757,10 +772,11 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             r = self._run_metrics_for_image_idx(
                 idx,
                 edge_params=edge_params,
-                export_supervision=export_supervision,
+                export_supervision=True,
                 display=display,
                 width_eval_mode="et_only",
                 best_method_key=None,
+                run_atomic_width_eval=False,
                 edge_parallel_workers=edge_parallel_workers,
             )
             pass1_rows.append(r)
@@ -769,9 +785,11 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             agg = self._aggregate_ablation_rs3_length_only(image_indices=idxs, persist=True, write_plot=True)
             best_non_dt = agg.get("best_non_dt")
         else:
-            best_non_dt = self._load_best_ablation_method()
+            best_non_dt = self._load_best_non_dt_method()
         if not best_non_dt:
-            best_non_dt = self._load_best_ablation_method()
+            # Fallback: compute directly from pass1 artifacts instead of hard-failing on missing JSON.
+            agg = self._aggregate_ablation_rs3_length_only(image_indices=idxs, persist=True, write_plot=True)
+            best_non_dt = agg.get("best_non_dt")
 
         print(f"[batch dt_best_et] selected best_non_dt={best_non_dt}")
 
@@ -786,6 +804,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 display=display,
                 width_eval_mode="dt_best_et",
                 best_method_key=best_non_dt,
+                run_atomic_width_eval=False,
                 edge_parallel_workers=edge_parallel_workers,
                 run_edge_tracking=False,
             )
@@ -1329,13 +1348,14 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
     def compute_mask_and_width_metrics_for_image(
         self,
         display=False,
-        export_supervision=True,
+        export_supervision=False,
         *,
         cache_key=None,
         include_auto=False,   # deprecated in final stage (kept for call compatibility)
         width_eval_mode="dt_best_et",
         best_method_key=None,
         best_selection_path=None,
+        run_atomic_width_eval=False,
     ):
         """
         Snapshot-only driver (strict edges). Writes:
@@ -1575,6 +1595,24 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             except Exception as e:
                 print(f"\n[DEBUG METRICS] GT supervision export failed: {e}\n")
                 traceback.print_exc()
+
+        gt_sup_json_path = os.path.join(gt_sup_root, "gt_supervision.json")
+        mode_precheck = str(width_eval_mode or "dt_best_et").strip().lower()
+        if mode_precheck not in {"et_only", "dt_best_et"}:
+            mode_precheck = "dt_best_et"
+        if not bool(export_supervision):
+            if not os.path.isfile(gt_sup_json_path):
+                if mode_precheck == "dt_best_et":
+                    raise RuntimeError(
+                        "compute_mask_and_width_metrics_for_image called with export_supervision=False "
+                        f"but no gt_supervision.json exists at {gt_sup_json_path}. "
+                        "Either run a prior export (call with export_supervision=True) or confirm the "
+                        "supervision folder is populated for this image."
+                    )
+                print(
+                    "[WIDTH DRIVER] warning: export_supervision=False and missing gt_supervision.json "
+                    f"at {gt_sup_json_path}; proceeding because width_eval_mode='et_only'."
+                )
 
         # ------------------------------------------------------------------
         # 4) Rebuild combined cracks for MANUAL + AUTO (shared logic)
@@ -2690,7 +2728,10 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
                     width_eval_methods = [
                         m for m in normalized_maps.keys()
-                        if not str(m).lower().startswith("skel_")
+                        if not (
+                            str(m).lower().startswith("skel_")
+                            and str(m).lower() not in ("skel_mat_dse", "skel_mat_raw")
+                        )
                     ]
                     print(f"[BASELINE DEBUG] width methods: {width_eval_methods}")
 
@@ -2926,12 +2967,14 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 a = pack.get("atomic")
                 c = pack.get("combined")
 
-                if a is not None:
+                if a is not None and run_atomic_width_eval:
                     _run_one_mode(
                         variant_id=vid,
                         crack_type="atomic",
                         payload={"atomic_cracks": a},
                     )
+                elif a is not None and not run_atomic_width_eval:
+                    print(f"[WIDTH] skipping atomic eval for {midline_type} (run_atomic_width_eval=False)")
 
                 if c is not None:
                     _run_one_mode(
@@ -3002,13 +3045,28 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
         mode = str(width_eval_mode or "dt_best_et").strip().lower()
         selected_best_non_dt = str(best_method_key or "").strip()
+        if mode not in {"et_only", "dt_best_et"}:
+            print(f"[DEBUG WIDTH] unknown width_eval_mode={mode}, defaulting to dt_best_et")
+            mode = "dt_best_et"
+        if mode == "dt_best_et" and not selected_best_non_dt:
+            # Single-image quick runs write per-image ablation CSVs during supervision export,
+            # but may not have executed a global aggregation step yet. Refresh persisted best
+            # selection from whatever ablation CSVs currently exist on disk.
+            self._aggregate_ablation_rs3_length_only(
+                image_indices=None,
+                persist=True,
+                write_plot=False,
+            )
+        if mode == "dt_best_et" and not selected_best_non_dt:
+            selected_best_non_dt = self._load_best_non_dt_method(best_json_path=best_selection_path)
+        if mode == "dt_best_et" and not selected_best_non_dt:
+            raise RuntimeError(
+                "width_eval_mode='dt_best_et' requires either an explicit best_method_key argument "
+                "OR a persisted best_ablation_length_only.json from a prior batch aggregation. "
+                "Neither was found. Run the batch aggregation first, or pass best_method_key explicitly."
+            )
         try:
             print("[DEBUG METRICS] width comparisons (total) ...")
-            if mode not in {"et_only", "dt_best_et"}:
-                print(f"[DEBUG WIDTH] unknown width_eval_mode={mode}, defaulting to dt_best_et")
-                mode = "dt_best_et"
-            if mode == "dt_best_et" and not selected_best_non_dt:
-                selected_best_non_dt = self._load_best_ablation_method(best_json_path=best_selection_path)
             if mode == "dt_best_et":
                 print(f"[WIDTH DRIVER] best_method = {selected_best_non_dt}")
 
@@ -3058,7 +3116,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         _run_width_eval_total(
                             atomic_src=best_atomic,
                             combined_src=best_combined,
-                            midline_type=str(selected_best_non_dt),
+                            midline_type=f"best_{selected_best_non_dt}",
                             width_baseline_root=None,
                         )
                     else:
