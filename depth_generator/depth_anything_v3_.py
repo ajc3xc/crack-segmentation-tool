@@ -568,8 +568,8 @@ for img_path in image_paths:
                 "bbox_half_xywh": [int(meta["bbox_half_xywh"][0]), int(meta["bbox_half_xywh"][1]), int(meta["bbox_half_xywh"][2]), int(meta["bbox_half_xywh"][3])],
                 "bbox_full_xyxy": [int(x0f), int(y0f), int(x1f), int(y1f)],
                 "padded_full_xyxy": [int(meta["pad_bounds"][0]), int(meta["pad_bounds"][1]), int(meta["pad_bounds"][2]), int(meta["pad_bounds"][3])],
-                "depth_npy_file": atomic_npy_file,
-                "depth_png_file": atomic_png_file,
+                "multi_cue_npy_file": atomic_npy_file,
+                "multi_cue_png_file": atomic_png_file,
                 "inference_s": float(bbox_s),
             })
 

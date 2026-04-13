@@ -1945,6 +1945,8 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
                 print("[quick] no cache map present — will recompute edges in Phase 1")
 
         t_edge_calib = time.perf_counter() - t_edge_calib_start
+        if isinstance(best_edge, dict) and best_edge:
+            print(f"[quick] edge selection: best_edge={best_edge}")
         print(f"[quick] ⏱ edge calibration total: {t_edge_calib:.2f}s")
 
         # ------------------------------------------------------------

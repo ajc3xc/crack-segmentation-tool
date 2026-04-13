@@ -2822,11 +2822,11 @@ def export_gt_supervision_for_image(
         "combined_centering_sec": 0.0,
         "dt_compute_s": 0.0,
         "centered_snap_s": 0.0,
-        "depth_align_s": 0.0,
-        "depth_recess_s": 0.0,
-        "depth_costmap_s": 0.0,
-        "depth_dijkstra_s": 0.0,
-        "depth_postprocess_s": 0.0,
+        "multi_cue_align_s": 0.0,
+        "multi_cue_recess_s": 0.0,
+        "multi_cue_costmap_s": 0.0,
+        "multi_cue_dijkstra_s": 0.0,
+        "multi_cue_postprocess_s": 0.0,
         "normals_centered_s": 0.0,
         "normals_depth_s": 0.0,
     }
@@ -2856,13 +2856,13 @@ def export_gt_supervision_for_image(
         return float(
             float(dt.get("compute_s", 0.0) or 0.0)
             + float(ctr.get("snap_s", 0.0) or 0.0)
-            + float(dep.get("depth_align_s", 0.0) or 0.0)
+            + float(dep.get("multi_cue_align_s", 0.0) or 0.0)
             + float(dep.get("recess_s", 0.0) or 0.0)
             + float(dep.get("costmap_s", 0.0) or 0.0)
             + float(dep.get("dijkstra_s", 0.0) or 0.0)
             + float(dep.get("postprocess_s", 0.0) or 0.0)
             + float(nrm.get("centered_s", 0.0) or 0.0)
-            + float(nrm.get("depth_s", 0.0) or 0.0)
+            + float(nrm.get("multi_cue_s", 0.0) or 0.0)
         )
 
     def _accumulate_timing_blob(timing_blob):
@@ -2878,11 +2878,11 @@ def export_gt_supervision_for_image(
                 m_depth = methods_blob.get("dt_depth", {}) if isinstance(methods_blob.get("dt_depth", {}), dict) else {}
             timing_totals["dt_compute_s"] += float(m_dt.get("dt_compute_s", 0.0) or 0.0)
             timing_totals["centered_snap_s"] += float(m_dt.get("dijkstra_s", 0.0) or 0.0)
-            timing_totals["depth_align_s"] += float(m_depth.get("depth_align_s", 0.0) or 0.0)
-            timing_totals["depth_recess_s"] += float(m_depth.get("depth_recess_s", 0.0) or 0.0)
-            timing_totals["depth_costmap_s"] += float(m_depth.get("costmap_s", 0.0) or 0.0)
-            timing_totals["depth_dijkstra_s"] += float(m_depth.get("dijkstra_s", 0.0) or 0.0)
-            timing_totals["depth_postprocess_s"] += float(m_depth.get("postprocess_s", 0.0) or 0.0)
+            timing_totals["multi_cue_align_s"] += float(m_depth.get("multi_cue_align_s", 0.0) or 0.0)
+            timing_totals["multi_cue_recess_s"] += float(m_depth.get("multi_cue_recess_s", 0.0) or 0.0)
+            timing_totals["multi_cue_costmap_s"] += float(m_depth.get("costmap_s", 0.0) or 0.0)
+            timing_totals["multi_cue_dijkstra_s"] += float(m_depth.get("dijkstra_s", 0.0) or 0.0)
+            timing_totals["multi_cue_postprocess_s"] += float(m_depth.get("postprocess_s", 0.0) or 0.0)
             timing_totals["normals_centered_s"] += float(m_dt.get("normals_s", 0.0) or 0.0)
             timing_totals["normals_depth_s"] += float(m_depth.get("normals_s", 0.0) or 0.0)
             return
@@ -2892,13 +2892,13 @@ def export_gt_supervision_for_image(
         nrm = timing_blob.get("normals", {}) if isinstance(timing_blob.get("normals", {}), dict) else {}
         timing_totals["dt_compute_s"] += float(dt.get("compute_s", 0.0) or 0.0)
         timing_totals["centered_snap_s"] += float(ctr.get("snap_s", 0.0) or 0.0)
-        timing_totals["depth_align_s"] += float(dep.get("depth_align_s", 0.0) or 0.0)
-        timing_totals["depth_recess_s"] += float(dep.get("recess_s", 0.0) or 0.0)
-        timing_totals["depth_costmap_s"] += float(dep.get("costmap_s", 0.0) or 0.0)
-        timing_totals["depth_dijkstra_s"] += float(dep.get("dijkstra_s", 0.0) or 0.0)
-        timing_totals["depth_postprocess_s"] += float(dep.get("postprocess_s", 0.0) or 0.0)
+        timing_totals["multi_cue_align_s"] += float(dep.get("multi_cue_align_s", 0.0) or 0.0)
+        timing_totals["multi_cue_recess_s"] += float(dep.get("recess_s", 0.0) or 0.0)
+        timing_totals["multi_cue_costmap_s"] += float(dep.get("costmap_s", 0.0) or 0.0)
+        timing_totals["multi_cue_dijkstra_s"] += float(dep.get("dijkstra_s", 0.0) or 0.0)
+        timing_totals["multi_cue_postprocess_s"] += float(dep.get("postprocess_s", 0.0) or 0.0)
         timing_totals["normals_centered_s"] += float(nrm.get("centered_s", 0.0) or 0.0)
-        timing_totals["normals_depth_s"] += float(nrm.get("depth_s", 0.0) or 0.0)
+        timing_totals["normals_depth_s"] += float(nrm.get("multi_cue_s", 0.0) or 0.0)
 
     method_style = {
         "dt": {"slug": "dt", "label": "DT", "compare_label": "DT Midline", "color": "cyan"},
@@ -3524,7 +3524,7 @@ def export_gt_supervision_for_image(
                 atomic_entry["gt_normals_fused"] = fused_normals
                 atomic_entry["gt_widths_fused"] = fused_normals.get("width_px", [])
 
-            atomic_entry["depth_cost_meta"] = {
+            atomic_entry["multi_cue_cost_meta"] = {
                 "dt_depth": m3.get("meta", {}) if isinstance(m3.get("meta", {}), dict) else {},
                 "dt_ridge_valley_depth": m4.get("meta", {}) if isinstance(m4.get("meta", {}), dict) else {},
                 "dt_ridge_color_depth": m5.get("meta", {}) if isinstance(m5.get("meta", {}), dict) else {},
@@ -4774,7 +4774,7 @@ def export_gt_supervision_for_image(
                                     "dt_norm": mdebug.get("dt_norm"),
                                     "depth_norm": mdebug.get("depth_norm"),
                                     "recess_norm": mdebug.get("recess_norm"),
-                                    "depth_score": mdebug.get("score_for_refine"),
+                                    "multi_cue_score": mdebug.get("score_for_refine"),
                                     "bx": int(bx),
                                     "by": int(by),
                                 })
@@ -4937,9 +4937,9 @@ def export_gt_supervision_for_image(
                 de2_valid = [de2x_list[i] for i in valid_depth_idx]
                 de2y_valid = [de2y_list[i] for i in valid_depth_idx]
                 dw_valid = [dw_list[i] for i in valid_depth_idx]
-                combined_entry["depth_midline_segments"] = [np.asarray(S, float).tolist() for S in depth_valid_segs]
-                combined_entry["depth_midline_segments_meta"] = depth_meta_valid
-                combined_entry["depth_midline"] = _pack_segs_with_separators(depth_valid_segs)
+                combined_entry["multi_cue_midline_segments"] = [np.asarray(S, float).tolist() for S in depth_valid_segs]
+                combined_entry["multi_cue_midline_segments_meta"] = depth_meta_valid
+                combined_entry["multi_cue_midline"] = _pack_segs_with_separators(depth_valid_segs)
                 combined_entry["depth_normals"] = {
                     "edge1_x": _pack_arrs_with_none_separators([_arr_to_list(a) for a in de1_valid]),
                     "edge1_y": _pack_arrs_with_none_separators([_arr_to_list(a) for a in de1y_valid]),
@@ -4951,9 +4951,9 @@ def export_gt_supervision_for_image(
                     per_seg_depth_normals_diag[i] if i < len(per_seg_depth_normals_diag) else {}
                     for i in valid_depth_idx
                 ]
-                combined_entry["fused_midline_segments"] = combined_entry["depth_midline_segments"]
-                combined_entry["fused_midline_segments_meta"] = combined_entry["depth_midline_segments_meta"]
-                combined_entry["fused_midline"] = combined_entry["depth_midline"]
+                combined_entry["fused_midline_segments"] = combined_entry["multi_cue_midline_segments"]
+                combined_entry["fused_midline_segments_meta"] = combined_entry["multi_cue_midline_segments_meta"]
+                combined_entry["fused_midline"] = combined_entry["multi_cue_midline"]
                 combined_entry["fused_normals"] = combined_entry["depth_normals"]
                 combined_entry["fused_normals_diag_per_segment"] = combined_entry["depth_normals_diag_per_segment"]
                 combined_entry["midline_fused"] = combined_entry["fused_midline"]
@@ -4998,7 +4998,7 @@ def export_gt_supervision_for_image(
                 }
             combined_entry["method_results"] = dict(combined_entry.get("method_variants", {}))
 
-            combined_entry["depth_cost_meta"] = {
+            combined_entry["multi_cue_cost_meta"] = {
                 "per_segment": depth_cost_meta_per_segment,
             }
 
@@ -5010,7 +5010,7 @@ def export_gt_supervision_for_image(
             center_geom_parts = [np.asarray(S, float) for S in centered_segs if S is not None and len(S) >= 2]
             depth_geom_parts = [
                 np.asarray(S, float)
-                for S in (combined_entry.get("fused_midline_segments", combined_entry.get("depth_midline_segments", [])) or [])
+                for S in (combined_entry.get("fused_midline_segments", combined_entry.get("multi_cue_midline_segments", [])) or [])
                 if S is not None and len(S) >= 2
             ]
             manual_geom_all = np.vstack(manual_geom_parts) if manual_geom_parts else np.empty((0, 2), float)
@@ -5242,7 +5242,7 @@ def export_gt_supervision_for_image(
                     dt_full = _assemble_full_from_branches(branch_dbg_list, "dt_norm")
                     depth_full = _assemble_full_from_branches(branch_dbg_list, "depth_norm")
                     recess_full = _assemble_full_from_branches(branch_dbg_list, "recess_norm")
-                    score_full = _assemble_full_from_branches(branch_dbg_list, "depth_score")
+                    score_full = _assemble_full_from_branches(branch_dbg_list, "multi_cue_score")
 
                     if selected_full is not None and np.any(np.isfinite(selected_full)):
                         out_side = os.path.join(method_dir, "combined_side_by_side.jpg")
@@ -5468,11 +5468,11 @@ def export_gt_supervision_for_image(
             "centering_total_sec",
             "dt_compute_s",
             "centered_snap_s",
-            "depth_align_s",
-            "depth_recess_s",
-            "depth_costmap_s",
-            "depth_dijkstra_s",
-            "depth_postprocess_s",
+            "multi_cue_align_s",
+            "multi_cue_recess_s",
+            "multi_cue_costmap_s",
+            "multi_cue_dijkstra_s",
+            "multi_cue_postprocess_s",
             "normals_centered_s",
             "normals_depth_s",
         ])
@@ -5485,11 +5485,11 @@ def export_gt_supervision_for_image(
             float(centering_total_sec),
             float(timing_totals["dt_compute_s"]),
             float(timing_totals["centered_snap_s"]),
-            float(timing_totals["depth_align_s"]),
-            float(timing_totals["depth_recess_s"]),
-            float(timing_totals["depth_costmap_s"]),
-            float(timing_totals["depth_dijkstra_s"]),
-            float(timing_totals["depth_postprocess_s"]),
+            float(timing_totals["multi_cue_align_s"]),
+            float(timing_totals["multi_cue_recess_s"]),
+            float(timing_totals["multi_cue_costmap_s"]),
+            float(timing_totals["multi_cue_dijkstra_s"]),
+            float(timing_totals["multi_cue_postprocess_s"]),
             float(timing_totals["normals_centered_s"]),
             float(timing_totals["normals_depth_s"]),
         ])
@@ -5527,11 +5527,11 @@ def export_gt_supervision_for_image(
         wcsv.writerow([
             "image",
             "dt_compute_s",
-            "depth_align_s",
-            "depth_recess_s",
-            "depth_costmap_s",
-            "depth_dijkstra_s",
-            "depth_postprocess_s",
+            "multi_cue_align_s",
+            "multi_cue_recess_s",
+            "multi_cue_costmap_s",
+            "multi_cue_dijkstra_s",
+            "multi_cue_postprocess_s",
             "normals_depth_s",
             "atomic_centering_sec",
             "noncombined_atomic_centering_sec",
@@ -5542,11 +5542,11 @@ def export_gt_supervision_for_image(
         wcsv.writerow([
             base_name,
             float(timing_totals["dt_compute_s"]),
-            float(timing_totals["depth_align_s"]),
-            float(timing_totals["depth_recess_s"]),
-            float(timing_totals["depth_costmap_s"]),
-            float(timing_totals["depth_dijkstra_s"]),
-            float(timing_totals["depth_postprocess_s"]),
+            float(timing_totals["multi_cue_align_s"]),
+            float(timing_totals["multi_cue_recess_s"]),
+            float(timing_totals["multi_cue_costmap_s"]),
+            float(timing_totals["multi_cue_dijkstra_s"]),
+            float(timing_totals["multi_cue_postprocess_s"]),
             float(timing_totals["normals_depth_s"]),
             float(timing_totals["atomic_centering_sec"]),
             float(timing_totals["noncombined_atomic_centering_sec"]),
@@ -5562,7 +5562,7 @@ def export_gt_supervision_for_image(
         f"combined_plus_noncombined_atomics_sec={combined_plus_noncombined_atomics_sec:.4f} "
         f"centering_total_sec={centering_total_sec:.4f} "
         f"dt_compute_s={timing_totals['dt_compute_s']:.4f} "
-        f"depth_dijkstra_s={timing_totals['depth_dijkstra_s']:.4f}"
+        f"multi_cue_dijkstra_s={timing_totals['multi_cue_dijkstra_s']:.4f}"
     )
     print(f"[GT_SUP TIMING] wrote {compute_csv}")
     print(f"[GT_SUP TIMING] wrote {centering_csv}")
@@ -5631,11 +5631,11 @@ def export_gt_supervision_for_image(
     t_atomic_center = float(timing_totals.get("atomic_centering_sec", 0.0) or 0.0)
     t_combined_center = float(timing_totals.get("combined_centering_sec", 0.0) or 0.0)
     t_multi_cue = float(
-        (timing_totals.get("depth_align_s", 0.0) or 0.0)
-        + (timing_totals.get("depth_recess_s", 0.0) or 0.0)
-        + (timing_totals.get("depth_costmap_s", 0.0) or 0.0)
-        + (timing_totals.get("depth_dijkstra_s", 0.0) or 0.0)
-        + (timing_totals.get("depth_postprocess_s", 0.0) or 0.0)
+        (timing_totals.get("multi_cue_align_s", 0.0) or 0.0)
+        + (timing_totals.get("multi_cue_recess_s", 0.0) or 0.0)
+        + (timing_totals.get("multi_cue_costmap_s", 0.0) or 0.0)
+        + (timing_totals.get("multi_cue_dijkstra_s", 0.0) or 0.0)
+        + (timing_totals.get("multi_cue_postprocess_s", 0.0) or 0.0)
     )
     P_mid = float(accP.get("mid", 0.0) or 0.0)
     P_rs = float(accP.get("rs", 0.0) or 0.0)

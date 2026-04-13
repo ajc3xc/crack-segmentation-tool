@@ -232,14 +232,39 @@ def _parse_midline_context(rel_path: str) -> Tuple[str, str, str]:
     method_family = "model"
     midline_type = "unknown"
 
-    if len(parts) >= 4 and parts[1] == "midline_metrics":
+    # Normalize: find where "midline_metrics" appears in path
+    try:
+        mm_idx = next(i for i, p in enumerate(parts) if "midline_metrics" in p.lower())
+    except StopIteration:
+        mm_idx = -1
+
+    if mm_idx == 1:
+        # model: {midline_type}/midline_metrics/...
         midline_type = parts[0]
-    elif len(parts) >= 5 and parts[2] == "midline_metrics":
+        method_family = "model"
+    elif mm_idx == 2:
+        # baseline: {method}/{midline_type}/midline_metrics/...
+        baseline_method = str(parts[0])
+        method_family = "baseline"
+        midline_type = parts[1]
+    elif mm_idx == 3:
+        # baseline with crack_type: {method}/{midline_type}/{crack_type}/midline_metrics_*.csv
         baseline_method = str(parts[0])
         method_family = "baseline"
         midline_type = parts[1]
     elif parts:
-        midline_type = parts[0]
+        # fallback: use filename to detect baseline
+        fname = parts[-1].lower()
+        if "baseline" in fname:
+            # try to infer from path structure
+            if len(parts) >= 2:
+                baseline_method = str(parts[0])
+                method_family = "baseline"
+                midline_type = parts[1] if len(parts) > 2 else "ET"
+            else:
+                midline_type = parts[0]
+        else:
+            midline_type = parts[0]
 
     return midline_type, method_family, baseline_method
 
@@ -1258,6 +1283,33 @@ def _aggregate_midline_metrics(
             d["baseline_method"] = baseline_method
             d["source_relpath"] = rel.replace("\\", "/")
             frames.append(d)
+
+        # Also pull midline scores from GT supervision ablation CSV
+        _abl_path = os.path.join(
+            os.path.dirname(os.path.dirname(img_dir)),  # up from metrics/ to save_folder
+            "supervision", image, "analysis", "gt_ablation_midline_metrics.csv"
+        )
+        if not os.path.isfile(_abl_path):
+            # try relative to save_folder sibling
+            _abl_path = os.path.join(img_dir, "..", "..", "..", "supervision", image, "analysis", "gt_ablation_midline_metrics.csv")
+            _abl_path = os.path.normpath(_abl_path)
+        if os.path.isfile(_abl_path):
+            _abl_df = _safe_read_csv(_abl_path)
+            if _abl_df is not None and not _abl_df.empty:
+                _abl_df = _abl_df.copy()
+                _abl_df["image"] = image
+                _abl_df["midline_type_path"] = _abl_df.get("variant_id", "unknown")
+                _abl_df["method_family"] = "model"
+                _abl_df["baseline_method"] = ""
+                _abl_df["source_relpath"] = f"supervision/{image}/analysis/gt_ablation_midline_metrics.csv"
+                # Rename variant_id -> midline_type if needed
+                if "variant_id" in _abl_df.columns and "midline_type" not in _abl_df.columns:
+                    _abl_df["midline_type"] = _abl_df["variant_id"].astype(str)
+                if "crack_type" not in _abl_df.columns:
+                    _abl_df["crack_type"] = "combined"
+                if "geometry_type" not in _abl_df.columns:
+                    _abl_df["geometry_type"] = "derived"
+                frames.append(_abl_df)
 
     if not frames:
         return outputs
@@ -2285,8 +2337,8 @@ def _aggregate_supervision_timings(
         return outputs
 
     _GT_SUP_EXCLUDE_PATTERNS = (
-        "depth_", "multi_cue_", "dijkstra", "costmap", "depth_generation",
-        "normals_depth", "depth_align", "depth_recess",
+        "multi_cue_", "multi_cue_", "dijkstra", "costmap", "multi_cue_generation",
+        "normals_depth", "multi_cue_align", "multi_cue_recess",
     )
     rows = []
     for p in files:
@@ -2771,15 +2823,15 @@ def _aggregate_depth_generation_timings(
     eval_set = {str(x) for x in (evaluated_images or set())}
     d = df[[img_col, sec_col]].copy()
     d["image"] = d[img_col].astype(str).apply(lambda s: os.path.splitext(os.path.basename(s))[0])
-    d["depth_generation_s"] = pd.to_numeric(d[sec_col], errors="coerce")
-    d = d[np.isfinite(d["depth_generation_s"])].copy()
+    d["multi_cue_generation_s"] = pd.to_numeric(d[sec_col], errors="coerce")
+    d = d[np.isfinite(d["multi_cue_generation_s"])].copy()
     if eval_set:
         d = d[d["image"].isin(eval_set)].copy()
     if d.empty:
         return outputs
 
     # Collapse duplicates per image if present.
-    d = d.groupby("image", dropna=False, as_index=False)["depth_generation_s"].mean()
+    d = d.groupby("image", dropna=False, as_index=False)["multi_cue_generation_s"].mean()
     d["source_file"] = depth_timing_csv
 
     all_csv = os.path.join(out_dir, "dataset_depth_generation_timing_all.csv")
@@ -2800,7 +2852,7 @@ def _aggregate_depth_generation_timings(
             if not ew.empty:
                 weight_map = ew.groupby("image", dropna=False)[wcol].sum().to_dict()
 
-    vals = pd.to_numeric(d["depth_generation_s"], errors="coerce").to_numpy(float)
+    vals = pd.to_numeric(d["multi_cue_generation_s"], errors="coerce").to_numpy(float)
     vals = vals[np.isfinite(vals)]
     if vals.size == 0:
         return outputs
@@ -2809,7 +2861,7 @@ def _aggregate_depth_generation_timings(
 
     if weight_map:
         ww = np.asarray([float(weight_map.get(im, np.nan)) for im in d["image"].astype(str).tolist()], dtype=float)
-        vv = pd.to_numeric(d["depth_generation_s"], errors="coerce").to_numpy(float)
+        vv = pd.to_numeric(d["multi_cue_generation_s"], errors="coerce").to_numpy(float)
         ok = np.isfinite(vv) & np.isfinite(ww) & (ww > 0)
         weighted_mean_t = float(np.sum(vv[ok] * ww[ok]) / np.sum(ww[ok])) if np.any(ok) else mean_t
     else:
@@ -2822,8 +2874,8 @@ def _aggregate_depth_generation_timings(
     roll_df = pd.DataFrame(
         [
             {
-                "category": "depth_generation",
-                "component": "depth_generation_s",
+                "category": "multi_cue_generation",
+                "component": "multi_cue_generation_s",
                 "mean_sec": mean_t,
                 "weighted_mean_sec": weighted_mean_t,
                 "total_sec": total_t,
@@ -3039,8 +3091,16 @@ def _plot_dataset_full_timing_overview(
     def _plot_atomic_vs_combined(df, title, out_png):
         if df is None or df.empty:
             return None
-        a_arr = pd.to_numeric(df.get("atomic_centering_sec"), errors="coerce").to_numpy(float)
-        c_arr = pd.to_numeric(df.get("combined_centering_sec"), errors="coerce").to_numpy(float)
+        # Support both old and renamed column variants
+        def _get_col(df, *candidates):
+            for c in candidates:
+                if c in df.columns:
+                    v = pd.to_numeric(df[c], errors="coerce")
+                    if v.notna().any():
+                        return v.to_numpy(float)
+            return np.zeros(len(df), dtype=float)
+        a_arr = _get_col(df, "atomic_centering_sec", "multi_cue_atomic_centering_sec")
+        c_arr = _get_col(df, "combined_centering_sec", "multi_cue_combined_centering_sec", "combined_atomics_centering_sec")
         a_arr = a_arr[np.isfinite(a_arr)]
         c_arr = c_arr[np.isfinite(c_arr)]
         atomic = _safe_num(np.mean(a_arr) if a_arr.size else np.nan)
@@ -3283,24 +3343,24 @@ def _plot_dataset_full_timing_overview(
         dd = df_depth.copy()
         if df_depth_gen is not None and not df_depth_gen.empty:
             gmap = (
-                df_depth_gen[["image", "depth_generation_s"]]
+                df_depth_gen[["image", "multi_cue_generation_s"]]
                 .dropna()
                 .assign(image=lambda x: x["image"].astype(str))
                 .drop_duplicates(subset=["image"], keep="last")
-                .set_index("image")["depth_generation_s"]
+                .set_index("image")["multi_cue_generation_s"]
                 .to_dict()
             )
             if "image" in dd.columns and gmap:
-                dd["depth_generation_s"] = dd["image"].astype(str).map(gmap)
+                dd["multi_cue_generation_s"] = dd["image"].astype(str).map(gmap)
             else:
-                dd["depth_generation_s"] = np.nan
+                dd["multi_cue_generation_s"] = np.nan
         elif df_depth_gen_roll is not None and not df_depth_gen_roll.empty:
-            dd["depth_generation_s"] = pd.to_numeric(
+            dd["multi_cue_generation_s"] = pd.to_numeric(
                 df_depth_gen_roll.iloc[0].get("weighted_mean_sec", np.nan),
                 errors="coerce",
             )
         else:
-            dd["depth_generation_s"] = np.nan
+            dd["multi_cue_generation_s"] = np.nan
 
         mc_centering_col = next(
             (
@@ -3314,40 +3374,45 @@ def _plot_dataset_full_timing_overview(
             None,
         )
         if mc_centering_col:
-            dd["depth_total_with_generation_sec"] = (
+            dd["multi_cue_total_with_generation_sec"] = (
                 pd.to_numeric(dd[mc_centering_col], errors="coerce")
-                + pd.to_numeric(dd["depth_generation_s"], errors="coerce").fillna(0.0)
+                + pd.to_numeric(dd["multi_cue_generation_s"], errors="coerce").fillna(0.0)
             )
         else:
-            dd["depth_total_with_generation_sec"] = pd.to_numeric(
-                dd["depth_generation_s"], errors="coerce"
+            dd["multi_cue_total_with_generation_sec"] = pd.to_numeric(
+                dd["multi_cue_generation_s"], errors="coerce"
             ).fillna(0.0)
 
+        print(f"[TIMING DBG] multi_cue timing CSV columns: {list(dd.columns[:20])}")
+        print(
+            f"[TIMING DBG] multi_cue_total_with_generation_sec sample: "
+            f"{pd.to_numeric(dd.get('multi_cue_total_with_generation_sec'), errors='coerce').describe()}"
+        )
         _add(
             mean_rows,
             "multi_cue",
-            pd.to_numeric(dd.get("depth_total_with_generation_sec"), errors="coerce").mean(),
+            pd.to_numeric(dd.get("multi_cue_total_with_generation_sec"), errors="coerce").mean(),
             "multi_cue",
-            float(np.nanstd(pd.to_numeric(dd.get("depth_total_with_generation_sec"), errors="coerce").to_numpy(float))),
+            float(np.nanstd(pd.to_numeric(dd.get("multi_cue_total_with_generation_sec"), errors="coerce").to_numpy(float))),
         )
         _add(
             sum_rows,
             "multi_cue",
             pd.to_numeric(
-                dd["depth_total_with_generation_sec"],
+                dd["multi_cue_total_with_generation_sec"],
                 errors="coerce",
             ).sum(),
             "multi_cue",
             float(
-                np.nanstd(pd.to_numeric(dd.get("depth_total_with_generation_sec"), errors="coerce").to_numpy(float))
-                * np.sqrt(max(1, int(np.isfinite(pd.to_numeric(dd.get("depth_total_with_generation_sec"), errors="coerce")).sum())))
+                np.nanstd(pd.to_numeric(dd.get("multi_cue_total_with_generation_sec"), errors="coerce").to_numpy(float))
+                * np.sqrt(max(1, int(np.isfinite(pd.to_numeric(dd.get("multi_cue_total_with_generation_sec"), errors="coerce")).sum())))
             ),
         )
-        dg_arr = pd.to_numeric(dd.get("depth_generation_s"), errors="coerce").to_numpy(float)
+        dg_arr = pd.to_numeric(dd.get("multi_cue_generation_s"), errors="coerce").to_numpy(float)
         dg_arr = dg_arr[np.isfinite(dg_arr)]
         if dg_arr.size:
-            _add(mean_rows, "depth_generation", float(np.mean(dg_arr)), "multi_cue", float(np.std(dg_arr)))
-            _add(sum_rows, "depth_generation", float(np.sum(dg_arr)), "multi_cue", float(np.std(dg_arr) * np.sqrt(dg_arr.size)))
+            _add(mean_rows, "multi_cue_generation", float(np.mean(dg_arr)), "multi_cue", float(np.std(dg_arr)))
+            _add(sum_rows, "multi_cue_generation", float(np.sum(dg_arr)), "multi_cue", float(np.std(dg_arr) * np.sqrt(dg_arr.size)))
         df_depth = dd
 
     if mean_rows:
@@ -3403,12 +3468,12 @@ def _plot_dataset_full_timing_overview(
     )
     multicue_comp_pairs = [
         ("dt_compute_s", None),
-        ("depth_generation_s", None),
-        ("multi_cue_align_s", "depth_align_s"),
-        ("multi_cue_recess_s", "depth_recess_s"),
-        ("multi_cue_costmap_s", "depth_costmap_s"),
-        ("multi_cue_dijkstra_s", "depth_dijkstra_s"),
-        ("multi_cue_postprocess_s", "depth_postprocess_s"),
+        ("multi_cue_generation_s", None),
+        ("multi_cue_align_s", "multi_cue_align_s"),
+        ("multi_cue_recess_s", "multi_cue_recess_s"),
+        ("multi_cue_costmap_s", "multi_cue_costmap_s"),
+        ("multi_cue_dijkstra_s", "multi_cue_dijkstra_s"),
+        ("multi_cue_postprocess_s", "multi_cue_postprocess_s"),
         ("normals_multi_cue_s", "normals_depth_s"),
     ]
     multicue_comp_cols: List[str] = []
@@ -3979,10 +4044,12 @@ def _aggregate_calibration_ablation(
     timing_csvs += glob.glob(os.path.join(calib_dir, "dt_best*.csv"))
     timing_csvs = list(dict.fromkeys(timing_csvs))
 
+    timing_skip = set()  # include all timing CSVs
     timing_display = {
-        "dt_best_et_pass2b_edge_tracking": "ET",
+        "dt_best_et_pass1": "GT supervision",
+        "dt_best_et_pass2b_edge_tracking": "edge tracking",
+        "dt_best_et_pass2c_width_eval": "width eval",
     }
-    timing_skip = {"dt_best_et_pass1", "dt_best_et_pass2", "dt_best_et_pass2c_width_eval"}
     for p in timing_csvs:
         df = _safe_read_csv(p)
         if df is None or df.empty:

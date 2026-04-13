@@ -3671,7 +3671,7 @@ def compute_projected_width_diffs(
 
             out_dir = os.path.join(
                 metrics_dir_local,
-                str(support_method),
+                str(fam_key),
                 "baseline_support",
                 crack_type,
             )

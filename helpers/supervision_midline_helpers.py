@@ -937,7 +937,7 @@ def _compute_depth_recess_signal(depth_local_f32, domain_u8, dt_norm=None):
         z0 = np.zeros_like(z, np.float32)
         return z0, z0, {
             "compute_s": float(time.perf_counter() - t0),
-            "reason": "depth_flat",
+            "reason": "multi_cue_flat",
         }
     z = np.clip((z - lo) / (hi - lo), 0.0, 1.0)
 
@@ -1291,7 +1291,7 @@ def _build_ridge_valley_method_costmaps(
         "ridge_term": None,
         "valley_term": None,
         "rgb_cue_term": None,
-        "depth_term": None,
+        "multi_cue_term": None,
     }
 
     depth_term = None
@@ -1300,7 +1300,7 @@ def _build_ridge_valley_method_costmaps(
         # Weak depth influence to avoid cost collapse on noisy/flat depth.
         depth_term = np.ones_like(dtn, dtype=np.float32)
         depth_term[dom] = (1.0 - float(DEPTH_COST_WEIGHT) * dep[dom]).astype(np.float32)
-        debug["depth_term"] = dep.copy()
+        debug["multi_cue_term"] = dep.copy()
         costmaps["dt_depth"] = np.full_like(dtn, inf, dtype=np.float32)
         costmaps["dt_depth"][dom] = (dt_bad[dom] * depth_term[dom]).astype(np.float32)
 
@@ -1366,7 +1366,7 @@ def _build_ridge_valley_method_costmaps(
         "selected_cost_key": str(selected_key),
         "used_depth": bool(depth_term is not None),
         "used_rgb": bool(rgb_bad is not None),
-        "depth_scale": float(DEPTH_COST_WEIGHT),
+        "multi_cue_scale": float(DEPTH_COST_WEIGHT),
         "rgb_weight": float(RGB_COST_WEIGHT),
     }
 
@@ -1448,8 +1448,8 @@ def _precompute_method_shared_inputs(
 
     shared_timing = {
         "dt_compute_s": float((t_dt or {}).get("compute_s", 0.0)),
-        "depth_align_s": 0.0,
-        "depth_recess_s": 0.0,
+        "multi_cue_align_s": 0.0,
+        "multi_cue_recess_s": 0.0,
         "rgb_align_s": 0.0,
         "rgb_cues_s": 0.0,
         "total_precompute_s": 0.0,
@@ -1480,11 +1480,11 @@ def _precompute_method_shared_inputs(
             full_image_hw=full_image_hw,
             context_pad_px=(int(CUE_CONTEXT_PAD_PX) if bool(ENABLE_CUE_BBOX_CONTEXT) else 0),
         )
-        shared_timing["depth_align_s"] = float(time.perf_counter() - t_align0)
+        shared_timing["multi_cue_align_s"] = float(time.perf_counter() - t_align0)
         depth_bundle["align_meta"] = depth_align_meta if isinstance(depth_align_meta, dict) else {}
 
         if depth_local is None:
-            depth_bundle["reason"] = (depth_align_meta or {}).get("reason", "depth_align_failed")
+            depth_bundle["reason"] = (depth_align_meta or {}).get("reason", "missing_depth")
         else:
             print(
                 f"[DEPTH OK] shared min={float(np.nanmin(depth_local)):.4f} "
@@ -1496,7 +1496,7 @@ def _precompute_method_shared_inputs(
                 domain_local,
                 dt_norm=None,
             )
-            shared_timing["depth_recess_s"] = float((depth_sig_meta or {}).get("compute_s", 0.0))
+            shared_timing["multi_cue_recess_s"] = float((depth_sig_meta or {}).get("compute_s", 0.0))
             depth_bundle.update({
                 "available": True,
                 "depth_local": np.asarray(depth_local, np.float32),
@@ -1596,8 +1596,8 @@ def _run_single_midline_method(
 
     timing = {
         "dt_compute_s": float(shared_timing.get("dt_compute_s", 0.0)),
-        "depth_align_s": 0.0,
-        "depth_recess_s": 0.0,
+        "multi_cue_align_s": 0.0,
+        "multi_cue_recess_s": 0.0,
         "costmap_s": 0.0,
         "dijkstra_s": 0.0,
         "refine_s": 0.0,
@@ -1620,7 +1620,7 @@ def _run_single_midline_method(
             "rgb_cue_norm": None,
             "edge_suppress_norm": None,
             "dt_term": None,
-            "depth_term": None,
+            "multi_cue_term": None,
             "costmap": None,
             "selected_cost_key": None,
             "score_for_refine": None,
@@ -1677,16 +1677,16 @@ def _run_single_midline_method(
     depth_bundle = shared.get("depth", {}) if isinstance(shared.get("depth", {}), dict) else {}
     use_depth = bool(method_spec.get("use_depth", False))
     if use_depth and not bool(ENABLE_DEPTH_PRIOR):
-        out["meta"]["depth_disabled"] = True
+        out["meta"]["multi_cue_disabled"] = True
         use_depth = False
 
     recess_norm = None
     if use_depth:
-        timing["depth_align_s"] = float(shared_timing.get("depth_align_s", 0.0))
-        timing["depth_recess_s"] = float(shared_timing.get("depth_recess_s", 0.0))
+        timing["multi_cue_align_s"] = float(shared_timing.get("multi_cue_align_s", 0.0))
+        timing["multi_cue_recess_s"] = float(shared_timing.get("multi_cue_recess_s", 0.0))
         if not bool(depth_bundle.get("available", False)):
-            out["meta"]["reason"] = str(depth_bundle.get("reason", "depth_precompute_failed"))
-            _log_method_failure(method_key, "depth_precompute_failed", depth_bundle)
+            out["meta"]["reason"] = str(depth_bundle.get("reason", "multi_cue_precompute_failed"))
+            _log_method_failure(method_key, "multi_cue_precompute_failed", depth_bundle)
             if str(method_key) in ("dt_depth", "dt_ridge_valley_depth", "dt_ridge_color_depth"):
                 raise RuntimeError(f"[CRITICAL] Depth required but failed for {method_key}")
             timing["total_s"] = float(time.perf_counter() - t0_method)
@@ -1757,7 +1757,7 @@ def _run_single_midline_method(
         out["meta"]["reason"] = "empty_path"
         out["meta"]["dijkstra"] = dijkstra_meta
         out["debug"]["dt_term"] = score_debug.get("dt_term")
-        out["debug"]["depth_term"] = score_debug.get("depth_term")
+        out["debug"]["multi_cue_term"] = score_debug.get("multi_cue_term")
         out["debug"]["costmap"] = np.asarray(route_costmap, np.float32)
         _log_method_failure(method_key, "empty_path", {"dijkstra_meta": dijkstra_meta})
         timing["total_s"] = float(time.perf_counter() - t0_method)
@@ -1835,7 +1835,7 @@ def _run_single_midline_method(
     out["normals"] = normals
     out["normals_diag"] = normals_diag
     out["debug"]["dt_term"] = score_debug.get("dt_term")
-    out["debug"]["depth_term"] = score_debug.get("depth_term")
+    out["debug"]["multi_cue_term"] = score_debug.get("multi_cue_term")
     out["debug"]["ridge_norm"] = score_debug.get("ridge_term")
     out["debug"]["valley_norm"] = score_debug.get("valley_term")
     out["debug"]["rgb_cue_norm"] = score_debug.get("rgb_cue_term")
@@ -1858,8 +1858,8 @@ def _run_single_midline_method(
     out["debug"]["score_for_refine"] = np.asarray(score_for_refine, np.float32) if score_for_refine is not None else None
 
     out["meta"]["reason"] = None
-    out["meta"]["depth_align"] = depth_bundle.get("align_meta", {}) if isinstance(depth_bundle, dict) else {}
-    out["meta"]["depth_recess"] = depth_bundle.get("recess_meta", {}) if isinstance(depth_bundle, dict) else {}
+    out["meta"]["multi_cue_align"] = depth_bundle.get("align_meta", {}) if isinstance(depth_bundle, dict) else {}
+    out["meta"]["multi_cue_recess"] = depth_bundle.get("recess_meta", {}) if isinstance(depth_bundle, dict) else {}
     out["meta"]["rgb_align"] = rgb_bundle.get("align_meta", {}) if isinstance(rgb_bundle, dict) else {}
     out["meta"]["rgb_cues"] = rgb_bundle.get("cue_meta", {}) if isinstance(rgb_bundle, dict) else {}
     out["meta"]["costmap"] = cost_meta if isinstance(cost_meta, dict) else {}
@@ -2099,18 +2099,18 @@ def compute_midline_methods_and_normals(
     out = {
         "centered_midline": centered_midline,
         "centered_normals": centered_normals,
-        "depth_midline": m_depth.get("midline"),
+        "multi_cue_midline": m_depth.get("midline"),
         "depth_normals": m_depth.get("normals"),
         "centered_normals_diag": centered_normals_diag,
         "depth_normals_diag": m_depth.get("normals_diag", {}) or {},
-        "depth_cost_meta": m_depth.get("meta", {}) or {},
+        "multi_cue_cost_meta": m_depth.get("meta", {}) or {},
         "debug": {
             "domain_u8": shared.get("domain_u8"),
             "dt_norm": shared.get("dt_norm"),
             "depth_norm": m_depth.get("debug", {}).get("depth_norm"),
             "recess_norm": m_depth.get("debug", {}).get("recess_norm"),
-            "depth_score": m_depth.get("debug", {}).get("score_for_refine"),
-            "depth_costmap": m_depth.get("debug", {}).get("costmap"),
+            "multi_cue_score": m_depth.get("debug", {}).get("score_for_refine"),
+            "multi_cue_costmap": m_depth.get("debug", {}).get("costmap"),
         },
         "timing": {
             "dt": {
@@ -2120,8 +2120,8 @@ def compute_midline_methods_and_normals(
                 "snap_s": float(centered_snap_s),
             },
             "depth": {
-                "depth_align_s": float((m_depth.get("timing", {}) or {}).get("depth_align_s", 0.0)),
-                "recess_s": float((m_depth.get("timing", {}) or {}).get("depth_recess_s", 0.0)),
+                "multi_cue_align_s": float((m_depth.get("timing", {}) or {}).get("multi_cue_align_s", 0.0)),
+                "recess_s": float((m_depth.get("timing", {}) or {}).get("multi_cue_recess_s", 0.0)),
                 "costmap_s": float((m_depth.get("timing", {}) or {}).get("costmap_s", 0.0)),
                 "dijkstra_s": float((m_depth.get("timing", {}) or {}).get("dijkstra_s", 0.0)),
                 "refine_s": float((m_depth.get("timing", {}) or {}).get("refine_s", 0.0)),
@@ -2129,7 +2129,7 @@ def compute_midline_methods_and_normals(
             },
             "normals": {
                 "centered_s": float(centered_normals_s),
-                "depth_s": float((m_depth.get("timing", {}) or {}).get("normals_s", 0.0)),
+                "multi_cue_s": float((m_depth.get("timing", {}) or {}).get("normals_s", 0.0)),
             },
         },
         "methods": methods,

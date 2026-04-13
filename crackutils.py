@@ -859,7 +859,7 @@ class CrackUtils:
                             d.get("mask_folder", ""),
                             d.get("width_baseline_folder", ""),
                             d.get("mask_baseline_folder", ""),
-                            d.get("depth_folder", ""),
+                            d.get("multi_cue_folder", ""),
                             d.get("use_masks", False),
                             d.get("use_baselines", False),
                             d.get("last_image_name", ""),
@@ -891,7 +891,7 @@ class CrackUtils:
                         "mask_folder": mask_folder,
                         "width_baseline_folder": width_baseline_folder,
                         "mask_baseline_folder": mask_baseline_folder,
-                        "depth_folder": depth_folder,
+                        "multi_cue_folder": depth_folder,
                         "use_masks": use_masks,
                         "use_baselines": use_baselines,
                         "last_image_name": prev.get("last_image_name", ""),
@@ -921,7 +921,7 @@ class CrackUtils:
         mask_folder_init = getattr(self, "mask_folder", default_mask_folder)
         width_baseline_folder_init = getattr(self, "width_baseline_folder", default_width_baseline_folder)
         mask_baseline_folder_init = getattr(self, "mask_baseline_folder", default_mask_baseline_folder)
-        depth_folder_init = getattr(self, "depth_folder", default_depth_folder)
+        depth_folder_init = getattr(self, "multi_cue_folder", default_depth_folder)
 
         use_masks_init = getattr(self, "use_masks", default_use_masks)
         use_baselines_init = getattr(self, "use_baselines", default_use_baselines)
@@ -2454,29 +2454,31 @@ class CrackUtils:
         print("[DEPTH MODE] SIMPLE_LOAD_ONLY")
 
         # Auto-detect atomic per-bbox depth folder if not set explicitly.
-        if not getattr(self, "atomic_depth_folder", "") and getattr(self, "depth_folder", ""):
-            cand_atomic = os.path.join(self.depth_folder, "atomic_npy")
+        _depth_folder = getattr(self, "multi_cue_folder", "") or getattr(self, "depth_folder", "")
+        if not getattr(self, "atomic_depth_folder", "") and _depth_folder:
+            cand_atomic = os.path.join(_depth_folder, "atomic_npy")
             if os.path.isdir(cand_atomic):
                 self.atomic_depth_folder = cand_atomic
 
-        # Prefer explicit global depth folder if provided; otherwise infer from depth_folder.
-        if not getattr(self, "global_depth_folder", "") and getattr(self, "depth_folder", ""):
-            cand_global = os.path.join(self.depth_folder, "global_npy")
+        if not getattr(self, "global_depth_folder", "") and _depth_folder:
+            cand_global = os.path.join(_depth_folder, "global_npy")
             if os.path.isdir(cand_global):
                 self.global_depth_folder = cand_global
 
         depth_path = None
-        if hasattr(self, "depth_map"):
-            depth_path = self.depth_map.get(base_name)
+        _depth_base = base_name.replace("_modified", "")
+        _depth_map = getattr(self, "multi_cue_map", None) or getattr(self, "depth_map", None)
+        if _depth_map is not None:
+            depth_path = _depth_map.get(_depth_base) or _depth_map.get(base_name)
         if depth_path is None and getattr(self, "global_depth_folder", ""):
             for ext in (".npy", ".tif", ".tiff", ".png", ".bmp", ".jpg", ".jpeg"):
-                cand = os.path.join(self.global_depth_folder, base_name + ext)
+                cand = os.path.join(self.global_depth_folder, _depth_base + ext)
                 if os.path.isfile(cand):
                     depth_path = cand
                     break
-        if depth_path is None and getattr(self, "depth_folder", ""):
+        if depth_path is None and getattr(self, "multi_cue_folder", ""):
             for ext in (".npy", ".tif", ".tiff", ".png", ".bmp", ".jpg", ".jpeg"):
-                cand = os.path.join(self.depth_folder, base_name + ext)
+                cand = os.path.join(self.multi_cue_folder, _depth_base + ext)
                 if os.path.isfile(cand):
                     depth_path = cand
                     break

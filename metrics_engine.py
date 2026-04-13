@@ -92,14 +92,14 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 baseline_roots.append(p)
 
         depth_timing_csv = None
-        depth_folder = getattr(self, "depth_folder", None)
+        depth_folder = getattr(self, "multi_cue_folder", None)
         if depth_folder and isinstance(depth_folder, str):
             cand = os.path.join(depth_folder, "timing_per_image.csv")
             if os.path.isfile(cand):
                 depth_timing_csv = cand
 
         # Hard-coded single-image filter for quick debug runs - comment out for full dataset:
-        image_filter = ["98", "111"]
+        image_filter = ["98"]
         report = _summarize_dataset_metrics(
             save_folder=self.save_folder,
             out_dir=out_dir,
@@ -700,6 +700,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         run_atomic_width_eval=False,
         edge_parallel_workers=None,
         run_edge_tracking=True,
+        skip_recomputing_midlines=False,
     ):
         import os
         import time
@@ -788,7 +789,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             base_name = self._image_base()
 
             t_sync0 = time.perf_counter()
-            self._purge_metrics_for_current_image()
+            if not skip_recomputing_midlines:
+                self._purge_metrics_for_current_image()
             self._sync_metrics_snapshot_from_authoring(refresh_combine=True, persist=True)
             timing_breakdown["snapshot_sync_s"] = float(time.perf_counter() - t_sync0)
 
@@ -864,11 +866,11 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     })
                 if depth_track:
                     gt_sup_timing.update({
-                        "multi_cue_align_s": _safe_float(depth_track.get("depth_align_s"), default=0.0),
-                        "multi_cue_recess_s": _safe_float(depth_track.get("depth_recess_s"), default=0.0),
-                        "multi_cue_costmap_s": _safe_float(depth_track.get("depth_costmap_s"), default=0.0),
-                        "multi_cue_dijkstra_s": _safe_float(depth_track.get("depth_dijkstra_s"), default=0.0),
-                        "multi_cue_postprocess_s": _safe_float(depth_track.get("depth_postprocess_s"), default=0.0),
+                        "multi_cue_align_s": _safe_float(depth_track.get("multi_cue_align_s"), default=0.0),
+                        "multi_cue_recess_s": _safe_float(depth_track.get("multi_cue_recess_s"), default=0.0),
+                        "multi_cue_costmap_s": _safe_float(depth_track.get("multi_cue_costmap_s"), default=0.0),
+                        "multi_cue_dijkstra_s": _safe_float(depth_track.get("multi_cue_dijkstra_s"), default=0.0),
+                        "multi_cue_postprocess_s": _safe_float(depth_track.get("multi_cue_postprocess_s"), default=0.0),
                         "normals_multi_cue_s": _safe_float(depth_track.get("normals_depth_s"), default=0.0),
                     })
                     gt_sup_timing["multi_cue_total_s"] = (
@@ -940,7 +942,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         from helpers import metrics as metrics_mod
 
         # -- Hardcoded toggles for fast iteration --
-        resolved_indices = [97,110]
+        resolved_indices = [97]
         SKIP_ALREADY_PROCESSED = False
         FAST_RUN_EDGE_SWEEP = True
 
@@ -1061,6 +1063,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     if not manual_ids:
                         print(f"  -> [{base}] no manual cracks for sweep")
                         continue
+                    _img_packs = {}
                     for cid in manual_ids:
                         try:
                             df = self.sweep_edges_with_executor(cid, grid=DEFAULT_EDGE_GRID, max_workers=(edge_parallel_workers or 8))
@@ -1073,6 +1076,16 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         d["image"] = str(base)
                         d["crack_id"] = str(cid)
                         all_rows.append(d)
+                        _img_packs[cid] = df
+                    # Write per-image edge_sweep_family_agg.csv for summarizer
+                    if _img_packs:
+                        try:
+                            self._sweep_base_name_override = base
+                            self.select_best_edge_family_across_subcracks(_img_packs)
+                        except Exception as _e_sel:
+                            print(f"  -> [{base}] per-image edge family write failed: {_e_sel}")
+                        finally:
+                            self._sweep_base_name_override = None
             finally:
                 try:
                     self.n = orig_n
@@ -1188,9 +1201,11 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             for n, idx in enumerate(idxs, 1):
                 base = _base(idx)
                 print(f"\n[batch dt_best_et] -- pass2b {n}/{len(idxs)}: {base} (edge tracking)")
+                _cur_base = os.path.splitext(os.path.basename(str(getattr(self, "name", ""))))[0]
+                if str(_cur_base) != str(base):
+                    self.n = int(idx)
+                    self.change_image()
                 t_edge0 = time.perf_counter()
-                self.n = int(idx)
-                self.change_image()
                 manual_ids = _manual_ids_for_current_image()
                 if manual_ids:
                     print(f"  -> [{base}] edge tracking ({len(manual_ids)} crack(s))...")
@@ -1229,6 +1244,10 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         for n, idx in enumerate(idxs, 1):
             base = _base(idx)
             print(f"\n[batch dt_best_et] -- pass2c {n}/{len(idxs)}: {base} (width eval dt_best_et)")
+            _cur_base = os.path.splitext(os.path.basename(str(getattr(self, "name", ""))))[0]
+            if str(_cur_base) != str(base):
+                self.n = int(idx)
+                self.change_image()
             r = self._run_metrics_for_image_idx(
                 idx,
                 edge_params=best_edge_params,
@@ -1238,6 +1257,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 run_atomic_width_eval=False,
                 edge_parallel_workers=edge_parallel_workers,
                 run_edge_tracking=False,
+                skip_recomputing_midlines=True,
             )
             pass2c_rows.append(r)
             _record_image_timing(
@@ -1564,10 +1584,12 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 or ""
             )
 
-            base_name = (
-                getattr(self, "image_base", None)
-                or getattr(self, "name", "unknown")
-            )
+            base_name = getattr(self, "_sweep_base_name_override", None)
+            if not base_name:
+                base_name = (
+                    getattr(self, "image_base", None)
+                    or getattr(self, "name", "unknown")
+                )
             base_name = os.path.splitext(os.path.basename(str(base_name)))[0]
 
             param_tag = (
@@ -3257,6 +3279,24 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         print("[BASELINE] no baseline maps after validation")
                         return
 
+                    # Ensure skeleton support methods exist for Regime B2 midline metrics
+                    for _skel_key, _member_keys in [
+                        ("skel_mat_dse", ["eob_width_dse", "esd_width_dse", "mat_width_dse", "pca_width_dse"]),
+                        ("skel_mat_raw", ["mat_width_raw"]),
+                    ]:
+                        if _skel_key not in normalized_maps:
+                            for _mk in _member_keys:
+                                if _mk in normalized_maps:
+                                    _src = normalized_maps[_mk]
+                                    normalized_maps[_skel_key] = {
+                                        "width_map": _src["width_map"],
+                                        "support_mask": _src["support_mask"],
+                                        "skel": _src["skel"],
+                                        "meta": dict(_src.get("meta", {})),
+                                    }
+                                    print(f"[BASELINE] synthesized skeleton record '{_skel_key}' from '{_mk}'")
+                                    break
+
                     width_eval_methods = [
                         m for m in normalized_maps.keys()
                         if not (
@@ -3270,6 +3310,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     # ============================================================
                     # Regime B1 - GT-projected width diffs (family-shared projection)
                     # ============================================================
+                    _t_b1_start = time.perf_counter()
                     rows_all = compute_projected_width_diffs(
                         gt_payload={"combined_cracks": combined_gt},
                         gt_full=gt_full,
@@ -3279,6 +3320,22 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         crack_type="combined",
                         metrics_dir_local=metrics_dir,
                     )
+                    _b1_duration_s = float(time.perf_counter() - _t_b1_start)
+                    try:
+                        import pandas as _pd
+                        _b1_timing_dir = os.path.join(metrics_dir, "_baseline_timings")
+                        os.makedirs(_b1_timing_dir, exist_ok=True)
+                        _b1_csv = os.path.join(_b1_timing_dir, "timing_per_image.csv")
+                        _b1_row = _pd.DataFrame([{
+                            "image": base_name,
+                            "b1_projection_s": _b1_duration_s,
+                            "n_rows": int(len(rows_all or [])),
+                        }])
+                        if os.path.isfile(_b1_csv):
+                            _b1_row = _pd.concat([_pd.read_csv(_b1_csv), _b1_row], ignore_index=True)
+                        _b1_row.to_csv(_b1_csv, index=False)
+                    except Exception:
+                        pass
 
                     rows_by_method = {}
                     for r in (rows_all or []):
@@ -3441,6 +3498,62 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
                 width_rows = ret[0] or []
                 midline_rows = ret[1] if len(ret) > 1 and ret[1] is not None else []
+                print(f"[MIDLINE DBG] {crack_type}/{variant_id} midline_rows={len(midline_rows)} width_rows={len(width_rows)}")
+                # Pull real midline scores from GT supervision ablation CSV
+                if not midline_rows and width_rows:
+                    try:
+                        _abl_path = os.path.join(gt_sup_root, "analysis", "gt_ablation_midline_metrics.csv")
+                        if os.path.isfile(_abl_path):
+                            import pandas as _pd_abl
+                            _abl = _pd_abl.read_csv(_abl_path)
+                            # map variant_id to method key: ET->"manual", dt->"dt", best_dt_depth->"dt_depth" etc.
+                            _vid_to_method = {
+                                "ET": "manual",
+                                "dt": "dt",
+                                "best_dt_depth": str(getattr(self, "_best_non_dt_method", "dt_depth")),
+                            }
+                            _mkey = _vid_to_method.get(str(variant_id), str(variant_id))
+                            _row = _abl[_abl["variant_id"].astype(str) == _mkey]
+                            if _row.empty:
+                                _row = _abl[_abl["variant_id"].astype(str).str.contains(_mkey, na=False)]
+                            if not _row.empty:
+                                _r = _row.iloc[0]
+
+                                def _sf(k):
+                                    try:
+                                        v = float(_r[k]) if k in _r.index else float("nan")
+                                        return float(v) if np.isfinite(v) else float("nan")
+                                    except Exception:
+                                        return float("nan")
+
+                                _nn = _sf("nn_mean_bidirectional")
+                                _hd = _sf("hausdorff_max")
+                                _cov = _sf("coverage_min")
+                                if all(np.isfinite(v) for v in [_nn, _hd, _cov]):
+                                    _score = float(
+                                        np.log1p(max(_nn, 0.0))
+                                        + 0.5 * np.log1p(max(_hd, 0.0))
+                                        + (1.0 - float(np.clip(_cov, 0.0, 1.0)))
+                                    )
+                                else:
+                                    _score = float("nan")
+                                midline_rows = [{
+                                    "image": base_tag,
+                                    "crack_id": "abl_lookup",
+                                    "crack_type": crack_type,
+                                    "midline_type": midline_type,
+                                    "variant_id": variant_id,
+                                    "geometry_type": "derived",
+                                    "method": midline_type,
+                                    "length_px": float(_sf("length_px")) if "length_px" in _r.index else 0.0,
+                                    "score_mid": _score,
+                                    "nn_mean_bidirectional": _nn,
+                                    "hausdorff_max": _hd,
+                                    "coverage_min": _cov,
+                                }]
+                                print(f"[MIDLINE ABL] pulled score from ablation CSV for {variant_id}: score={_score:.4f}")
+                    except Exception as _e_abl:
+                        print(f"[MIDLINE ABL] failed: {_e_abl}")
                 if midline_rows:
                     geom_counts = {}
                     for r in midline_rows:

@@ -2,7 +2,7 @@
 authors = ["Adam Camerer <ajc3xc@umsystem.edu>"]
 channels = ["pytorch", "nvidia", "conda-forge"]
 channel-priority = "disabled"
-name = "depth_generator"
+name = "multi_cue_generator"
 platforms = ["win-64", "linux-64"]
 version = "0.1.0"
 
