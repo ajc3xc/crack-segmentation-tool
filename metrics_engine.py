@@ -3264,6 +3264,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                             and str(m).lower() not in ("skel_mat_dse", "skel_mat_raw")
                         )
                     ]
+                    print(f"[BASELINE DEBUG] loaded map keys: {list(normalized_maps.keys())}")
                     print(f"[BASELINE DEBUG] width methods: {width_eval_methods}")
 
                     # ============================================================
