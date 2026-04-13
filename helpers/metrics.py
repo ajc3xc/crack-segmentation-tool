@@ -31,6 +31,7 @@ import hashlib
 import time
 
 ROUNDING_DIGITS=6
+B1_MAX_PROJ_RADIUS_PX = 30.0
 
 # ============================================
 # SINGLE CID CORRESPONDENCE DEBUG CONFIG
@@ -265,7 +266,6 @@ def _nn_dists(A, B):
     CPU cKDTree only (lower overhead and more stable for these metric sizes).
     """
     import numpy as np
-    B1_DIAGNOSTIC_DEBUG = True
     if A is None or B is None or len(A) == 0 or len(B) == 0:
         return np.zeros((len(A),), dtype=float)
     try:
@@ -2479,6 +2479,7 @@ def compute_projected_width_diffs(
         crack_type,
         cid,
         cr,
+        seg_radius_px,
         gt_seg,
         seg_meta,
         gt_mid_parts,
@@ -2524,38 +2525,91 @@ def compute_projected_width_diffs(
             branch_id = _safe_int(seg_meta.get("branch_id"), None)
         territory_applied = False
         if branch_id is None:
-            print(f"[DOMAIN DBG] cid={cid} branch={branch_id} territory_applied={territory_applied} domain_nnz={int(np.sum(domain))}")
+            print(
+                f"[DOMAIN DBG] cid={cid} branch={branch_id} territory_applied={territory_applied} "
+                f"domain_nnz={int(np.sum(domain))}"
+            )
             return domain.astype(bool)
 
-        try:
-            dom_meta = cr.get("dominance_meta") if isinstance(cr, dict) else None
-            if isinstance(dom_meta, dict):
-                terr_by_branch = dom_meta.get("branch_territory") or {}
-                terr_entry = terr_by_branch.get(str(int(branch_id)))
-                bite_bbox = (dom_meta.get("bite") or {}).get("bbox")  # [bx0, by0, bw, bh] global xywh
-                if (
-                    isinstance(terr_entry, dict)
-                    and terr_entry.get("packbits_b64")
-                    and isinstance(bite_bbox, (list, tuple))
-                    and len(bite_bbox) == 4
-                ):
-                    terr_crop = _decode_packbits_b64_to_mask(
-                        terr_entry["packbits_b64"],
-                        terr_entry["shape"],
+        terr_nnz = 0
+        domain_nnz_before_terr = int(np.count_nonzero(domain))
+        domain_nnz_after_terr = domain_nnz_before_terr
+        removed_by_terr = 0
+        dom_meta = cr.get("dominance_meta") if isinstance(cr, dict) else None
+        if isinstance(dom_meta, dict):
+            terr_by_branch = dom_meta.get("branch_territory") or {}
+            bite_info = dom_meta.get("bite") or {}
+            bite_bbox = bite_info.get("bbox")
+            terr_entry = terr_by_branch.get(str(int(branch_id))) if branch_id is not None else None
+
+            # If territory exists for this branch, any malformed payload is a hard error.
+            if terr_entry is not None:
+                if not isinstance(terr_entry, dict):
+                    raise RuntimeError(
+                        f"[B1 DOMAIN] cid={cid} branch={branch_id}: "
+                        f"branch_territory entry is not a dict: {type(terr_entry)}"
                     )
-                    bx0, by0, bw, bh = [int(v) for v in bite_bbox]
-                    terr_full = np.zeros((H, W), dtype=bool)
-                    bx1 = min(bx0 + bw, W)
-                    by1 = min(by0 + bh, H)
-                    ch = min(terr_crop.shape[0], by1 - by0)
-                    cw = min(terr_crop.shape[1], bx1 - bx0)
-                    if ch > 0 and cw > 0:
-                        terr_full[by0:by0 + ch, bx0:bx0 + cw] = (terr_crop[:ch, :cw] > 0)
-                    if np.any(terr_full):
-                        domain &= terr_full
-                        territory_applied = True
-        except Exception:
-            pass
+                if not terr_entry.get("packbits_b64"):
+                    raise RuntimeError(
+                        f"[B1 DOMAIN] cid={cid} branch={branch_id}: "
+                        f"branch_territory entry missing packbits_b64 "
+                        f"(keys present: {list(terr_entry.keys())})"
+                    )
+                if not isinstance(terr_entry.get("shape"), (list, tuple)) or len(terr_entry["shape"]) != 2:
+                    raise RuntimeError(
+                        f"[B1 DOMAIN] cid={cid} branch={branch_id}: "
+                        f"branch_territory entry has invalid shape: {terr_entry.get('shape')}"
+                    )
+                if not isinstance(bite_bbox, (list, tuple)) or len(bite_bbox) != 4:
+                    raise RuntimeError(
+                        f"[B1 DOMAIN] cid={cid} branch={branch_id}: "
+                        f"bite bbox missing or invalid: {bite_bbox}"
+                    )
+
+                bx0, by0, bw, bh = map(int, bite_bbox)
+                if bw <= 0 or bh <= 0:
+                    raise RuntimeError(
+                        f"[B1 DOMAIN] cid={cid} branch={branch_id}: "
+                        f"bite bbox has non-positive size: w={bw} h={bh}"
+                    )
+
+                terr_crop = _decode_packbits_b64_to_mask(
+                    terr_entry["packbits_b64"],
+                    terr_entry["shape"],
+                )
+                terr_full = np.zeros((H, W), dtype=bool)
+                bx1 = min(bx0 + bw, W)
+                by1 = min(by0 + bh, H)
+                ch = min(terr_crop.shape[0], by1 - by0)
+                cw_t = min(terr_crop.shape[1], bx1 - bx0)
+                if ch <= 0 or cw_t <= 0:
+                    raise RuntimeError(
+                        f"[B1 DOMAIN] cid={cid} branch={branch_id}: "
+                        f"territory crop has zero size after clamp: "
+                        f"ch={ch} cw={cw_t} bite_bbox={bite_bbox} domain_shape={domain.shape}"
+                    )
+                terr_full[by0:by0 + ch, bx0:bx0 + cw_t] = (terr_crop[:ch, :cw_t] > 0)
+
+                if not np.any(terr_full):
+                    raise RuntimeError(
+                        f"[B1 DOMAIN] cid={cid} branch={branch_id}: "
+                        f"territory decoded to all-zero mask - "
+                        f"bite_bbox={bite_bbox} terr_shape={terr_entry['shape']} "
+                        f"crop_nnz={int(np.count_nonzero(terr_crop))}"
+                    )
+
+                terr_nnz = int(np.count_nonzero(terr_full))
+                domain_before_terr = domain.copy()
+                try:
+                    from scipy.ndimage import binary_dilation
+                    junc_pad = max(4, int(np.ceil(float(seg_radius_px) * 0.3)))
+                    terr_for_proj = binary_dilation(terr_full, iterations=junc_pad).astype(bool)
+                except Exception:
+                    terr_for_proj = terr_full
+                domain &= terr_for_proj
+                domain_nnz_after_terr = int(np.count_nonzero(domain))
+                removed_by_terr = int(np.count_nonzero(domain_before_terr & (~domain)))
+                territory_applied = True
 
         if not territory_applied:
             # Fallback: width-adaptive dilation from wmap, matching combiner's scale
@@ -2579,7 +2633,14 @@ def compute_projected_width_diffs(
                 from scipy.ndimage import binary_dilation
                 domain &= binary_dilation(branch_seed, iterations=dil_px).astype(bool)
 
-        print(f"[DOMAIN DBG] cid={cid} branch={branch_id} territory_applied={territory_applied} domain_nnz={int(np.sum(domain))}")
+        print(
+            f"[DOMAIN DBG] cid={cid} branch={branch_id} territory_applied={territory_applied} "
+            f"domain_nnz_before_terr={domain_nnz_before_terr} "
+            f"domain_nnz_after_terr={domain_nnz_after_terr} "
+            f"terr_nnz={terr_nnz} "
+            f"removed_by_terr={removed_by_terr} "
+            f"domain_nnz={int(np.sum(domain))}"
+        )
         return domain.astype(bool)
 
     def _expand_bbox_xywh(bb, H, W, pad=0):
@@ -2719,11 +2780,13 @@ def compute_projected_width_diffs(
             "radii": [],
             "pts_success": [],
             "pts_radius_rejected": [],
+            "pts_radius_rejected_by_cid": {},
             "pts_wmap_nan": [],
             "pts_pre_projection": [],
             "pts_no_support": [],
             "skel_available_segs": [],
             "pts_dists": [],
+            "crack_contexts": {},
         }
         for fk in families.keys()
     }
@@ -2822,7 +2885,14 @@ def compute_projected_width_diffs(
             _finite_gtw = gt_widths_seg[np.isfinite(gt_widths_seg)]
             if _finite_gtw.size >= 1:
                 _median_gtw = float(np.median(_finite_gtw))
-                _seg_radius = float(np.clip(0.6 * _median_gtw, 6.0, 60.0))
+                _seg_radius_uncapped = float(0.6 * _median_gtw)
+                _seg_radius = float(np.clip(_seg_radius_uncapped, 6.0, B1_MAX_PROJ_RADIUS_PX))
+                if _seg_radius_uncapped > B1_MAX_PROJ_RADIUS_PX and B1_DIAGNOSTIC_DEBUG:
+                    print(
+                        f"[B1 RADIUS CAP] cid={cid} seg={seg_idx} "
+                        f"uncapped={_seg_radius_uncapped:.1f}px -> capped={_seg_radius:.1f}px "
+                        f"(median_gtw={_median_gtw:.1f}px)"
+                    )
             else:
                 _seg_radius = 6.0
                 print(f"[B1 PROJ] seg={seg_idx} cid={cid}: no finite GT widths, using fallback radius=6.0")
@@ -2850,6 +2920,15 @@ def compute_projected_width_diffs(
                 support_rec = norm_maps.get(support_method)
                 if support_rec is None:
                     continue
+                diagnostics_by_family[fam_key]["crack_contexts"].setdefault(
+                    str(cid),
+                    {
+                        "cid": str(cid),
+                        "dominance_meta": cr.get("dominance_meta") if isinstance(cr, dict) else None,
+                        "gt_mid_parts": [np.asarray(s, float) for s in gt_mid_parts],
+                        "gt_mid_meta": [dict(m) if isinstance(m, dict) else {} for m in gt_mid_meta],
+                    },
+                )
 
                 wmap_support = np.asarray(support_rec["width_map"])
                 supp_support = np.asarray(support_rec["support_mask"]).astype(bool)
@@ -2859,6 +2938,7 @@ def compute_projected_width_diffs(
                     crack_type=crack_type,
                     cid=cid,
                     cr=cr,
+                    seg_radius_px=float(_seg_radius),
                     gt_seg=gt_seg,
                     seg_meta=seg_meta_i,
                     gt_mid_parts=gt_mid_parts,
@@ -2990,7 +3070,7 @@ def compute_projected_width_diffs(
                 # family's support-method width map (not downstream width methods).
                 finite_pre = np.asarray(proj.get("finite_mask", []), bool)
                 valid_mask = np.asarray(proj.get("valid", []), bool)
-                if finite_pre.size == len(gt_seg) and valid_mask.size == len(gt_seg):
+                if B1_DIAGNOSTIC_DEBUG and finite_pre.size == len(gt_seg) and valid_mask.size == len(gt_seg):
                     support_widths = sample_widths_from_projected_indices(
                         np.asarray(support_rec["width_map"]),
                         proj,
@@ -3011,6 +3091,7 @@ def compute_projected_width_diffs(
                             diagnostics_by_family[fam_key]["pts_no_support"].append(pt)
                         elif not valid_mask[i]:
                             diagnostics_by_family[fam_key]["pts_radius_rejected"].append(pt)
+                            diagnostics_by_family[fam_key]["pts_radius_rejected_by_cid"].setdefault(str(cid), []).append(pt)
                         elif not finite_out[i]:
                             diagnostics_by_family[fam_key]["pts_wmap_nan"].append(pt)
                         else:
@@ -3103,7 +3184,7 @@ def compute_projected_width_diffs(
 
                 mask_crop = gt_full[y0c:y1c, x0c:x1c]
 
-                fig, ax = plt.subplots(figsize=(6, 6), dpi=150)
+                fig, ax = plt.subplots(figsize=(8, 8), dpi=220)
                 ax.set_facecolor("white")
                 ax.imshow(
                     mask_crop,
@@ -3164,7 +3245,7 @@ def compute_projected_width_diffs(
                     f"{base_name}_{method}_width_baseline_projected_overlay.png",
                 )
 
-                fig.savefig(out_path, dpi=150)
+                fig.savefig(out_path, dpi=220)
                 plt.close(fig)
 
                 print(f"[BASELINE B1] wrote overlay: {out_path}")
@@ -3207,7 +3288,8 @@ def compute_projected_width_diffs(
 
         try:
             import matplotlib.pyplot as plt
-            from matplotlib.patches import Circle
+            import matplotlib.colors as mcolors
+            from matplotlib.patches import Circle, Patch
             import numpy as np
             import os
 
@@ -3243,7 +3325,7 @@ def compute_projected_width_diffs(
 
             gt_crop = gt_full[y0c:y1c, x0c:x1c]
 
-            fig, ax = plt.subplots(figsize=(6, 6), dpi=100)
+            fig_spatial, ax = plt.subplots(figsize=(10, 10), dpi=220)
             ax.set_facecolor("white")
             ax.imshow(
                 gt_crop,
@@ -3286,8 +3368,8 @@ def compute_projected_width_diffs(
                 ax.scatter(
                     xs_s[keep_crop],
                     ys_s[keep_crop],
-                    s=1,
-                    c="#bbbbbb",
+                    s=3,
+                    c="#cccccc",
                     alpha=0.5,
                     zorder=2,
                     label="skel (filtered out)",
@@ -3306,7 +3388,7 @@ def compute_projected_width_diffs(
                         ax.scatter(
                             avail_all[ax_keep, 0],
                             avail_all[ax_keep, 1],
-                            s=4,
+                            s=8,
                             c="#00cc88",
                             alpha=0.85,
                             zorder=3,
@@ -3330,16 +3412,102 @@ def compute_projected_width_diffs(
                 segments = np.concatenate([points[:-1], points[1:]], axis=1)
                 lc = LineCollection(segments, colors=colors[:-1], linewidths=2.0, zorder=6)
                 ax.add_collection(lc)
+                # Mark threshold-crossing points where distance status flips across the segment.
+                over = np.asarray(dists > float(seg_r), dtype=np.int8)
+                cross_idx = np.where(np.diff(over) != 0)[0]
+                if cross_idx.size > 0:
+                    pts_cross = S[cross_idx]
+                    in_crop_cross = (
+                        (pts_cross[:, 0] >= x0c) & (pts_cross[:, 0] < x1c) &
+                        (pts_cross[:, 1] >= y0c) & (pts_cross[:, 1] < y1c)
+                    )
+                    if np.any(in_crop_cross):
+                        ax.scatter(
+                            pts_cross[in_crop_cross, 0],
+                            pts_cross[in_crop_cross, 1],
+                            marker="x",
+                            s=26,
+                            c="#ffeb3b",
+                            linewidths=1.1,
+                            zorder=10,
+                            alpha=0.95,
+                        )
 
             sm = plt.cm.ScalarMappable(cmap=cm.RdYlGn_r, norm=plt.Normalize(vmin=0, vmax=2))
             sm.set_array([])
             plt.colorbar(sm, ax=ax, fraction=0.02, pad=0.01, label="NN dist / radius (capped 2x)")
 
+            if B1_DIAGNOSTIC_DEBUG:
+                cat_style = {
+                    "pts_success": ("valid", "#00cc44", 8, 0.25),
+                    "pts_radius_rejected": ("radius-rejected", "#ff3300", 18, 0.85),
+                    "pts_wmap_nan": ("wmap NaN", "#0088ff", 14, 0.80),
+                    "pts_no_support": ("no support", "#cc00cc", 14, 0.80),
+                    "pts_pre_projection": ("non-finite coord", "#888888", 6, 0.50),
+                }
+                legend_handles_cat = []
+                for cat_key, (cat_label, cat_color, cat_s, cat_alpha) in cat_style.items():
+                    pts = diag.get(cat_key, [])
+                    if not pts:
+                        continue
+                    pts_arr = np.asarray(pts, float)
+                    if pts_arr.ndim != 2 or pts_arr.shape[1] != 2:
+                        continue
+                    in_crop = (
+                        (pts_arr[:, 0] >= x0c) & (pts_arr[:, 0] < x1c) &
+                        (pts_arr[:, 1] >= y0c) & (pts_arr[:, 1] < y1c)
+                    )
+                    if not np.any(in_crop):
+                        continue
+                    ax.scatter(
+                        pts_arr[in_crop, 0],
+                        pts_arr[in_crop, 1],
+                        s=cat_s,
+                        c=cat_color,
+                        alpha=cat_alpha,
+                        zorder=7,
+                        linewidths=0,
+                    )
+                    legend_handles_cat.append(
+                        ax.scatter(
+                            [], [],
+                            s=cat_s,
+                            c=cat_color,
+                            alpha=min(1.0, cat_alpha + 0.2),
+                            label=f"{cat_label} (n={len(pts)})",
+                        )
+                    )
+                if legend_handles_cat:
+                    ax.legend(
+                        handles=legend_handles_cat,
+                        loc="lower right",
+                        fontsize=7,
+                        framealpha=0.85,
+                        markerscale=1.5,
+                    )
+
+            all_dists_flat = []
+            all_radii_flat = []
+            for _, dists_arr, seg_r in pts_dists:
+                d = np.asarray(dists_arr, float)
+                d = d[np.isfinite(d)]
+                if d.size > 0:
+                    all_dists_flat.append(d)
+                    all_radii_flat.append(float(seg_r))
+
             ax.set_xlim(x0c, x1c)
             ax.set_ylim(y1c, y0c)
             ax.set_aspect("equal")
             ax.axis("off")
-            ax.set_title(f"{support_method} - B1 projection diagnostics")
+            n_succ = len(diag.get("pts_success", []))
+            n_rej = len(diag.get("pts_radius_rejected", []))
+            n_nan = len(diag.get("pts_wmap_nan", []))
+            n_nosupp = len(diag.get("pts_no_support", []))
+            ax.set_title(
+                f"{support_method} - B1 projection diagnostics\n"
+                f"success={n_succ}  radius_reject={n_rej}  wmap_nan={n_nan}  no_support={n_nosupp}",
+                fontsize=9,
+            )
 
             out_dir = os.path.join(
                 metrics_dir_local,
@@ -3350,12 +3518,489 @@ def compute_projected_width_diffs(
             os.makedirs(out_dir, exist_ok=True)
             out_path = os.path.join(
                 out_dir,
-                f"{base_name}_{support_method}_b1_projection_diagnostics.png",
+                f"{base_name}_{support_method}_b1_spatial.png",
             )
-            fig.savefig(out_path, dpi=100)
-            plt.close(fig)
-            print(f"[BASELINE B1] wrote projection diagnostics: {out_path}")
+            fig_spatial.savefig(out_path, dpi=220, bbox_inches="tight")
+            plt.close(fig_spatial)
+            print(f"[BASELINE B1] wrote projection diagnostics (spatial): {out_path}")
+
+            fig_hist, ax_hist = plt.subplots(figsize=(7, 5), dpi=220)
+            ax_hist.set_facecolor("white")
+            if all_dists_flat:
+                d_concat = np.concatenate(all_dists_flat)
+                d_concat = d_concat[np.isfinite(d_concat)]
+                if d_concat.size > 0:
+                    med_radius = float(np.median(all_radii_flat)) if all_radii_flat else 60.0
+                    n_bins = min(80, max(20, int(d_concat.size // 10)))
+                    ax_hist.hist(
+                        d_concat,
+                        bins=n_bins,
+                        color="#4c78a8",
+                        alpha=0.85,
+                        edgecolor="none",
+                    )
+                    ax_hist.axvline(
+                        med_radius,
+                        color="#ff3300",
+                        lw=1.8,
+                        linestyle="--",
+                        label=f"radius={med_radius:.0f}px",
+                    )
+                    xmax = float(max(np.max(d_concat) * 1.05, med_radius * 1.05, 1.0))
+                    ax_hist.axvspan(med_radius, xmax, alpha=0.12, color="#ff3300", label="_nolegend_")
+                    n_rejected = int(np.sum(d_concat > med_radius))
+                    n_total = int(d_concat.size)
+                    rej_pct = 100.0 * n_rejected / max(1, n_total)
+                    ax_hist.set_xlim(0.0, xmax)
+                    ax_hist.set_xlabel("NN distance to skeleton (px)", fontsize=9)
+                    ax_hist.set_ylabel("# GT points", fontsize=9)
+                    ax_hist.set_title(
+                        f"{support_method} - NN distance distribution\n"
+                        f"rejected: {n_rejected}/{n_total} ({rej_pct:.1f}%)",
+                        fontsize=9,
+                    )
+                    ax_hist.legend(fontsize=8)
+                    ax_hist.grid(axis="y", alpha=0.3)
+                else:
+                    ax_hist.text(0.5, 0.5, "No finite distances", ha="center", va="center", transform=ax_hist.transAxes)
+                    ax_hist.set_axis_off()
+            else:
+                ax_hist.text(0.5, 0.5, "No distance data", ha="center", va="center", transform=ax_hist.transAxes)
+                ax_hist.set_axis_off()
+
+            out_hist = os.path.join(
+                out_dir,
+                f"{base_name}_{support_method}_b1_dist_histogram.png",
+            )
+            fig_hist.savefig(out_hist, dpi=220, bbox_inches="tight")
+            plt.close(fig_hist)
+            print(f"[BASELINE B1] wrote projection diagnostics (hist): {out_hist}")
+
+            crack_contexts = diag.get("crack_contexts", {}) or {}
+            rejected_by_cid = diag.get("pts_radius_rejected_by_cid", {}) or {}
+            for cid_key, ctx in crack_contexts.items():
+                try:
+                    dom_meta_global = ctx.get("dominance_meta")
+                    gt_mid_parts_ctx = ctx.get("gt_mid_parts", []) or []
+                    gt_mid_meta_ctx = ctx.get("gt_mid_meta", []) or []
+                    if not isinstance(dom_meta_global, dict):
+                        raise RuntimeError(
+                            f"[TERR MAP] cid={cid_key}: dominance_meta is not a dict: {type(dom_meta_global)}"
+                        )
+                    bite_info = dom_meta_global.get("bite")
+                    if bite_info is None:
+                        raise RuntimeError(
+                            f"[TERR MAP] cid={cid_key}: dominance_meta missing 'bite'. "
+                            f"keys={list(dom_meta_global.keys())}"
+                        )
+                    if not isinstance(bite_info, dict):
+                        raise RuntimeError(f"[TERR MAP] cid={cid_key}: bite is not a dict: {type(bite_info)}")
+                    bite_bbox = bite_info.get("bbox")
+                    if bite_bbox is None:
+                        raise RuntimeError(
+                            f"[TERR MAP] cid={cid_key}: bite missing 'bbox'. bite_keys={list(bite_info.keys())}"
+                        )
+                    if not isinstance(bite_bbox, (list, tuple)) or len(bite_bbox) != 4:
+                        raise RuntimeError(f"[TERR MAP] cid={cid_key}: bite bbox invalid: {bite_bbox}")
+                    branch_territory_raw = dom_meta_global.get("branch_territory") or {}
+                    if not isinstance(branch_territory_raw, dict) or not branch_territory_raw:
+                        raise RuntimeError(
+                            f"[TERR MAP] cid={cid_key}: branch_territory missing/empty. "
+                            f"dom_meta_keys={list(dom_meta_global.keys())}"
+                        )
+
+                    bx0, by0, bw, bh = [int(v) for v in bite_bbox]
+                    if bw <= 0 or bh <= 0:
+                        raise RuntimeError(
+                            f"[TERR MAP] cid={cid_key}: bite bbox has non-positive size: w={bw} h={bh}"
+                        )
+                    H_img, W_img = gt_full.shape[:2]
+                    print(
+                        f"[TERR MAP] cid={cid_key} bite_bbox={bite_bbox} "
+                        f"branch_territory_keys={list(branch_territory_raw.keys())} "
+                        f"HxW={H_img}x{W_img}"
+                    )
+                    branch_label_map = np.zeros((H_img, W_img), dtype=np.int32)
+                    branch_ids_present = []
+                    for bid_str, terr_entry in branch_territory_raw.items():
+                        if not isinstance(terr_entry, dict):
+                            raise RuntimeError(f"[TERR MAP] cid={cid_key} branch={bid_str}: entry is not dict")
+                        if not terr_entry.get("packbits_b64"):
+                            raise RuntimeError(
+                                f"[TERR MAP] cid={cid_key} branch={bid_str}: missing packbits_b64 "
+                                f"(keys={list(terr_entry.keys())})"
+                            )
+                        if not isinstance(terr_entry.get("shape"), (list, tuple)) or len(terr_entry["shape"]) != 2:
+                            raise RuntimeError(
+                                f"[TERR MAP] cid={cid_key} branch={bid_str}: invalid shape={terr_entry.get('shape')}"
+                            )
+                        try:
+                            terr_crop = _decode_packbits_b64_to_mask(
+                                terr_entry["packbits_b64"],
+                                terr_entry["shape"],
+                            )
+                            print(
+                                f"[TERR MAP] branch={bid_str} crop_shape={tuple(terr_crop.shape)} "
+                                f"crop_nnz={int(np.count_nonzero(terr_crop))} bite_bbox={bite_bbox}"
+                            )
+                            if not np.any(terr_crop):
+                                raise RuntimeError(
+                                    f"[TERR MAP] cid={cid_key} branch={bid_str}: decoded territory crop is all-zero. "
+                                    f"shape={terr_entry['shape']} b64_len={len(str(terr_entry.get('packbits_b64', '')))}"
+                                )
+                            bx1 = min(bx0 + bw, W_img)
+                            by1 = min(by0 + bh, H_img)
+                            ch = min(terr_crop.shape[0], by1 - by0)
+                            cw_t = min(terr_crop.shape[1], bx1 - bx0)
+                            if ch <= 0 or cw_t <= 0:
+                                raise RuntimeError(
+                                    f"[TERR MAP] cid={cid_key} branch={bid_str}: zero-size placement "
+                                    f"ch={ch} cw={cw_t} bite_bbox={bite_bbox} img={H_img}x{W_img}"
+                                )
+                            if ch > 0 and cw_t > 0:
+                                bid = int(bid_str)
+                                mask_region = terr_crop[:ch, :cw_t] > 0
+                                region = branch_label_map[by0:by0 + ch, bx0:bx0 + cw_t]
+                                region[mask_region] = bid + 1
+                                branch_ids_present.append(bid)
+                        except Exception as e:
+                            raise RuntimeError(
+                                f"[TERR MAP] cid={cid_key} branch={bid_str}: decode failed: {e}"
+                            ) from e
+                    branch_ids_present = sorted(set(branch_ids_present))
+                    print(
+                        f"[TERR MAP] branch_label_map_nnz={int(np.count_nonzero(branch_label_map))} "
+                        f"unique_labels={np.unique(branch_label_map).tolist()}"
+                    )
+                    if not branch_ids_present:
+                        raise RuntimeError(
+                            f"[TERR MAP] cid={cid_key}: decoded branch territories are empty after placement"
+                        )
+
+                    bbox_coverage = float(bw * bh) / float(max(1, W_img * H_img))
+                    if bbox_coverage > 0.5:
+                        all_pts = []
+                        for S_pts, _, _ in (pts_dists or []):
+                            S_arr = np.asarray(S_pts, float)
+                            if S_arr.ndim == 2 and S_arr.shape[1] == 2 and len(S_arr) > 0:
+                                all_pts.append(S_arr)
+                        ys_sk_all, xs_sk_all = np.where(skel_support)
+                        if len(xs_sk_all) > 0:
+                            all_pts.append(np.column_stack([xs_sk_all, ys_sk_all]).astype(float))
+                        if all_pts:
+                            pts_concat = np.vstack(all_pts)
+                            data_pad = 60
+                            cx0 = max(0, int(np.floor(np.min(pts_concat[:, 0]))) - data_pad)
+                            cy0 = max(0, int(np.floor(np.min(pts_concat[:, 1]))) - data_pad)
+                            cx1 = min(W_img, int(np.ceil(np.max(pts_concat[:, 0]))) + data_pad)
+                            cy1 = min(H_img, int(np.ceil(np.max(pts_concat[:, 1]))) + data_pad)
+                        else:
+                            lys, lxs = np.where(branch_label_map > 0)
+                            if len(lxs) > 0 and len(lys) > 0:
+                                data_pad = 60
+                                cx0 = max(0, int(np.min(lxs)) - data_pad)
+                                cy0 = max(0, int(np.min(lys)) - data_pad)
+                                cx1 = min(W_img, int(np.max(lxs)) + data_pad)
+                                cy1 = min(H_img, int(np.max(lys)) + data_pad)
+                            else:
+                                pad = 20
+                                cx0 = max(0, bx0 - pad)
+                                cy0 = max(0, by0 - pad)
+                                cx1 = min(W_img, bx0 + bw + pad)
+                                cy1 = min(H_img, by0 + bh + pad)
+                    else:
+                        pad = 20
+                        cx0 = max(0, bx0 - pad)
+                        cy0 = max(0, by0 - pad)
+                        cx1 = min(W_img, bx0 + bw + pad)
+                        cy1 = min(H_img, by0 + bh + pad)
+
+                    print(
+                        f"[TERR MAP] plot crop=[{cx0},{cy0}]-[{cx1},{cy1}] "
+                        f"(bbox_coverage={bbox_coverage:.2%})"
+                    )
+                    label_crop = branch_label_map[cy0:cy1, cx0:cx1]
+                    gt_crop_t = (np.asarray(gt_full) > 0).astype(np.uint8)[cy0:cy1, cx0:cx1]
+                    branch_colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+                    primary_branch_id = int(dom_meta_global.get("primary_branch_id", 0))
+                    rej_pts = np.asarray(rejected_by_cid.get(str(cid_key), []), float).reshape(-1, 2)
+
+                    fig_t, ax_t = plt.subplots(figsize=(12, 12), dpi=220)
+                    ax_t.imshow(
+                        gt_crop_t,
+                        cmap="gray",
+                        extent=[cx0, cx1, cy1, cy0],
+                        interpolation="nearest",
+                        alpha=0.35,
+                        zorder=1,
+                    )
+                    rgba_map = np.zeros((*label_crop.shape, 4), dtype=float)
+                    legend_handles = []
+                    for bid in branch_ids_present:
+                        color_hex = branch_colors[bid % len(branch_colors)]
+                        rgba = mcolors.to_rgba(color_hex)
+                        mask = (label_crop == bid + 1)
+                        rgba_map[mask, 0] = rgba[0]
+                        rgba_map[mask, 1] = rgba[1]
+                        rgba_map[mask, 2] = rgba[2]
+                        rgba_map[mask, 3] = 0.45
+                        legend_handles.append(
+                            Patch(
+                                facecolor=color_hex,
+                                alpha=0.7,
+                                label=f"Branch {bid} {'(primary)' if bid == primary_branch_id else '(subordinate)'}",
+                            )
+                        )
+                    ax_t.imshow(rgba_map, extent=[cx0, cx1, cy1, cy0], interpolation="nearest", zorder=2)
+
+                    ys_sk, xs_sk = np.where(skel_support)
+                    in_crop_sk = (xs_sk >= cx0) & (xs_sk < cx1) & (ys_sk >= cy0) & (ys_sk < cy1)
+                    sk_labels = np.array([], dtype=np.int32)
+                    if np.any(in_crop_sk):
+                        sk_labels = branch_label_map[ys_sk[in_crop_sk], xs_sk[in_crop_sk]]
+                        for bid in branch_ids_present:
+                            sk_in_branch = (sk_labels == bid + 1)
+                            if np.any(sk_in_branch):
+                                ax_t.scatter(
+                                    xs_sk[in_crop_sk][sk_in_branch],
+                                    ys_sk[in_crop_sk][sk_in_branch],
+                                    s=6,
+                                    c=branch_colors[bid % len(branch_colors)],
+                                    alpha=0.9,
+                                    zorder=5,
+                                    linewidths=0,
+                                )
+                        sk_unclaimed = (sk_labels == 0)
+                        if np.any(sk_unclaimed):
+                            ax_t.scatter(
+                                xs_sk[in_crop_sk][sk_unclaimed],
+                                ys_sk[in_crop_sk][sk_unclaimed],
+                                s=3,
+                                c="#aaaaaa",
+                                alpha=0.5,
+                                zorder=4,
+                                linewidths=0,
+                                label="skel (no territory)",
+                            )
+                            legend_handles.append(
+                                ax_t.scatter([], [], s=3, c="#aaaaaa", alpha=0.5, label="skel (no territory)")
+                            )
+
+                    for seg_i2, (S2, mm2) in enumerate(zip(gt_mid_parts_ctx, gt_mid_meta_ctx)):
+                        S2a = np.asarray(S2, float)
+                        if S2a.ndim != 2 or S2a.shape[1] != 2 or len(S2a) == 0:
+                            continue
+                        bid2 = int((mm2 or {}).get("branch_id", -1)) if isinstance(mm2, dict) else -1
+                        seg_color = branch_colors[bid2 % len(branch_colors)] if bid2 >= 0 else "#ffffff"
+                        ax_t.plot(S2a[:, 0], S2a[:, 1], color=seg_color, lw=2.5, zorder=7, alpha=0.9)
+                        mid2 = S2a[len(S2a) // 2]
+                        if cx0 <= mid2[0] < cx1 and cy0 <= mid2[1] < cy1:
+                            ax_t.annotate(
+                                f"seg{seg_i2}\nbranch{bid2}",
+                                xy=(float(mid2[0]), float(mid2[1])),
+                                fontsize=6,
+                                color="white",
+                                bbox=dict(boxstyle="round,pad=0.2", fc="#333333", alpha=0.7),
+                                zorder=9,
+                                ha="center",
+                            )
+
+                    if rej_pts.size > 0:
+                        in_c = (
+                            (rej_pts[:, 0] >= cx0) & (rej_pts[:, 0] < cx1) &
+                            (rej_pts[:, 1] >= cy0) & (rej_pts[:, 1] < cy1)
+                        )
+                        if np.any(in_c):
+                            ax_t.scatter(
+                                rej_pts[in_c, 0],
+                                rej_pts[in_c, 1],
+                                s=25,
+                                c="#ff0000",
+                                marker="x",
+                                linewidths=1.2,
+                                zorder=8,
+                                label=f"radius-rejected (n={len(rej_pts)})",
+                            )
+                            legend_handles.append(
+                                ax_t.scatter([], [], s=25, c="#ff0000", marker="x", linewidths=1.2,
+                                             label=f"radius-rejected (n={len(rej_pts)})")
+                            )
+
+                    ax_t.set_xlim(cx0, cx1)
+                    ax_t.set_ylim(cy1, cy0)
+                    ax_t.set_aspect("equal")
+                    ax_t.axis("off")
+                    ax_t.set_title(
+                        f"{support_method} - Branch territory map (cid={cid_key})\n"
+                        f"regions=territory, lines=GT segments, dots=skeleton",
+                        fontsize=9,
+                    )
+                    if legend_handles:
+                        ax_t.legend(handles=legend_handles, loc="lower right", fontsize=7, framealpha=0.85)
+                    suffix = "" if len(crack_contexts) == 1 else f"_cid_{cid_key}"
+                    out_terr = os.path.join(
+                        out_dir,
+                        f"{base_name}_{support_method}_b1_territory_map{suffix}.png",
+                    )
+                    fig_t.savefig(out_terr, dpi=220, bbox_inches="tight")
+                    plt.close(fig_t)
+                    print(f"[BASELINE B1] wrote territory map: {out_terr}")
+
+                    fig_bd, axes_bd = plt.subplots(
+                        len(branch_ids_present),
+                        1,
+                        figsize=(10, 5 * len(branch_ids_present)),
+                        dpi=200,
+                        squeeze=False,
+                    )
+                    for row_i, bid in enumerate(branch_ids_present):
+                        ax_bd = axes_bd[row_i, 0]
+                        ax_bd.imshow(
+                            gt_crop_t,
+                            cmap="gray",
+                            extent=[cx0, cx1, cy1, cy0],
+                            interpolation="nearest",
+                            alpha=0.55,
+                            zorder=1,
+                        )
+                        branch_only = (label_crop == bid + 1)
+                        rgba_b = np.zeros((*label_crop.shape, 4), float)
+                        c_rgba = mcolors.to_rgba(branch_colors[bid % len(branch_colors)])
+                        rgba_b[branch_only, :] = (c_rgba[0], c_rgba[1], c_rgba[2], 0.45)
+                        ax_bd.imshow(rgba_b, extent=[cx0, cx1, cy1, cy0], interpolation="nearest", zorder=2)
+                        # Territory boundary overlays: current branch dashed, other branches dotted.
+                        try:
+                            import cv2 as _cv2
+                            terr_u8 = (branch_only.astype(np.uint8) * 255)
+                            contours_terr, _ = _cv2.findContours(
+                                terr_u8, _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE
+                            )
+                            for cnt in contours_terr:
+                                cnt = np.asarray(cnt).squeeze()
+                                if cnt.ndim != 2 or len(cnt) < 2:
+                                    continue
+                                cnt_global = cnt.astype(float)
+                                cnt_global[:, 0] += cx0
+                                cnt_global[:, 1] += cy0
+                                cnt_closed = np.vstack([cnt_global, cnt_global[0]])
+                                ax_bd.plot(
+                                    cnt_closed[:, 0],
+                                    cnt_closed[:, 1],
+                                    color=branch_colors[bid % len(branch_colors)],
+                                    lw=1.8,
+                                    alpha=0.9,
+                                    zorder=6,
+                                    linestyle="--",
+                                )
+                            for bid_other in branch_ids_present:
+                                if bid_other == bid:
+                                    continue
+                                other_mask = (label_crop == (bid_other + 1)).astype(np.uint8) * 255
+                                contours_other, _ = _cv2.findContours(
+                                    other_mask, _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE
+                                )
+                                for cnt_o in contours_other:
+                                    cnt_o = np.asarray(cnt_o).squeeze()
+                                    if cnt_o.ndim != 2 or len(cnt_o) < 2:
+                                        continue
+                                    cnt_global_o = cnt_o.astype(float)
+                                    cnt_global_o[:, 0] += cx0
+                                    cnt_global_o[:, 1] += cy0
+                                    cnt_closed_o = np.vstack([cnt_global_o, cnt_global_o[0]])
+                                    ax_bd.plot(
+                                        cnt_closed_o[:, 0],
+                                        cnt_closed_o[:, 1],
+                                        color=branch_colors[bid_other % len(branch_colors)],
+                                        lw=1.0,
+                                        alpha=0.45,
+                                        zorder=3,
+                                        linestyle=":",
+                                    )
+                        except Exception as _e:
+                            print(f"[B1 TERR CONTOUR] contour draw failed: {_e}")
+
+                        if np.any(in_crop_sk):
+                            sk_in_b = (sk_labels == (bid + 1))
+                            if np.any(sk_in_b):
+                                ax_bd.scatter(
+                                    xs_sk[in_crop_sk][sk_in_b],
+                                    ys_sk[in_crop_sk][sk_in_b],
+                                    s=5,
+                                    c=branch_colors[bid % len(branch_colors)],
+                                    alpha=0.85,
+                                    zorder=5,
+                                    linewidths=0,
+                                    label=f"skel in territory (n={int(np.sum(sk_in_b))})",
+                                )
+
+                        for S2, mm2 in zip(gt_mid_parts_ctx, gt_mid_meta_ctx):
+                            bid2 = int((mm2 or {}).get("branch_id", -1)) if isinstance(mm2, dict) else -1
+                            if bid2 != bid:
+                                continue
+                            S2a = np.asarray(S2, float)
+                            if S2a.ndim == 2 and S2a.shape[1] == 2 and len(S2a) > 0:
+                                ax_bd.plot(S2a[:, 0], S2a[:, 1], color="white", lw=2.0, zorder=7, alpha=0.9)
+
+                        if rej_pts.size > 0 and gt_mid_parts_ctx:
+                            in_c3 = (
+                                (rej_pts[:, 0] >= cx0) & (rej_pts[:, 0] < cx1) &
+                                (rej_pts[:, 1] >= cy0) & (rej_pts[:, 1] < cy1)
+                            )
+                            branch_seg_pts = []
+                            for S2, mm2 in zip(gt_mid_parts_ctx, gt_mid_meta_ctx):
+                                if int((mm2 or {}).get("branch_id", -1)) == bid:
+                                    S2a = np.asarray(S2, float)
+                                    if S2a.ndim == 2 and S2a.shape[1] == 2 and len(S2a) > 0:
+                                        branch_seg_pts.append(S2a)
+                            if branch_seg_pts and np.any(in_c3):
+                                rp_c = rej_pts[in_c3]
+                                try:
+                                    from scipy.spatial import cKDTree as _cKDT
+                                    t_bp = _cKDT(np.vstack(branch_seg_pts))
+                                    d_to_branch, _ = t_bp.query(rp_c, k=1)
+                                    near_branch = d_to_branch < 80.0
+                                except Exception:
+                                    near_branch = np.ones((len(rp_c),), dtype=bool)
+                                if np.any(near_branch):
+                                    rp_b = rp_c[near_branch]
+                                    ax_bd.scatter(
+                                        rp_b[:, 0],
+                                        rp_b[:, 1],
+                                        s=30,
+                                        c="#ff0000",
+                                        marker="x",
+                                        linewidths=1.5,
+                                        zorder=8,
+                                        label=f"rejected near branch{bid} (n={int(np.sum(near_branch))})",
+                                    )
+
+                        ax_bd.set_xlim(cx0, cx1)
+                        ax_bd.set_ylim(cy1, cy0)
+                        ax_bd.set_aspect("equal")
+                        ax_bd.axis("off")
+                        ax_bd.set_title(
+                            f"Branch {bid} {'(primary)' if bid == primary_branch_id else '(subordinate)'} "
+                            f"- territory_nnz={int(np.sum(branch_label_map == (bid + 1)))}",
+                            fontsize=9,
+                        )
+                        ax_bd.legend(loc="lower right", fontsize=7, framealpha=0.85)
+
+                    fig_bd.suptitle(f"{support_method} - Per-branch detail (cid={cid_key})", fontsize=10)
+                    fig_bd.tight_layout()
+                    out_bd = os.path.join(
+                        out_dir,
+                        f"{base_name}_{support_method}_b1_per_branch{suffix}.png",
+                    )
+                    fig_bd.savefig(out_bd, dpi=200, bbox_inches="tight")
+                    plt.close(fig_bd)
+                    print(f"[BASELINE B1] wrote per-branch detail: {out_bd}")
+                except Exception as e:
+                    raise RuntimeError(
+                        f"[BASELINE B1] territory/per-branch diagnostics failed for support_method='{support_method}' cid={cid_key}: {e}"
+                    ) from e
         except Exception as e:
+            if isinstance(e, RuntimeError):
+                raise
             print(f"[BASELINE B1] projection diagnostics failed for support_method='{support_method}': {e}")
 
     return width_rows

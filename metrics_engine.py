@@ -98,6 +98,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             if os.path.isfile(cand):
                 depth_timing_csv = cand
 
+        # Hard-coded single-image filter for quick debug runs - comment out for full dataset:
+        image_filter = ["42"]
         report = _summarize_dataset_metrics(
             save_folder=self.save_folder,
             out_dir=out_dir,
@@ -204,32 +206,27 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         write_plot=True,
     ):
         """
-        Aggregate per-image GT ablation RS3 into one dataset-level decision.
+        Aggregate GT ablation from per-image weighted summary CSVs.
 
-        Authoritative orchestrator output:
-        - return["best_non_dt"]: selected best non-DT method key (string or None).
+        Source per image:
+          supervision/<base>/analysis/gt_ablation_midline_weighted_summary.csv
 
-        Persisted receipt:
-        - metrics/_calibration/best_ablation_length_only.json
-          (this is what `_load_best_non_dt_method` reads later).
-
-        DataFrame returns:
-        - return["summary_df"] / return["all_df"] are produced for analysis/plotting.
+        Selection rule:
+          - filter group == "combined_plus_noncombined_atomic"
+          - group by variant_id
+          - length-weighted mean of lwmean_score_mid by total_length_px
+          - choose lowest non-dt variant as best_non_dt
         """
         import json
         import os
         import numpy as np
         import pandas as pd
-        import matplotlib.pyplot as plt
-
-        methods = ["dt", "dt_depth", "dt_ridge_valley", "dt_ridge_valley_depth", "dt_ridge_color_depth"]
-        non_dt = [m for m in methods if m != "dt"]
 
         idxs = self._resolve_metrics_image_indices(image_indices=image_indices, base_names=base_names)
         rows = []
         for idx in idxs:
             try:
-                base = os.path.splitext(os.path.basename(self.image_names[idx]))[0]
+                base = os.path.splitext(os.path.basename(str(self.image_names[idx])))[0]
             except Exception:
                 continue
             p = os.path.join(
@@ -237,7 +234,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 "supervision",
                 base,
                 "analysis",
-                "gt_ablation_midline_metrics.csv",
+                "gt_ablation_midline_weighted_summary.csv",
             )
             if not os.path.isfile(p):
                 continue
@@ -245,25 +242,53 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 d = pd.read_csv(p)
             except Exception:
                 continue
-            if d is None or d.empty:
+            need = {"group", "variant_id", "lwmean_score_mid", "total_length_px"}
+            if d is None or d.empty or not need.issubset(set(d.columns)):
                 continue
-            if "variant_id" not in d.columns or "score_mid" not in d.columns:
+            d = d[d["group"].astype(str) == "combined_plus_noncombined_atomic"].copy()
+            if d.empty:
                 continue
-            if "length_px" not in d.columns:
-                d["length_px"] = np.nan
-            d = d.copy()
-            d["image"] = base
-            rows.append(d)
+            d["lwmean_score_mid"] = pd.to_numeric(d["lwmean_score_mid"], errors="coerce")
+            d["total_length_px"] = pd.to_numeric(d["total_length_px"], errors="coerce")
+            d = d[np.isfinite(d["lwmean_score_mid"]) & np.isfinite(d["total_length_px"]) & (d["total_length_px"] > 0)].copy()
+            if d.empty:
+                continue
+            d["image"] = str(base)
+            keep_cols = ["image", "variant_id", "lwmean_score_mid", "total_length_px"]
+            for cc in (
+                "lwmean_score_term_nn",
+                "lwmean_score_term_hd",
+                "lwmean_score_term_cov",
+                "lwmean_nn_mean_bidirectional",
+                "lwmean_hausdorff_max",
+                "lwmean_coverage_min",
+                "lwmean_mean_tan_angle_error_deg",
+                "lwmean_precision_tau",
+                "lwmean_recall_tau",
+                "lwmean_f1_tau",
+            ):
+                if cc in d.columns and cc not in keep_cols:
+                    keep_cols.append(cc)
+            rows.append(d[keep_cols])
 
         calib_dir = os.path.join(self.save_folder, "metrics", "_calibration")
         os.makedirs(calib_dir, exist_ok=True)
         all_rows_csv = os.path.join(calib_dir, "ablation_rs3_all_rows.csv")
         summary_csv = os.path.join(calib_dir, "ablation_rs3_weighted_summary.csv")
         best_json = os.path.join(calib_dir, "best_ablation_length_only.json")
-        plot_png = os.path.join(calib_dir, "ablation_rs3_weighted_summary.png")
 
         if not rows:
-            empty = pd.DataFrame(columns=["method_key", "n_rows", "total_length_px", "mean_rs3", "weighted_rs3"])
+            empty = pd.DataFrame(
+                columns=[
+                    "variant_id",
+                    "n_rows",
+                    "total_length_px",
+                    "weighted_score_mid",
+                    "comp_nn_wmean",
+                    "comp_hausdorff_wmean",
+                    "comp_coverage_wmean",
+                ]
+            )
             if persist:
                 empty.to_csv(all_rows_csv, index=False)
                 empty.to_csv(summary_csv, index=False)
@@ -272,9 +297,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         {
                             "weighting": "length_only",
                             "best_non_dt": None,
-                            "weighted_rs3": {},
-                            "mean_rs3": {},
-                            "n_rows": {},
+                            "weighted_score_mid": {},
                         },
                         f,
                         indent=2,
@@ -282,47 +305,64 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             return {"best_non_dt": None, "summary_df": empty, "all_df": empty}
 
         df_all = pd.concat(rows, ignore_index=True)
-        df_all = df_all[df_all["variant_id"].astype(str).isin(methods)].copy()
-        df_all["score_mid"] = pd.to_numeric(df_all["score_mid"], errors="coerce")
-        df_all["length_px"] = pd.to_numeric(df_all["length_px"], errors="coerce")
-        df_all = df_all[np.isfinite(df_all["score_mid"])].copy()
-
         summary_rows = []
         weighted_map = {}
-        mean_map = {}
-        n_map = {}
 
-        for mk in methods:
-            d = df_all[df_all["variant_id"].astype(str) == str(mk)].copy()
-            x = pd.to_numeric(d.get("score_mid"), errors="coerce").astype(float).to_numpy() if not d.empty else np.array([], float)
-            w = pd.to_numeric(d.get("length_px"), errors="coerce").astype(float).to_numpy() if not d.empty else np.array([], float)
-            ok_x = np.isfinite(x)
-            mean_rs3 = float(np.mean(x[ok_x])) if np.any(ok_x) else np.nan
-            ok_w = np.isfinite(x) & np.isfinite(w) & (w > 0)
-            weighted_rs3 = float(np.sum(x[ok_w] * w[ok_w]) / np.sum(w[ok_w])) if np.any(ok_w) else np.nan
-            total_len = float(np.sum(w[ok_w])) if np.any(ok_w) else 0.0
+        for vid, dvid in df_all.groupby("variant_id", dropna=False):
+            x = pd.to_numeric(dvid["lwmean_score_mid"], errors="coerce").astype(float).to_numpy()
+            w = pd.to_numeric(dvid["total_length_px"], errors="coerce").astype(float).to_numpy()
+            ok = np.isfinite(x) & np.isfinite(w) & (w > 0)
+            wmean = float(np.sum(x[ok] * w[ok]) / np.sum(w[ok])) if np.any(ok) else np.nan
+            wlen = float(np.sum(w[ok])) if np.any(ok) else 0.0
+            comp_wmeans = {}
+            comp_cols_map = [
+                ("comp_nn_wmean", ["lwmean_score_term_nn", "lwmean_nn_mean_bidirectional"]),
+                ("comp_hausdorff_wmean", ["lwmean_score_term_hd", "lwmean_hausdorff_max"]),
+                ("comp_coverage_wmean", ["lwmean_score_term_cov", "lwmean_coverage_min"]),
+            ]
+            for out_col, candidates in comp_cols_map:
+                picked = None
+                for cand in candidates:
+                    if cand in dvid.columns:
+                        picked = cand
+                        break
+                if picked is None:
+                    comp_wmeans[out_col] = np.nan
+                    continue
+                xc = pd.to_numeric(dvid[picked], errors="coerce").astype(float).to_numpy()
+                wc = pd.to_numeric(dvid["total_length_px"], errors="coerce").astype(float).to_numpy()
+                okc = np.isfinite(xc) & np.isfinite(wc) & (wc > 0)
+                if not np.any(okc):
+                    comp_wmeans[out_col] = np.nan
+                    continue
+                # Fallback: if only raw component means are present, transform to score-term space.
+                vals = xc[okc]
+                if picked == "lwmean_nn_mean_bidirectional":
+                    vals = np.log1p(np.maximum(vals, 0.0))
+                elif picked == "lwmean_hausdorff_max":
+                    vals = 0.5 * np.log1p(np.maximum(vals, 0.0))
+                elif picked == "lwmean_coverage_min":
+                    vals = 1.0 - np.clip(vals, 0.0, 1.0)
+                comp_wmeans[out_col] = float(np.sum(vals * wc[okc]) / np.sum(wc[okc]))
 
             summary_rows.append(
                 {
-                    "method_key": mk,
-                    "n_rows": int(len(d)),
-                    "total_length_px": float(total_len),
-                    "mean_rs3": float(mean_rs3) if np.isfinite(mean_rs3) else np.nan,
-                    "weighted_rs3": float(weighted_rs3) if np.isfinite(weighted_rs3) else np.nan,
+                    "variant_id": str(vid),
+                    "n_rows": int(len(dvid)),
+                    "total_length_px": wlen,
+                    "weighted_score_mid": float(wmean) if np.isfinite(wmean) else np.nan,
+                    "comp_nn_wmean": comp_wmeans.get("comp_nn_wmean", np.nan),
+                    "comp_hausdorff_wmean": comp_wmeans.get("comp_hausdorff_wmean", np.nan),
+                    "comp_coverage_wmean": comp_wmeans.get("comp_coverage_wmean", np.nan),
                 }
             )
-            weighted_map[mk] = float(weighted_rs3) if np.isfinite(weighted_rs3) else None
-            mean_map[mk] = float(mean_rs3) if np.isfinite(mean_rs3) else None
-            n_map[mk] = int(len(d))
+            weighted_map[str(vid)] = float(wmean) if np.isfinite(wmean) else None
 
         summary_df = pd.DataFrame(summary_rows)
-
-        best_non_dt = None
-        pool = summary_df[summary_df["method_key"].isin(non_dt)].copy()
-        pool["weighted_rs3"] = pd.to_numeric(pool["weighted_rs3"], errors="coerce")
-        pool = pool[np.isfinite(pool["weighted_rs3"])]
-        if not pool.empty:
-            best_non_dt = str(pool.sort_values("weighted_rs3", ascending=True).iloc[0]["method_key"])
+        pool = summary_df[summary_df["variant_id"].astype(str) != "dt"].copy()
+        pool["weighted_score_mid"] = pd.to_numeric(pool["weighted_score_mid"], errors="coerce")
+        pool = pool[np.isfinite(pool["weighted_score_mid"])].copy()
+        best_non_dt = str(pool.sort_values("weighted_score_mid", ascending=True).iloc[0]["variant_id"]) if not pool.empty else None
 
         if persist:
             df_all.to_csv(all_rows_csv, index=False)
@@ -332,35 +372,11 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     {
                         "weighting": "length_only",
                         "best_non_dt": best_non_dt,
-                        "weighted_rs3": weighted_map,
-                        "mean_rs3": mean_map,
-                        "n_rows": n_map,
+                        "weighted_score_mid": weighted_map,
                     },
                     f,
                     indent=2,
                 )
-
-            if write_plot and not summary_df.empty:
-                try:
-                    order = methods
-                    bar_df = summary_df.set_index("method_key").reindex(order).reset_index()
-                    y = pd.to_numeric(bar_df["weighted_rs3"], errors="coerce").astype(float).to_numpy()
-                    x = np.arange(len(order))
-                    fig, ax = plt.subplots(figsize=(10, 4), dpi=170)
-                    colors = ["#4e79a7" if m != best_non_dt else "#e15759" for m in order]
-                    ax.bar(x, np.nan_to_num(y, nan=0.0), color=colors, alpha=0.9)
-                    for i, v in enumerate(y):
-                        if np.isfinite(v):
-                            ax.text(i, v + 0.01, f"{v:.3f}", ha="center", va="bottom", fontsize=8)
-                    ax.set_xticks(x, order, rotation=15)
-                    ax.set_ylabel("Length-weighted RS3")
-                    ax.set_title("GT Ablation (Length-only weighting)")
-                    ax.grid(axis="y", alpha=0.25)
-                    fig.tight_layout()
-                    fig.savefig(plot_png)
-                    plt.close(fig)
-                except Exception:
-                    pass
 
         return {"best_non_dt": best_non_dt, "summary_df": summary_df, "all_df": df_all}
 
@@ -680,7 +696,6 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         edge_params=None,
         export_supervision=False,
         display=False,
-        width_eval_mode="dt_best_et",
         best_method_key=None,
         run_atomic_width_eval=False,
         edge_parallel_workers=None,
@@ -712,9 +727,6 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 return {}
 
         def _sum_numeric_by_supervision(csv_path):
-            """
-            Sum *_s columns per supervision from metrics/timings_core.csv.
-            """
             out = {}
             if not os.path.isfile(csv_path):
                 return out
@@ -737,12 +749,6 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             return out
 
         def _read_driver_timing_csv(csv_path):
-            """
-            Read per-step driver timings from metrics/timings_driver.csv.
-            Returns:
-              - step_totals: dict[str,float] summed by step
-              - rows: list[dict] raw rows
-            """
             step_totals = {}
             rows_out = []
             if not os.path.isfile(csv_path):
@@ -756,13 +762,15 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     if not np.isfinite(sec):
                         continue
                     step_totals[step] = float(step_totals.get(step, 0.0) + float(sec))
-                    rows_out.append({
-                        "step": step,
-                        "seconds": float(sec),
-                        "midline_type": str(r.get("midline_type", "")),
-                        "variant_id": str(r.get("variant_id", "")),
-                        "crack_type": str(r.get("crack_type", "")),
-                    })
+                    rows_out.append(
+                        {
+                            "step": step,
+                            "seconds": float(sec),
+                            "midline_type": str(r.get("midline_type", "")),
+                            "variant_id": str(r.get("variant_id", "")),
+                            "crack_type": str(r.get("crack_type", "")),
+                        }
+                    )
             except Exception:
                 return {}, []
             return step_totals, rows_out
@@ -795,6 +803,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     manual_ids.append(cid)
 
             if manual_ids and bool(run_edge_tracking):
+                print(f"  → [{base_name}] edge tracking ({len(manual_ids)} crack(s))...")
                 t_edge0 = time.perf_counter()
                 self.run_edge_tracking_parallel(
                     crack_ids=manual_ids,
@@ -809,21 +818,21 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 timing_breakdown["edge_tracking_s"] = 0.0
 
             t_metrics0 = time.perf_counter()
+            _mode_label = "GT supervision export + ET width eval" if export_supervision else "width eval (dt_best_et)"
+            print(f"  → [{base_name}] {_mode_label}...")
             self.compute_mask_and_width_metrics_for_image(
                 display=bool(display),
                 export_supervision=bool(export_supervision),
-                width_eval_mode=str(width_eval_mode),
                 best_method_key=best_method_key,
                 run_atomic_width_eval=bool(run_atomic_width_eval),
             )
             timing_breakdown["metrics_total_s"] = float(time.perf_counter() - t_metrics0)
 
-            # Pull GT supervision sub-timings (when export runs) from per-image supervision CSVs.
             if base_name:
                 gt_sup_root = os.path.join(self.save_folder, "supervision", base_name)
                 analysis_dir = os.path.join(gt_sup_root, "analysis")
                 dt_track_dir = os.path.join(gt_sup_root, "dt_track")
-                fused_track_dir = os.path.join(gt_sup_root, "fused_track")
+                fused_track_dir = os.path.join(gt_sup_root, "multi_cue_track")
 
                 gt_compute = _read_first_row_csv(os.path.join(analysis_dir, "gt_compute_timing.csv"))
                 gt_center = _read_first_row_csv(os.path.join(analysis_dir, "gt_centering_timing.csv"))
@@ -855,24 +864,23 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     })
                 if depth_track:
                     gt_sup_timing.update({
-                        "depth_align_s": _safe_float(depth_track.get("depth_align_s"), default=0.0),
-                        "depth_recess_s": _safe_float(depth_track.get("depth_recess_s"), default=0.0),
-                        "depth_costmap_s": _safe_float(depth_track.get("depth_costmap_s"), default=0.0),
-                        "depth_dijkstra_s": _safe_float(depth_track.get("depth_dijkstra_s"), default=0.0),
-                        "depth_postprocess_s": _safe_float(depth_track.get("depth_postprocess_s"), default=0.0),
-                        "normals_depth_s": _safe_float(depth_track.get("normals_depth_s"), default=0.0),
+                        "multi_cue_align_s": _safe_float(depth_track.get("depth_align_s"), default=0.0),
+                        "multi_cue_recess_s": _safe_float(depth_track.get("depth_recess_s"), default=0.0),
+                        "multi_cue_costmap_s": _safe_float(depth_track.get("depth_costmap_s"), default=0.0),
+                        "multi_cue_dijkstra_s": _safe_float(depth_track.get("depth_dijkstra_s"), default=0.0),
+                        "multi_cue_postprocess_s": _safe_float(depth_track.get("depth_postprocess_s"), default=0.0),
+                        "normals_multi_cue_s": _safe_float(depth_track.get("normals_depth_s"), default=0.0),
                     })
                     gt_sup_timing["multi_cue_total_s"] = (
-                        gt_sup_timing.get("depth_align_s", 0.0)
-                        + gt_sup_timing.get("depth_recess_s", 0.0)
-                        + gt_sup_timing.get("depth_costmap_s", 0.0)
-                        + gt_sup_timing.get("depth_dijkstra_s", 0.0)
-                        + gt_sup_timing.get("depth_postprocess_s", 0.0)
+                        gt_sup_timing.get("multi_cue_align_s", 0.0)
+                        + gt_sup_timing.get("multi_cue_recess_s", 0.0)
+                        + gt_sup_timing.get("multi_cue_costmap_s", 0.0)
+                        + gt_sup_timing.get("multi_cue_dijkstra_s", 0.0)
+                        + gt_sup_timing.get("multi_cue_postprocess_s", 0.0)
                     )
                 if gt_sup_timing:
                     timing_breakdown["gt_supervision"] = gt_sup_timing
 
-                # Pull core metric timings grouped by supervision label (et/dt/baseline/best/etc.)
                 metrics_dir = os.path.join(self.save_folder, "metrics", str(base_name))
                 core_sup = _sum_numeric_by_supervision(os.path.join(metrics_dir, "timings_core.csv"))
                 if core_sup:
@@ -908,78 +916,344 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             except Exception:
                 pass
 
-    def _batch_run_metrics_global_dt_best_et(
+    def batch_run_metrics_global(
         self,
-        *,
+        sample_frac=0.10,
+        max_images=10,
+        seed=42,
+        edge_grid=None,
+        g_variants=None,
+        cpu_max_workers=8,
+        apply_to_sample=False,
+        edges_only=False,
+        edge_parallel_workers=None,
+        rs3_strategy="full",
+        rs3_fixed_family=None,
         image_indices=None,
         base_names=None,
-        edge_params=None,
-        export_supervision=True,
-        display=False,
-        edge_parallel_workers=None,
-        recompute_best=True,
+        recompute_best_non_dt=True,
     ):
         import os
-        import pandas as pd
         import time
+        import numpy as np
+        import pandas as pd
+        from helpers import metrics as metrics_mod
 
-        idxs = self._resolve_metrics_image_indices(image_indices=image_indices, base_names=base_names)
+        # -- Hardcoded toggles for fast iteration --
+        resolved_indices = [41]
+        SKIP_ALREADY_PROCESSED = False
+        FAST_RUN_EDGE_SWEEP = False
+
+        idxs = self._resolve_metrics_image_indices(image_indices=resolved_indices, base_names=base_names)
         if not idxs:
             print("[batch dt_best_et] no target images")
             return {"ok": False, "reason": "no_images"}
 
+        DEFAULT_EDGE = {"window_half_size": 45, "mu": 0.0, "l": 5, "p": 14, "seg_mode": "new"}
+        DEFAULT_EDGE_GRID = [
+            {"window_half_size": 45, "mu": 0, "l": 5, "p": 14, "seg_mode": "old"},
+            {"window_half_size": 45, "mu": 0, "l": 5, "p": 14, "seg_mode": "new"},
+            {"window_half_size": 45, "mu": 0, "l": 2, "p": 14, "seg_mode": "new"},
+            {"window_half_size": 45, "mu": 0, "l": 8, "p": 14, "seg_mode": "new"},
+            {"window_half_size": 45, "mu": 2, "l": 5, "p": 14, "seg_mode": "new"},
+            {"window_half_size": 45, "mu": 5, "l": 5, "p": 14, "seg_mode": "new"},
+            {"window_half_size": 45, "mu": 2, "l": 5, "p": 2, "seg_mode": "new"},
+            {"window_half_size": 45, "mu": 2, "l": 5, "p": 20, "seg_mode": "new"},
+        ]
+
         calib_dir = os.path.join(self.save_folder, "metrics", "_calibration")
         os.makedirs(calib_dir, exist_ok=True)
 
+        def _base(idx):
+            if 0 <= int(idx) < len(getattr(self, "image_names", []) or []):
+                return os.path.splitext(os.path.basename(str(self.image_names[int(idx)])))[0]
+            return str(idx)
+
+        def _append_csv_row(path, row):
+            try:
+                new_df = pd.DataFrame([row])
+                if os.path.isfile(path):
+                    prev = pd.read_csv(path)
+                    out = pd.concat([prev, new_df], ignore_index=True)
+                else:
+                    out = new_df
+                out.to_csv(path, index=False)
+            except Exception as e:
+                print(f"[batch dt_best_et] could not append CSV row -> {path}: {e}")
+
+        def _record_image_timing(img_base, row):
+            img_dir = os.path.join(self.save_folder, "metrics", str(img_base))
+            os.makedirs(img_dir, exist_ok=True)
+            _append_csv_row(os.path.join(img_dir, "batch_timing.csv"), row)
+            _append_csv_row(os.path.join(calib_dir, "global_per_image_runtime.csv"), row)
+
+        def _manual_ids_for_current_image():
+            atomic = dict(self._metric_atomic() or {})
+            out = []
+            for cid, cr in atomic.items():
+                src = str((cr or {}).get("source") or "").lower()
+                if src.startswith("auto") or src == "combined":
+                    continue
+                mid = metrics_mod._finite_xy((cr or {}).get("midline", []))
+                if len(mid) >= 2:
+                    out.append(cid)
+            return out
+
+        def _best_non_dt_from_weighted_summaries(indices):
+            rows = []
+            for idx in indices:
+                base = _base(idx)
+                p = os.path.join(self.save_folder, "supervision", base, "analysis", "gt_ablation_midline_weighted_summary.csv")
+                if not os.path.isfile(p):
+                    continue
+                try:
+                    d = pd.read_csv(p)
+                except Exception:
+                    continue
+                need = {"group", "variant_id", "lwmean_score_mid", "total_length_px"}
+                if d is None or d.empty or not need.issubset(set(d.columns)):
+                    continue
+                d = d[d["group"].astype(str) == "combined_plus_noncombined_atomic"].copy()
+                if d.empty:
+                    continue
+                d["lwmean_score_mid"] = pd.to_numeric(d["lwmean_score_mid"], errors="coerce")
+                d["total_length_px"] = pd.to_numeric(d["total_length_px"], errors="coerce")
+                d = d[np.isfinite(d["lwmean_score_mid"]) & np.isfinite(d["total_length_px"]) & (d["total_length_px"] > 0)].copy()
+                if d.empty:
+                    continue
+                d["image"] = str(base)
+                rows.append(d[["image", "variant_id", "lwmean_score_mid", "total_length_px"]])
+            if not rows:
+                return None
+            all_df = pd.concat(rows, ignore_index=True)
+            grouped = []
+            for vid, dvid in all_df.groupby("variant_id", dropna=False):
+                x = pd.to_numeric(dvid["lwmean_score_mid"], errors="coerce").astype(float).to_numpy()
+                w = pd.to_numeric(dvid["total_length_px"], errors="coerce").astype(float).to_numpy()
+                ok = np.isfinite(x) & np.isfinite(w) & (w > 0)
+                if not np.any(ok):
+                    continue
+                grouped.append(
+                    {
+                        "variant_id": str(vid),
+                        "weighted_score_mid": float(np.sum(x[ok] * w[ok]) / np.sum(w[ok])),
+                        "total_length_px": float(np.sum(w[ok])),
+                    }
+                )
+            if not grouped:
+                return None
+            gdf = pd.DataFrame(grouped)
+            pool = gdf[gdf["variant_id"].astype(str) != "dt"].copy()
+            if pool.empty:
+                return None
+            return str(pool.sort_values("weighted_score_mid", ascending=True).iloc[0]["variant_id"])
+
+        def _best_edge_params_from_sweep(sweep_indices):
+            all_rows = []
+            orig_n = int(getattr(self, "n", 0))
+            try:
+                for n, idx in enumerate(sweep_indices, 1):
+                    base = _base(idx)
+                    print(f"[batch dt_best_et] pass2a sweep {n}/{len(sweep_indices)}: {base}")
+                    self.n = int(idx)
+                    self.change_image()
+                    manual_ids = _manual_ids_for_current_image()
+                    if not manual_ids:
+                        print(f"  -> [{base}] no manual cracks for sweep")
+                        continue
+                    for cid in manual_ids:
+                        try:
+                            df = self.sweep_edges_with_executor(cid, grid=DEFAULT_EDGE_GRID, max_workers=(edge_parallel_workers or 8))
+                        except Exception as e:
+                            print(f"  -> [{base}] sweep failed cid={cid}: {e}")
+                            continue
+                        if df is None or df.empty:
+                            continue
+                        d = df.copy()
+                        d["image"] = str(base)
+                        d["crack_id"] = str(cid)
+                        all_rows.append(d)
+            finally:
+                try:
+                    self.n = orig_n
+                    self.change_image()
+                except Exception:
+                    pass
+
+            if not all_rows:
+                return dict(DEFAULT_EDGE)
+
+            sdf = pd.concat(all_rows, ignore_index=True)
+            if "edge_score" not in sdf.columns:
+                return dict(DEFAULT_EDGE)
+
+            for c in ["param_window_half_size", "param_mu", "param_l", "param_p", "param_seg_mode", "edge_score"]:
+                if c not in sdf.columns:
+                    return dict(DEFAULT_EDGE)
+
+            if "global_weight" in sdf.columns:
+                w = pd.to_numeric(sdf["global_weight"], errors="coerce")
+            else:
+                w = pd.Series(np.ones(len(sdf)), index=sdf.index)
+            sdf = sdf.copy()
+            sdf["edge_score"] = pd.to_numeric(sdf["edge_score"], errors="coerce")
+            sdf["_w"] = pd.to_numeric(w, errors="coerce")
+            sdf = sdf[np.isfinite(sdf["edge_score"]) & np.isfinite(sdf["_w"]) & (sdf["_w"] > 0)].copy()
+            if sdf.empty:
+                return dict(DEFAULT_EDGE)
+
+            fam_cols = ["param_window_half_size", "param_mu", "param_l", "param_p", "param_seg_mode"]
+            agg_rows = []
+            for key, dgrp in sdf.groupby(fam_cols, dropna=False):
+                x = dgrp["edge_score"].to_numpy(float)
+                ww = dgrp["_w"].to_numpy(float)
+                agg_rows.append(
+                    {
+                        "param_window_half_size": int(round(float(key[0]))),
+                        "param_mu": float(key[1]),
+                        "param_l": int(round(float(key[2]))),
+                        "param_p": int(round(float(key[3]))),
+                        "param_seg_mode": str(key[4]),
+                        "weighted_edge_score": float(np.sum(x * ww) / np.sum(ww)),
+                        "n_rows": int(len(dgrp)),
+                    }
+                )
+            agg_df = pd.DataFrame(agg_rows).sort_values("weighted_edge_score", ascending=True)
+            try:
+                agg_df.to_csv(os.path.join(calib_dir, "global_edge_family_ranked.csv"), index=False)
+            except Exception:
+                pass
+            best = agg_df.iloc[0]
+            return {
+                "window_half_size": int(best["param_window_half_size"]),
+                "mu": float(best["param_mu"]),
+                "l": int(best["param_l"]),
+                "p": int(best["param_p"]),
+                "seg_mode": str(best["param_seg_mode"]),
+            }
+
         t0 = time.perf_counter()
         pass1_rows = []
-        print(f"[batch dt_best_et] pass1 export/ablation prep on {len(idxs)} images")
+        pass2b_rows = []
+        pass2c_rows = []
+
+        print(f"[batch dt_best_et] pass1 GT supervision export on {len(idxs)} image(s)")
         for n, idx in enumerate(idxs, 1):
-            print(f"[batch dt_best_et] pass1 {n}/{len(idxs)} idx={idx}")
+            base = _base(idx)
+            if SKIP_ALREADY_PROCESSED:
+                done_flag = os.path.join(self.save_folder, "supervision", base, "analysis", "gt_ablation_midline_weighted_summary.csv")
+                if os.path.isfile(done_flag):
+                    print(f"[batch dt_best_et] pass1 skip existing: {base}")
+                    continue
+            print(f"\n[batch dt_best_et] -- pass1 {n}/{len(idxs)}: {base} (edge track + GT supervision export)")
             r = self._run_metrics_for_image_idx(
                 idx,
-                edge_params=edge_params,
+                edge_params=DEFAULT_EDGE,
                 export_supervision=True,
-                display=display,
-                width_eval_mode="et_only",
+                display=False,
                 best_method_key=None,
                 run_atomic_width_eval=False,
                 edge_parallel_workers=edge_parallel_workers,
+                run_edge_tracking=True,
             )
             pass1_rows.append(r)
+            _record_image_timing(
+                base,
+                {
+                    "stage": "pass1",
+                    "image": base,
+                    "elapsed_s": float((r or {}).get("elapsed_s", np.nan)),
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            )
 
-        if recompute_best:
-            agg = self._aggregate_ablation_rs3_length_only(image_indices=idxs, persist=True, write_plot=True)
-            best_non_dt = agg.get("best_non_dt")
-        else:
-            best_non_dt = self._load_best_non_dt_method()
+        best_non_dt = _best_non_dt_from_weighted_summaries(idxs)
         if not best_non_dt:
-            # Fallback: compute directly from pass1 artifacts instead of hard-failing on missing JSON.
-            agg = self._aggregate_ablation_rs3_length_only(image_indices=idxs, persist=True, write_plot=True)
+            agg = self._aggregate_ablation_rs3_length_only(image_indices=idxs, persist=True, write_plot=False)
             best_non_dt = agg.get("best_non_dt")
-
         print(f"[batch dt_best_et] selected best_non_dt={best_non_dt}")
 
-        pass2_rows = []
-        print(f"[batch dt_best_et] pass2 DT/BEST/ET width eval on {len(idxs)} images")
+        sweep_n = max(1, min(len(idxs) // 10, 10))
+        sweep_indices = idxs[:sweep_n]
+        if FAST_RUN_EDGE_SWEEP:
+            best_edge_params = _best_edge_params_from_sweep(sweep_indices)
+        else:
+            best_edge_params = dict(DEFAULT_EDGE)
+            print("[batch dt_best_et] pass2a sweep disabled (FAST_RUN_EDGE_SWEEP=False); using DEFAULT_EDGE")
+        print(f"[batch dt_best_et] best_edge_params={best_edge_params}")
+
+        print(f"[batch dt_best_et] pass2b edge tracking on {len(idxs)} image(s)")
+        orig_n = int(getattr(self, "n", 0))
+        try:
+            for n, idx in enumerate(idxs, 1):
+                base = _base(idx)
+                print(f"\n[batch dt_best_et] -- pass2b {n}/{len(idxs)}: {base} (edge tracking)")
+                t_edge0 = time.perf_counter()
+                self.n = int(idx)
+                self.change_image()
+                manual_ids = _manual_ids_for_current_image()
+                if manual_ids:
+                    print(f"  -> [{base}] edge tracking ({len(manual_ids)} crack(s))...")
+                    self.run_edge_tracking_parallel(
+                        crack_ids=manual_ids,
+                        cpu_max_workers=edge_parallel_workers,
+                        edge_params_fixed=best_edge_params,
+                    )
+                else:
+                    print(f"  -> [{base}] no manual cracks for edge tracking")
+                row = {
+                    "ok": True,
+                    "image": base,
+                    "idx": int(idx),
+                    "cracks": int(len(manual_ids)),
+                    "elapsed_s": float(time.perf_counter() - t_edge0),
+                }
+                pass2b_rows.append(row)
+                _record_image_timing(
+                    base,
+                    {
+                        "stage": "pass2b",
+                        "image": base,
+                        "elapsed_s": float(row.get("elapsed_s", np.nan)),
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    },
+                )
+        finally:
+            try:
+                self.n = orig_n
+                self.change_image()
+            except Exception:
+                pass
+
+        print(f"[batch dt_best_et] pass2c width metrics on {len(idxs)} image(s)")
         for n, idx in enumerate(idxs, 1):
-            print(f"[batch dt_best_et] pass2 {n}/{len(idxs)} idx={idx}")
+            base = _base(idx)
+            print(f"\n[batch dt_best_et] -- pass2c {n}/{len(idxs)}: {base} (width eval dt_best_et)")
             r = self._run_metrics_for_image_idx(
                 idx,
-                edge_params=edge_params,
-                export_supervision=True,
-                display=display,
-                width_eval_mode="dt_best_et",
+                edge_params=best_edge_params,
+                export_supervision=False,
+                display=False,
                 best_method_key=best_non_dt,
                 run_atomic_width_eval=False,
                 edge_parallel_workers=edge_parallel_workers,
                 run_edge_tracking=False,
             )
-            pass2_rows.append(r)
+            pass2c_rows.append(r)
+            _record_image_timing(
+                base,
+                {
+                    "stage": "pass2c",
+                    "image": base,
+                    "elapsed_s": float((r or {}).get("elapsed_s", np.nan)),
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            )
 
         try:
             pd.DataFrame(pass1_rows).to_csv(os.path.join(calib_dir, "dt_best_et_pass1.csv"), index=False)
-            pd.DataFrame(pass2_rows).to_csv(os.path.join(calib_dir, "dt_best_et_pass2.csv"), index=False)
+            pd.DataFrame(pass2b_rows).to_csv(os.path.join(calib_dir, "dt_best_et_pass2b_edge_tracking.csv"), index=False)
+            pd.DataFrame(pass2c_rows).to_csv(os.path.join(calib_dir, "dt_best_et_pass2c_width_eval.csv"), index=False)
         except Exception:
             pass
 
@@ -987,10 +1261,11 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         return {
             "ok": True,
             "best_non_dt": best_non_dt,
+            "best_edge_params": best_edge_params,
             "n_images": int(len(idxs)),
             "elapsed_s": float(time.perf_counter() - t0),
         }
-    
+
     def _flatten_edge_worker_result(self, crack_id, params, ew):
         """
         Flatten edge_param_worker output + params into a single row dict
@@ -1519,7 +1794,6 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         *,
         cache_key=None,
         include_auto=False,   # deprecated in final stage (kept for call compatibility)
-        width_eval_mode="dt_best_et",
         best_method_key=None,
         best_selection_path=None,
         run_atomic_width_eval=False,
@@ -1571,8 +1845,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         # Master dissertation-quality output flag.
         # Flip to True for full export runs with all heavy debug/summary plots.
         DISSERTATION_QUALITY_PLOTS = False
-        ENABLE_GT_VS_MASK_OVERLAY = DISSERTATION_QUALITY_PLOTS
-        ENABLE_COMBINED_DEBUG_PLOT = DISSERTATION_QUALITY_PLOTS
+        DEBUG_SHOW_PLOTS = False        # flip True for diagnostic visuals (Stage 5 overlay, width compare)
+        ENABLE_GT_VS_MASK_OVERLAY = DISSERTATION_QUALITY_PLOTS or DEBUG_SHOW_PLOTS
+        ENABLE_COMBINED_DEBUG_PLOT = DISSERTATION_QUALITY_PLOTS or DEBUG_SHOW_PLOTS
         ENABLE_MASK_COMPARISON_GRID = DISSERTATION_QUALITY_PLOTS
         ENABLE_DECK_PLOTS = DISSERTATION_QUALITY_PLOTS
 
@@ -1795,22 +2070,13 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 traceback.print_exc()
 
         gt_sup_json_path = os.path.join(gt_sup_root, "gt_supervision.json")
-        mode_precheck = str(width_eval_mode or "dt_best_et").strip().lower()
-        if mode_precheck not in {"et_only", "dt_best_et"}:
-            mode_precheck = "dt_best_et"
-        if not bool(export_supervision):
-            if not os.path.isfile(gt_sup_json_path):
-                if mode_precheck == "dt_best_et":
-                    raise RuntimeError(
-                        "compute_mask_and_width_metrics_for_image called with export_supervision=False "
-                        f"but no gt_supervision.json exists at {gt_sup_json_path}. "
-                        "Either run a prior export (call with export_supervision=True) or confirm the "
-                        "supervision folder is populated for this image."
-                    )
-                print(
-                    "[WIDTH DRIVER] warning: export_supervision=False and missing gt_supervision.json "
-                    f"at {gt_sup_json_path}; proceeding because width_eval_mode='et_only'."
-                )
+        if not bool(export_supervision) and not os.path.isfile(gt_sup_json_path):
+            raise RuntimeError(
+                "compute_mask_and_width_metrics_for_image called with export_supervision=False "
+                f"but no gt_supervision.json exists at {gt_sup_json_path}. "
+                "Either run a prior export (call with export_supervision=True) or confirm the "
+                "supervision folder is populated for this image."
+            )
 
         # ------------------------------------------------------------------
         # 4) Rebuild combined cracks for MANUAL + AUTO (shared logic)
@@ -2877,6 +3143,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
                 n_matched = 0
                 n_enriched_widths = 0
+                n_diag_printed = 0
                 for cid, cr in list(out.items()):
                     if not isinstance(cr, dict):
                         continue
@@ -2894,6 +3161,37 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     if not cr.get("midline"):
                         if gt_entry.get("midline") is not None:
                             cr["midline"] = gt_entry.get("midline")
+                    if not cr.get("midline_segments"):
+                        if gt_entry.get("midline_segments"):
+                            cr["midline_segments"] = gt_entry.get("midline_segments")
+                    if not cr.get("midline_segments_meta"):
+                        if gt_entry.get("midline_segments_meta"):
+                            cr["midline_segments_meta"] = gt_entry.get("midline_segments_meta")
+                    if not cr.get("dominance_meta"):
+                        if gt_entry.get("dominance_meta"):
+                            cr["dominance_meta"] = gt_entry.get("dominance_meta")
+                    if not cr.get("mask_bbox"):
+                        if gt_entry.get("mask_bbox") is not None:
+                            cr["mask_bbox"] = gt_entry.get("mask_bbox")
+                    if not cr.get("mask_crop"):
+                        if gt_entry.get("mask_crop") is not None:
+                            cr["mask_crop"] = gt_entry.get("mask_crop")
+                    if not cr.get("pred_mask"):
+                        if gt_entry.get("pred_mask") is not None:
+                            cr["pred_mask"] = gt_entry.get("pred_mask")
+
+                    if n_diag_printed < 3:
+                        dom = cr.get("dominance_meta") or {}
+                        dom_found = bool(dom)
+                        branch_count = len((dom.get("branch_territory") or {})) if isinstance(dom, dict) else 0
+                        seg_count = len(cr.get("midline_segments") or [])
+                        print(
+                            f"[BASELINE GT SUP] cid={cid} "
+                            f"dominance_meta={'Y' if dom_found else 'N'} "
+                            f"branch_territories={branch_count} "
+                            f"midline_segments={seg_count}"
+                        )
+                        n_diag_printed += 1
 
                     out[str(cid)] = cr
 
@@ -3303,12 +3601,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             coverage_pct = float(100.0 * n_segments / max(1, gt_entries))
             return n_segments, coverage_pct
 
-        mode = str(width_eval_mode or "dt_best_et").strip().lower()
         selected_best_non_dt = str(best_method_key or "").strip()
-        if mode not in {"et_only", "dt_best_et"}:
-            print(f"[DEBUG WIDTH] unknown width_eval_mode={mode}, defaulting to dt_best_et")
-            mode = "dt_best_et"
-        if mode == "dt_best_et" and not selected_best_non_dt:
+        if not selected_best_non_dt:
             # Single-image quick runs write per-image ablation CSVs during supervision export,
             # but may not have executed a global aggregation step yet. Refresh persisted best
             # selection from whatever ablation CSVs currently exist on disk.
@@ -3317,18 +3611,17 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 persist=True,
                 write_plot=False,
             )
-        if mode == "dt_best_et" and not selected_best_non_dt:
+        if not selected_best_non_dt:
             selected_best_non_dt = self._load_best_non_dt_method(best_json_path=best_selection_path)
-        if mode == "dt_best_et" and not selected_best_non_dt:
+        if not selected_best_non_dt:
             raise RuntimeError(
-                "width_eval_mode='dt_best_et' requires either an explicit best_method_key argument "
+                "dt_best_et flow requires either an explicit best_method_key argument "
                 "OR a persisted best_ablation_length_only.json from a prior batch aggregation. "
                 "Neither was found. Run the batch aggregation first, or pass best_method_key explicitly."
             )
         try:
             print("[DEBUG METRICS] width comparisons (total) ...")
-            if mode == "dt_best_et":
-                print(f"[WIDTH DRIVER] best_method = {selected_best_non_dt}")
+            print(f"[WIDTH DRIVER] best_method = {selected_best_non_dt}")
 
             # --- build payloads (sequential: fast disk reads) ---
             combined_for_width = _prep_combined_for_width(combined_map)
@@ -3337,37 +3630,36 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
             dt_atomic, dt_combined = None, None
             best_atomic, best_combined = None, None
-            if mode == "dt_best_et":
-                t_payload_dt0 = time.perf_counter()
-                dt_atomic, dt_combined = self._build_method_payload_from_gt_supervision(
+            t_payload_dt0 = time.perf_counter()
+            dt_atomic, dt_combined = self._build_method_payload_from_gt_supervision(
+                gt_sup_root_local=gt_sup_root,
+                gt_full=gt_full,
+                method_key="dt",
+            )
+            _record_driver_timing("payload_dt_s", time.perf_counter() - t_payload_dt0)
+            if dt_atomic or dt_combined:
+                dt_segments, dt_cov = _payload_stats(dt_atomic, dt_combined)
+                print(f"[WIDTH DRIVER] method=dt segments={dt_segments} coverage_pct={dt_cov:.2f}")
+            else:
+                print("[WIDTH] dt skipped: no method payload in gt_supervision.json")
+                dt_atomic, dt_combined = None, None
+
+            if selected_best_non_dt and selected_best_non_dt != "dt":
+                t_payload_best0 = time.perf_counter()
+                best_atomic, best_combined = self._build_method_payload_from_gt_supervision(
                     gt_sup_root_local=gt_sup_root,
                     gt_full=gt_full,
-                    method_key="dt",
+                    method_key=selected_best_non_dt,
                 )
-                _record_driver_timing("payload_dt_s", time.perf_counter() - t_payload_dt0)
-                if dt_atomic or dt_combined:
-                    dt_segments, dt_cov = _payload_stats(dt_atomic, dt_combined)
-                    print(f"[WIDTH DRIVER] method=dt segments={dt_segments} coverage_pct={dt_cov:.2f}")
+                _record_driver_timing("payload_best_s", time.perf_counter() - t_payload_best0)
+                if best_atomic or best_combined:
+                    best_segments, best_cov = _payload_stats(best_atomic, best_combined)
+                    print(f"[WIDTH DRIVER] method={selected_best_non_dt} segments={best_segments} coverage_pct={best_cov:.2f}")
                 else:
-                    print("[WIDTH] dt skipped: no method payload in gt_supervision.json")
-                    dt_atomic, dt_combined = None, None
-
-                if selected_best_non_dt and selected_best_non_dt != "dt":
-                    t_payload_best0 = time.perf_counter()
-                    best_atomic, best_combined = self._build_method_payload_from_gt_supervision(
-                        gt_sup_root_local=gt_sup_root,
-                        gt_full=gt_full,
-                        method_key=selected_best_non_dt,
-                    )
-                    _record_driver_timing("payload_best_s", time.perf_counter() - t_payload_best0)
-                    if best_atomic or best_combined:
-                        best_segments, best_cov = _payload_stats(best_atomic, best_combined)
-                        print(f"[WIDTH DRIVER] method={selected_best_non_dt} segments={best_segments} coverage_pct={best_cov:.2f}")
-                    else:
-                        print(f"[WIDTH] best_non_dt={selected_best_non_dt} skipped: no method payload in gt_supervision.json")
-                        best_atomic, best_combined = None, None
-                else:
-                    print(f"[WIDTH] best_non_dt unavailable/invalid: {selected_best_non_dt}")
+                    print(f"[WIDTH] best_non_dt={selected_best_non_dt} skipped: no method payload in gt_supervision.json")
+                    best_atomic, best_combined = None, None
+            else:
+                print(f"[WIDTH] best_non_dt unavailable/invalid: {selected_best_non_dt}")
 
             _width_tasks = [("ET", atomic, combined_for_width, getattr(self, "width_baseline_img_folder", None))]
             if dt_atomic or dt_combined:
@@ -3540,10 +3832,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     row.update(tdict)
                     timing_rows.append(row)
 
-            if mode == "dt_best_et":
-                _accum_method_variant_timing("dt", "dt")
-                if selected_best_non_dt and selected_best_non_dt != "dt":
-                    _accum_method_variant_timing(selected_best_non_dt, selected_best_non_dt)
+            _accum_method_variant_timing("dt", "dt")
+            if selected_best_non_dt and selected_best_non_dt != "dt":
+                _accum_method_variant_timing(selected_best_non_dt, selected_best_non_dt)
 
             if timing_rows:
                 timing_df = pd.DataFrame(timing_rows)
@@ -5120,3 +5411,12 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         if rows:
             pd.DataFrame(rows).to_csv(os.path.join(out_dir, "combined_metrics.csv"), index=False)
             print(f"[combined] wrote → {os.path.join(out_dir, 'combined_metrics.csv')}")
+
+
+
+
+
+
+
+
+

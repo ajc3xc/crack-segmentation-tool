@@ -5425,7 +5425,7 @@ def export_gt_supervision_for_image(
     # =====================================================
     analysis_dir = os.path.join(sup_root, "analysis")
     dt_track_dir = os.path.join(sup_root, "dt")
-    fused_track_dir = os.path.join(sup_root, "dt_ridge_color_depth")
+    fused_track_dir = os.path.join(sup_root, "multi_cue_track")
     os.makedirs(analysis_dir, exist_ok=True)
     os.makedirs(dt_track_dir, exist_ok=True)
     os.makedirs(fused_track_dir, exist_ok=True)

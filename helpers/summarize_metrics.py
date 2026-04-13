@@ -21,6 +21,34 @@ def _log(verbose: bool, msg: str) -> None:
         print(msg)
 
 
+def _clean_plot_label(s: str) -> str:
+    """Normalize plot titles and axis labels to consistent terminology."""
+    replacements = [
+        (r"\bscore_mid_wmean\b", "Mid Score"),
+        (r"\bscore_mid\b", "Mid Score"),
+        (r"\blwmean_score_mid\b", "Mid Score"),
+        (r"\(combined cracks,?\s*lower\s*=\s*better\)", "(combined)"),
+        (r"\(combined cracks\)", "(combined)"),
+        (r"\(combined,?\s*lower\s*is\s*better\)", "(combined)"),
+        (r",?\s*lower\s*(is|=)\s*better", ""),
+        (r"\s+by method\b", ""),
+        (r"\s+per method\b", ""),
+        (r"\s*\(box\+whisker\)", ""),
+        (r"\s*\(mean \+ IQR \+ outliers\)", ""),
+        (r"^Dataset width MAE\b", "Mean Width MAE"),
+        (r"^Dataset width RMSE\b", "Mean Width RMSE"),
+        (r"^Dataset width \|bias\|\b", "Mean Width |Bias|"),
+        (r"^Dataset width bias\b", "Mean Width Bias"),
+        (r"^Dataset width metrics\b", "Mean Width MAE"),
+        (r"RS3-Style Score", "Mid Score"),
+        (r"score_mid_wmean \(lower is better\)", "Mid Score"),
+    ]
+    result = str(s or "")
+    for pattern, repl in replacements:
+        result = re.sub(pattern, repl, result, flags=re.IGNORECASE)
+    return result.strip()
+
+
 def _safe_read_csv(path: str) -> Optional[pd.DataFrame]:
     try:
         if not os.path.isfile(path):
@@ -106,8 +134,8 @@ def _save_bar(
             pass
     plt.bar(xs, vals, **bar_kwargs)
     plt.xticks(xs, labs, rotation=rotate, ha="right")
-    plt.ylabel(ylabel)
-    plt.title(title)
+    plt.ylabel(_clean_plot_label(ylabel))
+    plt.title(_clean_plot_label(title))
     if color_legend:
         handles = [Patch(facecolor=c, edgecolor="none", label=str(lbl)) for lbl, c in color_legend]
         plt.legend(handles=handles, loc="best", framealpha=0.9, fontsize=8)
@@ -123,11 +151,43 @@ def _display_timing_component_name(name: str) -> str:
         return "medial_base"
     if low.startswith("skeleton_dse"):
         return "medial_dse"
-    if low.startswith("pca") or low.startswith("esd") or low.startswith("eob"):
-        s = s.replace("_width_dse", "_width")
-        s = s.replace("_dse", "")
+    # Strip _width in middle, preserve _dse/_raw, uppercase acronyms.
+    s = re.sub(r"_width(?=(_dse|_raw|$))", "", s, flags=re.IGNORECASE)
+    acronyms = {"eob": "EOB", "esd": "ESD", "pca": "PCA", "mat": "MAT"}
+    parts = s.split("_", 1)
+    if parts[0].lower() in acronyms:
+        parts[0] = acronyms[parts[0].lower()]
+        s = "_".join(parts)
     s = re.sub(r"(_sec|_s)$", "", s)
     return s
+
+
+def _display_width_method_label(name: str) -> str:
+    """
+    Clean up width baseline method display names:
+      - strip _width in middle (eob_width_dse -> eob_dse)
+      - uppercase known acronyms
+      - preserve _raw / _dse suffixes
+    """
+    s = str(name or "").strip()
+    s = re.sub(r"_width(?=(_dse|_raw|$))", "", s, flags=re.IGNORECASE)
+    acronyms = {"eob": "EOB", "esd": "ESD", "pca": "PCA", "mat": "MAT"}
+    parts = s.split("_", 1)
+    if parts[0].lower() in acronyms:
+        parts[0] = acronyms[parts[0].lower()]
+        s = "_".join(parts)
+    return s if s else str(name or "")
+
+
+_METHOD_DISPLAY_NAMES = {
+    "dt_ridge_valley": "dt_ridge",
+    "dt_ridge_valley_depth": "dt_ridge_depth",
+    "dt_ridge_color_depth": "dt_ridge_color_depth",
+}
+
+
+def _display_method_name(name: str) -> str:
+    return _METHOD_DISPLAY_NAMES.get(str(name), str(name))
 
 
 def _list_image_metric_dirs(metrics_root: str) -> List[str]:
@@ -185,13 +245,19 @@ def _parse_midline_context(rel_path: str) -> Tuple[str, str, str]:
 
 
 def _is_et_like(midline_type: str) -> bool:
-    return str(midline_type or "").strip().lower() in {"manual", "et"}
+    s = str(midline_type or "").strip().lower()
+    if s in {"manual", "et"}:
+        return True
+    # Catch compound labels like "manual:geodesic", "ET:geodesic", "et:anything"
+    if s.startswith("manual:") or s.startswith("et:"):
+        return True
+    return False
 
 
 def _display_midline_label(midline_type: str) -> str:
     if _is_et_like(midline_type):
         return "ET"
-    return str(midline_type or "")
+    return _display_method_name(str(midline_type or ""))
 
 
 def _aggregate_mask_metrics(
@@ -262,6 +328,8 @@ def _aggregate_mask_metrics(
         plt.close(fig)
 
     outputs = {}
+    mask_dir = os.path.join(out_dir, "mask")
+    os.makedirs(mask_dir, exist_ok=True)
     frames = []
     for img_dir in image_dirs:
         image = os.path.basename(img_dir)
@@ -289,7 +357,7 @@ def _aggregate_mask_metrics(
         return outputs
 
     all_df = pd.concat(frames, ignore_index=True)
-    all_csv = os.path.join(out_dir, "dataset_mask_metrics_all.csv")
+    all_csv = os.path.join(mask_dir, "dataset_mask_metrics_all.csv")
     all_df.to_csv(all_csv, index=False)
     outputs["mask_all_csv"] = all_csv
 
@@ -315,7 +383,7 @@ def _aggregate_mask_metrics(
         area_col = _find_col_ci(triplet_src, "gt_area_px") or _find_col_ci(triplet_src, "union_area_px")
 
         triplet_rows = []
-        triplet_dir = os.path.join(out_dir, "mask_triplets")
+        triplet_dir = os.path.join(mask_dir, "mask_triplets")
         os.makedirs(triplet_dir, exist_ok=True)
 
         for variant, g in triplet_src.groupby("variant", dropna=False):
@@ -387,7 +455,7 @@ def _aggregate_mask_metrics(
 
         if triplet_rows:
             triplet_df = pd.DataFrame(triplet_rows).sort_values("variant")
-            triplet_csv = os.path.join(out_dir, "dataset_mask_triplet_weighted_summary.csv")
+            triplet_csv = os.path.join(mask_dir, "dataset_mask_triplet_weighted_summary.csv")
             triplet_df.to_csv(triplet_csv, index=False)
             outputs["mask_triplet_weighted_summary_csv"] = triplet_csv
             outputs["mask_triplet_png_dir"] = triplet_dir
@@ -402,7 +470,7 @@ def _aggregate_mask_metrics(
         numeric_cols=num_cols,
     )
     if not grouped.empty:
-        grp_csv = os.path.join(out_dir, "dataset_mask_metrics_grouped.csv")
+        grp_csv = os.path.join(mask_dir, "dataset_mask_metrics_grouped.csv")
         grouped.to_csv(grp_csv, index=False)
         outputs["mask_grouped_csv"] = grp_csv
 
@@ -413,7 +481,8 @@ def _aggregate_mask_metrics(
             def _pretty_variant(v: str) -> str:
                 s = str(v or "").strip()
                 sl = s.lower()
-                if sl.startswith("manual:"):
+                prefix = sl.split(":")[0]
+                if _is_et_like(prefix):
                     return "ET"
                 if sl.startswith("auto:"):
                     return "auto"
@@ -425,7 +494,8 @@ def _aggregate_mask_metrics(
 
             def _variant_class(v: str) -> str:
                 sl = str(v or "").strip().lower()
-                if sl.startswith("manual:"):
+                prefix = sl.split(":")[0]
+                if _is_et_like(prefix):
                     return "ET"
                 if sl.startswith("auto:"):
                     return "auto"
@@ -455,7 +525,7 @@ def _aggregate_mask_metrics(
                         return cc
                 return None
             if iou_col:
-                out_png = os.path.join(out_dir, "dataset_mask_total_iou_by_variant.png")
+                out_png = os.path.join(mask_dir, "dataset_mask_total_iou_by_variant.png")
                 _save_bar(
                     var_labels,
                     total[iou_col].astype(float).tolist(),
@@ -467,7 +537,7 @@ def _aggregate_mask_metrics(
                 )
                 outputs["mask_total_iou_png"] = out_png
             if bf1_col:
-                out_png = os.path.join(out_dir, "dataset_mask_total_boundary_f1_by_variant.png")
+                out_png = os.path.join(mask_dir, "dataset_mask_total_boundary_f1_by_variant.png")
                 _save_bar(
                     var_labels,
                     total[bf1_col].astype(float).tolist(),
@@ -498,11 +568,24 @@ def _aggregate_mask_metrics(
                         s = s.sort_values("n_rows_num", ascending=False)
                     return s.iloc[0]
 
-                picks = [
-                    ("ET", _pick_row("manual:")),
-                    ("sam3", _pick_row("baseline:sam3")),
-                    ("hrsegnet", _pick_row("baseline:hrsegnet")),
-                ]
+                def _pick_et_row():
+                    r = _pick_row("manual:")
+                    if r is not None:
+                        return r
+                    return _pick_row("et:")
+
+                # Build picks dynamically: ET first, then every unique baseline:* variant.
+                picks = [("ET", _pick_et_row())]
+                seen_baseline_tokens = set()
+                for v in t0["variant"].astype(str).tolist():
+                    vl = v.strip().lower()
+                    if vl.startswith("baseline:"):
+                        token = vl
+                        if token in seen_baseline_tokens:
+                            continue
+                        seen_baseline_tokens.add(token)
+                        display = v.split(":", 1)[1] if ":" in v else v
+                        picks.append((display, _pick_row(token)))
                 labels = []
                 assd_vals = []
                 hd95_vals = []
@@ -518,10 +601,18 @@ def _aggregate_mask_metrics(
                     hd95_vals.append(h)
 
                 if labels:
-                    cmap = {"ET": "#4c78a8", "sam3": "#f28e2b", "hrsegnet": "#2ca02c"}
-                    bar_cols = [cmap.get(x, "#777777") for x in labels]
+                    palette = ["#f28e2b", "#2ca02c", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+                    base_idx = 0
+                    bar_cols = []
+                    for lab in labels:
+                        if lab == "ET":
+                            bar_cols.append("#4c78a8")
+                        else:
+                            bar_cols.append(palette[base_idx % len(palette)])
+                            base_idx += 1
+                    fig_w = max(6.0, 0.7 * len(labels))
                     x = np.arange(len(labels), dtype=float)
-                    fig, axes = plt.subplots(1, 2, figsize=(8.8, 4.2), dpi=180, sharex=True)
+                    fig, axes = plt.subplots(1, 2, figsize=(fig_w * 2, 4.2), dpi=180, sharex=True)
                     axes[0].bar(x, assd_vals, color=bar_cols, alpha=0.88)
                     axes[0].set_title("ASSD")
                     axes[0].set_ylabel("ASSD")
@@ -533,9 +624,9 @@ def _aggregate_mask_metrics(
                     for ax in axes:
                         ax.set_xticks(x)
                         ax.set_xticklabels(labels, rotation=20, ha="right")
-                    fig.suptitle("Dataset Mask Error Comparison: ET vs sam3 vs hrsegnet", fontsize=11, fontweight="bold")
+                    fig.suptitle("Dataset Mask ASSD / HD95 by method", fontsize=11, fontweight="bold")
                     plt.tight_layout()
-                    out_png = os.path.join(out_dir, "dataset_mask_assd_hd95_manual_sam3_hrsegnet.png")
+                    out_png = os.path.join(mask_dir, "dataset_mask_assd_hd95.png")
                     fig.savefig(out_png, bbox_inches="tight")
                     plt.close(fig)
                     outputs["mask_assd_hd95_compare_png"] = out_png
@@ -556,6 +647,8 @@ def _aggregate_width_metrics(
     EXCLUDE_SKEL_BASELINE_METHODS = True
 
     outputs = {}
+    width_dir = os.path.join(out_dir, "width")
+    os.makedirs(width_dir, exist_ok=True)
     frames = []
     COLOR_MAP = {
         "baseline": "#2ca02c",  # green
@@ -570,6 +663,7 @@ def _aggregate_width_metrics(
         out_png: str,
         title: str,
         max_methods: int = 20,
+        ylabel: Optional[str] = None,
     ) -> None:
         if metric_col not in df_plot.columns:
             return
@@ -581,7 +675,7 @@ def _aggregate_width_metrics(
                 mt = local_df["midline_type"].astype(str)
                 local_df["method_name"] = np.where(
                     mf.str.lower().eq("baseline"),
-                    bm.where(bm.str.len() > 0, "baseline"),
+                    bm.apply(_display_width_method_label).where(bm.str.len() > 0, "baseline"),
                     mt.where(mt.str.len() > 0, "model"),
                 )
             else:
@@ -637,8 +731,8 @@ def _aggregate_width_metrics(
             ax.scatter(xx, yy, s=10, color="#d62728", alpha=0.8, zorder=3)
         ax.set_xticks(xs)
         ax.set_xticklabels(d["method_name"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
-        ax.set_ylabel(metric_col)
-        ax.set_title(title)
+        ax.set_ylabel(_clean_plot_label(ylabel if ylabel is not None else metric_col))
+        ax.set_title(_clean_plot_label(title))
         ax.grid(axis="y", alpha=0.2)
         legend_handles = [
             Patch(facecolor=COLOR_MAP["ET"], edgecolor="none", label="ET"),
@@ -658,6 +752,7 @@ def _aggregate_width_metrics(
         out_png: str,
         title: str,
         max_methods: int = 20,
+        ylabel: Optional[str] = None,
     ) -> None:
         if metric_col not in df_plot.columns:
             return
@@ -669,7 +764,7 @@ def _aggregate_width_metrics(
                 mt = local_df["midline_type"].astype(str)
                 local_df["method_name"] = np.where(
                     mf.str.lower().eq("baseline"),
-                    bm.where(bm.str.len() > 0, "baseline"),
+                    bm.apply(_display_width_method_label).where(bm.str.len() > 0, "baseline"),
                     mt.where(mt.str.len() > 0, "model"),
                 )
             else:
@@ -727,8 +822,8 @@ def _aggregate_width_metrics(
             box.set_facecolor(COLOR_MAP.get(cls_map.get(m, "auto"), "#4c78a8"))
             box.set_alpha(0.65)
 
-        ax.set_ylabel(metric_col)
-        ax.set_title(title)
+        ax.set_ylabel(_clean_plot_label(ylabel if ylabel is not None else metric_col))
+        ax.set_title(_clean_plot_label(title))
         ax.set_xticklabels(med_order, rotation=35, ha="right", fontsize=8)
         ax.grid(axis="y", alpha=0.2)
         legend_handles = [
@@ -774,7 +869,10 @@ def _aggregate_width_metrics(
     if EXCLUDE_SKEL_BASELINE_METHODS and not all_df.empty:
         m_skel_all = (
             all_df["method_family"].astype(str).str.lower().eq("baseline")
-            & all_df["baseline_method"].astype(str).str.lower().str.startswith("skel_")
+            & (
+                all_df["baseline_method"].astype(str).str.lower().str.startswith("skel_")
+                | all_df["baseline_method"].astype(str).str.lower().str.contains("skeleton_graph", na=False)
+            )
         )
         n_drop_all = int(np.count_nonzero(m_skel_all.to_numpy(dtype=bool)))
         if n_drop_all > 0:
@@ -785,7 +883,7 @@ def _aggregate_width_metrics(
         _log(verbose, "[summarize] width summary: empty after skel_ filtering at all_df stage")
         return outputs
 
-    all_csv = os.path.join(out_dir, "dataset_width_summary_all.csv")
+    all_csv = os.path.join(width_dir, "dataset_width_summary_all.csv")
     all_df.to_csv(all_csv, index=False)
     outputs["width_summary_all_csv"] = all_csv
 
@@ -808,7 +906,7 @@ def _aggregate_width_metrics(
         mt = str(row.get("midline_type", "") or "")
         bm = str(row.get("baseline_method", "") or "")
         if mf == "baseline":
-            return bm or "baseline"
+            return _display_width_method_label(bm) if bm else "baseline"
         if mf in ("", "model", "nan", "None"):
             # "model" is just an internal bucket; use the actual supervision source.
             return mt or "model"
@@ -832,7 +930,11 @@ def _aggregate_width_metrics(
     if EXCLUDE_SKEL_BASELINE_METHODS and not grouped.empty:
         m_skel = (
             grouped["method_family"].astype(str).str.lower().eq("baseline")
-            & grouped["baseline_method"].astype(str).str.lower().str.startswith("skel_")
+            & (
+                grouped["baseline_method"].astype(str).str.lower().str.startswith("skel_")
+                | grouped["baseline_method"].astype(str).str.lower().str.contains("skeleton_graph", na=False)
+                | grouped["method_name"].astype(str).str.lower().str.contains("skeleton_graph", na=False)
+            )
         )
         n_drop = int(np.count_nonzero(m_skel.to_numpy(dtype=bool)))
         if n_drop > 0:
@@ -843,7 +945,7 @@ def _aggregate_width_metrics(
         _log(verbose, "[summarize] width summary: empty after skel_ baseline filtering")
         return outputs
 
-    grp_csv = os.path.join(out_dir, "dataset_width_summary_grouped.csv")
+    grp_csv = os.path.join(width_dir, "dataset_width_summary_grouped.csv")
     grouped.to_csv(grp_csv, index=False)
     outputs["width_summary_grouped_csv"] = grp_csv
 
@@ -901,7 +1003,7 @@ def _aggregate_width_metrics(
             split_out = out_parts[0]
             for nxt in out_parts[1:]:
                 split_out = split_out.merge(nxt, on=idx_cols, how="outer")
-            split_csv = os.path.join(out_dir, "dataset_width_error_split.csv")
+            split_csv = os.path.join(width_dir, "dataset_width_error_split.csv")
             split_out.to_csv(split_csv, index=False)
             outputs["width_error_split_csv"] = split_csv
 
@@ -914,7 +1016,7 @@ def _aggregate_width_metrics(
 
     if mae_col:
         # Keep canonical filename, but with richer uncertainty display.
-        out_png = os.path.join(out_dir, "dataset_width_mae_by_method.png")
+        out_png = os.path.join(width_dir, "dataset_width_mae_by_method.png")
         _plot_metric_bar_iqr_outliers(
             df_plot=all_df if total_grouped.empty else all_df[all_df["crack_type"].astype(str).str.upper() == "TOTAL"].copy(),
             metric_col="mae_px",
@@ -922,20 +1024,22 @@ def _aggregate_width_metrics(
             title="Dataset width MAE by method (mean + IQR + outliers)"
                   if not total_grouped.empty
                   else "Dataset width MAE by method (mean + IQR + outliers)",
+            ylabel="MAE (px)",
         )
         outputs["width_mae_png"] = out_png
-        out_png_box = os.path.join(out_dir, "dataset_width_mae_box_by_method.png")
+        out_png_box = os.path.join(width_dir, "dataset_width_mae_box_by_method.png")
         _plot_metric_box_by_method(
             df_plot=all_df if total_grouped.empty else all_df[all_df["crack_type"].astype(str).str.upper() == "TOTAL"].copy(),
             metric_col="mae_px",
             out_png=out_png_box,
             title="Dataset width MAE by method (box+whisker)",
+            ylabel="MAE (px)",
         )
         outputs["width_mae_box_png"] = out_png_box
 
     if rmse_col:
         # Keep canonical filename, but with richer uncertainty display.
-        out_png = os.path.join(out_dir, "dataset_width_rmse_by_method.png")
+        out_png = os.path.join(width_dir, "dataset_width_rmse_by_method.png")
         _plot_metric_bar_iqr_outliers(
             df_plot=all_df if total_grouped.empty else all_df[all_df["crack_type"].astype(str).str.upper() == "TOTAL"].copy(),
             metric_col="rmse_px",
@@ -943,18 +1047,20 @@ def _aggregate_width_metrics(
             title="Dataset width RMSE by method (mean + IQR + outliers)"
                   if not total_grouped.empty
                   else "Dataset width RMSE by method (mean + IQR + outliers)",
+            ylabel="RMSE (px)",
         )
         outputs["width_rmse_png"] = out_png
-        out_png_box = os.path.join(out_dir, "dataset_width_rmse_box_by_method.png")
+        out_png_box = os.path.join(width_dir, "dataset_width_rmse_box_by_method.png")
         _plot_metric_box_by_method(
             df_plot=all_df if total_grouped.empty else all_df[all_df["crack_type"].astype(str).str.upper() == "TOTAL"].copy(),
             metric_col="rmse_px",
             out_png=out_png_box,
             title="Dataset width RMSE by method (box+whisker)",
+            ylabel="RMSE (px)",
         )
         outputs["width_rmse_box_png"] = out_png_box
 
-    outputs.update(_plot_width_metrics_with_without_et(all_df, out_dir, verbose=verbose))
+    outputs.update(_plot_width_metrics_with_without_et(all_df, width_dir, verbose=verbose))
 
     # Additional distribution-aware plots: mean bar + IQR + outlier dots.
     # separate distribution plot files removed; canonical by_method plots include IQR/outliers
@@ -969,73 +1075,156 @@ def _plot_width_metrics_with_without_et(
     *,
     verbose: bool = False,
 ) -> Dict[str, str]:
+    """
+    Produces:
+      - dataset_width_mae_no_et.png (MAE, without ET)
+      - dataset_width_bias_by_method.png (bias, with ET)
+      - dataset_width_bias_no_et.png (bias, without ET)
+    """
     outputs: Dict[str, str] = {}
-    if df_width is None or df_width.empty or "mae_px" not in df_width.columns:
+    if df_width is None or df_width.empty:
         return outputs
+
+    color_map = {
+        "baseline": "#2ca02c",
+        "auto": "#1f77b4",
+        "ET": "#d62728",
+    }
+
+    def _classify(row) -> str:
+        if str(row.get("method_family", "")).lower() == "baseline":
+            return "baseline"
+        if _is_et_like(str(row.get("midline_type", ""))):
+            return "ET"
+        return "auto"
 
     def _build_method_name(df: pd.DataFrame) -> pd.Series:
         if {"method_family", "baseline_method", "midline_type"}.issubset(df.columns):
             mf = df["method_family"].astype(str)
             bm = df["baseline_method"].astype(str)
             mt = df["midline_type"].astype(str).map(_display_midline_label)
-            return np.where(
-                mf.str.lower().eq("baseline"),
-                bm.where(bm.str.len() > 0, "baseline"),
-                mt.where(mt.str.len() > 0, "model"),
+            return pd.Series(
+                np.where(
+                    mf.str.lower().eq("baseline"),
+                    bm.map(_display_width_method_label).where(bm.str.len() > 0, "baseline"),
+                    mt.where(mt.str.len() > 0, "model"),
+                ),
+                index=df.index,
             )
-        return df.get("midline_type", pd.Series(["unknown"] * len(df))).astype(str)
+        return df.get("midline_type", pd.Series(["unknown"] * len(df), index=df.index)).astype(str)
 
-    for exclude_et, suffix in ((False, "all"), (True, "no_et")):
-        d = df_width.copy()
-        d["midline_type_norm"] = d.get("midline_type", pd.Series([""] * len(d))).astype(str)
-        if exclude_et:
-            d = d[~d["midline_type_norm"].map(_is_et_like)].copy()
-        d["mae_px"] = pd.to_numeric(d["mae_px"], errors="coerce")
-        d = d[np.isfinite(d["mae_px"])].copy()
-        if d.empty:
-            continue
-
+    def _make_plot(
+        df: pd.DataFrame,
+        metric_col: str,
+        out_png: str,
+        title: str,
+        ylabel: Optional[str] = None,
+    ) -> bool:
+        if metric_col not in df.columns:
+            return False
+        d = df.copy()
         d["method_name"] = _build_method_name(d)
+        d["source_class"] = d.apply(_classify, axis=1)
+        d[metric_col] = pd.to_numeric(d[metric_col], errors="coerce")
+        d = d[np.isfinite(d[metric_col].to_numpy(float))].copy()
+        if d.empty:
+            return False
+
         rows = []
         for m, g in d.groupby("method_name", dropna=False):
-            v = pd.to_numeric(g["mae_px"], errors="coerce").to_numpy(float)
+            v = pd.to_numeric(g[metric_col], errors="coerce").to_numpy(float)
             v = v[np.isfinite(v)]
             if v.size == 0:
                 continue
+            sc = g["source_class"].iloc[0] if "source_class" in g.columns else "auto"
             q1 = float(np.percentile(v, 25))
             q3 = float(np.percentile(v, 75))
-            rows.append({
-                "method_name": str(m),
-                "mean": float(np.mean(v)),
-                "q1": q1,
-                "q3": q3,
-            })
+            iqr_val = float(q3 - q1)
+            lo_fence = float(q1 - 1.5 * iqr_val)
+            hi_fence = float(q3 + 1.5 * iqr_val)
+            outliers = v[(v < lo_fence) | (v > hi_fence)]
+            rows.append(
+                {
+                    "method_name": str(m),
+                    "mean": float(np.mean(v)),
+                    "q1": q1,
+                    "q3": q3,
+                    "outliers": outliers,
+                    "source_class": str(sc),
+                }
+            )
         if not rows:
-            continue
-        plot_df = pd.DataFrame(rows).sort_values("mean", ascending=True)
+            return False
 
-        fig_w = max(8.0, 0.5 * len(plot_df))
-        fig, ax = plt.subplots(figsize=(fig_w, 4.6), dpi=160)
-        x = np.arange(len(plot_df), dtype=float)
-        y = plot_df["mean"].to_numpy(float)
-        lo = np.clip(y - plot_df["q1"].to_numpy(float), 0.0, None)
-        hi = np.clip(plot_df["q3"].to_numpy(float) - y, 0.0, None)
-        ax.bar(x, y, color="#4c78a8", alpha=0.88)
-        ax.errorbar(x, y, yerr=np.vstack([lo, hi]), fmt="none", ecolor="#f58518", elinewidth=1.2, capsize=3)
-        ax.set_xticks(x)
-        ax.set_xticklabels(plot_df["method_name"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
-        ax.set_ylabel("abs width error (px)")
-        ax.set_title("Dataset width metrics (mean ± IQR)" + (" (without ET)" if exclude_et else ""))
+        plot_df = pd.DataFrame(rows).sort_values("mean", ascending=True)
+        fig_w = max(8.0, 0.55 * len(plot_df))
+        fig, ax = plt.subplots(figsize=(fig_w, 4.8), dpi=180)
+        xs = np.arange(len(plot_df), dtype=float)
+        means = plot_df["mean"].to_numpy(float)
+        bar_colors = [color_map.get(str(c), "#4c78a8") for c in plot_df["source_class"].tolist()]
+        ax.bar(xs, means, color=bar_colors, alpha=0.85)
+        lo_err = np.clip(means - plot_df["q1"].to_numpy(float), 0.0, None)
+        hi_err = np.clip(plot_df["q3"].to_numpy(float) - means, 0.0, None)
+        ax.errorbar(xs, means, yerr=np.vstack([lo_err, hi_err]), fmt="none", ecolor="#f58518", elinewidth=1.3, capsize=3)
+        for i, arr in enumerate(plot_df["outliers"].tolist()):
+            if arr is None or len(arr) == 0:
+                continue
+            yy = np.asarray(arr, float)
+            xx = np.full(len(yy), float(xs[i])) + np.linspace(-0.08, 0.08, len(yy))
+            ax.scatter(xx, yy, s=10, color="#d62728", alpha=0.8, zorder=3)
+        ax.set_xticks(xs)
+        ax.set_xticklabels(plot_df["method_name"].tolist(), rotation=35, ha="right", fontsize=8)
+        ax.set_ylabel(_clean_plot_label(ylabel if ylabel is not None else metric_col))
+        ax.set_title(_clean_plot_label(title))
         ax.grid(axis="y", alpha=0.2)
+        present_classes = set(plot_df["source_class"].astype(str).tolist())
+        legend_handles = [
+            Patch(facecolor=color_map[cls], edgecolor="none", label=cls)
+            for cls in ["ET", "auto", "baseline"]
+            if cls in present_classes
+        ]
+        legend_handles.append(Patch(facecolor="#f58518", edgecolor="none", label="IQR"))
+        ax.legend(handles=legend_handles, loc="best", fontsize=8, framealpha=0.9)
         plt.tight_layout()
-        out_png = os.path.join(out_dir, f"dataset_width_metrics_{suffix}.png")
-        fig.savefig(out_png, bbox_inches="tight", dpi=150)
+        fig.savefig(out_png, bbox_inches="tight")
         plt.close(fig)
-        outputs[f"width_metrics_{suffix}_png"] = out_png
+        return True
+
+    def _drop_et(df: pd.DataFrame) -> pd.DataFrame:
+        if "method_family" in df.columns:
+            is_baseline = df["method_family"].astype(str).str.lower().eq("baseline")
+        else:
+            is_baseline = pd.Series([False] * len(df), index=df.index)
+        mt = df.get("midline_type", pd.Series([""] * len(df), index=df.index)).astype(str)
+        return df[is_baseline | ~mt.map(_is_et_like)].copy()
+
+    df_no_et = _drop_et(df_width)
+
+    if "mae_px" in df_width.columns and not df_no_et.empty:
+        out_no_et = os.path.join(out_dir, "dataset_width_mae_no_et.png")
+        if _make_plot(df_no_et, "mae_px", out_no_et, "Dataset width MAE by method (mean + IQR + outliers)", ylabel="MAE (px)"):
+            outputs["width_mae_no_et_png"] = out_no_et
+
+    if "bias_px" in df_width.columns:
+        d_all_bias = df_width.copy()
+        d_all_bias["abs_bias_px"] = pd.to_numeric(d_all_bias["bias_px"], errors="coerce").abs()
+        d_no_et_bias = df_no_et.copy()
+        d_no_et_bias["abs_bias_px"] = pd.to_numeric(d_no_et_bias["bias_px"], errors="coerce").abs()
+
+        out_bias_all = os.path.join(out_dir, "dataset_width_bias_by_method.png")
+        if _make_plot(d_all_bias, "abs_bias_px", out_bias_all, "Dataset width |bias| by method (mean + IQR + outliers)", ylabel="|bias| (px)"):
+            outputs["width_bias_all_png"] = out_bias_all
+        out_bias_no_et = os.path.join(out_dir, "dataset_width_bias_no_et.png")
+        if not d_no_et_bias.empty and _make_plot(d_no_et_bias, "abs_bias_px", out_bias_no_et, "Dataset width |bias| by method (mean + IQR + outliers)", ylabel="|bias| (px)"):
+            outputs["width_bias_no_et_png"] = out_bias_no_et
+
+    if "rmse_px" in df_width.columns and not df_no_et.empty:
+        out_rmse_no_et = os.path.join(out_dir, "dataset_width_rmse_no_et.png")
+        if _make_plot(df_no_et, "rmse_px", out_rmse_no_et, "Mean Width RMSE", ylabel="RMSE (px)"):
+            outputs["width_rmse_no_et_png"] = out_rmse_no_et
 
     _log(verbose, f"[summarize] width metrics plots generated: {list(outputs.keys())}")
     return outputs
-
 
 def _aggregate_midline_metrics(
     image_dirs: List[str],
@@ -1044,12 +1233,19 @@ def _aggregate_midline_metrics(
     verbose: bool,
 ) -> Dict[str, str]:
     outputs = {}
-    EXCLUDE_SKEL_BASELINE_METHODS = True
+    midline_dir = os.path.join(out_dir, "midline")
+    os.makedirs(midline_dir, exist_ok=True)
+    EXCLUDE_SKEL_BASELINE_METHODS = False  # skel baselines are valid midline comparisons
     MIDLINE_DEBUG = True
     frames = []
     for img_dir in image_dirs:
         image = os.path.basename(img_dir)
-        for p in glob.glob(os.path.join(img_dir, "**", "*_midline_metrics_*.csv"), recursive=True):
+        found = glob.glob(os.path.join(img_dir, "**", "*_midline_metrics_*.csv"), recursive=True)
+        found += [
+            p for p in glob.glob(os.path.join(img_dir, "**", "midline_metrics*.csv"), recursive=True)
+            if p not in found
+        ]
+        for p in found:
             df = _safe_read_csv(p)
             if df is None:
                 continue
@@ -1070,7 +1266,7 @@ def _aggregate_midline_metrics(
     if MIDLINE_DEBUG:
         try:
             dbg_cols = [c for c in ["image", "crack_type", "geometry_type", "method_family", "baseline_method", "midline_type"] if c in all_df.columns]
-            dbg_csv = os.path.join(out_dir, "dataset_midline_debug_all_rows_raw.csv")
+            dbg_csv = os.path.join(midline_dir, "dataset_midline_debug_all_rows_raw.csv")
             all_df.loc[:, dbg_cols + [c for c in ["score_mid", "length_px", "source_relpath"] if c in all_df.columns]].to_csv(dbg_csv, index=False)
             _log(verbose, f"[midline-debug] wrote raw rows -> {dbg_csv}")
             if "method_family" in all_df.columns:
@@ -1097,7 +1293,11 @@ def _aggregate_midline_metrics(
     if EXCLUDE_SKEL_BASELINE_METHODS and {"method_family", "baseline_method"}.issubset(all_df.columns):
         m_skel = (
             all_df["method_family"].astype(str).str.lower().eq("baseline")
-            & all_df["baseline_method"].astype(str).str.lower().str.startswith("skel_")
+            & (
+                all_df["baseline_method"].astype(str).str.lower().str.startswith("skel_")
+                | all_df["baseline_method"].astype(str).str.lower().str.contains("skeleton_graph", na=False)
+                | all_df["midline_type"].astype(str).str.lower().str.contains("skeleton_graph", na=False)
+            )
         )
         if m_skel.any():
             all_df = all_df.loc[~m_skel].copy()
@@ -1107,7 +1307,7 @@ def _aggregate_midline_metrics(
     if all_df.empty:
         return outputs
 
-    all_csv = os.path.join(out_dir, "dataset_midline_metrics_all.csv")
+    all_csv = os.path.join(midline_dir, "dataset_midline_metrics_all.csv")
     all_df.to_csv(all_csv, index=False)
     outputs["midline_all_csv"] = all_csv
 
@@ -1127,24 +1327,66 @@ def _aggregate_midline_metrics(
     metric_cols = [c for c in metric_candidates if c in all_df.columns]
     grouped = _aggregate_numeric(all_df, group_cols=group_cols, numeric_cols=metric_cols)
     if not grouped.empty:
-        grp_csv = os.path.join(out_dir, "dataset_midline_metrics_grouped.csv")
+        grp_csv = os.path.join(midline_dir, "dataset_midline_metrics_grouped.csv")
         grouped.to_csv(grp_csv, index=False)
         outputs["midline_grouped_csv"] = grp_csv
 
         if "score_mid_mean" in grouped.columns:
             d = grouped.copy()
-            label_cols = [c for c in ["midline_type", "crack_type", "geometry_type"] if c in d.columns]
-            d["group_label"] = d[label_cols].astype(str).agg(":".join, axis=1)
+            if "crack_type" in d.columns:
+                m_comb = d["crack_type"].astype(str).str.lower().str.contains("combined", na=False)
+                if m_comb.any():
+                    d = d[m_comb].copy()
+            # Group by method+crack_type, collapsing geometry_type by taking min score.
+            # Include baseline_method so baselines are not merged into ET buckets.
+            gcols = [c for c in ["midline_type", "method_family", "baseline_method", "crack_type"] if c in d.columns]
+            d = (
+                d.groupby(
+                    gcols,
+                    dropna=False,
+                )["score_mid_mean"]
+                .min()
+                .reset_index()
+            )
+
+            def _grp_label(row):
+                mf = str(row.get("method_family", "") or "").lower()
+                bm = str(row.get("baseline_method", "") or "").strip()
+                mt = str(row.get("midline_type", "") or "").strip()
+                method = bm if (mf == "baseline" and bm) else (_display_midline_label(mt) if mt else "model")
+                return method
+
+            d["group_label"] = d.apply(_grp_label, axis=1)
             d = d.sort_values("score_mid_mean", ascending=True).head(20)
-            out_png = os.path.join(out_dir, "dataset_midline_score_by_group.png")
+
+            grp_color_map = {"ET": "#d62728", "auto": "#1f77b4", "baseline": "#2ca02c"}
+
+            def _grp_color(row):
+                mf = str(row.get("method_family", "") or "").lower()
+                mt = str(row.get("midline_type", "") or "")
+                if mf == "baseline":
+                    return grp_color_map["baseline"]
+                if _is_et_like(mt):
+                    return grp_color_map["ET"]
+                return grp_color_map["auto"]
+
+            grp_colors = d.apply(_grp_color, axis=1).tolist()
+            legend_items = [
+                ("ET", grp_color_map["ET"]),
+                ("auto", grp_color_map["auto"]),
+                ("baseline", grp_color_map["baseline"]),
+            ]
+            out_png = os.path.join(midline_dir, "dataset_midline_score_by_method_crack.png")
             _save_bar(
                 d["group_label"].astype(str).tolist(),
                 d["score_mid_mean"].astype(float).tolist(),
+                colors=grp_colors,
+                color_legend=legend_items,
                 out_png=out_png,
-                title="Dataset midline score by group",
-                ylabel="score_mid",
+                title="Dataset Midline Score (min over geometry)",
+                ylabel="Mid Score",
             )
-            outputs["midline_score_png"] = out_png
+            outputs["midline_score_by_method_crack_png"] = out_png
 
     # RS3-style dataset midline score ranking (lower is better),
     # focused on combined crack metrics when available.
@@ -1216,7 +1458,7 @@ def _aggregate_midline_metrics(
 
             if MIDLINE_DEBUG:
                 try:
-                    dbg_rank_csv = os.path.join(out_dir, "dataset_midline_debug_rank_input.csv")
+                    dbg_rank_csv = os.path.join(midline_dir, "dataset_midline_debug_rank_input.csv")
                     dbg_cols = [c for c in ["image", "method_family", "baseline_method", "midline_type", "crack_type", "geometry_type", "score_mid", "length_px", "_w", "source_relpath"] if c in d_rank_src.columns]
                     d_rank_src.loc[:, dbg_cols].to_csv(dbg_rank_csv, index=False)
                     _log(verbose, f"[midline-debug] wrote rank-input rows -> {dbg_rank_csv}")
@@ -1258,7 +1500,7 @@ def _aggregate_midline_metrics(
                         agg["weight_sum"] = "sum"
                     rank_df = rank_df.groupby("method_name", as_index=False).agg(agg)
                 rank_df = rank_df.sort_values("score_mid_wmean", ascending=True)
-                rank_csv = os.path.join(out_dir, "dataset_midline_score_ranked.csv")
+                rank_csv = os.path.join(midline_dir, "dataset_midline_score_ranked.csv")
                 rank_df.to_csv(rank_csv, index=False)
                 outputs["midline_score_ranked_csv"] = rank_csv
                 if MIDLINE_DEBUG:
@@ -1269,7 +1511,7 @@ def _aggregate_midline_metrics(
                         pass
 
                 top = rank_df.head(20).copy()
-                top["label"] = top.get("method_name", pd.Series(["unknown"] * len(top))).astype(str)
+                top["label"] = top.get("method_name", pd.Series(["unknown"] * len(top))).astype(str).map(_display_midline_label)
                 color_map = {"ET": "#d62728", "auto": "#1f77b4", "baseline": "#2ca02c"}
                 colors = [color_map.get(str(c), "#4c78a8") for c in top["source_class"].astype(str).tolist()]
                 fig_w = max(10.0, 0.55 * len(top))
@@ -1279,17 +1521,18 @@ def _aggregate_midline_metrics(
                 ax.bar(x, vals, color=colors, alpha=0.88)
                 ax.set_xticks(x)
                 ax.set_xticklabels(top["label"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
-                ax.set_ylabel("score_mid_wmean")
-                ax.set_title("Dataset Midline RS3-Style Score (combined, lower is better)")
+                ax.set_ylabel("Mid Score")
+                ax.set_title("Dataset Midline Mid Score (combined)")
                 ax.grid(axis="y", alpha=0.2)
+                present_cls = set(top["source_class"].astype(str).tolist())
                 legend_handles = [
-                    Patch(facecolor=color_map["ET"], edgecolor="none", label="ET"),
-                    Patch(facecolor=color_map["auto"], edgecolor="none", label="auto"),
-                    Patch(facecolor=color_map["baseline"], edgecolor="none", label="baseline"),
+                    Patch(facecolor=color_map[cls], edgecolor="none", label=cls)
+                    for cls in ["ET", "auto", "baseline"]
+                    if cls in present_cls and cls in color_map
                 ]
                 ax.legend(handles=legend_handles, loc="best", framealpha=0.9, fontsize=8)
                 plt.tight_layout()
-                out_png = os.path.join(out_dir, "dataset_midline_score_ranked.png")
+                out_png = os.path.join(midline_dir, "dataset_midline_score_ranked.png")
                 fig.savefig(out_png, bbox_inches="tight")
                 plt.close(fig)
                 outputs["midline_score_ranked_png"] = out_png
@@ -1297,12 +1540,12 @@ def _aggregate_midline_metrics(
                 rank_no_et = rank_df[~rank_df["source_class"].astype(str).str.upper().isin(["ET", "MANUAL"])].copy()
                 if not rank_no_et.empty:
                     rank_no_et = rank_no_et.sort_values("score_mid_wmean", ascending=True)
-                    rank_no_et_csv = os.path.join(out_dir, "dataset_midline_score_ranked_no_et.csv")
+                    rank_no_et_csv = os.path.join(midline_dir, "dataset_midline_score_ranked_no_et.csv")
                     rank_no_et.to_csv(rank_no_et_csv, index=False)
                     outputs["midline_score_ranked_no_et_csv"] = rank_no_et_csv
 
                     top_no_et = rank_no_et.head(20).copy()
-                    top_no_et["label"] = top_no_et.get("method_name", pd.Series(["unknown"] * len(top_no_et))).astype(str)
+                    top_no_et["label"] = top_no_et.get("method_name", pd.Series(["unknown"] * len(top_no_et))).astype(str).map(_display_midline_label)
                     colors_no_et = [color_map.get(str(c), "#4c78a8") for c in top_no_et["source_class"].astype(str).tolist()]
                     fig_w2 = max(10.0, 0.55 * len(top_no_et))
                     fig2, ax2 = plt.subplots(figsize=(fig_w2, 5.0), dpi=180)
@@ -1311,12 +1554,18 @@ def _aggregate_midline_metrics(
                     ax2.bar(x2, vals2, color=colors_no_et, alpha=0.88)
                     ax2.set_xticks(x2)
                     ax2.set_xticklabels(top_no_et["label"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
-                    ax2.set_ylabel("score_mid_wmean")
-                    ax2.set_title("Dataset Midline RS3-Style Score (combined, no ET)")
+                    ax2.set_ylabel("Mid Score")
+                    ax2.set_title("Dataset Midline Mid Score (combined, no ET)")
                     ax2.grid(axis="y", alpha=0.2)
-                    ax2.legend(handles=legend_handles, loc="best", framealpha=0.9, fontsize=8)
+                    present_no_et = set(top_no_et["source_class"].astype(str).tolist())
+                    legend_handles_no_et = [
+                        Patch(facecolor=color_map[cls], edgecolor="none", label=cls)
+                        for cls in ["ET", "auto", "baseline"]
+                        if cls in present_no_et and cls in color_map
+                    ]
+                    ax2.legend(handles=legend_handles_no_et, loc="best", framealpha=0.9, fontsize=8)
                     plt.tight_layout()
-                    out_png_no_et = os.path.join(out_dir, "dataset_midline_score_ranked_no_et.png")
+                    out_png_no_et = os.path.join(midline_dir, "dataset_midline_score_ranked_no_et.png")
                     fig2.savefig(out_png_no_et, bbox_inches="tight")
                     plt.close(fig2)
                     outputs["dataset_midline_score_ranked_no_et_png"] = out_png_no_et
@@ -1333,6 +1582,14 @@ def _aggregate_timing_metrics(
 ) -> Dict[str, str]:
     outputs = {}
 
+    def _drop_skeleton_graph_cols(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+        if not isinstance(df, pd.DataFrame):
+            return df
+        skel_cols = [c for c in df.columns if "skeleton_graph" in str(c).lower()]
+        if skel_cols:
+            return df.drop(columns=skel_cols)
+        return df
+
     # timings_core.csv (per-crack timing rows for edge-tracking stage only)
     timing_frames = []
     for img_dir in image_dirs:
@@ -1341,6 +1598,7 @@ def _aggregate_timing_metrics(
         df = _safe_read_csv(p)
         if df is None:
             continue
+        df = _drop_skeleton_graph_cols(df)
         d = df.copy()
         d["image"] = image
         timing_frames.append(d)
@@ -1473,6 +1731,7 @@ def _aggregate_timing_metrics(
         df = _safe_read_csv(p)
         if df is None:
             continue
+        df = _drop_skeleton_graph_cols(df)
         d = df.copy()
         d["image"] = image
         runtime_frames.append(d)
@@ -1504,6 +1763,7 @@ def _aggregate_timing_metrics(
         df = _safe_read_csv(p)
         if df is None:
             continue
+        df = _drop_skeleton_graph_cols(df)
         d = df.copy()
         if "image" not in d.columns:
             d["image"] = image
@@ -1514,22 +1774,8 @@ def _aggregate_timing_metrics(
         bdf.to_csv(out_csv, index=False)
         outputs["batch_timing_all_csv"] = out_csv
 
-        if "total_image_s" in bdf.columns:
-            dd = (
-                bdf.groupby("image", as_index=False)["total_image_s"]
-                .mean()
-                .sort_values("total_image_s", ascending=True)
-            )
-            out_png = os.path.join(out_dir, "dataset_batch_runtime_by_image.png")
-            _save_bar(
-                dd["image"].astype(str).tolist(),
-                dd["total_image_s"].astype(float).tolist(),
-                out_png=out_png,
-                title="Batch Runtime by Image (mean)",
-                ylabel="seconds",
-                rotate=45,
-            )
-            outputs["batch_runtime_by_image_png"] = out_png
+        # dataset_batch_runtime_by_image plot disabled (noisy for single-image runs)
+        # if "total_image_s" in bdf.columns: ...
 
     return outputs
 
@@ -1541,6 +1787,8 @@ def _aggregate_width_distribution(
     verbose: bool,
 ) -> Dict[str, str]:
     outputs = {}
+    width_dir = os.path.join(out_dir, "width")
+    os.makedirs(width_dir, exist_ok=True)
     frames = []
     for img_dir in image_dirs:
         image = os.path.basename(img_dir)
@@ -1557,14 +1805,14 @@ def _aggregate_width_distribution(
         return outputs
 
     all_df = pd.concat(frames, ignore_index=True)
-    csv_path = os.path.join(out_dir, "dataset_width_distribution_all.csv")
+    csv_path = os.path.join(width_dir, "dataset_width_distribution_all.csv")
     all_df.to_csv(csv_path, index=False)
     outputs["width_dist_all_csv"] = csv_path
 
     try:
         from helpers.present_plots import plot_width_distribution_report
 
-        rep_dir = os.path.join(out_dir, "width_distribution_report_dataset")
+        rep_dir = os.path.join(width_dir, "width_distribution_report_dataset")
         result = plot_width_distribution_report(
             csv_path=csv_path,
             out_dir=rep_dir,
@@ -2036,6 +2284,10 @@ def _aggregate_supervision_timings(
     if not files:
         return outputs
 
+    _GT_SUP_EXCLUDE_PATTERNS = (
+        "depth_", "multi_cue_", "dijkstra", "costmap", "depth_generation",
+        "normals_depth", "depth_align", "depth_recess",
+    )
     rows = []
     for p in files:
         df = _safe_read_csv(p)
@@ -2061,7 +2313,11 @@ def _aggregate_supervision_timings(
 
         num_cols = [
             c for c in d.columns
-            if pd.api.types.is_numeric_dtype(d[c]) and (c.endswith("_sec") or c.endswith("_s"))
+            if (
+                pd.api.types.is_numeric_dtype(d[c])
+                and (c.endswith("_sec") or c.endswith("_s"))
+                and not any(pat in c.lower() for pat in _GT_SUP_EXCLUDE_PATTERNS)
+            )
         ]
         for _, rr in d.iterrows():
             for col in num_cols:
@@ -2423,8 +2679,14 @@ def _aggregate_gt_component_timings(
         return outputs
 
     eval_set = {str(x) for x in (evaluated_images or set())}
-    center_files = glob.glob(os.path.join(supervision_root, "**", "gt_centering", "timing.csv"), recursive=True)
-    depth_files = glob.glob(os.path.join(supervision_root, "**", "multi_cue", "timing.csv"), recursive=True)
+    center_files = glob.glob(os.path.join(supervision_root, "**", "analysis", "gt_centering_timing.csv"), recursive=True)
+    center_files += glob.glob(os.path.join(supervision_root, "**", "analysis", "gt_compute_timing.csv"), recursive=True)
+    center_files += glob.glob(os.path.join(supervision_root, "**", "gt_centering", "timing.csv"), recursive=True)
+    dt_files = glob.glob(os.path.join(supervision_root, "**", "dt", "timing.csv"), recursive=True)
+    depth_files = glob.glob(os.path.join(supervision_root, "**", "multi_cue_track", "timing.csv"), recursive=True)
+    depth_files += glob.glob(os.path.join(supervision_root, "**", "multi_cue", "timing.csv"), recursive=True)
+    depth_files += glob.glob(os.path.join(supervision_root, "**", "dt_ridge_color_depth", "timing.csv"), recursive=True)
+    depth_files = list(dict.fromkeys(depth_files))
 
     def _collect(files: List[str]) -> pd.DataFrame:
         frames = []
@@ -2450,21 +2712,26 @@ def _aggregate_gt_component_timings(
         return pd.concat(frames, ignore_index=True)
 
     center_df = _collect(center_files)
+    dt_df = _collect(dt_files)
     depth_df = _collect(depth_files)
 
     if not center_df.empty:
         p = os.path.join(out_dir, "dataset_gt_centering_timing_all.csv")
         center_df.to_csv(p, index=False)
         outputs["dataset_gt_centering_timing_all_csv"] = p
+    if not dt_df.empty:
+        p = os.path.join(out_dir, "dataset_dt_timing_all.csv")
+        dt_df.to_csv(p, index=False)
+        outputs["dataset_dt_timing_all_csv"] = p
     if not depth_df.empty:
         p = os.path.join(out_dir, "dataset_multi_cue_timing_all.csv")
         depth_df.to_csv(p, index=False)
         outputs["dataset_multi_cue_timing_all_csv"] = p
 
-    if not center_df.empty or not depth_df.empty:
+    if not center_df.empty or not dt_df.empty or not depth_df.empty:
         _log(
             verbose,
-            f"[summarize] gt component timings: gt_centering_rows={len(center_df)} depth_rows={len(depth_df)}",
+            f"[summarize] gt component timings: gt_centering_rows={len(center_df)} dt_rows={len(dt_df)} depth_rows={len(depth_df)}",
         )
     return outputs
 
@@ -2642,8 +2909,8 @@ def _plot_dataset_full_timing_overview(
         )
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
-        ax.set_ylabel("seconds")
-        ax.set_title(title)
+        ax.set_ylabel(_clean_plot_label("seconds"))
+        ax.set_title(_clean_plot_label(title))
         ax.grid(axis="y", alpha=0.25)
         present = []
         for r in method_rows:
@@ -2674,7 +2941,7 @@ def _plot_dataset_full_timing_overview(
             v = _safe_num(np.mean(arr))
             e = _safe_num(np.std(arr))
             if np.isfinite(v):
-                labels.append(str(c))
+                labels.append(re.sub(r"(_s|_sec)$", "", str(c)))
                 vals.append(float(v))
                 errs.append(float(e) if np.isfinite(e) and e > 0 else 0.0)
         if not vals:
@@ -2695,8 +2962,74 @@ def _plot_dataset_full_timing_overview(
         )
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
-        ax.set_ylabel("seconds")
-        ax.set_title(title)
+        ax.set_ylabel(_clean_plot_label("seconds"))
+        ax.set_title(_clean_plot_label(title))
+        ax.grid(axis="y", alpha=0.25)
+        plt.tight_layout()
+        fig.savefig(out_png, bbox_inches="tight")
+        plt.close(fig)
+        return out_png
+
+    def _plot_components_with_total(df, cols, title, out_png):
+        """Like _plot_components but appends a TOTAL bar summing all components."""
+        if df is None or df.empty:
+            return None
+        labels = []
+        vals = []
+        errs = []
+        per_row_sum = None
+        for c in cols:
+            if c not in df.columns:
+                continue
+            arr = pd.to_numeric(df[c], errors="coerce").to_numpy(float)
+            arr_clean = np.where(np.isfinite(arr), arr, 0.0)
+            if np.all(arr_clean == 0.0):
+                continue
+            pos = arr_clean[arr_clean > 0]
+            v = _safe_num(np.mean(pos) if pos.size else 0.0)
+            e = _safe_num(np.std(pos) if pos.size else 0.0)
+            if not np.isfinite(v):
+                continue
+            disp = re.sub(r"(_s|_sec)$", "", c)
+            labels.append(disp)
+            vals.append(float(v))
+            errs.append(float(e) if np.isfinite(e) and e > 0 else 0.0)
+            if per_row_sum is None:
+                per_row_sum = arr_clean.copy()
+            else:
+                per_row_sum = per_row_sum + arr_clean
+
+        if not vals:
+            return None
+
+        if per_row_sum is not None and np.any(per_row_sum > 0):
+            pos_total = per_row_sum[per_row_sum > 0]
+            total_mean = _safe_num(float(np.mean(pos_total))) if pos_total.size else np.nan
+            total_err = _safe_num(float(np.std(pos_total))) if pos_total.size else 0.0
+            if np.isfinite(total_mean):
+                labels.append("TOTAL")
+                vals.append(float(total_mean))
+                errs.append(float(total_err) if np.isfinite(total_err) and total_err > 0 else 0.0)
+
+        bar_colors = ["#4c78a8"] * (len(labels) - 1) + ["#d62728"]
+        fig_w = max(7.0, 0.75 * len(labels))
+        fig, ax = plt.subplots(figsize=(fig_w, 4.2), dpi=180)
+        x = np.arange(len(labels))
+        ax.bar(x, vals, color=bar_colors, alpha=0.88)
+        ax.errorbar(
+            x,
+            vals,
+            yerr=np.asarray(errs, float),
+            fmt="none",
+            ecolor="black",
+            elinewidth=1.1,
+            capsize=3,
+            zorder=3,
+        )
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
+        ax.set_ylabel(_clean_plot_label("seconds (mean per image)"))
+        ax.set_title(_clean_plot_label(title))
         ax.grid(axis="y", alpha=0.25)
         plt.tight_layout()
         fig.savefig(out_png, bbox_inches="tight")
@@ -2733,8 +3066,8 @@ def _plot_dataset_full_timing_overview(
             capsize=3,
             zorder=3,
         )
-        ax.set_ylabel("seconds")
-        ax.set_title(title)
+        ax.set_ylabel(_clean_plot_label("seconds"))
+        ax.set_title(_clean_plot_label(title))
         ax.grid(axis="y", alpha=0.25)
         plt.tight_layout()
         fig.savefig(out_png, bbox_inches="tight")
@@ -2844,17 +3177,24 @@ def _plot_dataset_full_timing_overview(
     # GT supervision timing rollup (dataset-level): explicit atomic/combined rows.
     df_sup = _safe_read(os.path.join(out_dir, "dataset_gt_supervision_timings.csv"))
     df_sup_core = _safe_read(os.path.join(out_dir, "dataset_gt_supervision_core_timings.csv"))
+    gt_overview_specs = [
+        ("gt_compute", "normals", "combined_plus_noncombined_atomics_sec"),
+        ("gt_centering", "centering", "combined_plus_noncombined_atomics_centering_sec"),
+    ]
     if df_sup_core is not None and not df_sup_core.empty:
         for _, r in df_sup_core.iterrows():
-            _add(mean_rows, r.get("method"), r.get("weighted_mean_sec"), "gt_supervision", 0.0)
-            _add(sum_rows, r.get("method"), r.get("total_sec"), "gt_supervision", 0.0)
+            method = str(r.get("method", ""))
+            if method in ("gt_compute_combined", "gt_compute_atomic"):
+                label = "gt_compute"
+            elif method in ("gt_centering_combined", "gt_centering_atomic"):
+                label = "gt_centering"
+            else:
+                continue
+            if "combined" in method and "atomic" not in method:
+                _add(mean_rows, label, r.get("weighted_mean_sec"), "gt_supervision", 0.0)
+                _add(sum_rows, label, r.get("total_sec"), "gt_supervision", 0.0)
     elif df_sup is not None and not df_sup.empty:
-        for method_name, stage_name, comp_name in [
-            ("gt_compute_atomic", "normals", "atomic_compute_sec"),
-            ("gt_compute_combined", "normals", "combined_plus_noncombined_atomics_sec"),
-            ("gt_centering_atomic", "centering", "atomic_centering_sec"),
-            ("gt_centering_combined", "centering", "combined_plus_noncombined_atomics_centering_sec"),
-        ]:
+        for method_name, stage_name, comp_name in gt_overview_specs:
             g = df_sup[
                 (df_sup["stage"].astype(str) == stage_name)
                 & (df_sup["component"].astype(str) == comp_name)
@@ -2865,11 +3205,50 @@ def _plot_dataset_full_timing_overview(
             _add(mean_rows, method_name, r.get("weighted_mean_sec"), "gt_supervision", 0.0)
             _add(sum_rows, method_name, r.get("total_sec"), "gt_supervision", 0.0)
 
+    # dt timing from dt track CSV summary.
+    df_dt = _safe_read(os.path.join(out_dir, "dataset_dt_timing_all.csv"))
+    if df_dt is not None and not df_dt.empty:
+        dt_col = next(
+            (
+                c for c in (
+                    "combined_plus_noncombined_atomics_centering_sec",
+                    "centering_total_sec",
+                    "combined_centering_sec",
+                )
+                if c in df_dt.columns
+            ),
+            None,
+        )
+        if dt_col:
+            dt_arr = pd.to_numeric(df_dt[dt_col], errors="coerce").to_numpy(float)
+            dt_arr = dt_arr[np.isfinite(dt_arr)]
+            if dt_arr.size:
+                _add(mean_rows, "dt", float(np.mean(dt_arr)), "gt_centering", float(np.std(dt_arr)))
+                _add(sum_rows, "dt", float(np.sum(dt_arr)), "gt_centering", float(np.std(dt_arr) * np.sqrt(dt_arr.size)))
+
+    # dt / dt_best from calibration ablation timing summary.
+    abl_tim_csv = os.path.join(out_dir, "ablation", "ablation_timings_summary.csv")
+    df_abl_tim = _safe_read(abl_tim_csv)
+    if df_abl_tim is not None and not df_abl_tim.empty:
+        for _, r in df_abl_tim.iterrows():
+            method = str(r.get("method", ""))
+            mean_s = _safe_num(r.get("mean_sec"))
+            std_s = _safe_num(r.get("std_sec", 0.0))
+            n = int(pd.to_numeric(r.get("n", 1), errors="coerce") or 1)
+            total_s = mean_s * n if np.isfinite(mean_s) and n > 0 else np.nan
+            err_sum = float(std_s * np.sqrt(n)) if np.isfinite(std_s) else 0.0
+            category = "auto"
+            if "et" in method.lower():
+                category = "ET"
+            _add(mean_rows, method, mean_s, category, float(std_s) if np.isfinite(std_s) else 0.0)
+            _add(sum_rows, method, total_s, category, err_sum)
+
     # GT centering + depth distridge (dataset-level aggregations).
     df_gt = _safe_read(os.path.join(out_dir, "dataset_gt_centering_timing_all.csv"))
     if (df_gt is None) or df_gt.empty:
         df_gt = _safe_read(os.path.join(out_dir, "gt_centering", "timing.csv"))
-    if df_gt is not None and not df_gt.empty:
+    gt_centering_already_added = any(str(r.get("method", "")) == "gt_centering" for r in mean_rows)
+    if (not gt_centering_already_added) and df_gt is not None and not df_gt.empty:
         gt_mean_arr = pd.to_numeric(df_gt.get("combined_centering_sec"), errors="coerce").to_numpy(float)
         gt_mean_arr = gt_mean_arr[np.isfinite(gt_mean_arr)]
         gt_sum_arr = pd.to_numeric(
@@ -2923,15 +3302,26 @@ def _plot_dataset_full_timing_overview(
         else:
             dd["depth_generation_s"] = np.nan
 
-        if "centering_total_sec" in dd.columns:
+        mc_centering_col = next(
+            (
+                c for c in (
+                    "combined_plus_noncombined_atomics_centering_sec",
+                    "combined_centering_sec",
+                    "centering_total_sec",
+                )
+                if c in dd.columns
+            ),
+            None,
+        )
+        if mc_centering_col:
             dd["depth_total_with_generation_sec"] = (
-                pd.to_numeric(dd["centering_total_sec"], errors="coerce")
+                pd.to_numeric(dd[mc_centering_col], errors="coerce")
                 + pd.to_numeric(dd["depth_generation_s"], errors="coerce").fillna(0.0)
             )
         else:
             dd["depth_total_with_generation_sec"] = pd.to_numeric(
-                dd.get("combined_centering_sec"), errors="coerce"
-            ) + pd.to_numeric(dd["depth_generation_s"], errors="coerce").fillna(0.0)
+                dd["depth_generation_s"], errors="coerce"
+            ).fillna(0.0)
 
         _add(
             mean_rows,
@@ -2985,9 +3375,12 @@ def _plot_dataset_full_timing_overview(
     # Segmentation-only and width/midline subset charts (mean metric).
     if mean_rows:
         df_mean = pd.DataFrame(mean_rows)
-        seg_subset = df_mean[df_mean["category"].isin(["baseline_seg", "manual", "ET", "auto"])].to_dict("records")
+        seg_subset = df_mean[
+            df_mean["category"].isin(["baseline_seg", "ET"])
+            | df_mean["method"].astype(str).str.upper().eq("ET")
+        ].to_dict("records")
         width_subset = df_mean[
-            df_mean["category"].isin(["baseline_width", "manual", "ET", "auto", "multi_cue", "gt_centering"])
+            df_mean["category"].isin(["baseline_width", "ET", "auto", "multi_cue", "gt_centering", "gt_supervision"])
         ].to_dict("records")
         outputs["seg_chart"] = _plot_algorithm_overview(
             seg_subset,
@@ -3008,18 +3401,27 @@ def _plot_dataset_full_timing_overview(
         "Dataset GT Centering Components",
         os.path.join(out_dir, "dataset_gt_centering_components.png"),
     )
-    outputs["multi_cue_components_chart"] = _plot_components(
+    multicue_comp_pairs = [
+        ("dt_compute_s", None),
+        ("depth_generation_s", None),
+        ("multi_cue_align_s", "depth_align_s"),
+        ("multi_cue_recess_s", "depth_recess_s"),
+        ("multi_cue_costmap_s", "depth_costmap_s"),
+        ("multi_cue_dijkstra_s", "depth_dijkstra_s"),
+        ("multi_cue_postprocess_s", "depth_postprocess_s"),
+        ("normals_multi_cue_s", "normals_depth_s"),
+    ]
+    multicue_comp_cols: List[str] = []
+    if df_depth is not None and not df_depth.empty:
+        for pref, legacy in multicue_comp_pairs:
+            if pref in df_depth.columns:
+                multicue_comp_cols.append(pref)
+            elif legacy and legacy in df_depth.columns:
+                multicue_comp_cols.append(legacy)
+    outputs["multi_cue_components_chart"] = _plot_components_with_total(
         df_depth,
-        [
-            "depth_generation_s",
-            "depth_align_s",
-            "depth_recess_s",
-            "depth_costmap_s",
-            "depth_dijkstra_s",
-            "depth_postprocess_s",
-            "normals_depth_s",
-        ],
-        "Dataset Depth Distridge Components",
+        multicue_comp_cols,
+        "Multi-Cue Dataset Components",
         os.path.join(out_dir, "dataset_multi_cue_components.png"),
     )
 
@@ -3031,7 +3433,7 @@ def _plot_dataset_full_timing_overview(
     )
     outputs["multi_cue_atomic_vs_combined_chart"] = _plot_atomic_vs_combined(
         df_depth,
-        "Depth Distridge Atomic vs Combined",
+        "Multi-Cue Atomic vs Combined",
         os.path.join(out_dir, "dataset_multi_cue_atomic_vs_combined.png"),
     )
 
@@ -3236,110 +3638,131 @@ def _plot_multicue_ablation(
     w["crack_type_norm"] = w.get("crack_type", pd.Series([""] * len(w))).astype(str).str.lower()
     w = w[w["crack_type_norm"].str.contains("combined", na=False)].copy()
     w = w[w["method"].isin(multicue_methods)].copy()
-    if w.empty:
-        return outputs
 
     m = (df_midline.copy() if isinstance(df_midline, pd.DataFrame) else pd.DataFrame())
-    if not m.empty and "midline_type" in m.columns:
-        m["method"] = m["midline_type"].map(_norm_method)
-        m = m[m["method"].isin(multicue_methods)].copy()
-        if "crack_type" in m.columns:
-            m = m[m["crack_type"].astype(str).str.lower().str.contains("combined", na=False)].copy()
+    if not m.empty:
+        if "midline_type" in m.columns and "midline_type_path" in m.columns:
+            mt_col = m["midline_type"].astype(str)
+            mtp_col = m["midline_type_path"].astype(str)
+            m["midline_type"] = np.where(mt_col.isin(["unknown", "", "nan"]), mtp_col, mt_col)
+        if "midline_type" in m.columns:
+            m["method"] = m["midline_type"].map(_norm_method)
+            m = m[m["method"].isin(multicue_methods)].copy()
+            if "crack_type" in m.columns:
+                m = m[m["crack_type"].astype(str).str.lower().str.contains("combined", na=False)].copy()
 
-    variants = [(False, "with_et"), (True, "no_et")]
-    for drop_et, suffix in variants:
-        ww = w.copy()
-        mm = m.copy()
-        if drop_et:
-            ww = ww[ww["method"] != "ET"].copy()
-            if not mm.empty:
-                mm = mm[mm["method"] != "ET"].copy()
-        if ww.empty:
-            continue
+    # Single no-ET view.
+    ww = w[w["method"] != "ET"].copy() if not w.empty else w
+    mm = m[m["method"] != "ET"].copy() if isinstance(m, pd.DataFrame) and not m.empty else m
 
-        methods = [x for x in multicue_methods if (not drop_et or x != "ET") and x in set(ww["method"].astype(str))]
-        if not methods:
-            continue
+    if ww.empty and (not isinstance(mm, pd.DataFrame) or mm.empty):
+        return outputs
 
-        fig, axes = plt.subplots(2, 1, figsize=(max(9.0, 1.2 * len(methods)), 8.0), dpi=170, height_ratios=[1.2, 1.0])
-        ax0, ax1 = axes
+    present_in_width = set(ww["method"].astype(str)) if not ww.empty else set()
+    present_in_midline = set(mm["method"].astype(str)) if isinstance(mm, pd.DataFrame) and not mm.empty else set()
+    present = present_in_width | present_in_midline
+    methods = [x for x in multicue_methods if x != "ET" and x in present]
+    if not methods:
+        return outputs
+    if ww.empty:
+        ww = pd.DataFrame(columns=w.columns)
 
-        if not mm.empty and "score_mid" in mm.columns:
-            score_df = mm.copy()
-            score_df["score_mid"] = pd.to_numeric(score_df["score_mid"], errors="coerce")
-            score_df = score_df[np.isfinite(score_df["score_mid"])].copy()
-            if "geometry_type" not in score_df.columns:
-                score_df["geometry_type"] = "all"
-            geos = sorted(score_df["geometry_type"].astype(str).unique().tolist())
-            bottoms = np.zeros(len(methods), dtype=float)
-            cmap = plt.get_cmap("tab20")
-            for j, gname in enumerate(geos):
-                vals = []
-                for method in methods:
-                    sub = score_df[(score_df["method"] == method) & (score_df["geometry_type"].astype(str) == gname)]
-                    vals.append(float(pd.to_numeric(sub["score_mid"], errors="coerce").mean()) if not sub.empty else 0.0)
-                vals = np.asarray(vals, float)
-                ax0.bar(np.arange(len(methods)), vals, bottom=bottoms, color=cmap(j % 20), alpha=0.85, label=str(gname))
-                bottoms += vals
-            ax0.set_ylabel("stacked score_mid (mean)")
-            ax0.legend(loc="best", fontsize=8, framealpha=0.9)
-        else:
-            vals = []
-            for method in methods:
-                sub = ww[ww["method"] == method]
-                v = pd.to_numeric(sub.get("mae_px"), errors="coerce").to_numpy(float)
+    fig, axes = plt.subplots(2, 1, figsize=(max(9.0, 1.2 * len(methods)), 8.0), dpi=170, height_ratios=[1.2, 1.0])
+    ax0, ax1 = axes
+
+    # score_mid decomposition terms.
+    score_terms = [
+        ("nn_mean_bidirectional", "#e15759", "nn_mean", lambda v: np.log1p(np.maximum(v, 0.0))),
+        ("hausdorff_max", "#b07aa1", "hausdorff_max", lambda v: 0.5 * np.log1p(np.maximum(v, 0.0))),
+        ("coverage_min", "#f28e2b", "coverage_min", lambda v: 1.0 - np.clip(v, 0.0, 1.0)),
+    ]
+    comp_data = {}
+    if isinstance(mm, pd.DataFrame) and not mm.empty:
+        mm_c = mm.copy()
+        for col, color, lbl, fn in score_terms:
+            per_method = []
+            for mth in methods:
+                raw = pd.to_numeric(mm_c.loc[mm_c["method"] == mth, col], errors="coerce").to_numpy(float) if col in mm_c.columns else np.array([], dtype=float)
+                raw = raw[np.isfinite(raw)]
+                per_method.append(float(np.mean(fn(raw))) if raw.size else 0.0)
+            comp_data[col] = np.asarray(per_method, float)
+
+    bottoms = np.zeros(len(methods), dtype=float)
+    for col, color, lbl, _ in score_terms:
+        vals = comp_data.get(col, np.zeros(len(methods)))
+        vals = np.where(np.isfinite(vals), vals, 0.0)
+        ax0.bar(np.arange(len(methods)), vals, bottom=bottoms, color=color, alpha=0.85, label=lbl)
+        bottoms += vals
+
+    method_display = [_display_method_name(m) for m in methods]
+    ax0.set_xticks(np.arange(len(methods)))
+    ax0.set_xticklabels(method_display, rotation=25, ha="right")
+    ax0.set_title("Multi-Cue Ablation - Mid Score decomposition\n(combined cracks, per-crack mean)")
+    ax0.set_ylabel("Mid Score")
+    ax0.legend(loc="best", fontsize=8, framealpha=0.9)
+    ax0.grid(axis="y", alpha=0.2)
+
+    metric_sources = []
+    if "mae_px" in ww.columns:
+        metric_sources.append(("abs_width_error_px", ww, "mae_px"))
+    for mcol in ("nn_mean_bidirectional", "hausdorff_max", "coverage_min", "precision_tau", "recall_tau", "f1_tau", "mean_tan_angle_error_deg"):
+        if isinstance(mm, pd.DataFrame) and not mm.empty and mcol in mm.columns:
+            metric_sources.append((mcol, mm, mcol))
+    metric_sources = metric_sources[:8]
+
+    if metric_sources:
+        x = np.arange(len(metric_sources), dtype=float)
+        bar_w = 0.8 / max(1, len(methods))
+        tab_colors = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948"]
+        for i, method in enumerate(methods):
+            means = []
+            lo_errs = []
+            hi_errs = []
+            for _, df_src, col in metric_sources:
+                sub = df_src[df_src["method"] == method]
+                v = pd.to_numeric(sub[col], errors="coerce").to_numpy(float)
                 v = v[np.isfinite(v)]
-                vals.append(float(np.mean(v)) if v.size else 0.0)
-            ax0.bar(np.arange(len(methods)), vals, color="#4c78a8", alpha=0.85)
-            ax0.set_ylabel("MAE (px)")
-        ax0.set_xticks(np.arange(len(methods)))
-        ax0.set_xticklabels(methods, rotation=25, ha="right")
-        ax0.set_title("Multi-cue Ablation (combined)")
-        ax0.grid(axis="y", alpha=0.2)
+                if v.size == 0:
+                    means.append(np.nan)
+                    lo_errs.append(0.0)
+                    hi_errs.append(0.0)
+                else:
+                    q1 = float(np.percentile(v, 25))
+                    q3 = float(np.percentile(v, 75))
+                    mn = float(np.mean(v))
+                    means.append(mn)
+                    lo_errs.append(max(0.0, mn - q1))
+                    hi_errs.append(max(0.0, q3 - mn))
+            means_arr = np.asarray(means, float)
+            lo_arr = np.asarray(lo_errs, float)
+            hi_arr = np.asarray(hi_errs, float)
+            xpos = x - 0.4 + (i + 0.5) * bar_w
+            color = tab_colors[i % len(tab_colors)]
+            valid = np.isfinite(means_arr)
+            ax1.bar(
+                xpos[valid],
+                means_arr[valid],
+                width=bar_w * 0.9,
+                color=color,
+                alpha=0.85,
+                label=_display_method_name(method),
+            )
+            ax1.errorbar(xpos[valid], means_arr[valid], yerr=np.vstack([lo_arr[valid], hi_arr[valid]]), fmt="none", ecolor="black", elinewidth=0.8, capsize=2)
 
-        metric_sources = []
-        if "mae_px" in ww.columns:
-            metric_sources.append(("abs_width_error_px", ww, "mae_px"))
-        for mcol in ("nn_mean_bidirectional", "hausdorff_max", "coverage_min", "precision_tau", "recall_tau", "f1_tau", "mean_tan_angle_error_deg"):
-            if not mm.empty and mcol in mm.columns:
-                metric_sources.append((mcol, mm, mcol))
-        metric_sources = metric_sources[:8]
+        ax1.set_xticks(x)
+        ax1.set_xticklabels([ms[0] for ms in metric_sources], rotation=25, ha="right", fontsize=8)
+        ax1.set_ylabel("mean +/- IQR")
+        ax1.grid(axis="y", alpha=0.2)
+        ax1.legend(loc="best", fontsize=7, ncol=2)
 
-        if metric_sources:
-            x = np.arange(len(metric_sources), dtype=float)
-            width = 0.8 / max(1, len(methods))
-            for i, method in enumerate(methods):
-                means = []
-                iqr = []
-                for _, df_src, col in metric_sources:
-                    sub = df_src[df_src["method"] == method]
-                    v = pd.to_numeric(sub[col], errors="coerce").to_numpy(float)
-                    v = v[np.isfinite(v)]
-                    if v.size == 0:
-                        means.append(np.nan)
-                        iqr.append(0.0)
-                    else:
-                        means.append(float(np.mean(v)))
-                        iqr.append(float(np.percentile(v, 75) - np.percentile(v, 25)))
-                means_arr = np.asarray(means, float)
-                iqr_arr = np.asarray(iqr, float)
-                xpos = x - 0.4 + (i + 0.5) * width
-                ax1.errorbar(xpos, means_arr, yerr=iqr_arr, fmt="o-", linewidth=1.0, markersize=3, capsize=2, label=method)
-            ax1.set_xticks(x)
-            ax1.set_xticklabels([m[0] for m in metric_sources], rotation=25, ha="right", fontsize=8)
-            ax1.set_ylabel("mean ± IQR")
-            ax1.grid(axis="y", alpha=0.2)
-            ax1.legend(loc="best", fontsize=7, ncol=2)
-
-        plt.tight_layout()
-        out_png = os.path.join(out_dir, f"dataset_multicue_ablation_{suffix}.png")
-        fig.savefig(out_png, bbox_inches="tight")
-        plt.close(fig)
-        outputs[f"dataset_multicue_ablation_{suffix}_png"] = out_png
+    plt.tight_layout()
+    out_png = os.path.join(out_dir, "dataset_multicue_ablation.png")
+    fig.savefig(out_png, bbox_inches="tight")
+    plt.close(fig)
+    outputs["dataset_multicue_ablation_png"] = out_png
 
     _log(verbose, f"[summarize] multicue ablation outputs: {list(outputs.keys())}")
     return outputs
-
 
 def _plot_gt_supervision_timing_detail(out_dir: str, *, verbose: bool = False) -> Dict[str, str]:
     outputs: Dict[str, str] = {}
@@ -3397,29 +3820,233 @@ def _plot_gt_supervision_timing_detail(out_dir: str, *, verbose: bool = False) -
                 plt.close(fig)
                 outputs["dataset_timing_multicue_per_method_png"] = out_png
 
-    if df_sup is not None and not df_sup.empty:
-        d = df_sup.copy()
-        d["component"] = d["component"].astype(str)
-        d["mean_sec"] = pd.to_numeric(d.get("mean_sec"), errors="coerce")
-        d = d[np.isfinite(d["mean_sec"])].copy()
-        if not d.empty:
-            d = d.sort_values("mean_sec", ascending=False).head(12)
-            labels = d["component"].tolist()
-            vals = d["mean_sec"].to_numpy(float)
-            fig, ax = plt.subplots(figsize=(max(8.0, 0.48 * len(labels)), 4.2), dpi=170)
-            ax.bar(np.arange(len(labels)), vals, color="#9c755f", alpha=0.88)
-            ax.set_xticks(np.arange(len(labels)))
+    if df_center is not None and not df_center.empty:
+        gt_center_cols = [
+            "dt_compute_s",
+            "centered_snap_s",
+            "normals_centered_s",
+            "atomic_centering_sec",
+            "combined_centering_sec",
+        ]
+        labels = []
+        vals = []
+        for c in gt_center_cols:
+            if c not in df_center.columns:
+                continue
+            arr = pd.to_numeric(df_center[c], errors="coerce").to_numpy(float)
+            arr = arr[np.isfinite(arr)]
+            if arr.size == 0:
+                continue
+            labels.append(re.sub(r"(_s|_sec)$", "", c))
+            vals.append(float(np.mean(arr)))
+        if labels:
+            fig, ax = plt.subplots(figsize=(max(7.0, 0.7 * len(labels)), 4.2), dpi=170)
+            x = np.arange(len(labels))
+            ax.bar(x, vals, color="#1f77b4", alpha=0.88)
+            ax.set_xticks(x)
             ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
-            ax.set_ylabel("seconds")
-            ax.set_title("Pre-step shared components")
+            ax.set_ylabel("seconds (mean per image)")
+            ax.set_title("GT Centering Components")
             ax.grid(axis="y", alpha=0.2)
             plt.tight_layout()
-            out_png = os.path.join(out_dir, "dataset_timing_prestep_components.png")
+            out_png = os.path.join(out_dir, "dataset_timing_gt_centering_components.png")
             fig.savefig(out_png, bbox_inches="tight")
             plt.close(fig)
-            outputs["dataset_timing_prestep_components_png"] = out_png
+            outputs["dataset_timing_gt_centering_components_png"] = out_png
 
     _log(verbose, f"[summarize] gt timing detail outputs: {list(outputs.keys())}")
+    return outputs
+
+
+def _aggregate_calibration_ablation(
+    save_folder: str,
+    out_dir: str,
+    *,
+    evaluated_images: Optional[set] = None,
+    verbose: bool = True,
+) -> Dict[str, str]:
+    """
+    Aggregates calibration ablation results from metrics/_calibration/.
+
+    Reads:
+      - ablation_rs3_weighted_summary.csv   (score_mid + component columns per method)
+      - dt_best_et_*.csv                    (timing per image for dt_best and ET)
+
+    Writes to out_dir/ablation/:
+      - ablation_rs3_score_decomposition.png   (edge-family-style stacked bar)
+      - ablation_timings.png                   (mean timing bar per method)
+      - ablation_rs3_weighted_summary_all.csv
+    """
+    outputs: Dict[str, str] = {}
+    calib_dir = os.path.join(save_folder, "metrics", "_calibration")
+    if not os.path.isdir(calib_dir):
+        _log(verbose, f"[ablation] calibration dir not found: {calib_dir}")
+        return outputs
+
+    abl_dir = os.path.join(out_dir, "ablation")
+    os.makedirs(abl_dir, exist_ok=True)
+
+    # 1) Load ablation score summary.
+    abl_csv = os.path.join(calib_dir, "ablation_rs3_weighted_summary.csv")
+    abl_df = _safe_read_csv(abl_csv)
+    if abl_df is None or abl_df.empty:
+        _log(verbose, "[ablation] ablation_rs3_weighted_summary.csv not found or empty")
+        return outputs
+
+    import shutil
+    abl_copy_csv = os.path.join(abl_dir, "ablation_rs3_weighted_summary_all.csv")
+    shutil.copy2(abl_csv, abl_copy_csv)
+    outputs["ablation_summary_csv"] = abl_copy_csv
+
+    method_col = None
+    for c in ("method", "name", "variant", "label"):
+        if c in abl_df.columns:
+            method_col = c
+            break
+    if method_col is None:
+        for c in abl_df.columns:
+            if not pd.api.types.is_numeric_dtype(abl_df[c]):
+                method_col = c
+                break
+    if method_col is None:
+        _log(verbose, "[ablation] cannot identify method column in ablation CSV")
+        return outputs
+
+    total_col = next(
+        (c for c in abl_df.columns if "score_mid" in c.lower() and "wmean" in c.lower()),
+        next((c for c in abl_df.columns if "score_mid" in c.lower()), None),
+    )
+    score_terms = [
+        ("comp_nn_wmean", "#e15759", "nn_mean"),
+        ("comp_hausdorff_wmean", "#b07aa1", "hausdorff_max"),
+        ("comp_coverage_wmean", "#f28e2b", "coverage_min"),
+    ]
+    has_decomp = all(col in abl_df.columns for col, _, _ in score_terms)
+    if total_col is None and not has_decomp:
+        _log(verbose, "[ablation] no score columns found in ablation CSV")
+        return outputs
+
+    if total_col and total_col in abl_df.columns:
+        abl_df = abl_df.copy()
+        abl_df["_sort_score"] = pd.to_numeric(abl_df[total_col], errors="coerce")
+        abl_df = abl_df.sort_values("_sort_score", ascending=True).drop(columns=["_sort_score"]).reset_index(drop=True)
+
+    methods = abl_df[method_col].astype(str).tolist()
+    total_vals = (
+        pd.to_numeric(abl_df[total_col], errors="coerce").to_numpy(float)
+        if total_col else np.zeros(len(methods), dtype=float)
+    )
+
+    fig_w = max(10.0, 0.65 * len(methods))
+    fig, ax = plt.subplots(figsize=(fig_w, 5.2), dpi=180)
+    x = np.arange(len(methods), dtype=float)
+    if has_decomp:
+        bottoms = np.zeros(len(methods), dtype=float)
+        legend_handles = []
+        for col, color, lbl in score_terms:
+            raw = pd.to_numeric(abl_df[col], errors="coerce").to_numpy(float)
+            vals = np.where(np.isfinite(raw), raw, 0.0)
+            vals = np.where(np.isfinite(vals), vals, 0.0)
+            ax.bar(x, vals, bottom=bottoms, color=color, alpha=0.85, label=lbl)
+            legend_handles.append(Patch(facecolor=color, edgecolor="none", label=lbl))
+            bottoms += vals
+        if total_col:
+            tv = np.where(np.isfinite(total_vals), total_vals, np.nan)
+            ax.plot(x, tv, "o", color="black", markersize=5, zorder=5, label="RS3 score (wmean)")
+            legend_handles.append(Patch(facecolor="black", edgecolor="none", label="RS3 score (wmean)"))
+        ax.legend(handles=legend_handles, loc="best", framealpha=0.9, fontsize=8)
+    else:
+        tv = np.where(np.isfinite(total_vals), total_vals, 0.0)
+        ax.bar(x, tv, color="#4c78a8", alpha=0.85)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([_display_method_name(m) for m in methods], rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("RS3 Score")
+    ax.set_title("Calibration Ablation - RS3 Score Decomposition\n(combined + orphan atomics, length-weighted)")
+    ax.grid(axis="y", alpha=0.2)
+    plt.tight_layout()
+    out_png = os.path.join(abl_dir, "ablation_rs3_score_decomposition.png")
+    fig.savefig(out_png, bbox_inches="tight")
+    plt.close(fig)
+    outputs["ablation_score_decomposition_png"] = out_png
+
+    # 2) Load dt_best + ET timing CSVs.
+    eval_set = {str(x) for x in (evaluated_images or set())}
+    timing_rows = []
+    timing_csvs = glob.glob(os.path.join(calib_dir, "dt_best_et*.csv"))
+    timing_csvs += glob.glob(os.path.join(calib_dir, "dt_best*.csv"))
+    timing_csvs = list(dict.fromkeys(timing_csvs))
+
+    timing_display = {
+        "dt_best_et_pass2b_edge_tracking": "edge tracking",
+    }
+    timing_skip = {"dt_best_et_pass1", "dt_best_et_pass2", "dt_best_et_pass2c_width_eval"}
+    for p in timing_csvs:
+        df = _safe_read_csv(p)
+        if df is None or df.empty:
+            continue
+        stem = os.path.splitext(os.path.basename(p))[0]
+        if stem in timing_skip:
+            continue
+        method_label = timing_display.get(stem, stem)
+        img_col = next((c for c in ("image", "image_name", "stem") if c in df.columns), None)
+        sec_col = next(
+            (c for c in ("total_s", "total_sec", "seconds", "time_sec", "inference_seconds") if c in df.columns),
+            None,
+        )
+        if sec_col is None:
+            sec_col = next(
+                (
+                    c for c in df.columns
+                    if pd.api.types.is_numeric_dtype(df[c]) and (c.endswith("_s") or c.endswith("_sec"))
+                ),
+                None,
+            )
+        if sec_col is None:
+            continue
+        d = df.copy()
+        if img_col:
+            d["image"] = d[img_col].astype(str).apply(lambda s: os.path.splitext(os.path.basename(s))[0])
+            if eval_set:
+                d = d[d["image"].isin(eval_set)].copy()
+        arr = pd.to_numeric(d[sec_col], errors="coerce").to_numpy(float)
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            continue
+        timing_rows.append(
+            {
+                "method": method_label,
+                "mean_sec": float(np.mean(arr)),
+                "std_sec": float(np.std(arr)),
+                "n": int(arr.size),
+            }
+        )
+
+    if timing_rows:
+        tim_df = pd.DataFrame(timing_rows).sort_values("mean_sec")
+        fig_w2 = max(7.0, 0.65 * len(tim_df))
+        fig2, ax2 = plt.subplots(figsize=(fig_w2, 4.2), dpi=180)
+        x2 = np.arange(len(tim_df), dtype=float)
+        y2 = tim_df["mean_sec"].to_numpy(float)
+        e2 = tim_df["std_sec"].to_numpy(float)
+        ax2.bar(x2, y2, color="#4c78a8", alpha=0.85)
+        ax2.errorbar(x2, y2, yerr=e2, fmt="none", ecolor="black", elinewidth=1.2, capsize=3)
+        ax2.set_xticks(x2)
+        ax2.set_xticklabels(tim_df["method"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
+        ax2.set_ylabel("mean seconds")
+        ax2.set_title("Calibration Ablation - Timing (mean +/- std per image)")
+        ax2.grid(axis="y", alpha=0.2)
+        plt.tight_layout()
+        out_timing_png = os.path.join(abl_dir, "ablation_timings.png")
+        fig2.savefig(out_timing_png, bbox_inches="tight")
+        plt.close(fig2)
+        outputs["ablation_timings_png"] = out_timing_png
+
+        tim_csv = os.path.join(abl_dir, "ablation_timings_summary.csv")
+        tim_df.to_csv(tim_csv, index=False)
+        outputs["ablation_timings_csv"] = tim_csv
+
+    _log(verbose, f"[ablation] outputs: {list(outputs.keys())}")
     return outputs
 
 
@@ -3430,6 +4057,7 @@ def summarize_dataset_metrics(
     baseline_roots: Optional[List[str]] = None,
     depth_timing_csv: Optional[str] = None,
     image_filter: Optional[List[str]] = None,
+    index: Optional[str] = None,
     verbose: bool = True,
 ) -> Dict[str, object]:
     """
@@ -3444,6 +4072,14 @@ def summarize_dataset_metrics(
     - edge-family and RS3-family calibration summaries
     - optional external baseline timing CSVs
     """
+    # If `index` is supplied it overrides / merges with image_filter.
+    if index is not None:
+        index_str = str(index)
+        if image_filter is None:
+            image_filter = [index_str]
+        elif index_str not in image_filter:
+            image_filter = list(image_filter) + [index_str]
+
     metrics_root = os.path.join(save_folder, "metrics")
     if out_dir is None:
         out_dir = os.path.join(metrics_root, "_summary")
@@ -3524,13 +4160,46 @@ def summarize_dataset_metrics(
         )
     )
     outputs.update(
+        _aggregate_calibration_ablation(
+            save_folder=save_folder,
+            out_dir=out_dir,
+            evaluated_images=evaluated_images_set,
+            verbose=verbose,
+        )
+    )
+    outputs.update(
         _plot_dataset_full_timing_overview(
             out_dir=out_dir,
             verbose=verbose,
         )
     )
-    df_width_all = _safe_read_csv(os.path.join(out_dir, "dataset_width_summary_all.csv"))
-    df_midline_all = _safe_read_csv(os.path.join(out_dir, "dataset_midline_metrics_all.csv"))
+    df_width_all = _safe_read_csv(os.path.join(out_dir, "width", "dataset_width_summary_all.csv"))
+    df_midline_all = _safe_read_csv(os.path.join(out_dir, "midline", "dataset_midline_metrics_all.csv"))
+
+    # Supplement midline with ablation per-image rows so dt_depth/etc. appear in multicue plot.
+    _abl_all = _safe_read_csv(os.path.join(save_folder, "metrics", "_calibration", "ablation_rs3_all_rows.csv"))
+    if _abl_all is not None and not _abl_all.empty and "variant_id" in _abl_all.columns:
+        _abl_mid = _abl_all.rename(
+            columns={
+                "variant_id": "midline_type",
+                "lwmean_score_mid": "score_mid",
+                "lwmean_nn_mean_bidirectional": "nn_mean_bidirectional",
+                "lwmean_hausdorff_max": "hausdorff_max",
+                "lwmean_coverage_min": "coverage_min",
+                "lwmean_mean_tan_angle_error_deg": "mean_tan_angle_error_deg",
+                "lwmean_precision_tau": "precision_tau",
+                "lwmean_recall_tau": "recall_tau",
+                "lwmean_f1_tau": "f1_tau",
+            }
+        )
+        _abl_mid["crack_type"] = "combined_plus_noncombined_atomic"
+        _abl_mid["method_family"] = "model"
+        _abl_mid["baseline_method"] = ""
+        if df_midline_all is not None and not df_midline_all.empty:
+            df_midline_all = pd.concat([df_midline_all, _abl_mid], ignore_index=True)
+        else:
+            df_midline_all = _abl_mid
+
     outputs.update(_plot_multicue_ablation(df_width_all, df_midline_all, out_dir, verbose=verbose))
     outputs.update(_plot_gt_supervision_timing_detail(out_dir, verbose=verbose))
 
@@ -3564,6 +4233,12 @@ def summarize_dataset_metrics(
             continue
         if not os.path.exists(v):
             continue
+        try:
+            src_abs_pre = os.path.abspath(v)
+            if src_abs_pre.startswith(os.path.abspath(os.path.join(out_dir, "ablation")) + os.sep):
+                continue
+        except Exception:
+            pass
         if not _is_timing_output(k, v):
             continue
         try:
@@ -3595,3 +4270,4 @@ def summarize_dataset_metrics(
 
     _log(verbose, f"[summarize] wrote dataset summary artifacts to {out_dir}")
     return report
+

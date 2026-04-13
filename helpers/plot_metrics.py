@@ -762,6 +762,11 @@ def plot_core_timing_bars(metrics_dir):
             pass
         return str(v)
 
+    def _sum_col_safe(frame, col_name):
+        if col_name not in frame.columns:
+            return 0.0
+        return float(np.nansum(frame[col_name].apply(_to_num)))
+
     # ------------------------------------------------------------
     # LOOP BY SUPERVISION (NO COLLAPSING, NO MAGIC)
     # ------------------------------------------------------------
@@ -787,14 +792,14 @@ def plot_core_timing_bars(metrics_dir):
 
         if not atomic_df.empty:
             labels.append("Edge masks / atomic")
-            vals.append(np.nansum(atomic_df["edge_masks_sec"].apply(_to_num)))
+            vals.append(_sum_col_safe(atomic_df, "edge_masks_sec"))
 
             labels.append("Edge tracking / atomic")
-            vals.append(np.nansum(atomic_df["edges_tracking_sec"].apply(_to_num)))
+            vals.append(_sum_col_safe(atomic_df, "edges_tracking_sec"))
 
         if not combined_df.empty:
             labels.append("Combined crack")
-            vals.append(np.nansum(combined_df["build_combined_sec"].apply(_to_num)))
+            vals.append(_sum_col_safe(combined_df, "build_combined_sec"))
 
         if labels:
             fig, ax = plt.subplots(figsize=(8, 4))

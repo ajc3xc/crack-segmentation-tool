@@ -121,7 +121,7 @@ def plot_scaling_behavior(res_df, out_dir):
 
     plt.xscale("log")
     plt.yscale("log")
-    plt.xlabel("Crack Area (pixels)")
+    plt.xlabel("Crack Area (px)")
     plt.ylabel("Runtime (seconds)")
     plt.title("Runtime Scaling vs Crack Size")
     plt.legend()
