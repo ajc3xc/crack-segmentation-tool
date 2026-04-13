@@ -1087,7 +1087,7 @@ def dominant_segments_from_group(
             rad = int(
                 max(
                     4,                         # hard minimum exclusion
-                    min(1.2 * r, window_half_size)
+                    min(2.0 * r, window_half_size)
                 )
             )
 
@@ -2051,7 +2051,7 @@ def recompute_dominance_geometry_from_derived(
             derived_pts += int(len(S))
 
             r = seg_radius(S)
-            rad = int(max(4, min(1.2 * r, float(window_half_size))))
+            rad = int(max(4, min(2.0 * r, float(window_half_size))))
             line = _polyline_mask(S, H, W)
             kernel = cv2.getStructuringElement(
                 cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1)

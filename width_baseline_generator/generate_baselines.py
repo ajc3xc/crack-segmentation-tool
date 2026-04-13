@@ -1155,7 +1155,8 @@ def process_one_image(row: pd.Series, cfg: Dict[str, Any]) -> Dict[str, Any]:
     crack_px = int(np.count_nonzero(bw))
     H, W = bw.shape[:2]
 
-    img_out_root = os.path.join(out_dir, stem)
+    #img_out_root = os.path.join(out_dir, stem)
+    img_out_root = os.path.join(out_dir, stem.replace("_modified", ""))
     _safe_mkdir(img_out_root)
 
     timings = {}

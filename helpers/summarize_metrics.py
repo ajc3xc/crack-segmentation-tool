@@ -3627,6 +3627,8 @@ def _plot_multicue_ablation(
 
     def _norm_method(v: str) -> str:
         s = str(v or "").strip()
+        if s.startswith("best_"):
+            s = s[len("best_") :].strip()
         if _is_et_like(s):
             return "ET"
         return s
@@ -4270,4 +4272,3 @@ def summarize_dataset_metrics(
 
     _log(verbose, f"[summarize] wrote dataset summary artifacts to {out_dir}")
     return report
-

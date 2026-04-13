@@ -3834,7 +3834,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
             _accum_method_variant_timing("dt", "dt")
             if selected_best_non_dt and selected_best_non_dt != "dt":
-                _accum_method_variant_timing(selected_best_non_dt, selected_best_non_dt)
+                _accum_method_variant_timing(selected_best_non_dt, f"best_{selected_best_non_dt}")
 
             if timing_rows:
                 timing_df = pd.DataFrame(timing_rows)
