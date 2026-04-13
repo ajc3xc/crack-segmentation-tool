@@ -6346,7 +6346,7 @@ def compare_widths_for_aligned_cracks(
                     image=base_name,
                     cid=cid,
                     reason="atomic_no_usable_pred_width_trace",
-                    L_geom=int(pred_group_n_segments),
+                    L_geom=0,
                     pred_len_total=0,
                     gt_len_total=0,
                     branch_id="atomic",

@@ -3980,7 +3980,7 @@ def _aggregate_calibration_ablation(
     timing_csvs = list(dict.fromkeys(timing_csvs))
 
     timing_display = {
-        "dt_best_et_pass2b_edge_tracking": "edge tracking",
+        "dt_best_et_pass2b_edge_tracking": "ET",
     }
     timing_skip = {"dt_best_et_pass1", "dt_best_et_pass2", "dt_best_et_pass2c_width_eval"}
     for p in timing_csvs:

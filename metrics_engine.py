@@ -99,7 +99,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 depth_timing_csv = cand
 
         # Hard-coded single-image filter for quick debug runs - comment out for full dataset:
-        image_filter = ["42"]
+        image_filter = ["98", "111"]
         report = _summarize_dataset_metrics(
             save_folder=self.save_folder,
             out_dir=out_dir,
@@ -940,9 +940,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         from helpers import metrics as metrics_mod
 
         # -- Hardcoded toggles for fast iteration --
-        resolved_indices = [41]
+        resolved_indices = [97,110]
         SKIP_ALREADY_PROCESSED = False
-        FAST_RUN_EDGE_SWEEP = False
+        FAST_RUN_EDGE_SWEEP = True
 
         idxs = self._resolve_metrics_image_indices(image_indices=resolved_indices, base_names=base_names)
         if not idxs:
