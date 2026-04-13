@@ -2491,7 +2491,8 @@ def compute_projected_width_diffs(
     ):
         # ---- domain mask feature flags (flip to re-enable) ----
         _ENABLE_ATOMIC_CC_FILTER = False   # connected-component isolation for atomics
-        _ENABLE_COMBINED_RIBBON  = False   # EDT ribbon pruning for combined branches
+        _ENABLE_COMBINED_RIBBON  = True    # EDT ribbon pruning for combined branches
+        _COMBINED_RIBBON_FACTOR  = 2.5     # ribbon_px = median(dt_along_gt_midline) * this
         # --------------------------------------------------------
 
         terr_for_proj = None
@@ -2649,7 +2650,23 @@ def compute_projected_width_diffs(
 
                 # Disabled: ribbon/territory domain pruning — too coarse, bbox handles isolation.
                 # domain &= ribbon  # TODO: re-enable with better radius tuning
-                ribbon_px = int(np.clip(float(seg_radius_px) * 2.0, 20, 120))
+                # Sample wmap along this branch's GT segments to get local half-width
+                _dt_ribbon_vals = []
+                for Sx, mx in zip(gt_mid_parts, gt_mid_meta):
+                    b = _safe_int((mx or {}).get("branch_id"), None) if isinstance(mx, dict) else None
+                    if b is None or int(b) != int(branch_id):
+                        continue
+                    Sa = _finite_xy(Sx)
+                    if len(Sa) == 0:
+                        continue
+                    _xx = np.clip(np.rint(Sa[:, 0]).astype(int), 0, W - 1)
+                    _yy = np.clip(np.rint(Sa[:, 1]).astype(int), 0, H - 1)
+                    _v = np.asarray(wmap)[_yy, _xx]
+                    _v = _v[np.isfinite(_v) & (_v > 0)]
+                    if _v.size > 0:
+                        _dt_ribbon_vals.append(_v)
+                dt_med_ribbon = float(np.median(np.concatenate(_dt_ribbon_vals))) if _dt_ribbon_vals else float(seg_radius_px)
+                ribbon_px = int(np.clip(dt_med_ribbon * _COMBINED_RIBBON_FACTOR, 20, 120))
                 branch_seed = np.zeros((H, W), dtype=bool)
                 for Sx, mx in zip(gt_mid_parts, gt_mid_meta):
                     b = _safe_int((mx or {}).get("branch_id"), None) if isinstance(mx, dict) else None
@@ -3039,6 +3056,42 @@ def compute_projected_width_diffs(
                     gt_full=gt_full,
                 )
                 domain_mask = np.asarray((domain_result or {}).get("domain", []), bool)
+
+                # EDT ribbon culling: further restrict domain to within 2.5x median(wmap)
+                # of the GT midline for this segment. Applied to both atomic and combined.
+                _ENABLE_EDT_RIBBON_CULLING = True
+                _EDT_RIBBON_FACTOR = 2.5
+                domain_mask_pre_ribbon = domain_mask.copy()
+                if _ENABLE_EDT_RIBBON_CULLING and np.any(domain_mask):
+                    try:
+                        from scipy.ndimage import distance_transform_edt as _edt
+                        _seed_edt = np.zeros((Hm, Wm), dtype=bool)
+                        _xs_edt = np.clip(np.rint(gt_seg[:, 0]).astype(int), 0, Wm - 1)
+                        _ys_edt = np.clip(np.rint(gt_seg[:, 1]).astype(int), 0, Hm - 1)
+                        _seed_edt[_ys_edt, _xs_edt] = True
+                        _wm_edt = np.asarray(wmap_support, float)
+                        _v_edt = _wm_edt[_ys_edt, _xs_edt]
+                        _v_edt = _v_edt[np.isfinite(_v_edt) & (_v_edt > 0)]
+                        if _v_edt.size > 0 and np.any(_seed_edt):
+                            _med_edt = float(np.median(_v_edt))
+                            _rpx_edt = int(np.clip(_med_edt * _EDT_RIBBON_FACTOR, 20, 120))
+                            _dist_edt = _edt(~_seed_edt)
+                            _ribbon_mask = _dist_edt <= _rpx_edt
+                            domain_mask_pre_ribbon = domain_mask.copy()
+                            domain_mask = domain_mask & _ribbon_mask
+                            if not np.any(domain_mask):
+                                domain_mask = domain_mask_pre_ribbon  # safety fallback
+                                print(f"[EDT RIBBON] cid={cid} seg={seg_idx}: ribbon emptied domain, reverting")
+                            else:
+                                print(
+                                    f"[EDT RIBBON] cid={cid} seg={seg_idx} "
+                                    f"rpx={_rpx_edt} med_dt={_med_edt:.1f} "
+                                    f"before={int(np.count_nonzero(domain_mask_pre_ribbon))} "
+                                    f"after={int(np.count_nonzero(domain_mask))}"
+                                )
+                    except Exception as _e_edt:
+                        print(f"[EDT RIBBON] cid={cid} seg={seg_idx}: failed ({_e_edt})")
+
                 terr_used = (domain_result or {}).get("terr_for_proj", None)
                 terr_raw = (domain_result or {}).get("terr_raw", None)
                 other_terr_excluded = (domain_result or {}).get("other_terr_excluded", None)
@@ -3046,6 +3099,7 @@ def compute_projected_width_diffs(
                 diag_key = (str(cid), int(branch_id_used) if branch_id_used is not None else -1, int(seg_idx))
                 diagnostics_by_family[fam_key].setdefault("domain_masks_used", {})[diag_key] = {
                     "domain": domain_mask.copy(),
+                    "domain_pre_ribbon": domain_mask_pre_ribbon.copy(),
                     "terr_for_proj": np.asarray(terr_used, bool).copy() if terr_used is not None else None,
                     "terr_raw": np.asarray(terr_raw, bool).copy() if terr_raw is not None else None,
                     "other_terr_excluded": np.asarray(other_terr_excluded, bool).copy() if other_terr_excluded is not None else None,
@@ -3341,7 +3395,7 @@ def compute_projected_width_diffs(
 
                 out_dir = os.path.join(
                     method_root,
-                    midline_type or "unknown",
+                    "baseline_support",
                     crack_type,
                 )
                 os.makedirs(out_dir, exist_ok=True)
@@ -3687,16 +3741,14 @@ def compute_projected_width_diffs(
                 dom_masks_used = diag.get("domain_masks_used", {}) or {}
                 if dom_masks_used:
                     H_dm, W_dm = np.asarray(gt_full).shape[:2]
-                    gt_full_bin = (np.asarray(gt_full) > 0).astype(np.uint8)
+                    gt_full_bin = (np.asarray(gt_full) > 0)
 
-                    # Union of all domain masks for this family
                     dom_union = np.zeros((H_dm, W_dm), dtype=bool)
                     for dm_entry in dom_masks_used.values():
                         dm = np.asarray((dm_entry or {}).get("domain", []), bool)
                         if dm.ndim == 2 and dm.shape == (H_dm, W_dm):
                             dom_union |= dm
 
-                    # Crop to nonzero extent of domain union + pad
                     ys_d, xs_d = np.where(dom_union)
                     if len(xs_d) > 0:
                         pad_d = 30
@@ -3705,32 +3757,42 @@ def compute_projected_width_diffs(
                         dx1 = min(W_dm, int(np.max(xs_d)) + pad_d)
                         dy1 = min(H_dm, int(np.max(ys_d)) + pad_d)
 
+                        # pre_ribbon_union: domain before EDT ribbon was applied
+                        pre_ribbon_union = np.zeros((H_dm, W_dm), dtype=bool)
+                        for dm_entry in dom_masks_used.values():
+                            _pr = np.asarray((dm_entry or {}).get("domain_pre_ribbon", []), bool)
+                            if _pr.ndim == 2 and _pr.shape == (H_dm, W_dm):
+                                pre_ribbon_union |= _pr
+
+                        # 3 regions:
+                        # kept        - in final domain after ribbon (green)
+                        # excl_ribbon - in pre-ribbon domain but cut by ribbon (orange)
+                        # excl_bbox   - in gt_full but outside pre-ribbon domain entirely (red: bbox/no-touch)
+                        kept = dom_union
+                        excl_ribbon = pre_ribbon_union & ~dom_union
+                        excl_bbox = gt_full_bin & ~pre_ribbon_union
+
                         fig_dom, ax_dom = plt.subplots(figsize=(10, 6), dpi=180)
-                        ax_dom.set_facecolor("#111111")
+                        ax_dom.set_facecolor("black")
+                        bg = np.zeros((dy1 - dy0, dx1 - dx0, 3), dtype=np.uint8)
+                        ax_dom.imshow(bg, extent=[dx0, dx1, dy1, dy0],
+                                      interpolation="nearest", zorder=0)
 
-                        # Original crack mask: white
-                        gt_crop_d = gt_full_bin[dy0:dy1, dx0:dx1]
-                        rgba_gt = np.zeros((dy1 - dy0, dx1 - dx0, 4), float)
-                        rgba_gt[gt_crop_d > 0] = [1.0, 1.0, 1.0, 0.35]
-                        ax_dom.imshow(rgba_gt, extent=[dx0, dx1, dy1, dy0], interpolation="nearest", zorder=1)
-
-                        # Domain mask: green
-                        dom_crop = dom_union[dy0:dy1, dx0:dx1]
-                        rgba_dom = np.zeros((dy1 - dy0, dx1 - dx0, 4), float)
-                        rgba_dom[dom_crop] = [0.2, 0.9, 0.4, 0.55]
-                        ax_dom.imshow(rgba_dom, extent=[dx0, dx1, dy1, dy0], interpolation="nearest", zorder=2)
-
-                        # Excluded (in gt_full but not in domain): red
-                        excluded = (gt_full_bin[dy0:dy1, dx0:dx1] > 0) & (~dom_crop)
-                        rgba_excl = np.zeros((dy1 - dy0, dx1 - dx0, 4), float)
-                        rgba_excl[excluded] = [1.0, 0.2, 0.2, 0.55]
-                        ax_dom.imshow(rgba_excl, extent=[dx0, dx1, dy1, dy0], interpolation="nearest", zorder=3)
+                        for reg, col, zo in [
+                            (excl_bbox, [0.9, 0.2, 0.2, 0.8], 1),  # red
+                            (excl_ribbon, [1.0, 0.55, 0.1, 0.8], 2),  # orange
+                            (kept, [0.2, 0.9, 0.4, 0.85], 3),  # green
+                        ]:
+                            rgba_dm = np.zeros((dy1 - dy0, dx1 - dx0, 4), float)
+                            rgba_dm[reg[dy0:dy1, dx0:dx1]] = col
+                            ax_dom.imshow(rgba_dm, extent=[dx0, dx1, dy1, dy0],
+                                          interpolation="nearest", zorder=zo)
 
                         from matplotlib.patches import Patch as _Patch
                         ax_dom.legend(handles=[
-                            _Patch(facecolor="white", alpha=0.5, label="gt_full (original)"),
-                            _Patch(facecolor="#33ee66", alpha=0.7, label="domain (kept)"),
-                            _Patch(facecolor="#ff3333", alpha=0.7, label="excluded by domain"),
+                            _Patch(facecolor="#33ee66", alpha=0.9, label="domain (kept)"),
+                            _Patch(facecolor="#ff8822", alpha=0.9, label="excl. by ribbon (in bbox, outside 2.5xmedian DT)"),
+                            _Patch(facecolor="#ff3333", alpha=0.9, label="excl. by bbox/no-touch"),
                         ], loc="lower right", fontsize=7, framealpha=0.85)
                         ax_dom.set_xlim(dx0, dx1)
                         ax_dom.set_ylim(dy1, dy0)
@@ -3744,6 +3806,131 @@ def compute_projected_width_diffs(
                         print(f"[BASELINE B1] wrote domain mask plot: {out_dom}")
             except Exception as _e_dom:
                 print(f"[BASELINE B1] domain mask plot failed: {_e_dom}")
+
+            # --- DT ribbon experiment plots (plot-only, no projection changes) ---
+            # For each variant of ribbon radius derived from wmap_support sampled
+            # along the GT midline, plot the candidate domain vs current domain.
+            try:
+                dom_masks_used = diag.get("domain_masks_used", {}) or {}
+                if dom_masks_used and metrics_dir_local is not None:
+                    H_dt, W_dt = np.asarray(gt_full).shape[:2]
+                    gt_full_bin = (np.asarray(gt_full) > 0)
+                    _wm = np.asarray(wmap_support, float)
+
+                    # Collect current domain union and GT midline pixels across all entries
+                    dom_union_dt = np.zeros((H_dt, W_dt), dtype=bool)
+                    gt_seed_union = np.zeros((H_dt, W_dt), dtype=bool)
+                    dt_samples = []
+
+                    for dm_entry in dom_masks_used.values():
+                        dm = np.asarray((dm_entry or {}).get("domain", []), bool)
+                        if dm.ndim == 2 and dm.shape == (H_dt, W_dt):
+                            dom_union_dt |= dm
+
+                    # Sample wmap along GT midline points from all segments
+                    crack_contexts_dt = diag.get("crack_contexts", {}) or {}
+                    for ctx_dt in crack_contexts_dt.values():
+                        for S in (ctx_dt.get("gt_mid_parts") or []):
+                            Sa = np.asarray(S, float)
+                            if Sa.ndim != 2 or Sa.shape[1] != 2 or len(Sa) == 0:
+                                continue
+                            xx = np.clip(np.rint(Sa[:, 0]).astype(int), 0, W_dt - 1)
+                            yy = np.clip(np.rint(Sa[:, 1]).astype(int), 0, H_dt - 1)
+                            gt_seed_union[yy, xx] = True
+                            vals = _wm[yy, xx]
+                            vals = vals[np.isfinite(vals) & (vals > 0)]
+                            if vals.size > 0:
+                                dt_samples.append(vals)
+
+                    if dt_samples and np.any(gt_seed_union):
+                        dt_all = np.concatenate(dt_samples)
+                        dt_max = float(np.max(dt_all))
+                        dt_med = float(np.median(dt_all))
+
+                        from scipy.ndimage import distance_transform_edt
+                        dist_from_gt = distance_transform_edt(~gt_seed_union)
+
+                        variants = [
+                            ("1x_med_dt", dt_med * 1.0, f"1×median(dt)={dt_med*1:.1f}px"),
+                            ("2x_med_dt", dt_med * 2.0, f"2×median(dt)={dt_med*2:.1f}px"),
+                            ("3x_med_dt", dt_med * 3.0, f"3×median(dt)={dt_med*3:.1f}px"),
+                            ("max_dt", dt_max, f"max(dt)={dt_max:.1f}px"),
+                        ]
+
+                        # Crop bounds: union of current domain + pad
+                        ys_dtu, xs_dtu = np.where(dom_union_dt)
+                        if len(xs_dtu) > 0:
+                            pad_dt = 30
+                            vx0 = max(0, int(np.min(xs_dtu)) - pad_dt)
+                            vy0 = max(0, int(np.min(ys_dtu)) - pad_dt)
+                            vx1 = min(W_dt, int(np.max(xs_dtu)) + pad_dt)
+                            vy1 = min(H_dt, int(np.max(ys_dtu)) + pad_dt)
+
+                            for var_name, var_radius, var_label in variants:
+                                try:
+                                    ribbon_dt = dist_from_gt <= var_radius
+                                    candidate = gt_full_bin & ribbon_dt
+
+                                    fig_v, ax_v = plt.subplots(figsize=(10, 6), dpi=180)
+                                    ax_v.set_facecolor("black")
+
+                                    # Black background for non-crack
+                                    bg = np.zeros((vy1 - vy0, vx1 - vx0, 3), dtype=np.uint8)
+                                    ax_v.imshow(bg, extent=[vx0, vx1, vy1, vy0],
+                                                interpolation="nearest", zorder=0)
+
+                                    cur_crop = dom_union_dt[vy0:vy1, vx0:vx1]
+                                    cand_crop = candidate[vy0:vy1, vx0:vx1]
+                                    gt_crop_v = gt_full_bin[vy0:vy1, vx0:vx1]
+
+                                    # 4 regions:
+                                    # A — in ribbon AND current domain: green (kept)
+                                    # B — in current domain, outside ribbon: red (would drop)
+                                    # C — in ribbon, outside current domain but inside gt_full: orange (ribbon expands)
+                                    # D — in ribbon, outside gt_full entirely: purple (out of bounds DT)
+                                    reg_A = cand_crop & cur_crop
+                                    reg_B = cur_crop & ~cand_crop
+                                    reg_C = cand_crop & ~cur_crop & gt_crop_v
+                                    reg_D = cand_crop & ~cur_crop & ~gt_crop_v
+
+                                    for reg, col, zo in [
+                                        (reg_B, [1.0, 0.2, 0.2, 0.85], 1),
+                                        (reg_A, [0.2, 0.9, 0.4, 0.85], 2),
+                                        (reg_C, [1.0, 0.55, 0.1, 0.85], 3),
+                                        (reg_D, [0.6, 0.2, 0.9, 0.85], 4),
+                                    ]:
+                                        rgba_v = np.zeros((vy1 - vy0, vx1 - vx0, 4), float)
+                                        rgba_v[reg] = col
+                                        ax_v.imshow(rgba_v, extent=[vx0, vx1, vy1, vy0],
+                                                    interpolation="nearest", zorder=zo)
+
+                                    from matplotlib.patches import Patch as _PatchV
+                                    ax_v.legend(handles=[
+                                        _PatchV(facecolor="#33ee66", alpha=0.9, label="kept (ribbon ∩ domain)"),
+                                        _PatchV(facecolor="#ff3333", alpha=0.9, label="dropped (domain − ribbon)"),
+                                        _PatchV(facecolor="#ff8822", alpha=0.9, label="ribbon expands into gt_full"),
+                                        _PatchV(facecolor="#9933ee", alpha=0.9, label="ribbon OOB (outside gt_full)"),
+                                    ], loc="lower right", fontsize=7, framealpha=0.85)
+                                    ax_v.set_xlim(vx0, vx1)
+                                    ax_v.set_ylim(vy1, vy0)
+                                    ax_v.set_aspect("equal")
+                                    ax_v.axis("off")
+                                    ax_v.set_title(
+                                        f"{support_method} - DT ribbon experiment: {var_label}",
+                                        fontsize=9
+                                    )
+
+                                    out_v = os.path.join(
+                                        out_dir,
+                                        f"{base_name}_{support_method}_b1_dt_ribbon_{var_name}.png"
+                                    )
+                                    fig_v.savefig(out_v, dpi=180, bbox_inches="tight")
+                                    plt.close(fig_v)
+                                    print(f"[BASELINE B1] wrote DT ribbon plot ({var_name}): {out_v}")
+                                except Exception as _e_v:
+                                    print(f"[BASELINE B1] DT ribbon plot {var_name} failed: {_e_v}")
+            except Exception as _e_dt:
+                print(f"[BASELINE B1] DT ribbon experiment failed: {_e_dt}")
 
             # --- Plot B: skeleton pruning (original vs clipped) ---
             try:
