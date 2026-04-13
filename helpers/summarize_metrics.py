@@ -228,8 +228,12 @@ def _parse_width_summary_context(rel_path: str) -> Tuple[str, str, str]:
 
 def _parse_midline_context(rel_path: str) -> Tuple[str, str, str]:
     parts = rel_path.replace("\\", "/").split("/")
-    baseline_method = ""
-    method_family = "model"
+    _KNOWN_BASELINE_METHODS = {
+        "eob_width_dse", "esd_width_dse", "mat_width_dse", "mat_width_raw",
+        "pca_width_dse", "skel_mat_dse", "skel_mat_raw",
+    }
+    method_family = "baseline" if (len(parts) > 0 and parts[0].lower() in _KNOWN_BASELINE_METHODS) else "model"
+    baseline_method = parts[0] if method_family == "baseline" else ""
     midline_type = "unknown"
 
     # Normalize: find where "midline_metrics" appears in path
@@ -678,6 +682,7 @@ def _aggregate_width_metrics(
     COLOR_MAP = {
         "baseline": "#2ca02c",  # green
         "auto": "#1f77b4",      # blue
+        "model": "#1f77b4",     # blue (same as auto)
         "ET": "#d62728",        # red
     }
 
@@ -761,7 +766,7 @@ def _aggregate_width_metrics(
         ax.grid(axis="y", alpha=0.2)
         legend_handles = [
             Patch(facecolor=COLOR_MAP["ET"], edgecolor="none", label="ET"),
-            Patch(facecolor=COLOR_MAP["auto"], edgecolor="none", label="auto"),
+            Patch(facecolor=COLOR_MAP["model"], edgecolor="none", label="model (dt/best_dt)"),
             Patch(facecolor=COLOR_MAP["baseline"], edgecolor="none", label="baseline"),
             Patch(facecolor="#f58518", edgecolor="none", label="IQR"),
         ]
@@ -853,7 +858,7 @@ def _aggregate_width_metrics(
         ax.grid(axis="y", alpha=0.2)
         legend_handles = [
             Patch(facecolor=COLOR_MAP["ET"], edgecolor="none", label="ET"),
-            Patch(facecolor=COLOR_MAP["auto"], edgecolor="none", label="auto"),
+            Patch(facecolor=COLOR_MAP["model"], edgecolor="none", label="model (dt/best_dt)"),
             Patch(facecolor=COLOR_MAP["baseline"], edgecolor="none", label="baseline"),
         ]
         ax.legend(handles=legend_handles, loc="best", fontsize=8, framealpha=0.9)
@@ -1036,7 +1041,7 @@ def _aggregate_width_metrics(
     rmse_col = "rmse_px_mean" if "rmse_px_mean" in grouped.columns else None
     total_grouped = grouped[grouped["crack_type"].astype(str).str.upper() == "TOTAL"].copy()
     plot_grouped = total_grouped if not total_grouped.empty else grouped
-    legend_items = [(k, v) for k, v in [("ET", COLOR_MAP["ET"]), ("auto", COLOR_MAP["auto"]), ("baseline", COLOR_MAP["baseline"])]
+    legend_items = [(k, v) for k, v in [("ET", COLOR_MAP["ET"]), ("model", COLOR_MAP["model"]), ("baseline", COLOR_MAP["baseline"])]
                     if k in set(plot_grouped["source_class"].astype(str).tolist())]
 
     if mae_col:
@@ -1265,7 +1270,10 @@ def _aggregate_midline_metrics(
     frames = []
     for img_dir in image_dirs:
         image = os.path.basename(img_dir)
-        found = glob.glob(os.path.join(img_dir, "**", "*_midline_metrics_*.csv"), recursive=True)
+        found = [
+            f for f in glob.glob(os.path.join(img_dir, "**", "*_midline_metrics_*.csv"), recursive=True)
+            if re.search(r"\d+_midline_metrics_combined_(derived|baseline)\.csv$", os.path.basename(f))
+        ]
         found += [
             p for p in glob.glob(os.path.join(img_dir, "**", "midline_metrics*.csv"), recursive=True)
             if p not in found
@@ -1295,26 +1303,57 @@ def _aggregate_midline_metrics(
             _abl_path = os.path.normpath(_abl_path)
         if os.path.isfile(_abl_path):
             _abl_df = _safe_read_csv(_abl_path)
-            if _abl_df is not None and not _abl_df.empty:
-                _abl_df = _abl_df.copy()
-                _abl_df["image"] = image
-                _abl_df["midline_type_path"] = _abl_df.get("variant_id", "unknown")
-                _abl_df["method_family"] = "model"
-                _abl_df["baseline_method"] = ""
-                _abl_df["source_relpath"] = f"supervision/{image}/analysis/gt_ablation_midline_metrics.csv"
-                # Rename variant_id -> midline_type if needed
-                if "variant_id" in _abl_df.columns and "midline_type" not in _abl_df.columns:
-                    _abl_df["midline_type"] = _abl_df["variant_id"].astype(str)
-                if "crack_type" not in _abl_df.columns:
-                    _abl_df["crack_type"] = "combined"
-                if "geometry_type" not in _abl_df.columns:
-                    _abl_df["geometry_type"] = "derived"
-                frames.append(_abl_df)
+            if _abl_df is not None and not _abl_df.empty and "variant_id" in _abl_df.columns:
+                print(f"[MIDLINE ABL] {image} ablation variant_ids: {_abl_df['variant_id'].unique().tolist()}")
+                # Map supervision variant_id -> display midline_type, keep only ET/dt/dt_depth
+                _vid_map = {
+                    "manual": "ET",
+                    "dt": "dt",
+                    "dt_depth": "best_dt_depth",
+                    "dt_ridge_color_depth": "best_dt_depth",
+                    "dt_ridge_valley_depth": "best_dt_depth",
+                }
+                _abl_df = _abl_df[_abl_df["variant_id"].astype(str).isin(_vid_map)].copy()
+                if _abl_df.empty:
+                    pass
+                else:
+                    _abl_df["midline_type"] = _abl_df["variant_id"].astype(str).map(_vid_map)
+                    # Keep best score if multiple variants map to same midline_type
+                    if "score_mid" in _abl_df.columns:
+                        _abl_df = _abl_df.sort_values("score_mid").groupby("midline_type", as_index=False).first()
+                    _abl_df["image"] = image
+                    _abl_df["midline_type_path"] = _abl_df["midline_type"]
+                    _abl_df["method_family"] = "model"
+                    _abl_df["baseline_method"] = ""
+                    # Use a path that _parse_midline_context will handle correctly
+                    # Format: {midline_type}/midline_metrics/... -> parsed as model with midline_type=midline_type
+                    _abl_df["source_relpath"] = _abl_df["midline_type"].astype(str).apply(
+                        lambda mt: f"{mt}/midline_metrics/combined/gt_ablation_midline_metrics.csv"
+                    )
+                    if "crack_type" not in _abl_df.columns:
+                        _abl_df["crack_type"] = "combined"
+                    if "geometry_type" not in _abl_df.columns:
+                        _abl_df["geometry_type"] = "derived"
+                    frames.append(_abl_df)
 
     if not frames:
         return outputs
 
     all_df = pd.concat(frames, ignore_index=True)
+    print(
+        "[midline-debug] pre-filter all rows by midline_type:\n"
+        + (
+            all_df["midline_type"].value_counts(dropna=False).to_string()
+            if "midline_type" in all_df.columns
+            else "NO midline_type"
+        )
+    )
+    print(
+        f"[midline-debug] pre-filter score_mid finite: "
+        f"{int(np.isfinite(pd.to_numeric(all_df.get('score_mid', pd.Series()), errors='coerce').to_numpy(float)).sum())} / {len(all_df)}"
+    )
+    if "crack_type" in all_df.columns:
+        print(f"[midline-debug] crack_type values:\n{all_df[['midline_type','crack_type','method_family','source_relpath']].to_string()}")
     if MIDLINE_DEBUG:
         try:
             dbg_cols = [c for c in ["image", "crack_type", "geometry_type", "method_family", "baseline_method", "midline_type"] if c in all_df.columns]
@@ -1411,7 +1450,7 @@ def _aggregate_midline_metrics(
             d["group_label"] = d.apply(_grp_label, axis=1)
             d = d.sort_values("score_mid_mean", ascending=True).head(20)
 
-            grp_color_map = {"ET": "#d62728", "auto": "#1f77b4", "baseline": "#2ca02c"}
+            grp_color_map = {"ET": "#d62728", "auto": "#1f77b4", "model": "#1f77b4", "baseline": "#2ca02c"}
 
             def _grp_color(row):
                 mf = str(row.get("method_family", "") or "").lower()
@@ -1420,12 +1459,13 @@ def _aggregate_midline_metrics(
                     return grp_color_map["baseline"]
                 if _is_et_like(mt):
                     return grp_color_map["ET"]
-                return grp_color_map["auto"]
+                sc = row.get("source_class", "")
+                return grp_color_map.get(sc, grp_color_map["auto"])
 
             grp_colors = d.apply(_grp_color, axis=1).tolist()
             legend_items = [
                 ("ET", grp_color_map["ET"]),
-                ("auto", grp_color_map["auto"]),
+                ("model (dt/best_dt)", grp_color_map.get("model", grp_color_map["auto"])),
                 ("baseline", grp_color_map["baseline"]),
             ]
             out_png = os.path.join(midline_dir, "dataset_midline_score_by_method_crack.png")
@@ -1487,6 +1527,9 @@ def _aggregate_midline_metrics(
                     return "baseline"
                 if _is_et_like(row.get("midline_type", "")):
                     return "ET"
+                mt = str(row.get("midline_type", "")).lower()
+                if mt in ("dt", "best_dt_depth", "dt_depth", "dt_ridge_color_depth", "dt_ridge_valley_depth"):
+                    return "model"
                 return "auto"
 
             d0["source_class"] = d0.apply(_src_class, axis=1)
@@ -1564,7 +1607,7 @@ def _aggregate_midline_metrics(
 
                 top = rank_df.head(20).copy()
                 top["label"] = top.get("method_name", pd.Series(["unknown"] * len(top))).astype(str).map(_display_midline_label)
-                color_map = {"ET": "#d62728", "auto": "#1f77b4", "baseline": "#2ca02c"}
+                color_map = {"ET": "#d62728", "model": "#1f77b4", "auto": "#1f77b4", "baseline": "#2ca02c"}
                 colors = [color_map.get(str(c), "#4c78a8") for c in top["source_class"].astype(str).tolist()]
                 fig_w = max(10.0, 0.55 * len(top))
                 fig, ax = plt.subplots(figsize=(fig_w, 5.0), dpi=180)
@@ -1579,7 +1622,7 @@ def _aggregate_midline_metrics(
                 present_cls = set(top["source_class"].astype(str).tolist())
                 legend_handles = [
                     Patch(facecolor=color_map[cls], edgecolor="none", label=cls)
-                    for cls in ["ET", "auto", "baseline"]
+                    for cls in ["ET", "model", "auto", "baseline"]
                     if cls in present_cls and cls in color_map
                 ]
                 ax.legend(handles=legend_handles, loc="best", framealpha=0.9, fontsize=8)
@@ -1691,6 +1734,9 @@ def _aggregate_timing_metrics(
 
         # aggregate mean timing components
         key_cols = [c for c in ["edge_masks_sec", "edges_tracking_sec", "build_combined_sec"] if c in all_df.columns]
+        if not key_cols:
+            # Try driver timing columns which have real per-stage seconds
+            key_cols = [c for c in num_cols if any(k in c for k in ("edge", "mask", "build", "width", "mid"))][:6]
         if not key_cols:
             key_cols = num_cols[:6]
         if key_cols:
@@ -2140,6 +2186,13 @@ def _aggregate_baseline_timings(
             summary_files.append(p2)
         # Per-method segmentation inference timing CSVs.
         seg_infer_files.extend(glob.glob(os.path.join(root, "**", "timing_per_image.csv"), recursive=True))
+
+    # Also search metrics/_baseline_timings/ for B1 projection timing
+    metrics_root = os.path.join(os.path.dirname(out_dir), "metrics") if out_dir else ""
+    if metrics_root and os.path.isdir(metrics_root):
+        _b1_timing = os.path.join(metrics_root, "_baseline_timings", "timing_per_image.csv")
+        if os.path.isfile(_b1_timing) and _b1_timing not in timing_files:
+            timing_files.append(_b1_timing)
 
     # Also pick other timing-like files from explicit roots only.
     for root in roots:
@@ -3445,7 +3498,7 @@ def _plot_dataset_full_timing_overview(
             | df_mean["method"].astype(str).str.upper().eq("ET")
         ].to_dict("records")
         width_subset = df_mean[
-            df_mean["category"].isin(["baseline_width", "ET", "auto", "multi_cue", "gt_centering", "gt_supervision"])
+            df_mean["category"].isin(["baseline_width", "ET", "auto", "multi_cue", "gt_centering"])
         ].to_dict("records")
         outputs["seg_chart"] = _plot_algorithm_overview(
             seg_subset,
@@ -4044,12 +4097,12 @@ def _aggregate_calibration_ablation(
     timing_csvs += glob.glob(os.path.join(calib_dir, "dt_best*.csv"))
     timing_csvs = list(dict.fromkeys(timing_csvs))
 
-    timing_skip = set()  # include all timing CSVs
     timing_display = {
-        "dt_best_et_pass1": "GT supervision",
-        "dt_best_et_pass2b_edge_tracking": "edge tracking",
+        "dt_best_et_pass1": "ET (edge track + GT sup)",
+        "dt_best_et_pass2b_edge_tracking": "best edge tracking",
         "dt_best_et_pass2c_width_eval": "width eval",
     }
+    timing_skip = set()
     for p in timing_csvs:
         df = _safe_read_csv(p)
         if df is None or df.empty:
@@ -4162,6 +4215,15 @@ def summarize_dataset_metrics(
     except Exception as e:
         _log(verbose, f"[summarize] failed to reset summary dir: {e}")
         os.makedirs(out_dir, exist_ok=True)
+
+    # Clean up stale debug artifacts
+    import glob as _glob
+    for _stale in _glob.glob(os.path.join(metrics_root, "**", "et_ref.csv"), recursive=True):
+        try:
+            os.remove(_stale)
+            _log(verbose, f"[summarize] removed stale et_ref.csv: {_stale}")
+        except Exception:
+            pass
 
     image_dirs = _list_image_metric_dirs(metrics_root)
     if image_filter is not None:

@@ -1176,6 +1176,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     "stage": "pass1",
                     "image": base,
                     "elapsed_s": float((r or {}).get("elapsed_s", np.nan)),
+                    "total_s": float((r or {}).get("elapsed_s", np.nan)),
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 },
             )
@@ -3512,10 +3513,15 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                                 "dt": "dt",
                                 "best_dt_depth": str(getattr(self, "_best_non_dt_method", "dt_depth")),
                             }
-                            _mkey = _vid_to_method.get(str(variant_id), str(variant_id))
+                            # ET has no self-comparison in ablation; use dt row as geometric proxy
+                            _et_fallback = (str(variant_id) == "ET") or (str(midline_type) == "ET")
+                            _mkey = "dt" if _et_fallback else _vid_to_method.get(str(variant_id), str(variant_id))
                             _row = _abl[_abl["variant_id"].astype(str) == _mkey]
                             if _row.empty:
                                 _row = _abl[_abl["variant_id"].astype(str).str.contains(_mkey, na=False)]
+                            if _mkey == "manual" and _row.empty:
+                                # ET has no self-comparison row in ablation; use dt as ET reference proxy.
+                                _row = _abl[_abl["variant_id"].astype(str) == "dt"]
                             if not _row.empty:
                                 _r = _row.iloc[0]
 
