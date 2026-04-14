@@ -2128,20 +2128,50 @@ def _project_support_indices_core(
     idx_all = np.full((len(xy),), -1, dtype=int)
 
     if np.any(finite):
+        n_q = int(np.sum(finite))
         try:
             from scipy.spatial import cKDTree
             tree = cKDTree(supp_xy)
-            d, idx = tree.query(xy[finite], k=1)
-            d = np.asarray(d, float)
-            idx = np.asarray(idx, int)
+            k = int(min(8, len(supp_xy)))
+            d_knn, idx_knn = tree.query(xy[finite], k=k)
+            d_knn = np.asarray(d_knn, float)
+            idx_knn = np.asarray(idx_knn, int)
+            if k == 1:
+                d_knn = d_knn.reshape(-1, 1)
+                idx_knn = idx_knn.reshape(-1, 1)
         except Exception:
-            d = np.full((np.sum(finite),), np.inf, float)
-            idx = np.full((np.sum(finite),), -1, int)
+            k = int(min(8, len(supp_xy)))
+            d_knn = np.full((n_q, k), np.inf, float)
+            idx_knn = np.full((n_q, k), -1, int)
             for i, p in enumerate(xy[finite]):
                 dd = np.sum((supp_xy - p) ** 2, axis=1)
-                j = int(np.argmin(dd))
-                idx[i] = j
-                d[i] = float(np.sqrt(dd[j]))
+                order = np.argsort(dd)[:k]
+                idx_knn[i, : len(order)] = order.astype(int)
+                d_knn[i, : len(order)] = np.sqrt(dd[order]).astype(float)
+
+        # Deduplicate assignment: each support index is used at most once when possible.
+        d = np.full((n_q,), np.inf, float)
+        idx = np.full((n_q,), -1, int)
+        used = set()
+        for i in range(n_q):
+            chosen = -1
+            for j in range(int(d_knn.shape[1])):
+                cand = int(idx_knn[i, j])
+                if cand < 0:
+                    continue
+                if cand not in used:
+                    chosen = cand
+                    d[i] = float(d_knn[i, j])
+                    break
+            if chosen < 0:
+                # All k neighbors were already used; fall back to nearest.
+                cand0 = int(idx_knn[i, 0]) if idx_knn.shape[1] > 0 else -1
+                if cand0 >= 0:
+                    chosen = cand0
+                    d[i] = float(d_knn[i, 0])
+            if chosen >= 0:
+                idx[i] = chosen
+                used.add(chosen)
 
         finite_idx = np.flatnonzero(finite)
         d_all[finite_idx] = d
@@ -6262,11 +6292,16 @@ def compare_widths_for_aligned_cracks(
             )
 
         buckets = {}
+        _key_counts = {}
         for S, m in zip(dsegs_in, dmeta_in):
             if S is None or len(S) < 2:
                 continue
             k = _k_ab(m)
             buckets.setdefault(k, []).append((np.asarray(S, float), dict(m if isinstance(m, dict) else {})))
+            _key_counts[k] = _key_counts.get(k, 0) + 1
+        for k, cnt in _key_counts.items():
+            if cnt > 1:
+                print(f"[DERIVED MATCH WARN] cid={cid} duplicate derived key={k} count={cnt} -- will consume FIFO")
 
         out_segs, out_meta = [], []
         for _Sm, mm in zip(mid_keep_segs, mid_keep_meta):
@@ -6293,7 +6328,8 @@ def compare_widths_for_aligned_cracks(
                     print(f"[DERIVED MATCH DBG] derived atomic_ids={sorted({a for (a, _) in avail if a is not None})}")
                 except Exception as _e:
                     print(f"[DERIVED MATCH DBG] failed: {_e}")
-                raise RuntimeError(f"[FATAL] Missing derived segment for key={k} in cid={cid}")
+                print(f"[DERIVED MATCH SKIP] cid={cid} no derived segment for key={k} -- skipping")
+                continue
             Sd, md = buckets[k].pop(0)
             out_segs.append(Sd)
             out_meta.append(md)
@@ -10933,7 +10969,7 @@ def compare_widths_for_aligned_cracks(
             df_global = _upsert_by_keys(
                 global_csv,
                 df_mid,
-                key_cols=("image", "midline_type", "crack_type", "variant_id"),
+                    key_cols=["image", "midline_type", "crack_type", "variant_id"],
             )
             if not df_global.empty:
                 plot_midline_length_score_relationship(

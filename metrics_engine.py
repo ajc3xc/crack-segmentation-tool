@@ -99,7 +99,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 depth_timing_csv = cand
 
         # Hard-coded single-image filter for quick debug runs - comment out for full dataset:
-        image_filter = ["98"]
+        #image_filter = ["98"]
+        image_filter = None
         report = _summarize_dataset_metrics(
             save_folder=self.save_folder,
             out_dir=out_dir,
@@ -120,6 +121,13 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             return []
 
         total = len(self.image_names)
+        def _numeric_sort_key(idx):
+            try:
+                b = os.path.splitext(os.path.basename(str(self.image_names[idx])))[0]
+                return int(b)
+            except Exception:
+                return float("inf")
+
         if image_indices is not None:
             out = []
             for i in (image_indices or []):
@@ -129,7 +137,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     continue
                 if 0 <= ii < total:
                     out.append(ii)
-            return sorted(set(out))
+            return sorted(set(out), key=_numeric_sort_key)
 
         if base_names is not None:
             by_base = {}
@@ -140,9 +148,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             for b in (base_names or []):
                 if str(b) in by_base:
                     out.append(int(by_base[str(b)]))
-            return sorted(set(out))
+            return sorted(set(out), key=_numeric_sort_key)
 
-        return list(range(total))
+        return sorted(range(total), key=_numeric_sort_key)
 
     def _best_ablation_json_path(self):
         import os
@@ -942,9 +950,12 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         from helpers import metrics as metrics_mod
 
         # -- Hardcoded toggles for fast iteration --
-        resolved_indices = [97]
+        #resolved_indices = [0,101,97,108,113,129]
+        resolved_indices = [7,101,107,110,116]
+        #resolved_indices= None
+        #base_names = ["98", "102", "109", "114", "130"]
         SKIP_ALREADY_PROCESSED = False
-        FAST_RUN_EDGE_SWEEP = True
+        FAST_RUN_EDGE_SWEEP = False
 
         idxs = self._resolve_metrics_image_indices(image_indices=resolved_indices, base_names=base_names)
         if not idxs:
@@ -1146,10 +1157,12 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             }
 
         t0 = time.perf_counter()
+        section_wall_s = {}
         pass1_rows = []
         pass2b_rows = []
         pass2c_rows = []
 
+        _t_sec = time.perf_counter()
         print(f"[batch dt_best_et] pass1 GT supervision export on {len(idxs)} image(s)")
         for n, idx in enumerate(idxs, 1):
             base = _base(idx)
@@ -1180,13 +1193,17 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 },
             )
+        section_wall_s["pass1_gt_supervision_export"] = float(time.perf_counter() - _t_sec)
 
+        _t_sec = time.perf_counter()
         best_non_dt = _best_non_dt_from_weighted_summaries(idxs)
         if not best_non_dt:
             agg = self._aggregate_ablation_rs3_length_only(image_indices=idxs, persist=True, write_plot=False)
             best_non_dt = agg.get("best_non_dt")
         print(f"[batch dt_best_et] selected best_non_dt={best_non_dt}")
+        section_wall_s["select_best_non_dt"] = float(time.perf_counter() - _t_sec)
 
+        _t_sec = time.perf_counter()
         sweep_n = max(1, min(len(idxs) // 10, 10))
         sweep_indices = idxs[:sweep_n]
         if FAST_RUN_EDGE_SWEEP:
@@ -1195,7 +1212,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             best_edge_params = dict(DEFAULT_EDGE)
             print("[batch dt_best_et] pass2a sweep disabled (FAST_RUN_EDGE_SWEEP=False); using DEFAULT_EDGE")
         print(f"[batch dt_best_et] best_edge_params={best_edge_params}")
+        section_wall_s["pass2a_edge_sweep_and_selection"] = float(time.perf_counter() - _t_sec)
 
+        _t_sec = time.perf_counter()
         print(f"[batch dt_best_et] pass2b edge tracking on {len(idxs)} image(s)")
         orig_n = int(getattr(self, "n", 0))
         try:
@@ -1240,7 +1259,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 self.change_image()
             except Exception:
                 pass
+        section_wall_s["pass2b_edge_tracking"] = float(time.perf_counter() - _t_sec)
 
+        _t_sec = time.perf_counter()
         print(f"[batch dt_best_et] pass2c width metrics on {len(idxs)} image(s)")
         for n, idx in enumerate(idxs, 1):
             base = _base(idx)
@@ -1270,21 +1291,42 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 },
             )
+        section_wall_s["pass2c_width_eval"] = float(time.perf_counter() - _t_sec)
 
+        _t_sec = time.perf_counter()
         try:
             pd.DataFrame(pass1_rows).to_csv(os.path.join(calib_dir, "dt_best_et_pass1.csv"), index=False)
             pd.DataFrame(pass2b_rows).to_csv(os.path.join(calib_dir, "dt_best_et_pass2b_edge_tracking.csv"), index=False)
             pd.DataFrame(pass2c_rows).to_csv(os.path.join(calib_dir, "dt_best_et_pass2c_width_eval.csv"), index=False)
         except Exception:
             pass
+        section_wall_s["write_calibration_csvs"] = float(time.perf_counter() - _t_sec)
 
+        _t_sec = time.perf_counter()
         self.summarize_dataset_metrics()
+        section_wall_s["summarize_dataset_metrics"] = float(time.perf_counter() - _t_sec)
+
+        total_elapsed_s = float(time.perf_counter() - t0)
+        print("\n[batch dt_best_et] wall-time summary")
+        for _k in [
+            "pass1_gt_supervision_export",
+            "select_best_non_dt",
+            "pass2a_edge_sweep_and_selection",
+            "pass2b_edge_tracking",
+            "pass2c_width_eval",
+            "write_calibration_csvs",
+            "summarize_dataset_metrics",
+        ]:
+            if _k in section_wall_s:
+                print(f"  {_k}: {section_wall_s[_k]:.2f}s")
+        print(f"  total: {total_elapsed_s:.2f}s")
         return {
             "ok": True,
             "best_non_dt": best_non_dt,
             "best_edge_params": best_edge_params,
             "n_images": int(len(idxs)),
-            "elapsed_s": float(time.perf_counter() - t0),
+            "elapsed_s": total_elapsed_s,
+            "section_wall_s": section_wall_s,
         }
 
     def _flatten_edge_worker_result(self, crack_id, params, ew):
@@ -1361,6 +1403,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         import numpy as np
         import pandas as pd
         from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+        from concurrent.futures.process import BrokenProcessPool as _BrokenProcessPool
         from edge_workers import edge_param_worker
 
         base = self.extract_edge_inputs_for_subcrack(crack_id)
@@ -3513,15 +3556,10 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                                 "dt": "dt",
                                 "best_dt_depth": str(getattr(self, "_best_non_dt_method", "dt_depth")),
                             }
-                            # ET has no self-comparison in ablation; use dt row as geometric proxy
-                            _et_fallback = (str(variant_id) == "ET") or (str(midline_type) == "ET")
-                            _mkey = "dt" if _et_fallback else _vid_to_method.get(str(variant_id), str(variant_id))
+                            _mkey = _vid_to_method.get(str(variant_id), str(variant_id))
                             _row = _abl[_abl["variant_id"].astype(str) == _mkey]
                             if _row.empty:
                                 _row = _abl[_abl["variant_id"].astype(str).str.contains(_mkey, na=False)]
-                            if _mkey == "manual" and _row.empty:
-                                # ET has no self-comparison row in ablation; use dt as ET reference proxy.
-                                _row = _abl[_abl["variant_id"].astype(str) == "dt"]
                             if not _row.empty:
                                 _r = _row.iloc[0]
 
@@ -4568,48 +4606,71 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         # ---------------------------------------------------------------------
         rows = []
         requested_edge_workers = min(int(cpu_max_workers), len(tasks)) if cpu_max_workers is not None else len(tasks)
-        pool_workers, pool_init, pool_initargs, pool_cpus = process_pool_affinity_config(
-            requested_edge_workers, label="edge-parallel"
-        )
-        print(f"[AFFINITY] edge-parallel workers={pool_workers} cpus={pool_cpus}", flush=True)
-        with ProcessPoolExecutor(max_workers=pool_workers, initializer=pool_init, initargs=pool_initargs) as ex:
-            futs = {}
-            for (cid, p) in tasks:
-                print(f"[edge-parallel] submit cid{cid} plot_only={bool(p.get('plot_only', False))}", flush=True)
-                fut = ex.submit(edge_param_worker, p)
-                futs[fut] = cid
+        _attempt_workers = requested_edge_workers
+        _max_retries = 3
+        _attempt = 0
+        _success = False
 
-            for fut in as_completed(futs):
-                cid = futs[fut]
-                try:
-                    print(f"[edge-parallel] future-ready cid{cid}", flush=True)
-                    ew = fut.result()
+        while _attempt < _max_retries and not _success:
+            if _attempt > 0:
+                _attempt_workers = max(1, _attempt_workers // 2)
+                print(f"[edge-parallel] retry attempt {_attempt}/{_max_retries} with {_attempt_workers} workers", flush=True)
 
-                    if isinstance(ew, dict):
-                        # Persist results
-                        set_tracked_edges_for_crack(
-                            self.save_folder,
-                            base_name,
-                            cid,
-                            ew,
-                            mask_crop=ew.get("mask_crop"),
-                        )
+            rows = []
+            pool_workers, pool_init, pool_initargs, pool_cpus = process_pool_affinity_config(
+                _attempt_workers, label="edge-parallel"
+            )
+            print(f"[AFFINITY] edge-parallel workers={pool_workers} cpus={pool_cpus}", flush=True)
 
-                        # CSV row
-                        row = self._flatten_edge_worker_result(
-                            crack_id=cid,
-                            params=edge_params_fixed,
-                            ew=ew,
-                        )
-                        rows.append(row)
+            try:
+                with ProcessPoolExecutor(max_workers=pool_workers, initializer=pool_init, initargs=pool_initargs) as ex:
+                    futs = {}
+                    for (cid, p) in tasks:
+                        print(f"[edge-parallel] submit cid{cid} plot_only={bool(p.get('plot_only', False))}", flush=True)
+                        fut = ex.submit(edge_param_worker, p)
+                        futs[fut] = cid
 
-                        print(f"[edge-parallel] cid{cid} ✅")
+                    _any_broken = False
+                    for fut in as_completed(futs):
+                        cid = futs[fut]
+                        try:
+                            print(f"[edge-parallel] future-ready cid{cid}", flush=True)
+                            ew = fut.result()
 
-                    else:
-                        print(f"[edge-parallel] cid{cid} empty")
+                            if isinstance(ew, dict):
+                                set_tracked_edges_for_crack(
+                                    self.save_folder,
+                                    base_name,
+                                    cid,
+                                    ew,
+                                    mask_crop=ew.get("mask_crop"),
+                                )
+                                row = self._flatten_edge_worker_result(
+                                    crack_id=cid,
+                                    params=edge_params_fixed,
+                                    ew=ew,
+                                )
+                                rows.append(row)
+                                print(f"[edge-parallel] cid{cid} ✅")
+                            else:
+                                print(f"[edge-parallel] cid{cid} empty")
 
-                except Exception as e:
-                    print(f"[edge-parallel] cid{cid} ❌ {e}")
+                        except _BrokenProcessPool:
+                            print(f"[edge-parallel] cid{cid} ❌ BrokenProcessPool — will retry with fewer workers", flush=True)
+                            _any_broken = True
+                            break
+                        except Exception as e:
+                            print(f"[edge-parallel] cid{cid} ❌ {e}")
+
+                if _any_broken:
+                    _attempt += 1
+                    continue
+
+                _success = True
+
+            except _BrokenProcessPool:
+                print(f"[edge-parallel] pool imploded at {pool_workers} workers — halving", flush=True)
+                _attempt += 1
 
         # ---------------------------------------------------------------------
         # 4) Export CSV

@@ -2576,16 +2576,17 @@ def _split_derived_by_atomic_junctions(
         idx = int(np.argmin(np.abs(sD - frac)))
         raw_cut_idx.append(idx)
 
-    # --- De-dup / enforce strict increasing cut indices ---
-    cut_idx = []
+    # --- De-dup / enforce strict increasing cut indices (preserve atomic boundary index) ---
+    # raw_cut_idx[k] is the boundary between atomic_seq[k] and atomic_seq[k+1].
+    cut_pairs = []  # (derived_idx, seq_pos)
     last = -10**9
-    for idx in sorted(raw_cut_idx):
-        if idx <= last + 1:
+    for seq_pos, raw_idx in enumerate(raw_cut_idx):
+        if raw_idx <= last + 1:
             continue
-        cut_idx.append(idx)
-        last = idx
+        cut_pairs.append((int(raw_idx), int(seq_pos)))
+        last = int(raw_idx)
 
-    if not cut_idx:
+    if not cut_pairs:
         # Nothing usable -> return unsplit (still better than “missing derived segment” fatal)
         return [D], [{
             "branch_id": int(branch_id),
@@ -2601,11 +2602,11 @@ def _split_derived_by_atomic_junctions(
     start_i = 0
     seg_counter = 0
 
-    for k, idx in enumerate(cut_idx):
+    for idx, seq_pos in cut_pairs:
         end_i = int(idx) + 1
         if end_i - start_i >= 2:
             piece = D[start_i:end_i]
-            aid = atomic_seq[k]  # kth segment in chain order
+            aid = atomic_seq[seq_pos] if seq_pos < len(atomic_seq) else atomic_seq[-1]
             out_segs.append(piece)
             out_meta.append({
                 "branch_id": int(branch_id),
@@ -2618,7 +2619,8 @@ def _split_derived_by_atomic_junctions(
 
     # tail
     if len(D) - start_i >= 2:
-        aid = atomic_seq[len(out_segs)] if len(out_segs) < len(atomic_seq) else atomic_seq[-1]
+        last_seq_pos = (cut_pairs[-1][1] + 1) if cut_pairs else 0
+        aid = atomic_seq[last_seq_pos] if last_seq_pos < len(atomic_seq) else atomic_seq[-1]
         out_segs.append(D[start_i:])
         out_meta.append({
             "branch_id": int(branch_id),
@@ -3154,6 +3156,27 @@ def build_combined_crack_stateless(
                 continue
 
             # ------------------------------------------------
+            # Loop-open guard: near-closed runs can break ET endpoint logic.
+            # Open them by trimming a small tail from both ends.
+            # ------------------------------------------------
+            _s0 = np.asarray(S_run[0], float)
+            _s1 = np.asarray(S_run[-1], float)
+            _loop_dist = float(np.linalg.norm(_s0 - _s1))
+            _arc_len = float(np.sum(np.linalg.norm(np.diff(np.asarray(S_run, float), axis=0), axis=1)))
+            _loop_thresh = max(5.0, 0.05 * _arc_len)
+            if _loop_dist < _loop_thresh:
+                _trim = max(1, len(S_run) // 20)
+                if len(S_run) > 2 * _trim + 2:
+                    S_run = np.asarray(S_run[_trim:-_trim], float).copy()
+                    if len(S_run) < 3:
+                        continue
+                    print(
+                        f"[LOOP OPEN] branch={branch_id} run={run_id} "
+                        f"loop_dist={_loop_dist:.1f}px trimmed {_trim} pts from each end",
+                        flush=True,
+                    )
+
+            # ------------------------------------------------
             # Branch-safe pad
             # ------------------------------------------------
             branch_pad = max(
@@ -3362,28 +3385,46 @@ def build_combined_crack_stateless(
                     f"flipped derived run (d_fwd={orient_info['d_forward']:.4f}, d_rev={orient_info['d_reverse']:.4f})"
                 )
 
+            # ---- normals validity + fallback ----
+            from cracktools.segmentation import generate_mask_from_edges
+            m_norm = min(len(n1_full), len(n2_full))
+            if m_norm < 2:
+                # Fallback: estimate normals from derived midline tangents + fixed half-width.
+                try:
+                    _dm = np.asarray(derived_mid_full, float)
+                    _tangents = np.diff(_dm, axis=0)
+                    _lens = np.linalg.norm(_tangents, axis=1, keepdims=True).clip(1e-9)
+                    _tangents = _tangents / _lens
+                    _perp = np.column_stack([-_tangents[:, 1], _tangents[:, 0]])
+                    _hw = float(np.median(np.concatenate(all_widths)) / 2.0) if all_widths else 8.0
+                    _pts = (_dm[:-1] + _dm[1:]) / 2.0
+                    n1_full = _finite_xy(_pts + _perp * _hw)
+                    n2_full = _finite_xy(_pts - _perp * _hw)
+                    m_norm = min(len(n1_full), len(n2_full))
+                    print(
+                        f"[COMBINER FALLBACK] branch={branch_id} run={run_id} "
+                        f"recomputed normals from tangents n={m_norm} hw={_hw:.1f}px"
+                    )
+                except Exception as _ef:
+                    print(f"[COMBINER FALLBACK] branch={branch_id} run={run_id} failed: {_ef}")
+                    m_norm = 0
+                if m_norm < 2:
+                    print(
+                        f"[COMBINER DIAG] branch={branch_id} run={run_id} insufficient normals "
+                        f"after mapping/canon: len(S_run)={len(S_run)} len(derived_mid)={len(derived_mid_full)} "
+                        f"len(e1)={len(e1_full)} len(e2)={len(e2_full)} "
+                        f"len(n1)={len(n1_full)} len(n2)={len(n2_full)} "
+                        f"raw_norm_shapes={(np.shape(e1x), np.shape(e1y), np.shape(e2x), np.shape(e2y))}"
+                    )
+                    continue
+
+            # ---- store geometry (only after normals validated) ----
             derived_midline_segs.append(derived_mid_full)
             branch_to_derived_runs[int(branch_id)].append(derived_mid_full)
-
-            # ---- store geometry ----
             edge1_segs.append(e1_full)
             edge2_segs.append(e2_full)
             norm1_segs.append(n1_full)
             norm2_segs.append(n2_full)
-
-            # ---- mask generation ----
-            from cracktools.segmentation import generate_mask_from_edges
-            m_norm = min(len(n1_full), len(n2_full))
-            if m_norm < 2:
-                print(
-                    f"[COMBINER DIAG] branch={branch_id} run={run_id} insufficient normals "
-                    f"after mapping/canon: len(S_run)={len(S_run)} len(derived_mid)={len(derived_mid_full)} "
-                    f"len(e1)={len(e1_full)} len(e2)={len(e2_full)} "
-                    f"len(n1)={len(n1_full)} len(n2)={len(n2_full)} "
-                    f"raw_norm_shapes={(np.shape(e1x), np.shape(e1y), np.shape(e2x), np.shape(e2y))}"
-                )
-                # Keep pipeline alive and let downstream combined mask reflect remaining valid runs.
-                continue
 
             try:
                 mask_run = generate_mask_from_edges(

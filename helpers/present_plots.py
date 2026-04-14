@@ -51,8 +51,11 @@ def plot_iou_vs_bf1_scatter(metrics_csv, out_png, *, supervision=None):
         # two scatters so marker changes still work with a single colorbar
         sc0 = plt.scatter(iou[is_atomic], bf1[is_atomic], c=assd[is_atomic], s=55, alpha=0.9, marker="o")
         sc1 = plt.scatter(iou[~is_atomic], bf1[~is_atomic], c=assd[~is_atomic], s=55, alpha=0.9, marker="s")
-        cb = plt.colorbar(sc1)
-        cb.set_label("ASSD (px)")
+        # Use a scatter that actually has points for colorbar mappable.
+        _cb_mappable = sc1 if int(np.sum(~is_atomic)) > 0 else sc0
+        if int(np.sum(is_atomic)) > 0 or int(np.sum(~is_atomic)) > 0:
+            cb = plt.colorbar(_cb_mappable)
+            cb.set_label("ASSD (px)")
     else:
         plt.scatter(iou[is_atomic], bf1[is_atomic], s=55, alpha=0.9, marker="o", label="atomic")
         plt.scatter(iou[~is_atomic], bf1[~is_atomic], s=55, alpha=0.9, marker="s", label="combined")
