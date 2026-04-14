@@ -148,34 +148,41 @@ def _display_timing_component_name(name: str) -> str:
     s = str(name)
     low = s.lower()
     if low.startswith("shared_mat_gpu"):
-        return "medial_base"
+        return "MAT"
     if low.startswith("skeleton_dse"):
-        return "medial_dse"
-    # Strip _width in middle, preserve _dse/_raw, uppercase acronyms.
-    s = re.sub(r"_width(?=(_dse|_raw|$))", "", s, flags=re.IGNORECASE)
-    acronyms = {"eob": "EOB", "esd": "ESD", "pca": "PCA", "mat": "MAT"}
-    parts = s.split("_", 1)
-    if parts[0].lower() in acronyms:
-        parts[0] = acronyms[parts[0].lower()]
-        s = "_".join(parts)
-    s = re.sub(r"(_sec|_s)$", "", s)
+        return "DSE pruning"
+    s = re.sub(r"(_sec|_s)$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"_width", "", s, flags=re.IGNORECASE)
+    # Only strip _dse/_raw for non-MAT methods.
+    first = s.split("_")[0].lower()
+    if first in ("eob", "esd", "pca"):
+        s = re.sub(r"_dse$", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"_raw$", "", s, flags=re.IGNORECASE)
+        s = {"eob": "EOB", "esd": "ESD", "pca": "PCA"}[first]
+    elif first == "mat":
+        suffix = ""
+        if "_dse" in s.lower():
+            suffix = " (DSE)"
+        elif "_raw" in s.lower():
+            suffix = " (raw)"
+        s = "MAT" + suffix
     return s
 
 
 def _display_width_method_label(name: str) -> str:
     """
-    Clean up width baseline method display names:
-      - strip _width in middle (eob_width_dse -> eob_dse)
-      - uppercase known acronyms
-      - preserve _raw / _dse suffixes
+    Clean up width baseline method display names.
+    Preserve MAT raw vs DSE distinction.
     """
     s = str(name or "").strip()
-    s = re.sub(r"_width(?=(_dse|_raw|$))", "", s, flags=re.IGNORECASE)
-    acronyms = {"eob": "EOB", "esd": "ESD", "pca": "PCA", "mat": "MAT"}
-    parts = s.split("_", 1)
-    if parts[0].lower() in acronyms:
-        parts[0] = acronyms[parts[0].lower()]
-        s = "_".join(parts)
+    s = re.sub(r"(_sec|_s)$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"_width", "", s, flags=re.IGNORECASE)
+    first = s.split("_")[0].lower()
+    if first in ("eob", "esd", "pca"):
+        s = {"eob": "EOB", "esd": "ESD", "pca": "PCA"}[first]
+    elif first == "mat":
+        suffix = " (DSE)" if "_dse" in s.lower() else (" (raw)" if "_raw" in s.lower() else "")
+        s = "MAT" + suffix
     return s if s else str(name or "")
 
 
@@ -183,6 +190,10 @@ _METHOD_DISPLAY_NAMES = {
     "dt_ridge_valley": "dt_ridge",
     "dt_ridge_valley_depth": "dt_ridge_depth",
     "dt_ridge_color_depth": "dt_ridge_color_depth",
+    "best_dt_depth": "dt_depth",
+    "best_dt": "dt",
+    "skel_mat_dse": "MAT (DSE)",
+    "skel_mat_raw": "MAT (raw)",
 }
 
 
@@ -286,7 +297,10 @@ def _is_et_like(midline_type: str) -> bool:
 def _display_midline_label(midline_type: str) -> str:
     if _is_et_like(midline_type):
         return "ET"
-    return _display_method_name(str(midline_type or ""))
+    s = str(midline_type or "")
+    if s.startswith("best_"):
+        s = s[len("best_"):]
+    return _display_method_name(s)
 
 
 def _aggregate_mask_metrics(
@@ -766,7 +780,7 @@ def _aggregate_width_metrics(
         ax.grid(axis="y", alpha=0.2)
         legend_handles = [
             Patch(facecolor=COLOR_MAP["ET"], edgecolor="none", label="ET"),
-            Patch(facecolor=COLOR_MAP["model"], edgecolor="none", label="model (dt/best_dt)"),
+            Patch(facecolor=COLOR_MAP["model"], edgecolor="none", label="model (dt/dt_depth)"),
             Patch(facecolor=COLOR_MAP["baseline"], edgecolor="none", label="baseline"),
             Patch(facecolor="#f58518", edgecolor="none", label="IQR"),
         ]
@@ -858,7 +872,7 @@ def _aggregate_width_metrics(
         ax.grid(axis="y", alpha=0.2)
         legend_handles = [
             Patch(facecolor=COLOR_MAP["ET"], edgecolor="none", label="ET"),
-            Patch(facecolor=COLOR_MAP["model"], edgecolor="none", label="model (dt/best_dt)"),
+            Patch(facecolor=COLOR_MAP["model"], edgecolor="none", label="model (dt/dt_depth)"),
             Patch(facecolor=COLOR_MAP["baseline"], edgecolor="none", label="baseline"),
         ]
         ax.legend(handles=legend_handles, loc="best", fontsize=8, framealpha=0.9)
@@ -1465,7 +1479,7 @@ def _aggregate_midline_metrics(
             grp_colors = d.apply(_grp_color, axis=1).tolist()
             legend_items = [
                 ("ET", grp_color_map["ET"]),
-                ("model (dt/best_dt)", grp_color_map.get("model", grp_color_map["auto"])),
+                ("model (dt/dt_depth)", grp_color_map.get("model", grp_color_map["auto"])),
                 ("baseline", grp_color_map["baseline"]),
             ]
             out_png = os.path.join(midline_dir, "dataset_midline_score_by_method_crack.png")
@@ -1697,6 +1711,16 @@ def _aggregate_timing_metrics(
         d = df.copy()
         d["image"] = image
         timing_frames.append(d)
+    # Also read timings_driver.csv for actual component seconds.
+    driver_frames = []
+    for img_dir in image_dirs:
+        p = os.path.join(img_dir, "timings_driver.csv")
+        df = _safe_read_csv(p)
+        if df is None or df.empty:
+            continue
+        d = df.copy()
+        d["image"] = os.path.basename(img_dir)
+        driver_frames.append(d)
 
     if timing_frames:
         # Hard-coded naming switch:
@@ -1732,15 +1756,22 @@ def _aggregate_timing_metrics(
                 grouped.to_csv(legacy_grp_csv, index=False)
                 outputs["timings_core_grouped_csv"] = legacy_grp_csv
 
-        # aggregate mean timing components
-        key_cols = [c for c in ["edge_masks_sec", "edges_tracking_sec", "build_combined_sec"] if c in all_df.columns]
+        # Aggregate mean timing components (prefer timings_driver with real per-stage seconds).
+        _driver_df = pd.concat(driver_frames, ignore_index=True) if driver_frames else None
+        all_df_for_components = _driver_df if (_driver_df is not None and not _driver_df.empty) else all_df
+        _driver_num_cols = [
+            c for c in all_df_for_components.columns
+            if pd.api.types.is_numeric_dtype(all_df_for_components[c])
+            and (c.endswith("_sec") or c.endswith("_s"))
+            and c not in ("crack_id",)
+        ]
+        key_cols = [c for c in ["edge_masks_sec", "edges_tracking_sec", "build_combined_sec"] if c in _driver_num_cols]
         if not key_cols:
-            # Try driver timing columns which have real per-stage seconds
-            key_cols = [c for c in num_cols if any(k in c for k in ("edge", "mask", "build", "width", "mid"))][:6]
+            key_cols = [c for c in _driver_num_cols if any(k in c for k in ("edge", "mask", "build"))][:6]
         if not key_cols:
-            key_cols = num_cols[:6]
+            key_cols = _driver_num_cols[:6]
         if key_cols:
-            vals = [float(pd.to_numeric(all_df[c], errors="coerce").mean()) for c in key_cols]
+            vals = [float(pd.to_numeric(all_df_for_components[c], errors="coerce").mean()) for c in key_cols]
             out_png = os.path.join(out_dir, f"dataset_{stage_tag}_components.png")
             _save_bar(
                 key_cols,
@@ -1751,7 +1782,7 @@ def _aggregate_timing_metrics(
             )
             outputs[f"{stage_tag}_components_png"] = out_png
             # Sum version (total seconds across dataset).
-            vals_sum = [float(pd.to_numeric(all_df[c], errors="coerce").sum()) for c in key_cols]
+            vals_sum = [float(pd.to_numeric(all_df_for_components[c], errors="coerce").sum()) for c in key_cols]
             out_png_sum = os.path.join(out_dir, f"sum_dataset_{stage_tag}_components.png")
             _save_bar(
                 key_cols,
@@ -1903,6 +1934,13 @@ def _aggregate_width_distribution(
         return outputs
 
     all_df = pd.concat(frames, ignore_index=True)
+    # Normalize method-like labels for downstream sorting/plots.
+    # Purge "best_" prefix (e.g. best_dt_depth -> dt_depth).
+    for _c in ("method", "midline_type", "variant_id", "algo_variant"):
+        if _c in all_df.columns:
+            all_df[_c] = all_df[_c].astype(str).apply(
+                lambda s: s[len("best_") :] if s.startswith("best_") else s
+            )
     csv_path = os.path.join(width_dir, "dataset_width_distribution_all.csv")
     all_df.to_csv(csv_path, index=False)
     outputs["width_dist_all_csv"] = csv_path
@@ -2210,22 +2248,50 @@ def _aggregate_baseline_timings(
         frames.append(d)
     if frames:
         all_df = pd.concat(frames, ignore_index=True)
+        print(f"[BASELINE TIMING] all_df columns: {all_df.columns.tolist()}")
+        print(f"[BASELINE TIMING] num rows: {len(all_df)}")
+        if "b1_projection_s" in all_df.columns:
+            print(f"[BASELINE TIMING] b1_projection_s values: {all_df['b1_projection_s'].tolist()}")
         if "image" not in all_df.columns and "stem" in all_df.columns:
             all_df["image"] = all_df["stem"].astype(str)
-        if evaluated_images and "image" in all_df.columns:
-            all_df = all_df[all_df["image"].astype(str).isin({str(x) for x in evaluated_images})].copy()
+        if evaluated_images:
+            _eval_set_norm = {os.path.splitext(os.path.basename(str(x)))[0].replace("_modified", "") for x in evaluated_images}
+            for _id_col in ("image", "stem", "path"):
+                if _id_col in all_df.columns:
+                    _norm = all_df[_id_col].astype(str).apply(
+                        lambda s: os.path.splitext(os.path.basename(s))[0].replace("_modified", "")
+                    )
+                    all_df = all_df[_norm.isin(_eval_set_norm)].copy()
+                    break
 
         out_csv = os.path.join(out_dir, "dataset_baseline_timings_all.csv")
         all_df.to_csv(out_csv, index=False)
         outputs["baseline_timings_all_csv"] = out_csv
 
-        num_cols = [
-            c
-            for c in all_df.columns
-            if pd.api.types.is_numeric_dtype(all_df[c]) and (c.endswith("_s") or c.endswith("_sec"))
+        _ordered_cols = [
+            "shared_mat_gpu_s",
+            "skeleton_dse_s",
+            "pca_width_dse_s",
+            "esd_width_dse_s",
+            "eob_width_dse_s",
         ]
+        num_cols = [
+            c for c in _ordered_cols
+            if c in all_df.columns and pd.api.types.is_numeric_dtype(all_df[c])
+        ]
+        # mat_width_raw and mat_width_dse have no separate timing (DT*2, negligible)
+        # but they share the shared_mat_gpu_s precompute cost — add it to each
+        _col_display = {
+            "shared_mat_gpu_s": "MAT",
+            "skeleton_dse_s": "DSE pruning",
+            "pca_width_dse_s": "PCA",
+            "esd_width_dse_s": "ESD",
+            "eob_width_dse_s": "EOB",
+            "mat_width_dse_s": "MAT (DSE)",
+            "mat_width_raw_s": "MAT (raw)",
+        }
         if num_cols:
-            disp_cols = [_display_timing_component_name(c) for c in num_cols]
+            disp_cols = [_col_display.get(c, _display_timing_component_name(c)) for c in num_cols]
             vals = [float(pd.to_numeric(all_df[c], errors="coerce").mean()) for c in num_cols]
             out_png = os.path.join(out_dir, "dataset_baseline_timings_components.png")
             _save_bar(
@@ -2391,7 +2457,7 @@ def _aggregate_supervision_timings(
 
     _GT_SUP_EXCLUDE_PATTERNS = (
         "multi_cue_", "multi_cue_", "dijkstra", "costmap", "multi_cue_generation",
-        "normals_depth", "multi_cue_align", "multi_cue_recess",
+        "normals_depth", "multi_cue_align", "depth_recess",
     )
     rows = []
     for p in files:
@@ -3238,7 +3304,7 @@ def _plot_dataset_full_timing_overview(
             if comp.startswith("inference_seconds:"):
                 _add(mean_rows, comp.split(":", 1)[1], v_mean, "baseline_seg", err_mean)
                 _add(sum_rows, comp.split(":", 1)[1], v_sum, "baseline_seg", err_sum)
-            elif any(k in comp for k in ("mat_", "pca_", "esd_", "eob_", "width", "skeleton_dse")):
+            elif any(k in comp for k in ("mat_", "pca_", "esd_", "eob_", "width", "skeleton_dse")) and "skeleton_graph" not in comp.lower():
                 comp_low = comp.lower()
                 label = _display_timing_component_name(comp)
                 if any(k in comp_low for k in ("pca", "esd", "eob")):
@@ -3321,17 +3387,8 @@ def _plot_dataset_full_timing_overview(
     # dt timing from dt track CSV summary.
     df_dt = _safe_read(os.path.join(out_dir, "dataset_dt_timing_all.csv"))
     if df_dt is not None and not df_dt.empty:
-        dt_col = next(
-            (
-                c for c in (
-                    "combined_plus_noncombined_atomics_centering_sec",
-                    "centering_total_sec",
-                    "combined_centering_sec",
-                )
-                if c in df_dt.columns
-            ),
-            None,
-        )
+        # Use pure DT compute timing, not full centering loop totals.
+        dt_col = "dt_compute_s" if "dt_compute_s" in df_dt.columns else None
         if dt_col:
             dt_arr = pd.to_numeric(df_dt[dt_col], errors="coerce").to_numpy(float)
             dt_arr = dt_arr[np.isfinite(dt_arr)]
@@ -3426,7 +3483,16 @@ def _plot_dataset_full_timing_overview(
             ),
             None,
         )
-        if mc_centering_col:
+        # Prefer explicit multi-cue components.
+        _mc_component_cols = [
+            c for c in ("dt_compute_s", "multi_cue_costmap_s", "multi_cue_dijkstra_s", "normals_depth_s")
+            if c in dd.columns
+        ]
+        if _mc_component_cols:
+            dd["multi_cue_total_with_generation_sec"] = sum(
+                pd.to_numeric(dd[c], errors="coerce").fillna(0.0) for c in _mc_component_cols
+            )
+        elif mc_centering_col:
             dd["multi_cue_total_with_generation_sec"] = (
                 pd.to_numeric(dd[mc_centering_col], errors="coerce")
                 + pd.to_numeric(dd["multi_cue_generation_s"], errors="coerce").fillna(0.0)
@@ -3523,7 +3589,7 @@ def _plot_dataset_full_timing_overview(
         ("dt_compute_s", None),
         ("multi_cue_generation_s", None),
         ("multi_cue_align_s", "multi_cue_align_s"),
-        ("multi_cue_recess_s", "multi_cue_recess_s"),
+        ("depth_recess_s", "depth_recess_s"),
         ("multi_cue_costmap_s", "multi_cue_costmap_s"),
         ("multi_cue_dijkstra_s", "multi_cue_dijkstra_s"),
         ("multi_cue_postprocess_s", "multi_cue_postprocess_s"),
@@ -3916,15 +3982,49 @@ def _plot_gt_supervision_timing_detail(out_dir: str, *, verbose: bool = False) -
             outputs["dataset_timing_gt_centering_png"] = out_png
 
     if df_multi is not None and not df_multi.empty:
-        method_cols = [c for c in df_multi.columns if ("costmap" in str(c).lower() or "dijkstra" in str(c).lower())]
+        _mc_wanted = (
+            "dt_compute_s",
+            "normals_depth_s",
+            "multi_cue_align_s",
+            "depth_recess_s",
+            "multi_cue_costmap_s",
+            "multi_cue_dijkstra_s",
+            "multi_cue_postprocess_s",
+        )
+        method_cols = [
+            c
+            for c in df_multi.columns
+            if any(
+                w in str(c).lower()
+                for w in (
+                    "costmap",
+                    "dijkstra",
+                    "dt_compute",
+                    "normals_depth",
+                    "multi_cue_align",
+                    "depth_recess",
+                    "postprocess",
+                )
+            )
+        ]
+        method_cols = [c for c in _mc_wanted if c in df_multi.columns] + [c for c in method_cols if c not in _mc_wanted]
         if method_cols:
             sums = []
             labels = []
-            for c in sorted(method_cols):
+            for c in method_cols:
                 vals = pd.to_numeric(df_multi[c], errors="coerce").to_numpy(float)
                 vals = vals[np.isfinite(vals)]
                 if vals.size:
-                    labels.append(str(c))
+                    _mc_label_map = {
+                        "dt_compute_s": "DT",
+                        "normals_depth_s": "normals",
+                        "multi_cue_align_s": "align",
+                        "depth_recess_s": "recess",
+                        "multi_cue_costmap_s": "costmap",
+                        "multi_cue_dijkstra_s": "dijkstra",
+                        "multi_cue_postprocess_s": "postprocess",
+                    }
+                    labels.append(_mc_label_map.get(c, re.sub(r"(_s|_sec)$", "", str(c))))
                     sums.append(float(np.sum(vals)))
             if sums:
                 fig, ax = plt.subplots(figsize=(max(8.0, 0.45 * len(labels)), 4.2), dpi=170)
@@ -4098,11 +4198,9 @@ def _aggregate_calibration_ablation(
     timing_csvs = list(dict.fromkeys(timing_csvs))
 
     timing_display = {
-        "dt_best_et_pass1": "ET (edge track + GT sup)",
-        "dt_best_et_pass2b_edge_tracking": "best edge tracking",
-        "dt_best_et_pass2c_width_eval": "width eval",
+        "dt_best_et_pass2b_edge_tracking": "ET",
     }
-    timing_skip = set()
+    timing_skip = {"dt_best_et_pass1", "dt_best_et_pass2c_width_eval"}
     for p in timing_csvs:
         df = _safe_read_csv(p)
         if df is None or df.empty:
@@ -4298,6 +4396,50 @@ def summarize_dataset_metrics(
             verbose=verbose,
         )
     )
+    # Edge-tracking variant timing breakdown from timings_core (if timing columns exist).
+    _et_variant_rows = []
+    for _img_dir in image_dirs:
+        _tc = _safe_read_csv(os.path.join(_img_dir, "timings_core.csv"))
+        if _tc is None or _tc.empty:
+            continue
+        _tc = _tc.copy()
+        _tc["image"] = os.path.basename(_img_dir)
+        _et_variant_rows.append(_tc)
+    if _et_variant_rows:
+        _tc_all = pd.concat(_et_variant_rows, ignore_index=True)
+        _tc_all_csv = os.path.join(out_dir, "dataset_edge_variant_timings_all.csv")
+        _tc_all.to_csv(_tc_all_csv, index=False)
+        outputs["edge_variant_timings_all_csv"] = _tc_all_csv
+        _grp_cols = [c for c in ("supervision", "algo_variant", "crack_type") if c in _tc_all.columns]
+        _time_col = next((c for c in ("elapsed_s", "total_s", "edge_total_s") if c in _tc_all.columns), None)
+        if _grp_cols and _time_col:
+            _tc_grp = (
+                _tc_all.groupby(_grp_cols)[_time_col]
+                .agg(mean_s="mean", std_s="std", n="count")
+                .reset_index()
+            )
+            _tc_grp["label"] = _tc_grp.apply(
+                lambda r: f"{r.get('supervision', '')}/{r.get('algo_variant', '')}".strip("/"),
+                axis=1,
+            )
+            _tc_grp = _tc_grp.sort_values("mean_s", ascending=False)
+            if not _tc_grp.empty and _tc_grp["mean_s"].notna().any():
+                _fig, _ax = plt.subplots(figsize=(max(7.0, 0.6 * len(_tc_grp)), 4.2), dpi=180)
+                _x = np.arange(len(_tc_grp))
+                _y = _tc_grp["mean_s"].to_numpy(float)
+                _e = _tc_grp["std_s"].fillna(0.0).to_numpy(float)
+                _ax.bar(_x, _y, color="#4c78a8", alpha=0.85)
+                _ax.errorbar(_x, _y, yerr=_e, fmt="none", ecolor="black", elinewidth=1.2, capsize=3)
+                _ax.set_xticks(_x)
+                _ax.set_xticklabels(_tc_grp["label"].tolist(), rotation=35, ha="right", fontsize=8)
+                _ax.set_ylabel("mean seconds")
+                _ax.set_title("Edge-tracking variant timings (mean +/- std per image)")
+                _ax.grid(axis="y", alpha=0.2)
+                plt.tight_layout()
+                _vt_png = os.path.join(out_dir, "dataset_edge_variant_timings.png")
+                _fig.savefig(_vt_png, bbox_inches="tight")
+                plt.close(_fig)
+                outputs["edge_variant_timings_png"] = _vt_png
     outputs.update(
         _plot_dataset_full_timing_overview(
             out_dir=out_dir,

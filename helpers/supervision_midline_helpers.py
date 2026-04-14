@@ -1449,7 +1449,7 @@ def _precompute_method_shared_inputs(
     shared_timing = {
         "dt_compute_s": float((t_dt or {}).get("compute_s", 0.0)),
         "multi_cue_align_s": 0.0,
-        "multi_cue_recess_s": 0.0,
+        "depth_recess_s": 0.0,
         "rgb_align_s": 0.0,
         "rgb_cues_s": 0.0,
         "total_precompute_s": 0.0,
@@ -1496,7 +1496,7 @@ def _precompute_method_shared_inputs(
                 domain_local,
                 dt_norm=None,
             )
-            shared_timing["multi_cue_recess_s"] = float((depth_sig_meta or {}).get("compute_s", 0.0))
+            shared_timing["depth_recess_s"] = float((depth_sig_meta or {}).get("compute_s", 0.0))
             depth_bundle.update({
                 "available": True,
                 "depth_local": np.asarray(depth_local, np.float32),
@@ -1597,7 +1597,7 @@ def _run_single_midline_method(
     timing = {
         "dt_compute_s": float(shared_timing.get("dt_compute_s", 0.0)),
         "multi_cue_align_s": 0.0,
-        "multi_cue_recess_s": 0.0,
+        "depth_recess_s": 0.0,
         "costmap_s": 0.0,
         "dijkstra_s": 0.0,
         "refine_s": 0.0,
@@ -1683,7 +1683,7 @@ def _run_single_midline_method(
     recess_norm = None
     if use_depth:
         timing["multi_cue_align_s"] = float(shared_timing.get("multi_cue_align_s", 0.0))
-        timing["multi_cue_recess_s"] = float(shared_timing.get("multi_cue_recess_s", 0.0))
+        timing["depth_recess_s"] = float(shared_timing.get("depth_recess_s", 0.0))
         if not bool(depth_bundle.get("available", False)):
             out["meta"]["reason"] = str(depth_bundle.get("reason", "multi_cue_precompute_failed"))
             _log_method_failure(method_key, "multi_cue_precompute_failed", depth_bundle)
@@ -1859,7 +1859,7 @@ def _run_single_midline_method(
 
     out["meta"]["reason"] = None
     out["meta"]["multi_cue_align"] = depth_bundle.get("align_meta", {}) if isinstance(depth_bundle, dict) else {}
-    out["meta"]["multi_cue_recess"] = depth_bundle.get("recess_meta", {}) if isinstance(depth_bundle, dict) else {}
+    out["meta"]["depth_recess"] = depth_bundle.get("recess_meta", {}) if isinstance(depth_bundle, dict) else {}
     out["meta"]["rgb_align"] = rgb_bundle.get("align_meta", {}) if isinstance(rgb_bundle, dict) else {}
     out["meta"]["rgb_cues"] = rgb_bundle.get("cue_meta", {}) if isinstance(rgb_bundle, dict) else {}
     out["meta"]["costmap"] = cost_meta if isinstance(cost_meta, dict) else {}
@@ -2121,7 +2121,7 @@ def compute_midline_methods_and_normals(
             },
             "depth": {
                 "multi_cue_align_s": float((m_depth.get("timing", {}) or {}).get("multi_cue_align_s", 0.0)),
-                "recess_s": float((m_depth.get("timing", {}) or {}).get("multi_cue_recess_s", 0.0)),
+                "recess_s": float((m_depth.get("timing", {}) or {}).get("depth_recess_s", 0.0)),
                 "costmap_s": float((m_depth.get("timing", {}) or {}).get("costmap_s", 0.0)),
                 "dijkstra_s": float((m_depth.get("timing", {}) or {}).get("dijkstra_s", 0.0)),
                 "refine_s": float((m_depth.get("timing", {}) or {}).get("refine_s", 0.0)),

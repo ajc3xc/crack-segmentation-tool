@@ -867,7 +867,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 if depth_track:
                     gt_sup_timing.update({
                         "multi_cue_align_s": _safe_float(depth_track.get("multi_cue_align_s"), default=0.0),
-                        "multi_cue_recess_s": _safe_float(depth_track.get("multi_cue_recess_s"), default=0.0),
+                        "depth_recess_s": _safe_float(depth_track.get("depth_recess_s"), default=0.0),
                         "multi_cue_costmap_s": _safe_float(depth_track.get("multi_cue_costmap_s"), default=0.0),
                         "multi_cue_dijkstra_s": _safe_float(depth_track.get("multi_cue_dijkstra_s"), default=0.0),
                         "multi_cue_postprocess_s": _safe_float(depth_track.get("multi_cue_postprocess_s"), default=0.0),
@@ -875,7 +875,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     })
                     gt_sup_timing["multi_cue_total_s"] = (
                         gt_sup_timing.get("multi_cue_align_s", 0.0)
-                        + gt_sup_timing.get("multi_cue_recess_s", 0.0)
+                        + gt_sup_timing.get("depth_recess_s", 0.0)
                         + gt_sup_timing.get("multi_cue_costmap_s", 0.0)
                         + gt_sup_timing.get("multi_cue_dijkstra_s", 0.0)
                         + gt_sup_timing.get("multi_cue_postprocess_s", 0.0)

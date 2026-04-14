@@ -2823,7 +2823,7 @@ def export_gt_supervision_for_image(
         "dt_compute_s": 0.0,
         "centered_snap_s": 0.0,
         "multi_cue_align_s": 0.0,
-        "multi_cue_recess_s": 0.0,
+        "depth_recess_s": 0.0,
         "multi_cue_costmap_s": 0.0,
         "multi_cue_dijkstra_s": 0.0,
         "multi_cue_postprocess_s": 0.0,
@@ -2879,7 +2879,7 @@ def export_gt_supervision_for_image(
             timing_totals["dt_compute_s"] += float(m_dt.get("dt_compute_s", 0.0) or 0.0)
             timing_totals["centered_snap_s"] += float(m_dt.get("dijkstra_s", 0.0) or 0.0)
             timing_totals["multi_cue_align_s"] += float(m_depth.get("multi_cue_align_s", 0.0) or 0.0)
-            timing_totals["multi_cue_recess_s"] += float(m_depth.get("multi_cue_recess_s", 0.0) or 0.0)
+            timing_totals["depth_recess_s"] += float(m_depth.get("depth_recess_s", 0.0) or 0.0)
             timing_totals["multi_cue_costmap_s"] += float(m_depth.get("costmap_s", 0.0) or 0.0)
             timing_totals["multi_cue_dijkstra_s"] += float(m_depth.get("dijkstra_s", 0.0) or 0.0)
             timing_totals["multi_cue_postprocess_s"] += float(m_depth.get("postprocess_s", 0.0) or 0.0)
@@ -2893,7 +2893,7 @@ def export_gt_supervision_for_image(
         timing_totals["dt_compute_s"] += float(dt.get("compute_s", 0.0) or 0.0)
         timing_totals["centered_snap_s"] += float(ctr.get("snap_s", 0.0) or 0.0)
         timing_totals["multi_cue_align_s"] += float(dep.get("multi_cue_align_s", 0.0) or 0.0)
-        timing_totals["multi_cue_recess_s"] += float(dep.get("recess_s", 0.0) or 0.0)
+        timing_totals["depth_recess_s"] += float(dep.get("recess_s", 0.0) or 0.0)
         timing_totals["multi_cue_costmap_s"] += float(dep.get("costmap_s", 0.0) or 0.0)
         timing_totals["multi_cue_dijkstra_s"] += float(dep.get("dijkstra_s", 0.0) or 0.0)
         timing_totals["multi_cue_postprocess_s"] += float(dep.get("postprocess_s", 0.0) or 0.0)
@@ -5469,7 +5469,7 @@ def export_gt_supervision_for_image(
             "dt_compute_s",
             "centered_snap_s",
             "multi_cue_align_s",
-            "multi_cue_recess_s",
+            "depth_recess_s",
             "multi_cue_costmap_s",
             "multi_cue_dijkstra_s",
             "multi_cue_postprocess_s",
@@ -5486,7 +5486,7 @@ def export_gt_supervision_for_image(
             float(timing_totals["dt_compute_s"]),
             float(timing_totals["centered_snap_s"]),
             float(timing_totals["multi_cue_align_s"]),
-            float(timing_totals["multi_cue_recess_s"]),
+            float(timing_totals["depth_recess_s"]),
             float(timing_totals["multi_cue_costmap_s"]),
             float(timing_totals["multi_cue_dijkstra_s"]),
             float(timing_totals["multi_cue_postprocess_s"]),
@@ -5528,7 +5528,7 @@ def export_gt_supervision_for_image(
             "image",
             "dt_compute_s",
             "multi_cue_align_s",
-            "multi_cue_recess_s",
+            "depth_recess_s",
             "multi_cue_costmap_s",
             "multi_cue_dijkstra_s",
             "multi_cue_postprocess_s",
@@ -5543,7 +5543,7 @@ def export_gt_supervision_for_image(
             base_name,
             float(timing_totals["dt_compute_s"]),
             float(timing_totals["multi_cue_align_s"]),
-            float(timing_totals["multi_cue_recess_s"]),
+            float(timing_totals["depth_recess_s"]),
             float(timing_totals["multi_cue_costmap_s"]),
             float(timing_totals["multi_cue_dijkstra_s"]),
             float(timing_totals["multi_cue_postprocess_s"]),
@@ -5632,7 +5632,7 @@ def export_gt_supervision_for_image(
     t_combined_center = float(timing_totals.get("combined_centering_sec", 0.0) or 0.0)
     t_multi_cue = float(
         (timing_totals.get("multi_cue_align_s", 0.0) or 0.0)
-        + (timing_totals.get("multi_cue_recess_s", 0.0) or 0.0)
+        + (timing_totals.get("depth_recess_s", 0.0) or 0.0)
         + (timing_totals.get("multi_cue_costmap_s", 0.0) or 0.0)
         + (timing_totals.get("multi_cue_dijkstra_s", 0.0) or 0.0)
         + (timing_totals.get("multi_cue_postprocess_s", 0.0) or 0.0)
