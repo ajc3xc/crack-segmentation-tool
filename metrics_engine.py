@@ -952,9 +952,11 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         # -- Hardcoded toggles for fast iteration --
         #resolved_indices = [0,101,97,108,113,129]
         resolved_indices = [7,101,107,110,116]
+        resolved_indices = [101]
         #resolved_indices= None
         #base_names = ["98", "102", "109", "114", "130"]
         SKIP_ALREADY_PROCESSED = False
+        SKIP_PASS1 = True   # skip GT supervision export (pass1) - use when supervision already exists
         FAST_RUN_EDGE_SWEEP = False
 
         idxs = self._resolve_metrics_image_indices(image_indices=resolved_indices, base_names=base_names)
@@ -1164,35 +1166,38 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
         _t_sec = time.perf_counter()
         print(f"[batch dt_best_et] pass1 GT supervision export on {len(idxs)} image(s)")
-        for n, idx in enumerate(idxs, 1):
-            base = _base(idx)
-            if SKIP_ALREADY_PROCESSED:
-                done_flag = os.path.join(self.save_folder, "supervision", base, "analysis", "gt_ablation_midline_weighted_summary.csv")
-                if os.path.isfile(done_flag):
-                    print(f"[batch dt_best_et] pass1 skip existing: {base}")
-                    continue
-            print(f"\n[batch dt_best_et] -- pass1 {n}/{len(idxs)}: {base} (edge track + GT supervision export)")
-            r = self._run_metrics_for_image_idx(
-                idx,
-                edge_params=DEFAULT_EDGE,
-                export_supervision=True,
-                display=False,
-                best_method_key=None,
-                run_atomic_width_eval=False,
-                edge_parallel_workers=edge_parallel_workers,
-                run_edge_tracking=True,
-            )
-            pass1_rows.append(r)
-            _record_image_timing(
-                base,
-                {
-                    "stage": "pass1",
-                    "image": base,
-                    "elapsed_s": float((r or {}).get("elapsed_s", np.nan)),
-                    "total_s": float((r or {}).get("elapsed_s", np.nan)),
-                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                },
-            )
+        if SKIP_PASS1:
+            print(f"[batch dt_best_et] pass1 SKIPPED (SKIP_PASS1=True)")
+        else:
+            for n, idx in enumerate(idxs, 1):
+                base = _base(idx)
+                if SKIP_ALREADY_PROCESSED:
+                    done_flag = os.path.join(self.save_folder, "supervision", base, "analysis", "gt_ablation_midline_weighted_summary.csv")
+                    if os.path.isfile(done_flag):
+                        print(f"[batch dt_best_et] pass1 skip existing: {base}")
+                        continue
+                print(f"\n[batch dt_best_et] -- pass1 {n}/{len(idxs)}: {base} (edge track + GT supervision export)")
+                r = self._run_metrics_for_image_idx(
+                    idx,
+                    edge_params=DEFAULT_EDGE,
+                    export_supervision=True,
+                    display=False,
+                    best_method_key=None,
+                    run_atomic_width_eval=False,
+                    edge_parallel_workers=edge_parallel_workers,
+                    run_edge_tracking=True,
+                )
+                pass1_rows.append(r)
+                _record_image_timing(
+                    base,
+                    {
+                        "stage": "pass1",
+                        "image": base,
+                        "elapsed_s": float((r or {}).get("elapsed_s", np.nan)),
+                        "total_s": float((r or {}).get("elapsed_s", np.nan)),
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    },
+                )
         section_wall_s["pass1_gt_supervision_export"] = float(time.perf_counter() - _t_sec)
 
         _t_sec = time.perf_counter()
@@ -1226,6 +1231,11 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     self.n = int(idx)
                     self.change_image()
                 t_edge0 = time.perf_counter()
+                # Ensure metric snapshots are loaded for this image.
+                try:
+                    self._sync_metrics_snapshot_from_authoring(refresh_combine=False, persist=False)
+                except Exception as _e_sync:
+                    print(f"  -> [{base}] snapshot sync failed: {_e_sync}")
                 manual_ids = _manual_ids_for_current_image()
                 if manual_ids:
                     print(f"  -> [{base}] edge tracking ({len(manual_ids)} crack(s))...")

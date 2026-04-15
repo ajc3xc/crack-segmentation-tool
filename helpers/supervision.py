@@ -2737,7 +2737,7 @@ def export_gt_supervision_for_image(
     auto_centering_domain_combined: str = "terr_and_mask",
 ):
     t0_total = time.perf_counter()
-    FAST_EXPORT_MODE = True  # Keep thesis-critical outputs; skip heavy debug visuals.
+    FAST_EXPORT_MODE = not bool(DEBUG_TARGET and DEBUG_TARGET != "cid1")
     t_plot = 0.0
     t_preview = 0.0
     t_json = 0.0
@@ -2752,7 +2752,7 @@ def export_gt_supervision_for_image(
 
     # Re-enable full centering pipeline for holistic evaluation.
     enable_auto_centering = True
-    auto_centering_debug = False
+    auto_centering_debug = bool(DEBUG_TARGET and DEBUG_TARGET != "cid1")
 
     if bool(HARD_ISOLATION_DISABLE_CENTERING):
         enable_auto_centering = False
@@ -4026,6 +4026,13 @@ def export_gt_supervision_for_image(
                 return full
 
             x0, y0, bw, bh = map(int, bbox)
+            # bite bbox is in global coords; shift to crack_mask_clipped local coords
+            x0 -= int(ux)
+            y0 -= int(uy)
+            if x0 >= W or y0 >= H or x0 + bw <= 0 or y0 + bh <= 0:
+                return full
+            x0 = max(0, x0)
+            y0 = max(0, y0)
             shape = blob.get("shape", None)
             b64 = blob.get("packbits_b64", None)
             if shape is None or b64 is None:
@@ -4103,7 +4110,7 @@ def export_gt_supervision_for_image(
                 terr_px = int(np.count_nonzero(branch_terr_masks.get(bi, 0)))
                 bite_px = int(np.count_nonzero(branch_bite_masks.get(bi, 0)))
                 allow_px = int(np.count_nonzero(branch_allowed_masks.get(bi, 0)))
-                _dlog(3, f"[GT_SUP MASKDBG] branch={bi} terr_px={terr_px} bite_px={bite_px} allow_px={allow_px}")
+                print(f"[GT_SUP MASKDBG] branch={bi} terr_px={terr_px} bite_px={bite_px} allow_px={allow_px}")
         except Exception as _e:
             _dlog(3, f"[GT_SUP MASKDBG] failed: {_e}")
         
@@ -4327,8 +4334,11 @@ def export_gt_supervision_for_image(
             branch_local_cache = {}
             for bi, idxs in branch_seg_indices.items():
                 segs_branch = [np.asarray(segs[i], float) for i in idxs]
-                bb_local = _bbox_from_segments(segs_branch, pad=5, Hh=Hm, Ww=Wm)
+                if not segs_branch:
+                    continue
+                bb_local = _bbox_from_segments(segs_branch, pad=5, Hh=H, Ww=W)
                 if bb_local is None:
+                    print(f"[CACHE SKIP] branch={int(bi)} reason=bb_local_none n_segs={len(segs_branch)}")
                     continue
                 bx, by, bw, bh = [int(v) for v in bb_local]
 
@@ -4338,6 +4348,10 @@ def export_gt_supervision_for_image(
                 )
                 mask_local = np.asarray(mask_branch_full[by:by + bh, bx:bx + bw], np.uint8)
                 if mask_local.size == 0 or not np.any(mask_local):
+                    print(
+                        f"[CACHE SKIP] branch={int(bi)} reason=empty_mask_local "
+                        f"size={mask_local.size} any={bool(np.any(mask_local))}"
+                    )
                     continue
                 # Territory-aware island removal for branch-local optimization masks:
                 # keep only connected components that overlap this branch territory.
@@ -4360,11 +4374,21 @@ def export_gt_supervision_for_image(
                         except Exception:
                             pass
 
-                gx0 = int(ux + bx)
-                gy0 = int(uy + by)
-                gx1 = int(min(W, gx0 + bw))
-                gy1 = int(min(H, gy0 + bh))
+                print(
+                    f"[CACHE BUILD] branch={int(bi)} bbox=({bx},{by},{bw},{bh}) "
+                    f"mask_nnz={int(np.count_nonzero(mask_local))} "
+                    f"terr_available={terr_branch_full is not None}"
+                )
+
+                gx0 = int(bx)
+                gy0 = int(by)
+                gx1 = int(min(W, bx + bw))
+                gy1 = int(min(H, by + bh))
                 if gx1 <= gx0 or gy1 <= gy0:
+                    print(
+                        f"[CACHE SKIP] branch={int(bi)} reason=zero_size_global_crop "
+                        f"gx=({gx0},{gx1}) gy=({gy0},{gy1})"
+                    )
                     continue
 
                 rgb_local = np.asarray(original_image[gy0:gy1, gx0:gx1])
@@ -4390,7 +4414,7 @@ def export_gt_supervision_for_image(
                         depth_local = None
 
                 branch_local_cache[int(bi)] = {
-                    "bbox_local": [bx, by, bw, bh],
+                    "bbox_local": [bx, by, bw, bh],  # global coords
                     "mask_local": mask_local,
                     "rgb_local": rgb_local,
                     "depth_local": depth_local,

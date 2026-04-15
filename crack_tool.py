@@ -1505,6 +1505,12 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
         # Export manual GT supervision (atomic+combined)
         # -----------------------------------------
         _check_bbox_mutation("before-export", atomic, bbox_snapshot)
+        # Temporarily set supervision debug target to current image.
+        try:
+            import helpers.supervision as _sup_mod
+            _sup_mod.DEBUG_TARGET = str(base_name)
+        except Exception:
+            pass
         _export_gt_sup(
             base_name=base_name,
             save_root=self.save_folder,

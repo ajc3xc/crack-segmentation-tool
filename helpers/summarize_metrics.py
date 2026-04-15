@@ -4474,6 +4474,195 @@ def summarize_dataset_metrics(
             df_midline_all = _abl_mid
 
     outputs.update(_plot_multicue_ablation(df_width_all, df_midline_all, out_dir, verbose=verbose))
+
+    # Width stratified by GT width bin — sample-level length-weighted
+    # Each row in diffs CSV = ~1px arc length, so raw aggregation is length-weighted.
+    try:
+        _strat_frames = []
+        for img_dir in image_dirs:
+            image = os.path.basename(img_dir)
+            _found = glob.glob(
+                os.path.join(img_dir, "**", "*_width_diffs_combined.csv"),
+                recursive=True,
+            )
+            for p in _found:
+                try:
+                    df = _safe_read_csv(p)
+                    if df is None or df.empty:
+                        continue
+
+                    rel = os.path.relpath(p, img_dir)
+                    _mt, _mf, _bm = _parse_width_summary_context(rel)
+                    cols_lower = {str(c).lower(): c for c in df.columns}
+
+                    # --- schema normalization ---
+                    # detect gt col
+                    _gc = next(
+                        (cols_lower[k] for k in ("gt_width_px", "gt_width", "gt") if k in cols_lower),
+                        None,
+                    )
+                    # detect diff col
+                    _dc = next(
+                        (cols_lower[k] for k in ("width_diff_px", "diff_px", "diff") if k in cols_lower),
+                        None,
+                    )
+                    # detect method col (baselines have explicit method column)
+                    _mc = next(
+                        (cols_lower[k] for k in ("method",) if k in cols_lower),
+                        None,
+                    )
+
+                    # ET / positional schema: no named gt/diff cols, >=5 columns
+                    # ET row: x, y, gt_width_px, pred_width_px, diff_px, ...
+                    if _gc is None and _dc is None and len(df.columns) >= 5:
+                        if pd.to_numeric(df.iloc[:, 2], errors="coerce").notna().sum() > 0:
+                            df = df.rename(columns={
+                                df.columns[2]: "gt_width_px",
+                                df.columns[4]: "diff_px",
+                            })
+                            cols_lower = {str(c).lower(): c for c in df.columns}
+                            _gc = "gt_width_px"
+                            _dc = "diff_px"
+
+                    if _gc is None or _dc is None:
+                        continue
+
+                    # build slim frame
+                    d = pd.DataFrame({
+                        "gt_width_px": pd.to_numeric(df[_gc], errors="coerce"),
+                        "diff_px":     pd.to_numeric(df[_dc], errors="coerce"),
+                    })
+
+                    # method label: baselines use their method col, models use midline_type
+                    if _mc is not None and _mf == "baseline":
+                        d["_method"] = df[_mc].astype(str)
+                    else:
+                        d["_method"] = _mt
+
+                    d["image"] = image
+                    _strat_frames.append(d)
+
+                except Exception:
+                    continue  # skip bad files silently
+
+        if _strat_frames:
+            _strat_all = pd.concat(_strat_frames, ignore_index=True)
+            _strat_all["gt_width_px"] = pd.to_numeric(_strat_all["gt_width_px"], errors="coerce")
+            _strat_all["diff_px"]     = pd.to_numeric(_strat_all["diff_px"],     errors="coerce")
+            _strat_all = _strat_all[
+                np.isfinite(_strat_all["gt_width_px"]) &
+                np.isfinite(_strat_all["diff_px"]) &
+                (_strat_all["gt_width_px"] > 0)
+            ].copy()
+
+            # display labels
+            _strat_all["_method_label"] = _strat_all["_method"].astype(str).apply(
+                lambda s: _display_width_method_label(s) if s not in ("dt", "best_dt_depth", "ET")
+                else _display_method_name(s)
+            )
+
+            _bins       = [0.0, 6.0, 12.0, 20.0, np.inf]
+            _bin_labels = ["<6px", "6-12px", "12-20px", ">20px"]
+            _strat_all["gt_width_bin"] = pd.cut(
+                _strat_all["gt_width_px"],
+                bins=_bins,
+                labels=_bin_labels,
+                include_lowest=True,
+                right=False,
+            )
+
+            _strat_rows = []
+            for (method, wbin), g in _strat_all.groupby(
+                ["_method_label", "gt_width_bin"], observed=True
+            ):
+                d_arr = g["diff_px"].to_numpy(float)
+                d_arr = d_arr[np.isfinite(d_arr)]
+                if d_arr.size == 0:
+                    continue
+                _strat_rows.append({
+                    "method":       str(method),
+                    "gt_width_bin": str(wbin),
+                    "n_samples":    int(d_arr.size),
+                    "mae_px":       round(float(np.mean(np.abs(d_arr))),  3),
+                    "rmse_px":      round(float(np.sqrt(np.mean(d_arr**2))), 3),
+                    "bias_px":      round(float(np.mean(d_arr)),           3),
+                    "abs_bias_px":  round(float(np.mean(np.abs(d_arr))),  3),
+                })
+
+            if _strat_rows:
+                _strat_df = pd.DataFrame(_strat_rows)
+                _width_out_dir = os.path.join(out_dir, "width")
+                os.makedirs(_width_out_dir, exist_ok=True)
+                _strat_csv = os.path.join(_width_out_dir, "dataset_width_stratified_by_gt_width.csv")
+                _strat_df.to_csv(_strat_csv, index=False)
+                outputs["width_stratified_csv"] = _strat_csv
+                print(f"[stratified] wrote {len(_strat_rows)} rows -> {_strat_csv}")
+
+                _methods_order = ["dt", "dt_depth", "MAT (DSE)", "MAT (raw)", "EOB", "ESD", "PCA"]
+                _methods_present = [m for m in _methods_order if m in _strat_df["method"].values]
+                _methods_present += [m for m in _strat_df["method"].unique() if m not in _methods_present]
+                _bins_order = [b for b in _bin_labels if b in _strat_df["gt_width_bin"].values]
+                _x = np.arange(len(_bins_order), dtype=float)
+                _bar_w = 0.8 / max(1, len(_methods_present))
+                _model_color    = "#1f77b4"
+                _baseline_color = "#2ca02c"
+
+                for _metric, _col, _ylabel in [
+                    ("MAE",    "mae_px",      "MAE (px)"),
+                    ("RMSE",   "rmse_px",     "RMSE (px)"),
+                    ("|bias|", "abs_bias_px", "|bias| (px)"),
+                ]:
+                    try:
+                        fig, ax = plt.subplots(
+                            figsize=(max(8.0, 1.5 * len(_bins_order)), 4.8), dpi=170
+                        )
+                        for mi, method in enumerate(_methods_present):
+                            sub = _strat_df[_strat_df["method"] == method]
+                            vals = [
+                                float(sub.loc[sub["gt_width_bin"] == b, _col].iloc[0])
+                                if len(sub[sub["gt_width_bin"] == b]) > 0 else np.nan
+                                for b in _bins_order
+                            ]
+                            xpos = _x - 0.4 + (mi + 0.5) * _bar_w
+                            _col_c = _model_color if method in ("dt", "dt_depth", "ET") else _baseline_color
+                            _alpha = max(0.4, 1.0 - mi * 0.08)
+                            ax.bar(xpos, vals, width=_bar_w, color=_col_c,
+                                   alpha=_alpha, label=method)
+                        ax.set_xticks(_x)
+                        ax.set_xticklabels(_bins_order)
+                        ax.set_xlabel("GT crack width bin")
+                        ax.set_ylabel(_ylabel)
+                        ax.set_title(
+                            f"Width {_metric} by GT Width Bin\n"
+                            f"(length-weighted, n_samples per bin)"
+                        )
+                        ax.legend(fontsize=7, framealpha=0.9, ncol=2)
+                        ax.grid(axis="y", alpha=0.2)
+                        # annotate n_samples per bin
+                        for bi, b in enumerate(_bins_order):
+                            _ns = int(_strat_df[_strat_df["gt_width_bin"] == b]["n_samples"].sum())
+                            ax.text(bi, ax.get_ylim()[1] * 0.97,
+                                    f"n={_ns:,}", ha="center", va="top",
+                                    fontsize=6, color="#555555")
+                        plt.tight_layout()
+                        _tag = _metric.lower().replace("|", "").strip()
+                        _png = os.path.join(
+                            _width_out_dir,
+                            f"dataset_width_stratified_{_tag}.png",
+                        )
+                        fig.savefig(_png, bbox_inches="tight")
+                        plt.close(fig)
+                        outputs[f"width_stratified_{_tag}_png"] = _png
+                    except Exception as _ep:
+                        print(f"[stratified plot {_metric}] failed: {_ep}")
+            else:
+                print("[stratified] no rows produced after groupby")
+        else:
+            print("[stratified] no diffs frames loaded")
+    except Exception as _e_strat:
+        import traceback
+        print(f"[summarize] width stratified-by-gt failed: {_e_strat}")
+        traceback.print_exc()
     outputs.update(_plot_gt_supervision_timing_detail(out_dir, verbose=verbose))
 
     # Organize timing-related summary artifacts under a dedicated subfolder.

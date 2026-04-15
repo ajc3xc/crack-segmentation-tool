@@ -11089,6 +11089,9 @@ def export_width_metrics_all(
         "rmse_px": rmse,
         "bias_px": bias,
         "corr": corr,
+        "gt_mean_px": float(np.mean(gt)),
+        "gt_median_px": float(np.median(gt)),
+        "gt_std_px": float(np.std(gt)),
     }]).to_csv(summary_csv, index=False)
 
     print("[WIDTH SUMMARY] wrote:", summary_csv)
