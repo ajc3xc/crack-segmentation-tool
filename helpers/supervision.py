@@ -1420,10 +1420,10 @@ def plot_combined_overlay_and_costmap(
             show[valid] = (cropC[valid] - lo) / (hi - lo)
         else:
             show[valid] = 0.5
-    cmap_cost = plt.cm.get_cmap("inferno").copy()
+    cmap_cost = plt.cm.get_cmap("viridis").copy()
     cmap_cost.set_bad(color="black")
     cmap_cost.set_under(color="black")
-    ax1.imshow(show, cmap=cmap_cost, vmin=0.0, vmax=1.0)
+    ax1.imshow(show, cmap=cmap_cost, vmin=1e-6, vmax=1.0)
 
     for ax in (ax0, ax1):
         for S in manual_segs or []:
@@ -2134,13 +2134,23 @@ def plot_depth_cost_diagnostic(
             return None
         a = np.asarray(arr, np.float32)
         out = np.full_like(a, np.nan, dtype=np.float32)
-        valid = np.isfinite(a)
+        # Kill sentinels first — before any mask check — so 1e6 background
+        # never contaminates normalization even when mask shape doesn't match
+        valid = np.isfinite(a) & (a < np.float32(1e5))
         if not np.any(valid):
             return out
         local_mask = _pick_local_mask_for_cost(a, crack_mask_u8=crack_mask_u8)
         if local_mask is not None:
             valid &= local_mask
-        out[valid] = np.clip(a[valid], 0.0, 1.0)
+        # Robust percentile normalize over valid pixels instead of blind clip to [0,1]
+        # This handles both dt_norm (already 0-1) and raw DT (0-42px) correctly
+        vals = a[valid]
+        lo = float(np.percentile(vals, 2))
+        hi = float(np.percentile(vals, 98))
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo + 1e-9:
+            out[valid] = np.clip(a[valid], 0.0, 1.0)
+        else:
+            out[valid] = np.clip((a[valid] - lo) / (hi - lo), 0.0, 1.0)
         return out.astype(np.float32, copy=False)
 
     panels = []
@@ -2222,6 +2232,12 @@ def build_global_cost_maps(branches, full_shape):
     global_count = np.zeros((H, W), np.float32)
     winner_id = np.full((H, W), -1, np.int32)
 
+    def _ks(a):
+        if a is None:
+            return None
+        a = np.asarray(a, np.float32)
+        return np.where(np.isfinite(a) & (a < np.float32(1e5)), a, np.float32(np.nan))
+
     def _write(dst, src, y0, y1, x0, x1, mode="max"):
         if src is None:
             return
@@ -2247,6 +2263,13 @@ def build_global_cost_maps(branches, full_shape):
     )
 
     for bi, b in ordered:
+        dt_src = _ks(b.get("dt_norm", None))
+        rgb_src = _ks(b.get("rgb", None))
+        ridge_src = _ks(b.get("ridge", None))
+        depth_src = _ks(b.get("depth", None))
+        recess_src = _ks(b.get("recess_norm", None))
+        cost_src = _ks(b.get("final_cost", None))
+
         bbox = b.get("bbox", None)
         if bbox is None or len(bbox) != 4:
             continue
@@ -2256,8 +2279,7 @@ def build_global_cost_maps(branches, full_shape):
 
         # Compute clip extents from whichever map exists first.
         ref = None
-        for k in ("final_cost", "dt_norm", "rgb", "ridge", "depth", "recess_norm"):
-            v = b.get(k, None)
+        for v in (cost_src, dt_src, rgb_src, ridge_src, depth_src, recess_src):
             if v is not None:
                 a = np.asarray(v)
                 if a.ndim >= 2:
@@ -2270,9 +2292,8 @@ def build_global_cost_maps(branches, full_shape):
         if yy1 <= y0 or xx1 <= x0:
             continue
 
-        cost = b.get("final_cost", None)
-        if cost is not None:
-            c = np.asarray(cost, np.float32)[: (yy1 - y0), : (xx1 - x0)]
+        if cost_src is not None:
+            c = np.asarray(cost_src, np.float32)[: (yy1 - y0), : (xx1 - x0)]
             valid_c = np.isfinite(c)
             if np.any(valid_c):
                 sub = global_cost[y0:yy1, x0:xx1]
@@ -2285,11 +2306,11 @@ def build_global_cost_maps(branches, full_shape):
                     winner_id[y0:yy1, x0:xx1] = winners
                 global_count[y0:yy1, x0:xx1][valid_c] += 1.0
 
-        _write(global_dt, b.get("dt_norm", None), y0, yy1, x0, xx1, mode="max")
-        _write(global_rgb, b.get("rgb", None), y0, yy1, x0, xx1, mode="max")
-        _write(global_ridge, b.get("ridge", None), y0, yy1, x0, xx1, mode="max")
-        _write(global_depth, b.get("depth", None), y0, yy1, x0, xx1, mode="max")
-        _write(global_recess, b.get("recess_norm", None), y0, yy1, x0, xx1, mode="max")
+        _write(global_dt, dt_src, y0, yy1, x0, xx1, mode="max")
+        _write(global_rgb, rgb_src, y0, yy1, x0, xx1, mode="max")
+        _write(global_ridge, ridge_src, y0, yy1, x0, xx1, mode="max")
+        _write(global_depth, depth_src, y0, yy1, x0, xx1, mode="max")
+        _write(global_recess, recess_src, y0, yy1, x0, xx1, mode="max")
 
     return {
         "dt": global_dt.astype(np.float32, copy=False),
@@ -2312,6 +2333,12 @@ def save_global_cost_panel(
     title="Global Atomic Cost Panel",
 ):
     import matplotlib.pyplot as plt
+
+    def _ks(a):
+        if a is None:
+            return None
+        a = np.asarray(a, np.float32)
+        return np.where(np.isfinite(a) & (a < np.float32(1e5)), a, np.float32(np.nan))
 
     def _norm_cost(arr, mask=None):
         if arr is None:
@@ -2374,14 +2401,14 @@ def save_global_cost_panel(
         return out
 
     maps = maps if isinstance(maps, dict) else {}
-    dt = maps.get("dt", None)
-    depth = maps.get("depth", None)
-    recess = maps.get("recess", None)
-    cost = maps.get("cost", None)
-    rgb = maps.get("rgb", None)
-    ridge = maps.get("ridge", None)
+    dt = _ks(maps.get("dt", None))
+    depth = _ks(maps.get("depth", None))
+    recess = _ks(maps.get("recess", None))
+    cost = _ks(maps.get("cost", None))
+    rgb = _ks(maps.get("rgb", None))
+    ridge = _ks(maps.get("ridge", None))
     if ridge is None:
-        ridge = maps.get("ridge_valley", None)
+        ridge = _ks(maps.get("ridge_valley", None))
 
     H = W = None
     M = None
@@ -2447,7 +2474,7 @@ def save_global_cost_panel(
     if _has_signal(recess_v):
         panels.append(("Depth signal", recess_v, "plasma"))
     if cost_v is not None and np.any(np.isfinite(cost_v)):
-        panels.append(("Final cost", cost_v, "inferno"))
+        panels.append(("Final cost", cost_v, "viridis"))
 
     if not panels:
         return
@@ -2461,7 +2488,7 @@ def save_global_cost_panel(
         cmap_obj = plt.cm.get_cmap(cmap).copy()
         cmap_obj.set_bad(color="black")
         cmap_obj.set_under(color="black")
-        ax.imshow(arr_crop, cmap=cmap_obj, vmin=0.0, vmax=1.0)
+        ax.imshow(arr_crop, cmap=cmap_obj, vmin=1e-6, vmax=1.0)
         ax.set_title(label, fontsize=10)
         ax.axis("off")
 
@@ -4793,7 +4820,16 @@ def export_gt_supervision_for_image(
                     int(bi),
                     (crack_mask_clipped > 0).astype(np.uint8),
                 )
-                mask_local = np.asarray(mask_branch_full[by:by + bh, bx:bx + bw], np.uint8)
+                # branch_allowed_masks / branch_terr_masks are in crack_mask_clipped space,
+                # which starts at (ux, uy) in the global image.  The bbox (bx, by) from
+                # _bbox_from_segments is in global coords, so we must subtract the origin
+                # before indexing the local mask arrays.
+                bx_in_mask = int(bx) - int(ux)
+                by_in_mask = int(by) - int(uy)
+                mask_local = np.asarray(
+                    mask_branch_full[by_in_mask:by_in_mask + bh, bx_in_mask:bx_in_mask + bw],
+                    np.uint8,
+                )
                 if mask_local.size == 0 or not np.any(mask_local):
                     if _VERBOSE_DEBUG:
                         print(
@@ -4806,7 +4842,10 @@ def export_gt_supervision_for_image(
                 terr_branch_full = branch_terr_masks.get(int(bi), None)
                 if terr_branch_full is not None:
                     territory_local = (
-                        np.asarray(terr_branch_full[by:by + bh, bx:bx + bw], np.uint8) > 0
+                        np.asarray(
+                            terr_branch_full[by_in_mask:by_in_mask + bh, bx_in_mask:bx_in_mask + bw],
+                            np.uint8,
+                        ) > 0
                     )
                     if territory_local.size == mask_local.size and np.any(territory_local):
                         try:
@@ -5703,6 +5742,103 @@ def export_gt_supervision_for_image(
                         _dlog(2, f"[SKIP] combined {tag_name} {mk} (no midline)")
                         continue
 
+                    # (0) Clean binary mask + DT diagnostic (white on black background).
+                    if not BATCH_PLOTS_ONLY:
+                        try:
+                            import matplotlib.pyplot as _plt_diag
+                            _H_diag, _W_diag = np.asarray(crack_mask, np.uint8).shape[:2]
+                            _mask_global = np.zeros((_H_diag, _W_diag), np.float32)
+                            _dt_global = np.zeros((_H_diag, _W_diag), np.float32)
+                            for _brec in branch_dbg_list:
+                                _by = int(_brec.get("by", 0) or 0)
+                                _bx = int(_brec.get("bx", 0) or 0)
+                                _mu = _brec.get("mask_use", None)
+                                _dn = _brec.get("dt_norm", None)
+                                if _mu is not None:
+                                    _mu_arr = (np.asarray(_mu, np.uint8) > 0).astype(np.float32)
+                                    _mh, _mw = _mu_arr.shape[:2]
+                                    _y1e = min(_H_diag, _by + _mh)
+                                    _x1e = min(_W_diag, _bx + _mw)
+                                    _mask_global[_by:_y1e, _bx:_x1e] = np.maximum(
+                                        _mask_global[_by:_y1e, _bx:_x1e],
+                                        _mu_arr[:(_y1e - _by), :(_x1e - _bx)]
+                                    )
+                                if _dn is not None:
+                                    _dn_arr = np.asarray(_dn, np.float32)
+                                    _dn_arr = np.where((_dn_arr < 1e5) & np.isfinite(_dn_arr), _dn_arr, 0.0)
+                                    _dh, _dw = _dn_arr.shape[:2]
+                                    _y1e = min(_H_diag, _by + _dh)
+                                    _x1e = min(_W_diag, _bx + _dw)
+                                    _dt_global[_by:_y1e, _bx:_x1e] = np.maximum(
+                                        _dt_global[_by:_y1e, _bx:_x1e],
+                                        _dn_arr[:(_y1e - _by), :(_x1e - _bx)]
+                                    )
+                            _bb = combined_entry.get("mask_bbox")
+                            if _bb and len(_bb) == 4:
+                                _cx, _cy, _cw, _ch = [int(v) for v in _bb]
+                                _pad = 20
+                                _cx0 = max(0, _cx - _pad); _cy0 = max(0, _cy - _pad)
+                                _cx1 = min(_W_diag, _cx + _cw + _pad); _cy1 = min(_H_diag, _cy + _ch + _pad)
+                            else:
+                                _cy0, _cx0, _cy1, _cx1 = 0, 0, _H_diag, _W_diag
+                            _fig_diag, (_ax_m, _ax_d, _ax_c) = _plt_diag.subplots(1, 3, figsize=(12, 10))
+                            _ax_m.imshow(_mask_global[_cy0:_cy1, _cx0:_cx1], cmap="gray", vmin=0, vmax=1, interpolation="nearest")
+                            _ax_m.set_title("Binary mask", fontsize=9)
+                            _ax_m.axis("off")
+                            _dt_crop = _dt_global[_cy0:_cy1, _cx0:_cx1]
+                            _vmax = float(np.max(_dt_crop)) if np.any(_dt_crop > 0) else 1.0
+                            # DT: black background for zero pixels, viridis for crack interior
+                            _dt_cmap = _plt_diag.cm.get_cmap("viridis").copy()
+                            _dt_cmap.set_under(color="black")
+                            _ax_d.imshow(_dt_crop, cmap=_dt_cmap, vmin=1e-6, vmax=_vmax, interpolation="nearest")
+                            _ax_d.set_title("DT norm (black=0, purple=edge, yellow=center)", fontsize=9)
+                            _ax_d.axis("off")
+                            # Costmap: assemble from branch_dbg_list same as DT
+                            _cost_global = np.zeros((_H_diag, _W_diag), np.float32)
+                            for _brec in branch_dbg_list:
+                                _by2 = int(_brec.get("by", 0) or 0)
+                                _bx2 = int(_brec.get("bx", 0) or 0)
+                                _cmaps = _brec.get("costmaps", {}) if isinstance(_brec.get("costmaps", {}), dict) else {}
+                                _sel = _cmaps.get("selected", None)
+                                if _sel is None:
+                                    _sk = str(_cmaps.get("selected_key", "dt"))
+                                    _sel = _cmaps.get(_sk, _cmaps.get("dt", None))
+                                if _sel is None:
+                                    continue
+                                _sel_arr = np.asarray(_sel, np.float32)
+                                # Kill sentinels, remap so low cost = high brightness
+                                _sel_arr = np.where((_sel_arr < 1e5) & np.isfinite(_sel_arr), _sel_arr, 0.0)
+                                _ch2, _cw2 = _sel_arr.shape[:2]
+                                _y1e2 = min(_H_diag, _by2 + _ch2)
+                                _x1e2 = min(_W_diag, _bx2 + _cw2)
+                                _cost_global[_by2:_y1e2, _bx2:_x1e2] = np.maximum(
+                                    _cost_global[_by2:_y1e2, _bx2:_x1e2],
+                                    _sel_arr[:(_y1e2 - _by2), :(_x1e2 - _bx2)]
+                                )
+                            _cost_crop = _cost_global[_cy0:_cy1, _cx0:_cx1]
+                            # Normalize raw cost within crack pixels only (low cost stays dark/purple).
+                            _cost_valid = _cost_crop[_cost_crop > 1e-9]
+                            if _cost_valid.size > 0:
+                                _clo = float(np.percentile(_cost_valid, 2))
+                                _chi = float(np.percentile(_cost_valid, 98))
+                                _cost_viz = np.where(_cost_crop > 1e-9,
+                                    np.clip((_cost_crop - _clo) / max(_chi - _clo, 1e-9), 0.0, 1.0),
+                                    0.0).astype(np.float32)
+                            else:
+                                _cost_viz = np.zeros_like(_cost_crop)
+                            _cost_cmap = _plt_diag.cm.get_cmap("viridis").copy()
+                            _cost_cmap.set_under(color="black")
+                            _ax_c.imshow(_cost_viz, cmap=_cost_cmap, vmin=1e-6, vmax=1.0, interpolation="nearest")
+                            _ax_c.set_title("Costmap inverted (black=0, yellow=low cost)", fontsize=9)
+                            _ax_c.axis("off")
+                            _fig_diag.suptitle(f"{tag_name} {mk} mask+DT", fontsize=8)
+                            _fig_diag.tight_layout()
+                            _out_diag = os.path.join(method_dir, "mask_costmap.jpg")
+                            _fig_diag.savefig(_out_diag, dpi=100, bbox_inches="tight", facecolor="black")
+                            _plt_diag.close(_fig_diag)
+                        except Exception as _e_diag:
+                            _dlog(2, f"[DIAG PLOT FAIL] mask+DT plot failed: {_e_diag}")
+
                     # (1) Overlay-only combined debug (old visual style).
                     out_overlay = os.path.join(method_dir, "combined_overlay.jpg")
                     _run_timed_plot(
@@ -5754,6 +5890,14 @@ def export_gt_supervision_for_image(
                                 return v
                         return None
 
+                    def _ks(a):
+                        """Kill sentinels: zero out any value >= 1e5 or non-finite."""
+                        if a is None:
+                            return None
+                        arr = np.asarray(a, np.float32)
+                        arr = np.where(np.isfinite(arr) & (arr < np.float32(1e5)), arr, np.float32(np.nan))
+                        return arr
+
                     branches_for_global = []
                     for brec in branch_dbg_list:
                         cmaps = brec.get("costmaps", {}) if isinstance(brec.get("costmaps", {}), dict) else {}
@@ -5772,12 +5916,12 @@ def export_gt_supervision_for_image(
                         bx = int(brec.get("bx", 0) or 0)
                         branches_for_global.append({
                             "bbox": [by, by + int(a_sel.shape[0]), bx, bx + int(a_sel.shape[1])],
-                            "dt_norm": brec.get("dt_norm"),
-                            "rgb": rgb_src if use_rgb else None,
-                            "ridge": ridge_src if use_ridge else None,
-                            "depth": brec.get("depth_norm") if use_depth else None,
-                            "recess_norm": brec.get("recess_norm") if use_depth else None,
-                            "final_cost": a_sel,
+                            "dt_norm": _ks(brec.get("dt_norm")),
+                            "rgb": _ks(rgb_src) if use_rgb else None,
+                            "ridge": _ks(ridge_src) if use_ridge else None,
+                            "depth": _ks(brec.get("depth_norm")) if use_depth else None,
+                            "recess_norm": _ks(brec.get("recess_norm")) if use_depth else None,
+                            "final_cost": _ks(a_sel),
                         })
                     if branches_for_global and not BATCH_PLOTS_ONLY:
                         maps_global = build_global_cost_maps(branches_for_global, np.asarray(crack_mask, np.uint8).shape[:2])
@@ -5830,45 +5974,56 @@ def export_gt_supervision_for_image(
                                 f"has_depth_norm={brec.get('depth_norm') is not None} "
                                 f"has_recess_norm={brec.get('recess_norm') is not None}"
                             )
-                            _run_timed_plot(
-                                save_global_cost_panel,
-                                maps={
-                                    "dt": np.asarray(brec.get("dt_norm"), np.float32) if brec.get("dt_norm") is not None else None,
-                                    "rgb": (
-                                        np.asarray(_rgb_src, np.float32)
-                                        if (use_rgb and (_rgb_src is not None))
-                                        else None
-                                    ),
-                                    "ridge": (
-                                        np.asarray(_ridge_src, np.float32)
-                                        if (use_ridge and (_ridge_src is not None))
-                                        else None
-                                    ),
-                                    "depth": (
-                                        np.asarray(brec.get("depth_norm"), np.float32)
-                                        if (use_depth and brec.get("depth_norm") is not None)
-                                        else None
-                                    ),
-                                    "recess": (
-                                        np.asarray(brec.get("recess_norm"), np.float32)
-                                        if (use_depth and brec.get("recess_norm") is not None)
-                                        else None
-                                    ),
-                                    "cost": (
-                                        np.asarray(_cm.get("selected"), np.float32)
-                                        if _cm.get("selected") is not None
-                                        else (
-                                            np.asarray(_cm.get(str(_cm.get("selected_key", "dt"))), np.float32)
-                                            if _cm.get(str(_cm.get("selected_key", "dt"))) is not None
-                                            else (np.asarray(_cm.get("dt"), np.float32) if _cm.get("dt") is not None else None)
-                                        )
-                                    ),
-                                },
-                                out_path=out_cost,
-                                crack_mask_u8=np.asarray(brec.get("mask_use"), np.uint8) if brec.get("mask_use") is not None else None,
-                                bbox_xywh=None,
-                                title=f"combined {tag_name} [{mslug} | branch {int(bidx):03d}]",
-                            )
+                            try:
+                                import matplotlib.pyplot as _plt_branch
+
+                                def _ks_viz(a):
+                                    if a is None:
+                                        return None
+                                    a = np.asarray(a, np.float32)
+                                    a = np.where(np.isfinite(a) & (a < np.float32(1e5)), a, np.float32(0.0))
+                                    nz = a > 1e-9
+                                    if not np.any(nz):
+                                        return None
+                                    vals = a[nz]
+                                    lo, hi = float(np.percentile(vals, 2)), float(np.percentile(vals, 98))
+                                    if hi <= lo + 1e-9:
+                                        return None
+                                    out = np.zeros_like(a)
+                                    out[nz] = np.clip((a[nz] - lo) / (hi - lo), 0.0, 1.0)
+                                    return out
+
+                                _selected_b = _cm.get("selected")
+                                if _selected_b is None:
+                                    _sk = str(_cm.get("selected_key", "dt"))
+                                    _selected_b = _cm.get(_sk, _cm.get("dt"))
+                                _cost_viz = _ks_viz(_selected_b)
+                                if _cost_viz is None:
+                                    continue
+
+                                _bh, _bw = _cost_viz.shape[:2]
+                                _bx0, _by0, _bx1, _by1 = 0, 0, _bw, _bh
+                                _bb_local = brec.get("mask_bbox")
+                                if _bb_local is not None and len(_bb_local) == 4:
+                                    _x, _y, _w, _h = [int(v) for v in _bb_local]
+                                    _pad = 20
+                                    _bx0 = max(0, _x - _pad)
+                                    _by0 = max(0, _y - _pad)
+                                    _bx1 = min(_bw, _x + _w + _pad)
+                                    _by1 = min(_bh, _y + _h + _pad)
+
+                                _crop = _cost_viz[_by0:_by1, _bx0:_bx1]
+                                _fig_b, _ax_b = _plt_branch.subplots(1, 1, figsize=(5.5, 5.5))
+                                _cmap_b = _plt_branch.cm.get_cmap("viridis").copy()
+                                _cmap_b.set_under(color="black")
+                                _ax_b.imshow(_crop, cmap=_cmap_b, vmin=1e-6, vmax=1.0, interpolation="nearest")
+                                _ax_b.set_title(f"combined {tag_name} [{mslug} | branch {int(bidx):03d}]", fontsize=9)
+                                _ax_b.axis("off")
+                                os.makedirs(os.path.dirname(out_cost), exist_ok=True)
+                                _fig_b.savefig(out_cost, dpi=100, bbox_inches="tight", facecolor="black")
+                                _plt_branch.close(_fig_b)
+                            except Exception as _e_branch:
+                                _dlog(2, f"[BRANCH COST PLOT FAIL] branch={int(bidx):03d} err={_e_branch}")
                     elif pdbg is not None:
                         # Backward fallback when branch records are unavailable.
                         out_cost = os.path.join(method_dir, "costmap_fallback.jpg")

@@ -1115,6 +1115,7 @@ def dominant_segments_from_group(
                 for atomic_id, S_user in branch_user_segs[bi]:
                     if S_user is not None and len(S_user) >= 2:
                         seg_mask |= _polyline_mask(S_user, H, W)
+                seg_mask = cv2.dilate(seg_mask, np.ones((3, 3), np.uint8), iterations=1)
                 keep = np.zeros((H, W), np.uint8)
                 for lab in range(1, int(num_labels)):
                     if np.any((labels == lab) & (seg_mask > 0)):
@@ -1304,6 +1305,25 @@ def dominant_segments_from_group(
             )
             terr = cv2.dilate(line, kernel, iterations=1)
             branch_terr |= terr
+        if crack_mask is not None:
+            branch_terr &= crack_mask
+        if crack_mask is not None and np.any(branch_terr):
+            num_labels, labels = cv2.connectedComponents(
+                (branch_terr > 0).astype(np.uint8), connectivity=8
+            )
+            if int(num_labels) > 2:
+                seg_mask = np.zeros((H, W), np.uint8)
+                for it in (items or []):
+                    S_user = np.asarray((it or {}).get("seg", []), float)
+                    if S_user.ndim == 2 and S_user.shape[1] == 2 and len(S_user) >= 2:
+                        seg_mask |= _polyline_mask(S_user, H, W)
+                seg_mask = cv2.dilate(seg_mask, np.ones((3, 3), np.uint8), iterations=1)
+                keep = np.zeros((H, W), np.uint8)
+                for lab in range(1, int(num_labels)):
+                    if np.any((labels == lab) & (seg_mask > 0)):
+                        keep |= (labels == lab).astype(np.uint8)
+                if np.any(keep):
+                    branch_terr = keep
         return branch_terr
 
     # Validate post-clip stitchability per branch and split disconnected pieces.

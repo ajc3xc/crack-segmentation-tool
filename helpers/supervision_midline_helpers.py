@@ -13,7 +13,7 @@ _VERBOSE_DEBUG = True
 DEBUG_CC_TRACE = True
 DEBUG_TARGET_IMAGE = "42"
 DEBUG_TARGET_BRANCHES = None
-USE_CC_RESTRICT_FOR_SOLVER = True
+USE_CC_RESTRICT_FOR_SOLVER = False
 # When domain has more than this many CCs, skip CC restriction (fragmented cracks should use full domain).
 CC_RESTRICT_MAX_LABELS = 5
 
@@ -512,6 +512,19 @@ def _compute_dijkstra_midline(
     for lab in range(1, int(cc_n)):
         cc_sizes.append((int(lab), int(np.sum(cc_labels == lab))))
     cc_sizes = sorted(cc_sizes, key=lambda t: t[1], reverse=True)
+    num_labels = int(max(0, cc_n - 1))
+    if bool(USE_CC_RESTRICT_FOR_SOLVER) and num_labels > 1:
+        cc_sizes_only = [int(np.sum(cc_labels == lab)) for lab in range(1, int(cc_n))]
+        cc_sizes_sorted = sorted(cc_sizes_only, reverse=True)
+        total_nz = int(np.sum(dom > 0))
+        largest_frac = float(cc_sizes_sorted[0]) / float(max(1, total_nz)) if cc_sizes_sorted else 0.0
+        print(
+            f"[CC_DIST] branch={branch_id} mk={method_key} "
+            f"num_cc={int(num_labels)} total_nz={total_nz} "
+            f"cc_sizes={cc_sizes_sorted} "
+            f"largest_frac={largest_frac:.3f}",
+            flush=True,
+        )
     start_cc_before = int(cc_labels[sy0, sx0]) if start_valid_before else 0
     end_cc_before = int(cc_labels[ey0, ex0]) if end_valid_before else 0
     if dbg_on:
@@ -555,7 +568,6 @@ def _compute_dijkstra_midline(
             flush=True,
         )
 
-    num_labels = int(max(0, cc_n - 1))
     domain_for_solver = dom.copy()
     chosen_cc = 0
     cc_fix_reason = None
@@ -1440,6 +1452,12 @@ def _precompute_method_shared_inputs(
     full_image_hw=None,
 ):
     t0 = time.perf_counter()
+    print(
+        f"[PRECOMPUTE_IN] domain_u8 shape={np.asarray(domain_u8).shape if domain_u8 is not None else None} "
+        f"nz={int(np.count_nonzero(domain_u8)) if domain_u8 is not None else 0} "
+        f"bbox={depth_bbox_xywh}",
+        flush=True,
+    )
 
     mid_global = np.asarray(mid_xy, float)
     mask_u8 = (np.asarray(crack_mask_u8) > 0).astype(np.uint8)
@@ -1776,6 +1794,12 @@ def _run_single_midline_method(
         out["debug"]["rgb_cue_norm"] = np.asarray(rgb_cue_norm, np.float32)
         out["debug"]["edge_suppress_norm"] = np.asarray(rgb_bundle.get("edge_suppress_norm"), np.float32)
 
+    print(
+        f"[COSTMAP_IN] method={method_key} dom_shape={tuple(dom.shape)} dom_nz={int(np.sum(dom))} "
+        f"dtn_min={float(dtn[dom > 0].min()) if np.any(dom) else 'N/A'} "
+        f"dtn_max={float(dtn[dom > 0].max()) if np.any(dom) else 'N/A'}",
+        flush=True,
+    )
     costmaps, score_debug, cost_meta = _build_ridge_valley_method_costmaps(
         dom,
         dtn,
