@@ -1928,10 +1928,19 @@ def _plot_territory_debug(
         if img.ndim != 3:
             return
         H, W = img.shape[:2]
-        x0 = max(0, int(ux))
-        y0 = max(0, int(uy))
-        x1 = min(W, int(ux + uw))
-        y1 = min(H, int(uy + uh))
+        gt_full = (np.asarray(gt_mask_full) > 0)
+        _ys, _xs = np.where(gt_full)
+        if _xs.size > 0 and _ys.size > 0:
+            _pad = 25
+            x0 = max(0, int(_xs.min()) - _pad)
+            y0 = max(0, int(_ys.min()) - _pad)
+            x1 = min(W, int(_xs.max()) + 1 + _pad)
+            y1 = min(H, int(_ys.max()) + 1 + _pad)
+        else:
+            x0 = max(0, int(ux))
+            y0 = max(0, int(uy))
+            x1 = min(W, int(ux + uw))
+            y1 = min(H, int(uy + uh))
         if x1 <= x0 or y1 <= y0:
             return
 
@@ -1945,7 +1954,42 @@ def _plot_territory_debug(
         cmap = cm.get_cmap("tab10", max(len(order_use), 1))
         branch_colors = {int(bi): cmap(i) for i, bi in enumerate(order_use)}
 
-        gt_crop = (np.asarray(gt_mask_full)[y0:y1, x0:x1] > 0)
+        gt_crop = gt_full[y0:y1, x0:x1]
+        crop_h, crop_w = gt_crop.shape[:2]
+
+        def _local_mask_to_crop(mask_local):
+            """Project a local-frame mask (origin at ux,uy) into current global crop coords."""
+            if mask_local is None:
+                return None
+            m = (np.asarray(mask_local) > 0)
+            if m.ndim < 2:
+                return None
+            mh, mw = m.shape[:2]
+            out = np.zeros((crop_h, crop_w), dtype=bool)
+
+            # Overlap in global coordinates between crop box and local-mask box.
+            gx0 = max(int(x0), int(ux))
+            gy0 = max(int(y0), int(uy))
+            gx1 = min(int(x1), int(ux + mw))
+            gy1 = min(int(y1), int(uy + mh))
+            if gx1 <= gx0 or gy1 <= gy0:
+                return out
+
+            # Source indices in local mask.
+            sx0 = int(gx0 - ux)
+            sy0 = int(gy0 - uy)
+            sx1 = int(gx1 - ux)
+            sy1 = int(gy1 - uy)
+
+            # Destination indices in crop-local coordinates.
+            dx0 = int(gx0 - x0)
+            dy0 = int(gy0 - y0)
+            dx1 = int(gx1 - x0)
+            dy1 = int(gy1 - y0)
+
+            out[dy0:dy1, dx0:dx1] = m[sy0:sy1, sx0:sx1]
+            return out
+
         for ax, title in zip(axes, titles):
             ax.imshow(img_crop[:, :, ::-1])  # BGR -> RGB
             gt_overlay = np.zeros((gt_crop.shape[0], gt_crop.shape[1], 4), float)
@@ -1968,7 +2012,7 @@ def _plot_territory_debug(
 
             terr = branch_terr_masks.get(bi, None)
             if terr is not None:
-                tc = (np.asarray(terr)[y0:y1, x0:x1] > 0).astype(float)
+                tc = _local_mask_to_crop(terr).astype(float)
                 if np.any(tc > 0):
                     overlay = np.zeros((*tc.shape, 4), float)
                     overlay[..., :3] = color[:3]
@@ -1990,7 +2034,7 @@ def _plot_territory_debug(
 
             bite = branch_bite_masks.get(bi, None)
             if bite is not None:
-                bc = (np.asarray(bite)[y0:y1, x0:x1] > 0).astype(float)
+                bc = _local_mask_to_crop(bite).astype(float)
                 if np.any(bc > 0):
                     red_overlay = np.zeros((*bc.shape, 4), float)
                     red_overlay[..., 0] = 1.0
@@ -1999,7 +2043,7 @@ def _plot_territory_debug(
 
             allowed = branch_allowed_masks.get(bi, None)
             if allowed is not None:
-                ac = (np.asarray(allowed)[y0:y1, x0:x1] > 0).astype(float)
+                ac = _local_mask_to_crop(allowed).astype(float)
                 if np.any(ac > 0):
                     axes[2].contour(ac, levels=[0.5], colors=[color[:3]], linewidths=1.0)
 
@@ -5288,6 +5332,10 @@ def export_gt_supervision_for_image(
                                 cm_arr = None
                             if cm_arr is not None and cm_arr.ndim >= 2:
                                 mm.setdefault("plot_debug_branches", [])
+                                print(
+                                    f"[BRANCH_DBG_BXY] blob_id={blob_id} bx={int(bx)} by={int(by)} "
+                                    f"mask_shape={np.asarray(mask_use).shape}"
+                                )
                                 mm["plot_debug_branches"].append({
                                     "blob_id": str(blob_id),
                                     "mask_use": np.asarray(mask_use, np.uint8),
@@ -5723,6 +5771,23 @@ def export_gt_supervision_for_image(
                     mpack_dbg = method_variant_segments.get(mk, {}) if isinstance(method_variant_segments.get(mk, {}), dict) else {}
                     pdbg = mpack_dbg.get("plot_debug", None) if isinstance(mpack_dbg.get("plot_debug", None), dict) else None
                     branch_dbg_list = mpack_dbg.get("plot_debug_branches", []) if isinstance(mpack_dbg.get("plot_debug_branches", []), list) else []
+                    _mask_for_bbox = np.asarray(crack_mask, np.uint8)
+                    _H_bbox, _W_bbox = _mask_for_bbox.shape[:2]
+                    _ys_bbox, _xs_bbox = np.where(_mask_for_bbox > 0)
+                    if _xs_bbox.size > 0 and _ys_bbox.size > 0:
+                        _pad_bbox = 25
+                        _x0_bbox = max(0, int(_xs_bbox.min()) - _pad_bbox)
+                        _y0_bbox = max(0, int(_ys_bbox.min()) - _pad_bbox)
+                        _x1_bbox = min(_W_bbox, int(_xs_bbox.max()) + 1 + _pad_bbox)
+                        _y1_bbox = min(_H_bbox, int(_ys_bbox.max()) + 1 + _pad_bbox)
+                        _bbox_full = (
+                            int(_x0_bbox),
+                            int(_y0_bbox),
+                            int(max(1, _x1_bbox - _x0_bbox)),
+                            int(max(1, _y1_bbox - _y0_bbox)),
+                        )
+                    else:
+                        _bbox_full = None
 
                     pred_segs = [
                         np.asarray(Sm, float)
@@ -5773,7 +5838,7 @@ def export_gt_supervision_for_image(
                                         _dt_global[_by:_y1e, _bx:_x1e],
                                         _dn_arr[:(_y1e - _by), :(_x1e - _bx)]
                                     )
-                            _bb = combined_entry.get("mask_bbox")
+                            _bb = _bbox_full
                             if _bb and len(_bb) == 4:
                                 _cx, _cy, _cw, _ch = [int(v) for v in _bb]
                                 _pad = 20
@@ -5850,7 +5915,7 @@ def export_gt_supervision_for_image(
                         pred_segs=pred_segs,
                         normals=mv.get("normals"),
                         territory_u8=terr_vis,
-                        bbox_xywh=combined_entry.get("mask_bbox"),
+                        bbox_xywh=_bbox_full,
                         title=f"Combined - {style.get('label', mk)}",
                         compare_label=style.get("compare_label", mk),
                         compare_color="magenta",
@@ -5873,7 +5938,7 @@ def export_gt_supervision_for_image(
                             pred_segs=pred_segs,
                             selected_costmap=selected_full,
                             territory_u8=terr_vis,
-                            bbox_xywh=combined_entry.get("mask_bbox"),
+                            bbox_xywh=_bbox_full,
                             title=f"Combined - {style.get('label', mk)}",
                             compare_label=style.get("compare_label", mk),
                             compare_color="magenta",
@@ -5937,8 +6002,8 @@ def export_gt_supervision_for_image(
                             save_global_cost_panel,
                             maps=maps_global,
                             out_path=out_cost_panel,
-                            crack_mask_u8=crack_mask_clipped,
-                            bbox_xywh=combined_entry.get("mask_bbox"),
+                            crack_mask_u8=crack_mask,
+                            bbox_xywh=_bbox_full,
                             title=f"combined {tag_name} [{style.get('label', mk)}]",
                         )
                         # Temporary: disable overlap-count plot emission.

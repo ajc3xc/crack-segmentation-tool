@@ -960,9 +960,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         # -- Hardcoded toggles for fast iteration --
         #resolved_indices = [0,101,97,108,113,129]
         #resolved_indices = [5,7,9,11,13,16,18,20,101,107,110,116]
-        resolved_indices = [11]
+        resolved_indices = [5,16]
         #resolved_indices= None
-        #base_names = ["98", "102", "109", "114", "130"]
+        base_names = ["6","17"]
         SKIP_ALREADY_PROCESSED = False
         SKIP_PASS1 = False   # skip GT supervision export (pass1) - use when supervision already exists
         FAST_RUN_EDGE_SWEEP = False
