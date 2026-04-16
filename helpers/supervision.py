@@ -4414,8 +4414,11 @@ def export_gt_supervision_for_image(
             if not isinstance(blob, dict):
                 return full
 
-            bite_meta_local = dom_meta.get("bite", {}) if isinstance(dom_meta.get("bite", {}), dict) else {}
-            bbox = bite_meta_local.get("bbox", None)
+            # Use blob bbox when present (territory blobs), fallback to bite bbox for legacy blobs.
+            bbox = blob.get("bbox", None)
+            if bbox is None:
+                bite_meta_local = dom_meta.get("bite", {}) if isinstance(dom_meta.get("bite", {}), dict) else {}
+                bbox = bite_meta_local.get("bbox", None)
             if bbox is None or len(bbox) != 4:
                 return full
 

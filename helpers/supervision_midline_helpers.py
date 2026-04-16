@@ -14,6 +14,8 @@ DEBUG_CC_TRACE = True
 DEBUG_TARGET_IMAGE = "42"
 DEBUG_TARGET_BRANCHES = None
 USE_CC_RESTRICT_FOR_SOLVER = True
+# When domain has more than this many CCs, skip CC restriction (fragmented cracks should use full domain).
+CC_RESTRICT_MAX_LABELS = 5
 
 
 def _cc_dbg(base_name, branch_id=None):
@@ -557,7 +559,16 @@ def _compute_dijkstra_midline(
     domain_for_solver = dom.copy()
     chosen_cc = 0
     cc_fix_reason = None
-    if bool(USE_CC_RESTRICT_FOR_SOLVER) and num_labels > 2:
+    if bool(USE_CC_RESTRICT_FOR_SOLVER) and num_labels > int(CC_RESTRICT_MAX_LABELS):
+        # Too many CCs to reliably pick one — use the full domain.
+        cc_fix_reason = "too_many_ccs_full_domain"
+        if dbg_on:
+            print(
+                f"[CC_FIX][SKIP] branch={branch_id} mk={method_key} "
+                f"num_labels={num_labels} > CC_RESTRICT_MAX_LABELS={CC_RESTRICT_MAX_LABELS} -> full_domain",
+                flush=True,
+            )
+    elif bool(USE_CC_RESTRICT_FOR_SOLVER) and 2 < num_labels <= int(CC_RESTRICT_MAX_LABELS):
         if num_labels > 4:
             # Many CCs: midpoint is typically more stable than endpoints.
             mid_idx = int(len(S) // 2)

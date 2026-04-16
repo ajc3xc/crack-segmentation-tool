@@ -1101,6 +1101,27 @@ def dominant_segments_from_group(
             #terr &= domain_mask
             branch_terr |= terr
 
+        # Constrain territory to crack mask first.
+        if crack_mask is not None:
+            branch_terr &= crack_mask
+
+        # Keep only territory CCs connected to this branch's own segments.
+        if crack_mask is not None and np.any(branch_terr):
+            num_labels, labels = cv2.connectedComponents(
+                (branch_terr > 0).astype(np.uint8), connectivity=8
+            )
+            if int(num_labels) > 2:
+                seg_mask = np.zeros((H, W), np.uint8)
+                for atomic_id, S_user in branch_user_segs[bi]:
+                    if S_user is not None and len(S_user) >= 2:
+                        seg_mask |= _polyline_mask(S_user, H, W)
+                keep = np.zeros((H, W), np.uint8)
+                for lab in range(1, int(num_labels)):
+                    if np.any((labels == lab) & (seg_mask > 0)):
+                        keep |= (labels == lab).astype(np.uint8)
+                if np.any(keep):
+                    branch_terr = keep
+
         branch_terr_masks[bi] = branch_terr.copy()
 
         # -------------------------------------------------
@@ -1268,6 +1289,23 @@ def dominant_segments_from_group(
             groups.append([items[k] for k in comp])
         return groups
 
+    def _build_branch_territory_from_items(items):
+        """Rebuild branch territory from kept segment items (global frame)."""
+        branch_terr = np.zeros((H, W), np.uint8)
+        for it in (items or []):
+            S_user = np.asarray((it or {}).get("seg", []), float)
+            if S_user.ndim != 2 or S_user.shape[1] != 2 or len(S_user) < 2:
+                continue
+            r = seg_radius(S_user)
+            rad = int(max(4, min(2.0 * r, window_half_size)))
+            line = _polyline_mask(S_user, H, W)
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1)
+            )
+            terr = cv2.dilate(line, kernel, iterations=1)
+            branch_terr |= terr
+        return branch_terr
+
     # Validate post-clip stitchability per branch and split disconnected pieces.
     ordered_branch_ids = [int(b) for b in order]
     ordered_branch_ids += [b for b in sorted(branch_to_items.keys()) if b not in ordered_branch_ids]
@@ -1340,6 +1378,27 @@ def dominant_segments_from_group(
                         "kept_len": float(kept_len),
                         "suppressed": False,
                     }
+                )
+            # Ensure territory exists for both parent-retained and synthetic branches.
+            syn_terr = _build_branch_territory_from_items(sg)
+            branch_terr_masks[int(out_bid)] = syn_terr
+            sg_segs = [np.asarray((it or {}).get("seg", []), float) for it in (sg or [])]
+            sg_segs = [a for a in sg_segs if a.ndim == 2 and a.shape[1] == 2 and len(a) >= 2]
+            if sg_segs:
+                sg_polyline = np.vstack(sg_segs)
+                terr_ys, terr_xs = np.where(syn_terr > 0)
+                if len(terr_xs):
+                    tx0, ty0 = int(terr_xs.min()), int(terr_ys.min())
+                    tx1, ty1 = int(terr_xs.max()) + 1, int(terr_ys.max()) + 1
+                else:
+                    tx0, ty0, tx1, ty1 = 0, 0, 1, 1
+                print(
+                    f"[SYNTH_TERR_DBG] out_bid={int(out_bid)} H={int(H)} W={int(W)} "
+                    f"terr_nnz={int(np.sum(syn_terr > 0))} "
+                    f"bbox=[{tx0},{ty0},{int(tx1 - tx0)},{int(ty1 - ty0)}] "
+                    f"seg_pts={int(len(sg_polyline))} "
+                    f"seg_x=[{float(sg_polyline[:,0].min()):.1f},{float(sg_polyline[:,0].max()):.1f}] "
+                    f"seg_y=[{float(sg_polyline[:,1].min()):.1f},{float(sg_polyline[:,1].max()):.1f}]"
                 )
     branch_to_items = expanded_branch_to_items
 
@@ -1457,9 +1516,14 @@ def dominant_segments_from_group(
         terr_u8 = (terr > 0).astype(np.uint8)
         if not np.any(terr_u8):
             continue
-        terr_crop = terr_u8[by0:by1, bx0:bx1].astype(np.uint8)
+        # Tight bbox in GLOBAL coords (full HxW frame), then crop for packing.
+        ys, xs = np.where(terr_u8 > 0)
+        tx0, ty0 = int(xs.min()), int(ys.min())
+        tx1, ty1 = int(xs.max()) + 1, int(ys.max()) + 1
+        terr_crop = terr_u8[ty0:ty1, tx0:tx1].astype(np.uint8)
         terr_blob = _pack_mask_b64(terr_crop)
         branch_territory_export[str(int(bi))] = {
+            "bbox": [int(tx0), int(ty0), int(tx1 - tx0), int(ty1 - ty0)],
             "shape": terr_blob["shape"],
             "packbits_b64": terr_blob["packbits_b64"],
         }
