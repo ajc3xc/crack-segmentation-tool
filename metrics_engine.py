@@ -57,6 +57,14 @@ from helpers.cpu_affinity import process_pool_affinity_config
 
 #from crackutils import CrackUtils
 DEBUG_SAVE_LIGHT = True   # True → only high-res compact outputs
+# Set to False to suppress verbose per-image debug prints during batch runs
+_VERBOSE_DEBUG = True
+
+
+def _vdbg_print(*args, **kwargs):
+    if _VERBOSE_DEBUG:
+        print(*args, **kwargs)
+
 from helpers.endpoint_annotator import CrackAnnotator
 min_crop_size = 16   
 class MetricsEngine(TrackSegmentPipeline, CrackUtils):
@@ -951,18 +959,39 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
         # -- Hardcoded toggles for fast iteration --
         #resolved_indices = [0,101,97,108,113,129]
-        resolved_indices = [7,101,107,110,116]
-        resolved_indices = [101]
+        #resolved_indices = [5,7,9,11,13,16,18,20,101,107,110,116]
+        resolved_indices = [107]
         #resolved_indices= None
         #base_names = ["98", "102", "109", "114", "130"]
         SKIP_ALREADY_PROCESSED = False
-        SKIP_PASS1 = True   # skip GT supervision export (pass1) - use when supervision already exists
+        SKIP_PASS1 = False   # skip GT supervision export (pass1) - use when supervision already exists
         FAST_RUN_EDGE_SWEEP = False
 
         idxs = self._resolve_metrics_image_indices(image_indices=resolved_indices, base_names=base_names)
         if not idxs:
             print("[batch dt_best_et] no target images")
             return {"ok": False, "reason": "no_images"}
+
+        import helpers.supervision as _sup_mod
+        import helpers.supervision_midline_helpers as _smh_mod
+        import helpers.metrics as _met_mod
+        import helpers.metrics as _metrics_mod
+        import combiner as _comb_mod
+        global _VERBOSE_DEBUG
+        _prev_verbose = {
+            "metrics_engine": bool(_VERBOSE_DEBUG),
+            "supervision": bool(getattr(_sup_mod, "_VERBOSE_DEBUG", True)),
+            "supervision_midline_helpers": bool(getattr(_smh_mod, "_VERBOSE_DEBUG", True)),
+            "combiner": bool(getattr(_comb_mod, "_VERBOSE_DEBUG", True)),
+            "metrics": bool(getattr(_met_mod, "_VERBOSE_DEBUG", True)),
+        }
+        setattr(self, "_batch_quiet_verbose_debug", True)
+        _VERBOSE_DEBUG = False
+        _sup_mod._VERBOSE_DEBUG = False
+        _smh_mod._VERBOSE_DEBUG = False
+        _comb_mod._VERBOSE_DEBUG = False
+        _met_mod._VERBOSE_DEBUG = False
+        _metrics_mod._VERBOSE_DEBUG = False
 
         DEFAULT_EDGE = {"window_half_size": 45, "mu": 0.0, "l": 5, "p": 14, "seg_mode": "new"}
         DEFAULT_EDGE_GRID = [
@@ -1330,6 +1359,12 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             if _k in section_wall_s:
                 print(f"  {_k}: {section_wall_s[_k]:.2f}s")
         print(f"  total: {total_elapsed_s:.2f}s")
+        _VERBOSE_DEBUG = _prev_verbose["metrics_engine"]
+        _sup_mod._VERBOSE_DEBUG = _prev_verbose["supervision"]
+        _smh_mod._VERBOSE_DEBUG = _prev_verbose["supervision_midline_helpers"]
+        _comb_mod._VERBOSE_DEBUG = _prev_verbose["combiner"]
+        _met_mod._VERBOSE_DEBUG = _prev_verbose["metrics"]
+        setattr(self, "_batch_quiet_verbose_debug", False)
         return {
             "ok": True,
             "best_non_dt": best_non_dt,
@@ -1918,6 +1953,21 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         from helpers.supervision import export_gt_supervision_for_image as _export_gt_sup
         #from cracktools.segmentation import generate_mask_from_edges
 
+        if bool(export_supervision) and not bool(getattr(self, "_batch_quiet_verbose_debug", False)):
+            try:
+                import helpers.supervision as _sup_mod
+                import helpers.supervision_midline_helpers as _smh_mod
+                import helpers.metrics as _met_mod
+                import combiner as _comb_mod
+                _sup_mod._VERBOSE_DEBUG = True
+                _smh_mod._VERBOSE_DEBUG = True
+                _met_mod._VERBOSE_DEBUG = True
+                _comb_mod._VERBOSE_DEBUG = True
+                global _VERBOSE_DEBUG
+                _VERBOSE_DEBUG = True
+            except Exception:
+                pass
+
         # Master dissertation-quality output flag.
         # Flip to True for full export runs with all heavy debug/summary plots.
         DISSERTATION_QUALITY_PLOTS = False
@@ -1992,12 +2042,12 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         for cid, cr in atomic.items():
             try:
                 mc = cr.get("mask_crop")
-                print(f"[PRE-COMBINE DEBUG] manual cid={cid}")
-                print("  source:", cr.get("source"))
-                print("  bbox:", cr.get("mask_bbox"))
-                print("  crop shape:", None if mc is None else tuple(np.asarray(mc).shape))
+                _vdbg_print(f"[PRE-COMBINE DEBUG] manual cid={cid}")
+                _vdbg_print("  source:", cr.get("source"))
+                _vdbg_print("  bbox:", cr.get("mask_bbox"))
+                _vdbg_print("  crop shape:", None if mc is None else tuple(np.asarray(mc).shape))
             except Exception as e:
-                print(f"[PRE-COMBINE DEBUG] manual cid={cid} debug failed: {e}")
+                _vdbg_print(f"[PRE-COMBINE DEBUG] manual cid={cid} debug failed: {e}")
 
         # ------------------------------------------------------------------
         # 2) Build AUTO atomic set from per-cid snapshots (auto_best)
@@ -2015,12 +2065,12 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 if not snap:
                     continue
                 try:
-                    print(f"[SNAPSHOT LOAD DEBUG] auto loop cid={scid} source={snap.get('source')}")
-                    print("  bbox:", snap.get("mask_bbox"))
+                    _vdbg_print(f"[SNAPSHOT LOAD DEBUG] auto loop cid={scid} source={snap.get('source')}")
+                    _vdbg_print("  bbox:", snap.get("mask_bbox"))
                     mc_dbg = snap.get("mask_crop")
-                    print("  crop shape:", None if mc_dbg is None else tuple(np.asarray(mc_dbg).shape))
+                    _vdbg_print("  crop shape:", None if mc_dbg is None else tuple(np.asarray(mc_dbg).shape))
                 except Exception as e:
-                    print(f"[SNAPSHOT LOAD DEBUG] auto loop cid={scid} debug failed: {e}")
+                    _vdbg_print(f"[SNAPSHOT LOAD DEBUG] auto loop cid={scid} debug failed: {e}")
 
                 ab = snap.get("auto_best")
                 if not isinstance(ab, dict):
@@ -2067,12 +2117,12 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             for cid, cr in auto_atomic.items():
                 try:
                     mc = cr.get("mask_crop")
-                    print(f"[PRE-COMBINE DEBUG] auto cid={cid}")
-                    print("  source:", cr.get("source"))
-                    print("  bbox:", cr.get("mask_bbox"))
-                    print("  crop shape:", None if mc is None else tuple(np.asarray(mc).shape))
+                    _vdbg_print(f"[PRE-COMBINE DEBUG] auto cid={cid}")
+                    _vdbg_print("  source:", cr.get("source"))
+                    _vdbg_print("  bbox:", cr.get("mask_bbox"))
+                    _vdbg_print("  crop shape:", None if mc is None else tuple(np.asarray(mc).shape))
                 except Exception as e:
-                    print(f"[PRE-COMBINE DEBUG] auto cid={cid} debug failed: {e}")
+                    _vdbg_print(f"[PRE-COMBINE DEBUG] auto cid={cid} debug failed: {e}")
         else:
             print("[DEBUG METRICS] auto metrics disabled for this call.")
 
@@ -2087,7 +2137,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             px_thresh=10.0,
             debug_root=combine_debug_root
         )
-        print(f"[COMBINE_DBG] synthesized {len(authoring_combined)} combined groups automatically.")
+        _vdbg_print(f"[COMBINE_DBG] synthesized {len(authoring_combined)} combined groups automatically.")
 
         # ------------------------------------------------------------------
         # 3.5) CORRECT GT SUPERVISION EXPORT (ATOMIC + GT GROUPED COMBINED)
@@ -2249,16 +2299,16 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         print(f"[{mode_label.upper()}_COMBINE_DBG] debug_callback failed: {e}")
 
                 try:
-                    print(
+                    _vdbg_print(
                         f"[COMBINER CALLSITE] mode={mode_label} base={base_name} ccid={ccid} "
                         f"members={[str(m) for m in members]} atomic_id={id(atomic_src)}"
                     )
                     for _m in members:
                         _sid = str(_m)
                         _cr = (atomic_src or {}).get(_sid, {}) or {}
-                        print(f"[ATOMIC FINGER PRE] mode={mode_label} cid={_sid} {_crack_fingerprint(_cr)}")
+                        _vdbg_print(f"[ATOMIC FINGER PRE] mode={mode_label} cid={_sid} {_crack_fingerprint(_cr)}")
                 except Exception as e:
-                    print(f"[COMBINER CALLSITE] debug fingerprint failed mode={mode_label} ccid={ccid}: {e}")
+                    _vdbg_print(f"[COMBINER CALLSITE] debug fingerprint failed mode={mode_label} ccid={ccid}: {e}")
 
                 rebuilt = build_combined_crack_stateless(
                     original_image=self.original_image,
@@ -2650,7 +2700,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
                 out_iou = os.path.join(out_dir, out_iou_name)
                 cv2.imwrite(out_iou, vis_large)
-                print(f"[COMBINE_DBG] wrote → {out_iou}")
+                _vdbg_print(f"[COMBINE_DBG] wrote -> {out_iou}")
 
                 # plot normals on pred crop (same frame)
                 if (mid_global is not None or derived_mid_global is not None) and e1_global is not None and e2_global is not None:
@@ -2692,10 +2742,10 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         track_e2         = None,
                         out_png          = out_width,
                     )
-                    print(f"[COMBINE_DBG] wrote → {out_width}")
+                    _vdbg_print(f"[COMBINE_DBG] wrote -> {out_width}")
 
             except Exception as e:
-                print(f"[COMBINE_DBG] pretty/width overlay failed: {e}")
+                _vdbg_print(f"[COMBINE_DBG] pretty/width overlay failed: {e}")
 
         def _compute_and_record_combined_metrics(
             *,
@@ -2747,7 +2797,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                         bb   = cmb.get("mask_bbox")
                         crop = cmb.get("mask_crop")
                         if not bb or crop is None:
-                            print(f"[COMBINE_DBG] ⚠️ combined {ccid} missing mask_crop/bbox — skipping.")
+                            _vdbg_print(f"[COMBINE_DBG] combined {ccid} missing mask_crop/bbox - skipping.")
                             continue
 
                         x, y, w, h = map(int, bb)
@@ -2789,7 +2839,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                             boxes.append([xs.min(), ys.min(), xs.max(), ys.max()])
 
                         if not np.any(combined_mask):
-                            print(f"[COMBINE_DBG] ⚠️ combined {ccid} empty (auto) — skipping.")
+                            _vdbg_print(f"[COMBINE_DBG] combined {ccid} empty (auto) - skipping.")
                             continue
 
                         if boxes:
@@ -3605,9 +3655,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                                     "hausdorff_max": _hd,
                                     "coverage_min": _cov,
                                 }]
-                                print(f"[MIDLINE ABL] pulled score from ablation CSV for {variant_id}: score={_score:.4f}")
+                                _vdbg_print(f"[MIDLINE ABL] pulled score from ablation CSV for {variant_id}: score={_score:.4f}")
                     except Exception as _e_abl:
-                        print(f"[MIDLINE ABL] failed: {_e_abl}")
+                        _vdbg_print(f"[MIDLINE ABL] failed: {_e_abl}")
                 if midline_rows:
                     geom_counts = {}
                     for r in midline_rows:

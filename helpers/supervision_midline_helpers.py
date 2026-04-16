@@ -7,6 +7,9 @@ from scipy.ndimage import gaussian_filter, label as ndi_label
 
 from helpers.metrics import normals_from_mask_for_midline, resample_by_arclength
 
+# Set to False to suppress verbose per-image debug prints during batch runs
+_VERBOSE_DEBUG = True
+
 DEBUG_CC_TRACE = True
 DEBUG_TARGET_IMAGE = "42"
 DEBUG_TARGET_BRANCHES = None
@@ -34,7 +37,8 @@ def _dbg_coord(tag, mid_xy, mask_u8, bbox_xywh=None):
     mid = np.asarray(mid_xy, float)
     m = np.asarray(mask_u8)
     if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) == 0 or m.ndim < 2:
-        print(f"[COORD][WARN] {tag} invalid mid/mask input", flush=True)
+        if _VERBOSE_DEBUG:
+            print(f"[COORD][WARN] {tag} invalid mid/mask input", flush=True)
         return
 
     h, w = m.shape[:2]
@@ -47,18 +51,21 @@ def _dbg_coord(tag, mid_xy, mask_u8, bbox_xywh=None):
     )
     inside_ratio = float(np.mean(inside)) if inside.size else 0.0
 
-    print(
-        f"[COORD] {tag} | "
-        f"mask={w}x{h} | "
-        f"mid_x=[{xmin:.1f},{xmax:.1f}] mid_y=[{ymin:.1f},{ymax:.1f}] | "
-        f"inside={inside_ratio:.3f}",
-        flush=True,
-    )
+    if _VERBOSE_DEBUG:
+        print(
+            f"[COORD] {tag} | "
+            f"mask={w}x{h} | "
+            f"mid_x=[{xmin:.1f},{xmax:.1f}] mid_y=[{ymin:.1f},{ymax:.1f}] | "
+            f"inside={inside_ratio:.3f}",
+            flush=True,
+        )
     if bbox_xywh is not None and len(bbox_xywh) == 4:
         x, y, bw, bh = [int(v) for v in bbox_xywh]
-        print(f"[COORD] {tag} | bbox=({x},{y},{bw},{bh})", flush=True)
+        if _VERBOSE_DEBUG:
+            print(f"[COORD] {tag} | bbox=({x},{y},{bw},{bh})", flush=True)
     if inside_ratio < 0.9:
-        print(f"[COORD][WARN] {tag} mid not aligned with mask", flush=True)
+        if _VERBOSE_DEBUG:
+            print(f"[COORD][WARN] {tag} mid not aligned with mask", flush=True)
 
 
 def build_centering_domain_mask(*, crack_mask_u8, territory_u8=None, mode="soft"):
@@ -546,30 +553,68 @@ def _compute_dijkstra_midline(
             flush=True,
         )
 
+    num_labels = int(max(0, cc_n - 1))
     domain_for_solver = dom.copy()
     chosen_cc = 0
     cc_fix_reason = None
-    if bool(USE_CC_RESTRICT_FOR_SOLVER):
-        if start_cc_after > 0 and end_cc_after > 0:
-            if start_cc_after == end_cc_after:
-                chosen_cc = int(start_cc_after)
-            else:
-                cc_fix_reason = "different_endpoint_ccs"
-        elif start_cc_after > 0:
-            chosen_cc = int(start_cc_after)
-        elif end_cc_after > 0:
-            chosen_cc = int(end_cc_after)
+    if bool(USE_CC_RESTRICT_FOR_SOLVER) and num_labels > 2:
+        if num_labels > 4:
+            # Many CCs: midpoint is typically more stable than endpoints.
+            mid_idx = int(len(S) // 2)
+            mx = int(round(float(S[mid_idx, 0])))
+            my = int(round(float(S[mid_idx, 1])))
+            mx = int(np.clip(mx, 0, W - 1))
+            my = int(np.clip(my, 0, H - 1))
+            if dom[my, mx]:
+                chosen_cc = int(cc_labels[my, mx])
+            # Fallback to endpoint logic if midpoint is outside domain/invalid.
+            if chosen_cc == 0:
+                if start_cc_after > 0 and end_cc_after > 0:
+                    if start_cc_after == end_cc_after:
+                        chosen_cc = int(start_cc_after)
+                    else:
+                        cc_fix_reason = "different_endpoint_ccs"
+                elif start_cc_after > 0:
+                    chosen_cc = int(start_cc_after)
+                elif end_cc_after > 0:
+                    chosen_cc = int(end_cc_after)
+                else:
+                    cc_fix_reason = "no_valid_endpoint_cc"
         else:
-            cc_fix_reason = "no_valid_endpoint_cc"
+            if start_cc_after > 0 and end_cc_after > 0:
+                if start_cc_after == end_cc_after:
+                    chosen_cc = int(start_cc_after)
+                else:
+                    cc_fix_reason = "different_endpoint_ccs"
+            elif start_cc_after > 0:
+                chosen_cc = int(start_cc_after)
+            elif end_cc_after > 0:
+                chosen_cc = int(end_cc_after)
+            else:
+                cc_fix_reason = "no_valid_endpoint_cc"
 
         if chosen_cc > 0:
-            domain_for_solver = (cc_labels == int(chosen_cc)).astype(bool)
-            if dbg_on:
-                print(
-                    f"[CC_FIX] branch={branch_id} mk={method_key} "
-                    f"chosen_cc={chosen_cc} size={int(np.sum(domain_for_solver))}",
-                    flush=True,
-                )
+            domain_cc = (cc_labels == int(chosen_cc)).astype(bool)
+            cc_sz = int(np.sum(domain_cc))
+            dom_sz = int(np.sum(dom))
+            cc_coverage = float(cc_sz) / float(max(1, dom_sz))
+            if cc_coverage < 0.15:
+                domain_for_solver = dom.copy()
+                cc_fix_reason = "low_cc_coverage_full_domain"
+                if dbg_on:
+                    print(
+                        f"[CC_FIX][SKIP] branch={branch_id} mk={method_key} "
+                        f"chosen_cc={chosen_cc} cc_coverage={cc_coverage:.4f} -> full_domain",
+                        flush=True,
+                    )
+            else:
+                domain_for_solver = domain_cc
+                if dbg_on:
+                    print(
+                        f"[CC_FIX] branch={branch_id} mk={method_key} "
+                        f"chosen_cc={chosen_cc} size={cc_sz} cc_coverage={cc_coverage:.4f}",
+                        flush=True,
+                    )
         elif dbg_on:
             print(
                 f"[CC_FIX][SKIP] branch={branch_id} mk={method_key} reason={cc_fix_reason}",
@@ -1272,14 +1317,15 @@ def _build_ridge_valley_method_costmaps(
     dt_bad[dom] = (1.0 - dtn[dom]).astype(np.float32)
     vals = dt_bad[dom]
     if vals.size:
-        print(
-            f"[DT COST DBG] method={method_key} "
-            f"dt_norm_min={float(dtn[dom].min()):.6f} "
-            f"dt_norm_max={float(dtn[dom].max()):.6f} "
-            f"dt_bad_min={float(vals.min()):.6f} "
-            f"dt_bad_max={float(vals.max()):.6f} "
-            f"dt_bad_unique_1e4={int(np.unique(np.round(vals, 4)).size)}"
-        )
+        if _VERBOSE_DEBUG:
+            print(
+                f"[DT COST DBG] method={method_key} "
+                f"dt_norm_min={float(dtn[dom].min()):.6f} "
+                f"dt_norm_max={float(dtn[dom].max()):.6f} "
+                f"dt_bad_min={float(vals.min()):.6f} "
+                f"dt_bad_max={float(vals.max()):.6f} "
+                f"dt_bad_unique_1e4={int(np.unique(np.round(vals, 4)).size)}"
+            )
 
     costmaps = {
         "dt": np.full_like(dtn, inf, dtype=np.float32),
@@ -1408,10 +1454,11 @@ def _precompute_method_shared_inputs(
 
     if depth_bbox_xywh is not None and len(depth_bbox_xywh) == 4:
         bx, by, bw, bh = [int(v) for v in depth_bbox_xywh]
-        print(
-            f"[FRAME] shared bbox_global=({bx},{by}) size=({bw},{bh})",
-            flush=True,
-        )
+        if _VERBOSE_DEBUG:
+            print(
+                f"[FRAME] shared bbox_global=({bx},{by}) size=({bw},{bh})",
+                flush=True,
+            )
         if bw > 0 and bh > 0:
             frame_offset_xy = np.array([float(bx), float(by)], dtype=float)
             if (
@@ -1427,10 +1474,11 @@ def _precompute_method_shared_inputs(
                 if mask_local.shape[0] >= by + bh and mask_local.shape[1] >= bx + bw:
                     mask_local = np.asarray(mask_local[by:by + bh, bx:bx + bw], np.uint8)
     else:
-        print(
-            f"[FRAME] shared bbox_global=(0,0) size=({int(domain_local.shape[1])},{int(domain_local.shape[0])})",
-            flush=True,
-        )
+        if _VERBOSE_DEBUG:
+            print(
+                f"[FRAME] shared bbox_global=(0,0) size=({int(domain_local.shape[1])},{int(domain_local.shape[0])})",
+                flush=True,
+            )
 
     _dbg_coord(
         tag="shared_precompute",
@@ -1441,10 +1489,11 @@ def _precompute_method_shared_inputs(
 
     dom_nz = int(np.count_nonzero(domain_local))
     _, ncc = ndi_label(domain_local > 0)
-    print(
-        f"[DOMAIN] shared | nz={dom_nz} | cc={int(ncc)}",
-        flush=True,
-    )
+    if _VERBOSE_DEBUG:
+        print(
+            f"[DOMAIN] shared | nz={dom_nz} | cc={int(ncc)}",
+            flush=True,
+        )
 
     shared_timing = {
         "dt_compute_s": float((t_dt or {}).get("compute_s", 0.0)),
@@ -1486,11 +1535,12 @@ def _precompute_method_shared_inputs(
         if depth_local is None:
             depth_bundle["reason"] = (depth_align_meta or {}).get("reason", "missing_depth")
         else:
-            print(
-                f"[DEPTH OK] shared min={float(np.nanmin(depth_local)):.4f} "
-                f"max={float(np.nanmax(depth_local)):.4f} "
-                f"mean={float(np.nanmean(depth_local)):.4f}"
-            )
+            if _VERBOSE_DEBUG:
+                print(
+                    f"[DEPTH OK] shared min={float(np.nanmin(depth_local)):.4f} "
+                    f"max={float(np.nanmax(depth_local)):.4f} "
+                    f"mean={float(np.nanmean(depth_local)):.4f}"
+                )
             depth_norm, recess_norm, depth_sig_meta = _compute_depth_recess_signal(
                 depth_local,
                 domain_local,
@@ -1743,6 +1793,13 @@ def _run_single_midline_method(
 
     route_domain = np.asarray(dom, np.uint8).copy()
     route_costmap = np.asarray(costmap, np.float32)
+    print(
+        f"[COORD_CHECK] mask={tuple(route_domain.shape)} "
+        f"start={np.asarray(mid[0], float).tolist()} end={np.asarray(mid[-1], float).tolist()} "
+        f"x_range=[{float(np.min(np.asarray(mid, float)[:, 0])):.1f},{float(np.max(np.asarray(mid, float)[:, 0])):.1f}] "
+        f"y_range=[{float(np.min(np.asarray(mid, float)[:, 1])):.1f},{float(np.max(np.asarray(mid, float)[:, 1])):.1f}]",
+        flush=True,
+    )
 
     path_raw, dijkstra_meta = _compute_dijkstra_midline(
         mid,

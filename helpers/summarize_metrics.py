@@ -1,7 +1,9 @@
 import os
 import glob
 import json
+import shutil
 from typing import Dict, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -174,7 +176,20 @@ def _display_width_method_label(name: str) -> str:
     Clean up width baseline method display names.
     Preserve MAT raw vs DSE distinction.
     """
-    s = str(name or "").strip()
+    s0 = str(name or "").strip()
+    key = s0.lower()
+    width_method_display = {
+        "mat_width_raw": "MAT (raw)",
+        "mat_width_dse": "MAT (DSE)",
+        "pca_width_dse": "PCA",
+        "esd_width_dse": "ESD",
+        "eob_width_dse": "EOB",
+        "skel_mat_raw": "MAT (raw)",
+        "skel_mat_dse": "MAT (DSE)",
+    }
+    if key in width_method_display:
+        return width_method_display[key]
+    s = s0
     s = re.sub(r"(_sec|_s)$", "", s, flags=re.IGNORECASE)
     s = re.sub(r"_width", "", s, flags=re.IGNORECASE)
     first = s.split("_")[0].lower()
@@ -199,6 +214,187 @@ _METHOD_DISPLAY_NAMES = {
 
 def _display_method_name(name: str) -> str:
     return _METHOD_DISPLAY_NAMES.get(str(name), str(name))
+
+
+def _build_width_method_name(df: pd.DataFrame) -> pd.Series:
+    """Converts method_family / baseline_method / midline_type cols to display label."""
+    if not {"method_family", "baseline_method", "midline_type"}.issubset(df.columns):
+        return df.get("midline_type", pd.Series(["unknown"] * len(df), index=df.index)).astype(str)
+    mf = df["method_family"].astype(str)
+    bm = df["baseline_method"].astype(str)
+    mt = df["midline_type"].astype(str).map(_display_method_name)
+    return pd.Series(
+        np.where(
+            mf.str.lower().eq("baseline"),
+            bm.map(_display_width_method_label).where(bm.str.len() > 0, "baseline"),
+            mt.where(mt.str.len() > 0, "model"),
+        ),
+        index=df.index,
+    )
+
+
+def _classify_width_source(row) -> str:
+    """Returns 'baseline', 'ET', or 'model'."""
+    mf = str(row.get("method_family", "") or "").lower()
+    if mf == "baseline":
+        return "baseline"
+    bm = str(row.get("baseline_method", "") or "").strip().lower()
+    mn = str(row.get("method_name", "") or "").strip().lower()
+    baseline_keys = {"mat_width_raw", "mat_width_dse", "pca_width_dse", "esd_width_dse", "eob_width_dse", "skel_mat_raw", "skel_mat_dse"}
+    if bm in baseline_keys:
+        return "baseline"
+    if any(tok in mn for tok in ("mat", "pca", "esd", "eob")):
+        return "baseline"
+    if _is_et_like(str(row.get("midline_type", "") or "")) or _is_et_like(str(row.get("method_name", "") or "")):
+        return "ET"
+    return "model"
+
+
+def _plot_width_metric(
+    *,
+    df: pd.DataFrame,
+    metric_col: str,
+    out_png: str,
+    title: str,
+    ylabel: str,
+    plot_type: str = "bar",
+    max_methods: int = 20,
+    color_map: Optional[Dict] = None,
+) -> bool:
+    if df is None or df.empty or metric_col not in df.columns:
+        return False
+    d = df.copy()
+    d["method_name"] = _build_width_method_name(d)
+    d["source_class"] = d.apply(_classify_width_source, axis=1)
+    d[metric_col] = pd.to_numeric(d[metric_col], errors="coerce")
+    d = d[np.isfinite(d[metric_col].to_numpy(float))].copy()
+    if d.empty:
+        return False
+
+    cmap = color_map or {"baseline": "#2ca02c", "model": "#1f77b4", "ET": "#d62728"}
+
+    if str(plot_type).lower() == "box":
+        order = (
+            d.groupby("method_name", dropna=False)[metric_col]
+            .size()
+            .sort_values(ascending=False)
+            .head(int(max_methods))
+            .index.astype(str)
+            .tolist()
+        )
+        d = d[d["method_name"].astype(str).isin(order)].copy()
+        if d.empty:
+            return False
+        med_order = (
+            d.groupby("method_name", dropna=False)[metric_col]
+            .median()
+            .sort_values(ascending=True)
+            .index.astype(str)
+            .tolist()
+        )
+        d["method_name"] = pd.Categorical(d["method_name"].astype(str), categories=med_order, ordered=True)
+        fig_w = max(9.0, 0.55 * len(med_order))
+        fig, ax = plt.subplots(figsize=(fig_w, 5.0), dpi=180)
+        parts = ax.boxplot(
+            [d.loc[d["method_name"] == m, metric_col].to_numpy(float) for m in med_order],
+            labels=med_order,
+            patch_artist=True,
+            showfliers=True,
+            medianprops=dict(color="black", linewidth=1.2),
+            whiskerprops=dict(color="#555555"),
+            capprops=dict(color="#555555"),
+            flierprops=dict(marker="o", markersize=3, alpha=0.5, markerfacecolor="#888888", markeredgecolor="#888888"),
+        )
+        cls_map = {}
+        for m in med_order:
+            g = d.loc[d["method_name"] == m]
+            if g.empty:
+                cls_map[m] = "model"
+                continue
+            cls_map[m] = str(g["source_class"].iloc[0])
+        for box, m in zip(parts["boxes"], med_order):
+            box.set_facecolor(cmap.get(cls_map.get(m, "model"), "#4c78a8"))
+            box.set_alpha(0.65)
+        ax.set_ylabel(_clean_plot_label(ylabel))
+        ax.set_title(_clean_plot_label(title))
+        ax.set_xticklabels(med_order, rotation=35, ha="right", fontsize=8)
+        ax.grid(axis="y", alpha=0.2)
+        ax.legend(
+            handles=[
+                Patch(facecolor=cmap.get("ET", "#d62728"), edgecolor="none", label="ET"),
+                Patch(facecolor=cmap.get("model", "#1f77b4"), edgecolor="none", label="model (dt/dt_depth)"),
+                Patch(facecolor=cmap.get("baseline", "#2ca02c"), edgecolor="none", label="baseline"),
+            ],
+            loc="best",
+            fontsize=8,
+            framealpha=0.9,
+        )
+        plt.tight_layout()
+        fig.savefig(out_png, bbox_inches="tight")
+        plt.close(fig)
+        return True
+
+    rows = []
+    for m, g in d.groupby("method_name", dropna=False):
+        v = pd.to_numeric(g[metric_col], errors="coerce").to_numpy(float)
+        v = v[np.isfinite(v)]
+        if v.size == 0:
+            continue
+        q1 = float(np.percentile(v, 25))
+        q3 = float(np.percentile(v, 75))
+        iqr_val = float(q3 - q1)
+        lo_fence = float(q1 - 1.5 * iqr_val)
+        hi_fence = float(q3 + 1.5 * iqr_val)
+        outliers = v[(v < lo_fence) | (v > hi_fence)]
+        rows.append(
+            {
+                "method_name": str(m),
+                "mean": float(np.mean(v)),
+                "q1": q1,
+                "q3": q3,
+                "outliers": outliers,
+                "source_class": str(g["source_class"].iloc[0]) if "source_class" in g.columns else "model",
+                "n": int(v.size),
+            }
+        )
+    if not rows:
+        return False
+
+    p = pd.DataFrame(rows).sort_values("mean", ascending=True).head(int(max_methods))
+    x = np.arange(len(p), dtype=float)
+    y = p["mean"].to_numpy(float)
+    lo = np.clip(y - p["q1"].to_numpy(float), 0.0, None)
+    hi = np.clip(p["q3"].to_numpy(float) - y, 0.0, None)
+    cols = [cmap.get(str(c), "#4c78a8") for c in p["source_class"].astype(str).tolist()]
+    fig, ax = plt.subplots(figsize=(max(8.0, 0.55 * len(p)), 4.8), dpi=180)
+    ax.bar(x, y, color=cols, alpha=0.85)
+    ax.errorbar(x, y, yerr=np.vstack([lo, hi]), fmt="none", ecolor="#f58518", elinewidth=1.3, capsize=3)
+    for i, arr in enumerate(p["outliers"].tolist()):
+        if arr is None or len(arr) == 0:
+            continue
+        yy = np.asarray(arr, float)
+        xx = np.full(len(yy), float(x[i])) + np.linspace(-0.08, 0.08, len(yy))
+        ax.scatter(xx, yy, s=10, color="#d62728", alpha=0.8, zorder=3)
+    ax.set_xticks(x)
+    ax.set_xticklabels(p["method_name"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
+    ax.set_ylabel(_clean_plot_label(ylabel))
+    ax.set_title(_clean_plot_label(title))
+    ax.grid(axis="y", alpha=0.2)
+    ax.legend(
+        handles=[
+            Patch(facecolor=cmap.get("ET", "#d62728"), edgecolor="none", label="ET"),
+            Patch(facecolor=cmap.get("model", "#1f77b4"), edgecolor="none", label="model (dt/dt_depth)"),
+            Patch(facecolor=cmap.get("baseline", "#2ca02c"), edgecolor="none", label="baseline"),
+            Patch(facecolor="#f58518", edgecolor="none", label="IQR"),
+        ],
+        loc="best",
+        fontsize=8,
+        framealpha=0.9,
+    )
+    plt.tight_layout()
+    fig.savefig(out_png, bbox_inches="tight")
+    plt.close(fig)
+    return True
 
 
 def _list_image_metric_dirs(metrics_root: str) -> List[str]:
@@ -678,6 +874,73 @@ def _aggregate_mask_metrics(
     return outputs
 
 
+def _load_diffs_frames(image_dirs: List[str]) -> pd.DataFrame:
+    """
+    Load per-sample width diffs rows from *_width_diffs_combined.csv.
+    Each row is approximately 1px arc-length, so row-wise aggregation is
+    naturally length-weighted.
+    """
+    frames = []
+    for img_dir in image_dirs:
+        image = os.path.basename(img_dir)
+        found = glob.glob(
+            os.path.join(img_dir, "**", "*_width_diffs_combined.csv"),
+            recursive=True,
+        )
+        for p in found:
+            df = _safe_read_csv(p)
+            if df is None or df.empty:
+                continue
+
+            rel = os.path.relpath(p, img_dir)
+            mt, mf, _ = _parse_width_summary_context(rel)
+            cols_lower = {str(c).lower(): c for c in df.columns}
+
+            gc = next((cols_lower[k] for k in ("gt_width_px", "gt_width", "gt") if k in cols_lower), None)
+            dc = next((cols_lower[k] for k in ("width_diff_px", "diff_px", "diff") if k in cols_lower), None)
+            mc = next((cols_lower[k] for k in ("method",) if k in cols_lower), None)
+
+            # ET positional schema fallback: x,y,gt,pred,diff,...
+            if gc is None and dc is None and len(df.columns) >= 5:
+                if pd.to_numeric(df.iloc[:, 2], errors="coerce").notna().sum() > 0:
+                    df = df.rename(columns={df.columns[2]: "gt_width_px", df.columns[4]: "diff_px"})
+                    cols_lower = {str(c).lower(): c for c in df.columns}
+                    gc = cols_lower.get("gt_width_px")
+                    dc = cols_lower.get("diff_px")
+
+            if gc is None or dc is None:
+                continue
+
+            d = pd.DataFrame(
+                {
+                    "gt_width_px": pd.to_numeric(df[gc], errors="coerce"),
+                    "diff_px": pd.to_numeric(df[dc], errors="coerce"),
+                }
+            )
+
+            if mc is not None and str(mf).lower() == "baseline":
+                d["_method"] = df[mc].astype(str)
+            else:
+                d["_method"] = str(mt)
+
+            d["image"] = image
+            d["source_relpath"] = rel.replace("\\", "/")
+            frames.append(d)
+
+    if not frames:
+        return pd.DataFrame(columns=["gt_width_px", "diff_px", "_method", "image", "source_relpath"])
+
+    out = pd.concat(frames, ignore_index=True)
+    out["gt_width_px"] = pd.to_numeric(out["gt_width_px"], errors="coerce")
+    out["diff_px"] = pd.to_numeric(out["diff_px"], errors="coerce")
+    out = out[
+        np.isfinite(out["gt_width_px"])
+        & np.isfinite(out["diff_px"])
+        & (out["gt_width_px"] > 0)
+    ].copy()
+    return out
+
+
 def _aggregate_width_metrics(
     image_dirs: List[str],
     out_dir: str,
@@ -691,7 +954,12 @@ def _aggregate_width_metrics(
 
     outputs = {}
     width_dir = os.path.join(out_dir, "width")
-    os.makedirs(width_dir, exist_ok=True)
+    overview_dir = os.path.join(width_dir, "overview")
+    no_et_dir = os.path.join(width_dir, "no_et")
+    bias_dir = os.path.join(width_dir, "bias")
+    length_weighted_dir = os.path.join(width_dir, "length_weighted")
+    for _d in (width_dir, overview_dir, no_et_dir, bias_dir, length_weighted_dir):
+        os.makedirs(_d, exist_ok=True)
     frames = []
     COLOR_MAP = {
         "baseline": "#2ca02c",  # green
@@ -699,186 +967,6 @@ def _aggregate_width_metrics(
         "model": "#1f77b4",     # blue (same as auto)
         "ET": "#d62728",        # red
     }
-
-    def _plot_metric_bar_iqr_outliers(
-        *,
-        df_plot: pd.DataFrame,
-        metric_col: str,
-        out_png: str,
-        title: str,
-        max_methods: int = 20,
-        ylabel: Optional[str] = None,
-    ) -> None:
-        if metric_col not in df_plot.columns:
-            return
-        local_df = df_plot.copy()
-        if "method_name" not in local_df.columns:
-            if {"method_family", "baseline_method", "midline_type"}.issubset(local_df.columns):
-                mf = local_df["method_family"].astype(str)
-                bm = local_df["baseline_method"].astype(str)
-                mt = local_df["midline_type"].astype(str)
-                local_df["method_name"] = np.where(
-                    mf.str.lower().eq("baseline"),
-                    bm.apply(_display_width_method_label).where(bm.str.len() > 0, "baseline"),
-                    mt.where(mt.str.len() > 0, "model"),
-                )
-            else:
-                return
-        rows = []
-        for m, g in local_df.groupby("method_name", dropna=False):
-            v = pd.to_numeric(g[metric_col], errors="coerce").to_numpy(float)
-            v = v[np.isfinite(v)]
-            if v.size == 0:
-                continue
-            mf0 = str(g.get("method_family", pd.Series([""])).astype(str).iloc[0]).lower() if "method_family" in g.columns else ""
-            mt0 = str(g.get("midline_type", pd.Series([""])).astype(str).iloc[0]).lower() if "midline_type" in g.columns else ""
-            if mf0 == "baseline":
-                source_class = "baseline"
-            elif _is_et_like(mt0):
-                source_class = "ET"
-            else:
-                source_class = "auto"
-            q1 = float(np.percentile(v, 25))
-            q3 = float(np.percentile(v, 75))
-            iqr = float(q3 - q1)
-            lo = float(q1 - 1.5 * iqr)
-            hi = float(q3 + 1.5 * iqr)
-            out = v[(v < lo) | (v > hi)]
-            rows.append(
-                {
-                    "method_name": str(m),
-                    "mean": float(np.mean(v)),
-                    "q1": q1,
-                    "q3": q3,
-                    "outliers": out,
-                    "n": int(v.size),
-                    "source_class": source_class,
-                }
-            )
-        if not rows:
-            return
-        d = pd.DataFrame(rows).sort_values("mean", ascending=True).head(int(max_methods))
-        fig_w = max(8.0, 0.55 * len(d))
-        fig, ax = plt.subplots(figsize=(fig_w, 4.8), dpi=180)
-        xs = np.arange(len(d))
-        means = d["mean"].to_numpy(float)
-        bar_colors = [COLOR_MAP.get(str(c), "#4c78a8") for c in d["source_class"].astype(str).tolist()]
-        ax.bar(xs, means, color=bar_colors, alpha=0.85, label="mean")
-        lo_err = np.clip(means - d["q1"].to_numpy(float), 0.0, None)
-        hi_err = np.clip(d["q3"].to_numpy(float) - means, 0.0, None)
-        ax.errorbar(xs, means, yerr=np.vstack([lo_err, hi_err]), fmt="none", ecolor="#f58518", elinewidth=1.3, capsize=3, label="IQR")
-        for i, arr in enumerate(d["outliers"].tolist()):
-            if arr is None or len(arr) == 0:
-                continue
-            yy = np.asarray(arr, float)
-            xx = np.full(len(yy), float(xs[i])) + np.linspace(-0.08, 0.08, len(yy))
-            ax.scatter(xx, yy, s=10, color="#d62728", alpha=0.8, zorder=3)
-        ax.set_xticks(xs)
-        ax.set_xticklabels(d["method_name"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
-        ax.set_ylabel(_clean_plot_label(ylabel if ylabel is not None else metric_col))
-        ax.set_title(_clean_plot_label(title))
-        ax.grid(axis="y", alpha=0.2)
-        legend_handles = [
-            Patch(facecolor=COLOR_MAP["ET"], edgecolor="none", label="ET"),
-            Patch(facecolor=COLOR_MAP["model"], edgecolor="none", label="model (dt/dt_depth)"),
-            Patch(facecolor=COLOR_MAP["baseline"], edgecolor="none", label="baseline"),
-            Patch(facecolor="#f58518", edgecolor="none", label="IQR"),
-        ]
-        ax.legend(handles=legend_handles, loc="best", fontsize=8, framealpha=0.9)
-        plt.tight_layout()
-        fig.savefig(out_png, bbox_inches="tight")
-        plt.close(fig)
-
-    def _plot_metric_box_by_method(
-        *,
-        df_plot: pd.DataFrame,
-        metric_col: str,
-        out_png: str,
-        title: str,
-        max_methods: int = 20,
-        ylabel: Optional[str] = None,
-    ) -> None:
-        if metric_col not in df_plot.columns:
-            return
-        local_df = df_plot.copy()
-        if "method_name" not in local_df.columns:
-            if {"method_family", "baseline_method", "midline_type"}.issubset(local_df.columns):
-                mf = local_df["method_family"].astype(str)
-                bm = local_df["baseline_method"].astype(str)
-                mt = local_df["midline_type"].astype(str)
-                local_df["method_name"] = np.where(
-                    mf.str.lower().eq("baseline"),
-                    bm.apply(_display_width_method_label).where(bm.str.len() > 0, "baseline"),
-                    mt.where(mt.str.len() > 0, "model"),
-                )
-            else:
-                return
-        local_df[metric_col] = pd.to_numeric(local_df[metric_col], errors="coerce")
-        local_df = local_df[np.isfinite(local_df[metric_col].to_numpy(float))]
-        if local_df.empty:
-            return
-
-        # Keep top methods by count for readability.
-        order = (
-            local_df.groupby("method_name", dropna=False)[metric_col]
-            .size()
-            .sort_values(ascending=False)
-            .head(int(max_methods))
-            .index.astype(str)
-            .tolist()
-        )
-        local_df = local_df[local_df["method_name"].astype(str).isin(order)].copy()
-        if local_df.empty:
-            return
-        # Order by median error (lower is better).
-        med_order = (
-            local_df.groupby("method_name", dropna=False)[metric_col]
-            .median()
-            .sort_values(ascending=True)
-            .index.astype(str)
-            .tolist()
-        )
-        local_df["method_name"] = pd.Categorical(local_df["method_name"].astype(str), categories=med_order, ordered=True)
-
-        fig_w = max(9.0, 0.55 * len(med_order))
-        fig, ax = plt.subplots(figsize=(fig_w, 5.0), dpi=180)
-        parts = ax.boxplot(
-            [local_df.loc[local_df["method_name"] == m, metric_col].to_numpy(float) for m in med_order],
-            labels=med_order,
-            patch_artist=True,
-            showfliers=True,
-            medianprops=dict(color="black", linewidth=1.2),
-            whiskerprops=dict(color="#555555"),
-            capprops=dict(color="#555555"),
-            flierprops=dict(marker="o", markersize=3, alpha=0.5, markerfacecolor="#888888", markeredgecolor="#888888"),
-        )
-        # Color by source class.
-        cls_map = {}
-        for m in med_order:
-            g = local_df.loc[local_df["method_name"] == m]
-            if g.empty:
-                cls_map[m] = "auto"
-                continue
-            mf0 = str(g.get("method_family", pd.Series([""])).astype(str).iloc[0]).lower() if "method_family" in g.columns else ""
-            mt0 = str(g.get("midline_type", pd.Series([""])).astype(str).iloc[0]).lower() if "midline_type" in g.columns else ""
-            cls_map[m] = "baseline" if mf0 == "baseline" else ("ET" if _is_et_like(mt0) else "auto")
-        for box, m in zip(parts["boxes"], med_order):
-            box.set_facecolor(COLOR_MAP.get(cls_map.get(m, "auto"), "#4c78a8"))
-            box.set_alpha(0.65)
-
-        ax.set_ylabel(_clean_plot_label(ylabel if ylabel is not None else metric_col))
-        ax.set_title(_clean_plot_label(title))
-        ax.set_xticklabels(med_order, rotation=35, ha="right", fontsize=8)
-        ax.grid(axis="y", alpha=0.2)
-        legend_handles = [
-            Patch(facecolor=COLOR_MAP["ET"], edgecolor="none", label="ET"),
-            Patch(facecolor=COLOR_MAP["model"], edgecolor="none", label="model (dt/dt_depth)"),
-            Patch(facecolor=COLOR_MAP["baseline"], edgecolor="none", label="baseline"),
-        ]
-        ax.legend(handles=legend_handles, loc="best", fontsize=8, framealpha=0.9)
-        plt.tight_layout()
-        fig.savefig(out_png, bbox_inches="tight")
-        plt.close(fig)
 
     for img_dir in image_dirs:
         image = os.path.basename(img_dir)
@@ -927,7 +1015,7 @@ def _aggregate_width_metrics(
         _log(verbose, "[summarize] width summary: empty after skel_ filtering at all_df stage")
         return outputs
 
-    all_csv = os.path.join(width_dir, "dataset_width_summary_all.csv")
+    all_csv = os.path.join(overview_dir, "dataset_width_summary_all.csv")
     all_df.to_csv(all_csv, index=False)
     outputs["width_summary_all_csv"] = all_csv
 
@@ -945,30 +1033,12 @@ def _aggregate_width_metrics(
     # --------------------------------------------------------
     # Clean method labeling (x-axis)
     # --------------------------------------------------------
-    def _width_method_label(row):
-        mf = str(row.get("method_family", "") or "")
-        mt = str(row.get("midline_type", "") or "")
-        bm = str(row.get("baseline_method", "") or "")
-        if mf == "baseline":
-            return _display_width_method_label(bm) if bm else "baseline"
-        if mf in ("", "model", "nan", "None"):
-            # "model" is just an internal bucket; use the actual supervision source.
-            return mt or "model"
-        return f"{mt}:{mf}" if mt and mt != "unknown" else mf
-
-    grouped["method_name"] = grouped.apply(_width_method_label, axis=1)
+    grouped["method_name"] = _build_width_method_name(grouped)
 
     # --------------------------------------------------------
     # Color classification
     # --------------------------------------------------------
-    def _classify(row):
-        if str(row["method_family"]) == "baseline":
-            return "baseline"
-        if _is_et_like(row["midline_type"]):
-            return "ET"
-        return "auto"
-
-    grouped["source_class"] = grouped.apply(_classify, axis=1)
+    grouped["source_class"] = grouped.apply(_classify_width_source, axis=1)
     grouped["color"] = grouped["source_class"].map(COLOR_MAP)
 
     if EXCLUDE_SKEL_BASELINE_METHODS and not grouped.empty:
@@ -989,7 +1059,7 @@ def _aggregate_width_metrics(
         _log(verbose, "[summarize] width summary: empty after skel_ baseline filtering")
         return outputs
 
-    grp_csv = os.path.join(width_dir, "dataset_width_summary_grouped.csv")
+    grp_csv = os.path.join(overview_dir, "dataset_width_summary_grouped.csv")
     grouped.to_csv(grp_csv, index=False)
     outputs["width_summary_grouped_csv"] = grp_csv
 
@@ -1047,7 +1117,7 @@ def _aggregate_width_metrics(
             split_out = out_parts[0]
             for nxt in out_parts[1:]:
                 split_out = split_out.merge(nxt, on=idx_cols, how="outer")
-            split_csv = os.path.join(width_dir, "dataset_width_error_split.csv")
+            split_csv = os.path.join(overview_dir, "dataset_width_error_split.csv")
             split_out.to_csv(split_csv, index=False)
             outputs["width_error_split_csv"] = split_csv
 
@@ -1058,53 +1128,197 @@ def _aggregate_width_metrics(
     legend_items = [(k, v) for k, v in [("ET", COLOR_MAP["ET"]), ("model", COLOR_MAP["model"]), ("baseline", COLOR_MAP["baseline"])]
                     if k in set(plot_grouped["source_class"].astype(str).tolist())]
 
+    _df_total = all_df if total_grouped.empty else all_df[all_df["crack_type"].astype(str).str.upper() == "TOTAL"].copy()
+    _plot_jobs = []
     if mae_col:
-        # Keep canonical filename, but with richer uncertainty display.
-        out_png = os.path.join(width_dir, "dataset_width_mae_by_method.png")
-        _plot_metric_bar_iqr_outliers(
-            df_plot=all_df if total_grouped.empty else all_df[all_df["crack_type"].astype(str).str.upper() == "TOTAL"].copy(),
-            metric_col="mae_px",
-            out_png=out_png,
-            title="Dataset width MAE by method (mean + IQR + outliers)"
-                  if not total_grouped.empty
-                  else "Dataset width MAE by method (mean + IQR + outliers)",
-            ylabel="MAE (px)",
+        _plot_jobs.extend(
+            [
+                (
+                    "width_mae_png",
+                    dict(
+                        df=_df_total,
+                        metric_col="mae_px",
+                        out_png=os.path.join(overview_dir, "dataset_width_mae_by_method.png"),
+                        title="Dataset width MAE by method (mean + IQR + outliers)",
+                        ylabel="MAE (px)",
+                        plot_type="bar",
+                        color_map=COLOR_MAP,
+                    ),
+                ),
+                (
+                    "width_mae_box_png",
+                    dict(
+                        df=_df_total,
+                        metric_col="mae_px",
+                        out_png=os.path.join(overview_dir, "dataset_width_mae_box_by_method.png"),
+                        title="Dataset width MAE by method (box+whisker)",
+                        ylabel="MAE (px)",
+                        plot_type="box",
+                        color_map=COLOR_MAP,
+                    ),
+                ),
+            ]
         )
-        outputs["width_mae_png"] = out_png
-        out_png_box = os.path.join(width_dir, "dataset_width_mae_box_by_method.png")
-        _plot_metric_box_by_method(
-            df_plot=all_df if total_grouped.empty else all_df[all_df["crack_type"].astype(str).str.upper() == "TOTAL"].copy(),
-            metric_col="mae_px",
-            out_png=out_png_box,
-            title="Dataset width MAE by method (box+whisker)",
-            ylabel="MAE (px)",
-        )
-        outputs["width_mae_box_png"] = out_png_box
-
     if rmse_col:
-        # Keep canonical filename, but with richer uncertainty display.
-        out_png = os.path.join(width_dir, "dataset_width_rmse_by_method.png")
-        _plot_metric_bar_iqr_outliers(
-            df_plot=all_df if total_grouped.empty else all_df[all_df["crack_type"].astype(str).str.upper() == "TOTAL"].copy(),
-            metric_col="rmse_px",
-            out_png=out_png,
-            title="Dataset width RMSE by method (mean + IQR + outliers)"
-                  if not total_grouped.empty
-                  else "Dataset width RMSE by method (mean + IQR + outliers)",
-            ylabel="RMSE (px)",
+        _plot_jobs.extend(
+            [
+                (
+                    "width_rmse_png",
+                    dict(
+                        df=_df_total,
+                        metric_col="rmse_px",
+                        out_png=os.path.join(overview_dir, "dataset_width_rmse_by_method.png"),
+                        title="Dataset width RMSE by method (mean + IQR + outliers)",
+                        ylabel="RMSE (px)",
+                        plot_type="bar",
+                        color_map=COLOR_MAP,
+                    ),
+                ),
+                (
+                    "width_rmse_box_png",
+                    dict(
+                        df=_df_total,
+                        metric_col="rmse_px",
+                        out_png=os.path.join(overview_dir, "dataset_width_rmse_box_by_method.png"),
+                        title="Dataset width RMSE by method (box+whisker)",
+                        ylabel="RMSE (px)",
+                        plot_type="box",
+                        color_map=COLOR_MAP,
+                    ),
+                ),
+            ]
         )
-        outputs["width_rmse_png"] = out_png
-        out_png_box = os.path.join(width_dir, "dataset_width_rmse_box_by_method.png")
-        _plot_metric_box_by_method(
-            df_plot=all_df if total_grouped.empty else all_df[all_df["crack_type"].astype(str).str.upper() == "TOTAL"].copy(),
-            metric_col="rmse_px",
-            out_png=out_png_box,
-            title="Dataset width RMSE by method (box+whisker)",
-            ylabel="RMSE (px)",
-        )
-        outputs["width_rmse_box_png"] = out_png_box
+    if _plot_jobs:
+        with ThreadPoolExecutor(max_workers=4) as _pool:
+            _futs = {_pool.submit(_plot_width_metric, **kwargs): (out_key, kwargs["out_png"]) for out_key, kwargs in _plot_jobs}
+            for _f in as_completed(_futs):
+                _key, _png = _futs[_f]
+                try:
+                    if bool(_f.result()):
+                        outputs[_key] = _png
+                except Exception as _e_plot:
+                    _log(verbose, f"[summarize] plot {_key} failed: {_e_plot}")
 
-    outputs.update(_plot_width_metrics_with_without_et(all_df, width_dir, verbose=verbose))
+    def _plot_length_weighted_summary() -> Dict[str, str]:
+        lw_outputs: Dict[str, str] = {}
+        diffs = _load_diffs_frames(image_dirs)
+        if diffs is None or diffs.empty:
+            return lw_outputs
+
+        d = diffs.copy()
+        d["_abs_diff"] = np.abs(pd.to_numeric(d["diff_px"], errors="coerce"))
+        d["_sq_diff"] = np.square(pd.to_numeric(d["diff_px"], errors="coerce"))
+        d = d[np.isfinite(d["diff_px"].to_numpy(float))].copy()
+        if d.empty:
+            return lw_outputs
+
+        _baseline_raw_keys = {
+            "mat_width_raw",
+            "mat_width_dse",
+            "pca_width_dse",
+            "esd_width_dse",
+            "eob_width_dse",
+            "skel_mat_raw",
+            "skel_mat_dse",
+        }
+        rows = []
+        for raw_method, g in d.groupby("_method", dropna=False):
+            raw_key = str(raw_method).strip().lower()
+            if raw_key in _baseline_raw_keys:
+                src_class = "baseline"
+            elif _is_et_like(raw_key):
+                src_class = "ET"
+            else:
+                src_class = "model"
+            if raw_key in _baseline_raw_keys:
+                display_label = _display_width_method_label(raw_key)
+            else:
+                display_label = _display_method_name(str(raw_method))
+            diff = pd.to_numeric(g["diff_px"], errors="coerce").to_numpy(float)
+            diff = diff[np.isfinite(diff)]
+            if diff.size == 0:
+                continue
+            ad = np.abs(diff)
+            sd = np.square(diff)
+            rows.append(
+                {
+                    "method": str(display_label),
+                    "source_class": src_class,
+                    "n_samples": int(diff.size),
+                    "mae_px": float(np.mean(ad)),
+                    "mae_q1": float(np.percentile(ad, 25)),
+                    "mae_q3": float(np.percentile(ad, 75)),
+                    "rmse_px": float(np.sqrt(np.mean(sd))),
+                    "rmse_q1": float(np.sqrt(np.percentile(sd, 25))),
+                    "rmse_q3": float(np.sqrt(np.percentile(sd, 75))),
+                    "bias_px": float(np.mean(diff)),
+                    "bias_q1": float(np.percentile(diff, 25)),
+                    "bias_q3": float(np.percentile(diff, 75)),
+                }
+            )
+        if not rows:
+            return lw_outputs
+
+        lw_df = pd.DataFrame(rows).sort_values("mae_px", ascending=True)
+        lw_df["abs_bias_px"] = lw_df["bias_px"].abs()
+        lw_df["abs_bias_q1"] = lw_df[["bias_q1", "bias_q3"]].abs().min(axis=1)
+        lw_df["abs_bias_q3"] = lw_df[["bias_q1", "bias_q3"]].abs().max(axis=1)
+        lw_csv = os.path.join(length_weighted_dir, "dataset_width_lw_summary.csv")
+        lw_df.to_csv(lw_csv, index=False)
+        lw_outputs["width_lw_csv"] = lw_csv
+
+        def _plot_lw(df_plot: pd.DataFrame, metric: str, q1_col: str, q3_col: str, out_png: str, title: str, ylabel: str):
+            if df_plot is None or df_plot.empty:
+                return
+            p = df_plot.sort_values(metric, ascending=True).copy()
+            x = np.arange(len(p), dtype=float)
+            y = pd.to_numeric(p[metric], errors="coerce").to_numpy(float)
+            q1 = pd.to_numeric(p[q1_col], errors="coerce").to_numpy(float)
+            q3 = pd.to_numeric(p[q3_col], errors="coerce").to_numpy(float)
+            lo = np.clip(y - q1, 0.0, None)
+            hi = np.clip(q3 - y, 0.0, None)
+            cols = [COLOR_MAP.get(str(c), "#4c78a8") for c in p["source_class"].astype(str).tolist()]
+            fig, ax = plt.subplots(figsize=(max(8.0, 0.55 * len(p)), 4.8), dpi=180)
+            ax.bar(x, y, color=cols, alpha=0.86)
+            ax.errorbar(x, y, yerr=np.vstack([lo, hi]), fmt="none", ecolor="#f58518", elinewidth=1.3, capsize=3)
+            ax.set_xticks(x)
+            ax.set_xticklabels(p["method"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
+            ax.set_ylabel(ylabel)
+            ax.set_title(title)
+            ax.grid(axis="y", alpha=0.2)
+            ax.legend(
+                handles=[
+                    Patch(facecolor=COLOR_MAP["ET"], edgecolor="none", label="ET"),
+                    Patch(facecolor=COLOR_MAP["model"], edgecolor="none", label="model (dt/dt_depth)"),
+                    Patch(facecolor=COLOR_MAP["baseline"], edgecolor="none", label="baseline"),
+                    Patch(facecolor="#f58518", edgecolor="none", label="IQR"),
+                ],
+                loc="best",
+                fontsize=8,
+                framealpha=0.9,
+            )
+            plt.tight_layout()
+            fig.savefig(out_png, bbox_inches="tight")
+            plt.close(fig)
+
+        _plot_lw(lw_df, "mae_px", "mae_q1", "mae_q3", os.path.join(length_weighted_dir, "dataset_width_lw_mae.png"), "Length-weighted width MAE by method", "MAE (px)")
+        lw_outputs["width_lw_mae_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_mae.png")
+        _plot_lw(lw_df, "rmse_px", "rmse_q1", "rmse_q3", os.path.join(length_weighted_dir, "dataset_width_lw_rmse.png"), "Length-weighted width RMSE by method", "RMSE (px)")
+        lw_outputs["width_lw_rmse_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_rmse.png")
+        _plot_lw(lw_df, "abs_bias_px", "abs_bias_q1", "abs_bias_q3", os.path.join(length_weighted_dir, "dataset_width_lw_bias.png"), "Length-weighted width |bias| by method", "|bias| (px)")
+        lw_outputs["width_lw_bias_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_bias.png")
+
+        lw_no_et = lw_df[~lw_df["method"].astype(str).map(_is_et_like)].copy()
+        _plot_lw(lw_no_et, "mae_px", "mae_q1", "mae_q3", os.path.join(length_weighted_dir, "dataset_width_lw_mae_no_et.png"), "Length-weighted width MAE by method (no ET)", "MAE (px)")
+        lw_outputs["width_lw_mae_no_et_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_mae_no_et.png")
+        _plot_lw(lw_no_et, "rmse_px", "rmse_q1", "rmse_q3", os.path.join(length_weighted_dir, "dataset_width_lw_rmse_no_et.png"), "Length-weighted width RMSE by method (no ET)", "RMSE (px)")
+        lw_outputs["width_lw_rmse_no_et_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_rmse_no_et.png")
+        _plot_lw(lw_no_et, "abs_bias_px", "abs_bias_q1", "abs_bias_q3", os.path.join(length_weighted_dir, "dataset_width_lw_bias_no_et.png"), "Length-weighted width |bias| by method (no ET)", "|bias| (px)")
+        lw_outputs["width_lw_bias_no_et_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_bias_no_et.png")
+        return lw_outputs
+
+    outputs.update(_plot_width_metrics_with_without_et(all_df, no_et_dir, bias_dir, verbose=verbose))
+    outputs.update(_plot_length_weighted_summary())
 
     # Additional distribution-aware plots: mean bar + IQR + outlier dots.
     # separate distribution plot files removed; canonical by_method plots include IQR/outliers
@@ -1116,123 +1330,25 @@ def _aggregate_width_metrics(
 def _plot_width_metrics_with_without_et(
     df_width: pd.DataFrame,
     out_dir: str,
+    bias_dir: Optional[str] = None,
     *,
     verbose: bool = False,
 ) -> Dict[str, str]:
     """
     Produces:
       - dataset_width_mae_no_et.png (MAE, without ET)
-      - dataset_width_bias_by_method.png (bias, with ET)
-      - dataset_width_bias_no_et.png (bias, without ET)
+      - dataset_width_bias_by_method.png (|bias|, with ET)
+      - dataset_width_bias_no_et.png (|bias|, without ET)
     """
     outputs: Dict[str, str] = {}
     if df_width is None or df_width.empty:
         return outputs
+    if bias_dir is None:
+        bias_dir = out_dir
+    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(bias_dir, exist_ok=True)
 
-    color_map = {
-        "baseline": "#2ca02c",
-        "auto": "#1f77b4",
-        "ET": "#d62728",
-    }
-
-    def _classify(row) -> str:
-        if str(row.get("method_family", "")).lower() == "baseline":
-            return "baseline"
-        if _is_et_like(str(row.get("midline_type", ""))):
-            return "ET"
-        return "auto"
-
-    def _build_method_name(df: pd.DataFrame) -> pd.Series:
-        if {"method_family", "baseline_method", "midline_type"}.issubset(df.columns):
-            mf = df["method_family"].astype(str)
-            bm = df["baseline_method"].astype(str)
-            mt = df["midline_type"].astype(str).map(_display_midline_label)
-            return pd.Series(
-                np.where(
-                    mf.str.lower().eq("baseline"),
-                    bm.map(_display_width_method_label).where(bm.str.len() > 0, "baseline"),
-                    mt.where(mt.str.len() > 0, "model"),
-                ),
-                index=df.index,
-            )
-        return df.get("midline_type", pd.Series(["unknown"] * len(df), index=df.index)).astype(str)
-
-    def _make_plot(
-        df: pd.DataFrame,
-        metric_col: str,
-        out_png: str,
-        title: str,
-        ylabel: Optional[str] = None,
-    ) -> bool:
-        if metric_col not in df.columns:
-            return False
-        d = df.copy()
-        d["method_name"] = _build_method_name(d)
-        d["source_class"] = d.apply(_classify, axis=1)
-        d[metric_col] = pd.to_numeric(d[metric_col], errors="coerce")
-        d = d[np.isfinite(d[metric_col].to_numpy(float))].copy()
-        if d.empty:
-            return False
-
-        rows = []
-        for m, g in d.groupby("method_name", dropna=False):
-            v = pd.to_numeric(g[metric_col], errors="coerce").to_numpy(float)
-            v = v[np.isfinite(v)]
-            if v.size == 0:
-                continue
-            sc = g["source_class"].iloc[0] if "source_class" in g.columns else "auto"
-            q1 = float(np.percentile(v, 25))
-            q3 = float(np.percentile(v, 75))
-            iqr_val = float(q3 - q1)
-            lo_fence = float(q1 - 1.5 * iqr_val)
-            hi_fence = float(q3 + 1.5 * iqr_val)
-            outliers = v[(v < lo_fence) | (v > hi_fence)]
-            rows.append(
-                {
-                    "method_name": str(m),
-                    "mean": float(np.mean(v)),
-                    "q1": q1,
-                    "q3": q3,
-                    "outliers": outliers,
-                    "source_class": str(sc),
-                }
-            )
-        if not rows:
-            return False
-
-        plot_df = pd.DataFrame(rows).sort_values("mean", ascending=True)
-        fig_w = max(8.0, 0.55 * len(plot_df))
-        fig, ax = plt.subplots(figsize=(fig_w, 4.8), dpi=180)
-        xs = np.arange(len(plot_df), dtype=float)
-        means = plot_df["mean"].to_numpy(float)
-        bar_colors = [color_map.get(str(c), "#4c78a8") for c in plot_df["source_class"].tolist()]
-        ax.bar(xs, means, color=bar_colors, alpha=0.85)
-        lo_err = np.clip(means - plot_df["q1"].to_numpy(float), 0.0, None)
-        hi_err = np.clip(plot_df["q3"].to_numpy(float) - means, 0.0, None)
-        ax.errorbar(xs, means, yerr=np.vstack([lo_err, hi_err]), fmt="none", ecolor="#f58518", elinewidth=1.3, capsize=3)
-        for i, arr in enumerate(plot_df["outliers"].tolist()):
-            if arr is None or len(arr) == 0:
-                continue
-            yy = np.asarray(arr, float)
-            xx = np.full(len(yy), float(xs[i])) + np.linspace(-0.08, 0.08, len(yy))
-            ax.scatter(xx, yy, s=10, color="#d62728", alpha=0.8, zorder=3)
-        ax.set_xticks(xs)
-        ax.set_xticklabels(plot_df["method_name"].tolist(), rotation=35, ha="right", fontsize=8)
-        ax.set_ylabel(_clean_plot_label(ylabel if ylabel is not None else metric_col))
-        ax.set_title(_clean_plot_label(title))
-        ax.grid(axis="y", alpha=0.2)
-        present_classes = set(plot_df["source_class"].astype(str).tolist())
-        legend_handles = [
-            Patch(facecolor=color_map[cls], edgecolor="none", label=cls)
-            for cls in ["ET", "auto", "baseline"]
-            if cls in present_classes
-        ]
-        legend_handles.append(Patch(facecolor="#f58518", edgecolor="none", label="IQR"))
-        ax.legend(handles=legend_handles, loc="best", fontsize=8, framealpha=0.9)
-        plt.tight_layout()
-        fig.savefig(out_png, bbox_inches="tight")
-        plt.close(fig)
-        return True
+    color_map = {"baseline": "#2ca02c", "model": "#1f77b4", "ET": "#d62728"}
 
     def _drop_et(df: pd.DataFrame) -> pd.DataFrame:
         if "method_family" in df.columns:
@@ -1243,29 +1359,81 @@ def _plot_width_metrics_with_without_et(
         return df[is_baseline | ~mt.map(_is_et_like)].copy()
 
     df_no_et = _drop_et(df_width)
-
+    _jobs = []
     if "mae_px" in df_width.columns and not df_no_et.empty:
-        out_no_et = os.path.join(out_dir, "dataset_width_mae_no_et.png")
-        if _make_plot(df_no_et, "mae_px", out_no_et, "Dataset width MAE by method (mean + IQR + outliers)", ylabel="MAE (px)"):
-            outputs["width_mae_no_et_png"] = out_no_et
-
+        _jobs.append(
+            (
+                "width_mae_no_et_png",
+                dict(
+                    df=df_no_et,
+                    metric_col="mae_px",
+                    out_png=os.path.join(out_dir, "dataset_width_mae_no_et.png"),
+                    title="Dataset width MAE by method (mean + IQR + outliers)",
+                    ylabel="MAE (px)",
+                    plot_type="bar",
+                    color_map=color_map,
+                ),
+            )
+        )
     if "bias_px" in df_width.columns:
-        d_all_bias = df_width.copy()
-        d_all_bias["abs_bias_px"] = pd.to_numeric(d_all_bias["bias_px"], errors="coerce").abs()
-        d_no_et_bias = df_no_et.copy()
-        d_no_et_bias["abs_bias_px"] = pd.to_numeric(d_no_et_bias["bias_px"], errors="coerce").abs()
-
-        out_bias_all = os.path.join(out_dir, "dataset_width_bias_by_method.png")
-        if _make_plot(d_all_bias, "abs_bias_px", out_bias_all, "Dataset width |bias| by method (mean + IQR + outliers)", ylabel="|bias| (px)"):
-            outputs["width_bias_all_png"] = out_bias_all
-        out_bias_no_et = os.path.join(out_dir, "dataset_width_bias_no_et.png")
-        if not d_no_et_bias.empty and _make_plot(d_no_et_bias, "abs_bias_px", out_bias_no_et, "Dataset width |bias| by method (mean + IQR + outliers)", ylabel="|bias| (px)"):
-            outputs["width_bias_no_et_png"] = out_bias_no_et
-
+        df_bias_all = df_width.copy()
+        df_bias_all["abs_bias_px"] = pd.to_numeric(df_bias_all["bias_px"], errors="coerce").abs()
+        _jobs.append(
+            (
+                "width_bias_all_png",
+                dict(
+                    df=df_bias_all,
+                    metric_col="abs_bias_px",
+                    out_png=os.path.join(bias_dir, "dataset_width_bias_by_method.png"),
+                    title="Dataset width |bias| by method (mean + IQR + outliers)",
+                    ylabel="|bias| (px)",
+                    plot_type="bar",
+                    color_map=color_map,
+                ),
+            )
+        )
+        if not df_no_et.empty:
+            df_bias_no_et = df_no_et.copy()
+            df_bias_no_et["abs_bias_px"] = pd.to_numeric(df_bias_no_et["bias_px"], errors="coerce").abs()
+            _jobs.append(
+                (
+                    "width_bias_no_et_png",
+                    dict(
+                        df=df_bias_no_et,
+                        metric_col="abs_bias_px",
+                        out_png=os.path.join(out_dir, "dataset_width_bias_no_et.png"),
+                        title="Dataset width |bias| by method (mean + IQR + outliers, no ET)",
+                        ylabel="|bias| (px)",
+                        plot_type="bar",
+                        color_map=color_map,
+                    ),
+                )
+            )
     if "rmse_px" in df_width.columns and not df_no_et.empty:
-        out_rmse_no_et = os.path.join(out_dir, "dataset_width_rmse_no_et.png")
-        if _make_plot(df_no_et, "rmse_px", out_rmse_no_et, "Mean Width RMSE", ylabel="RMSE (px)"):
-            outputs["width_rmse_no_et_png"] = out_rmse_no_et
+        _jobs.append(
+            (
+                "width_rmse_no_et_png",
+                dict(
+                    df=df_no_et,
+                    metric_col="rmse_px",
+                    out_png=os.path.join(out_dir, "dataset_width_rmse_no_et.png"),
+                    title="Dataset width RMSE by method (mean + IQR + outliers, no ET)",
+                    ylabel="RMSE (px)",
+                    plot_type="bar",
+                    color_map=color_map,
+                ),
+            )
+        )
+    if _jobs:
+        with ThreadPoolExecutor(max_workers=4) as _pool:
+            _futs = {_pool.submit(_plot_width_metric, **kwargs): (out_key, kwargs["out_png"]) for out_key, kwargs in _jobs}
+            for _f in as_completed(_futs):
+                _key, _png = _futs[_f]
+                try:
+                    if bool(_f.result()):
+                        outputs[_key] = _png
+                except Exception as _e_plot:
+                    _log(verbose, f"[summarize] plot {_key} failed: {_e_plot}")
 
     _log(verbose, f"[summarize] width metrics plots generated: {list(outputs.keys())}")
     return outputs
@@ -1318,7 +1486,7 @@ def _aggregate_midline_metrics(
         if os.path.isfile(_abl_path):
             _abl_df = _safe_read_csv(_abl_path)
             if _abl_df is not None and not _abl_df.empty and "variant_id" in _abl_df.columns:
-                print(f"[MIDLINE ABL] {image} ablation variant_ids: {_abl_df['variant_id'].unique().tolist()}")
+                #print(f"[MIDLINE ABL] {image} ablation variant_ids: {_abl_df['variant_id'].unique().tolist()}")
                 # Map supervision variant_id -> display midline_type, keep only ET/dt/dt_depth
                 _vid_map = {
                     "manual": "ET",
@@ -1354,20 +1522,21 @@ def _aggregate_midline_metrics(
         return outputs
 
     all_df = pd.concat(frames, ignore_index=True)
-    print(
-        "[midline-debug] pre-filter all rows by midline_type:\n"
-        + (
-            all_df["midline_type"].value_counts(dropna=False).to_string()
-            if "midline_type" in all_df.columns
-            else "NO midline_type"
+    if verbose:
+        print(
+            "[midline-debug] pre-filter all rows by midline_type:\n"
+            + (
+                all_df["midline_type"].value_counts(dropna=False).to_string()
+                if "midline_type" in all_df.columns
+                else "NO midline_type"
+            )
         )
-    )
-    print(
-        f"[midline-debug] pre-filter score_mid finite: "
-        f"{int(np.isfinite(pd.to_numeric(all_df.get('score_mid', pd.Series()), errors='coerce').to_numpy(float)).sum())} / {len(all_df)}"
-    )
+        print(
+            f"[midline-debug] pre-filter score_mid finite: "
+            f"{int(np.isfinite(pd.to_numeric(all_df.get('score_mid', pd.Series()), errors='coerce').to_numpy(float)).sum())} / {len(all_df)}"
+        )
     if "crack_type" in all_df.columns:
-        print(f"[midline-debug] crack_type values:\n{all_df[['midline_type','crack_type','method_family','source_relpath']].to_string()}")
+        _log(verbose, f"[midline-debug] crack_type values:\n{all_df[['midline_type','crack_type','method_family','source_relpath']].head().to_string()}")
     if MIDLINE_DEBUG:
         try:
             dbg_cols = [c for c in ["image", "crack_type", "geometry_type", "method_family", "baseline_method", "midline_type"] if c in all_df.columns]
@@ -1917,7 +2086,8 @@ def _aggregate_width_distribution(
 ) -> Dict[str, str]:
     outputs = {}
     width_dir = os.path.join(out_dir, "width")
-    os.makedirs(width_dir, exist_ok=True)
+    dist_dir = os.path.join(width_dir, "distribution")
+    os.makedirs(dist_dir, exist_ok=True)
     frames = []
     for img_dir in image_dirs:
         image = os.path.basename(img_dir)
@@ -1941,14 +2111,14 @@ def _aggregate_width_distribution(
             all_df[_c] = all_df[_c].astype(str).apply(
                 lambda s: s[len("best_") :] if s.startswith("best_") else s
             )
-    csv_path = os.path.join(width_dir, "dataset_width_distribution_all.csv")
+    csv_path = os.path.join(dist_dir, "dataset_width_distribution_all.csv")
     all_df.to_csv(csv_path, index=False)
     outputs["width_dist_all_csv"] = csv_path
 
     try:
         from helpers.present_plots import plot_width_distribution_report
 
-        rep_dir = os.path.join(width_dir, "width_distribution_report_dataset")
+        rep_dir = os.path.join(dist_dir, "width_distribution_report_dataset")
         result = plot_width_distribution_report(
             csv_path=csv_path,
             out_dir=rep_dir,
@@ -3889,8 +4059,6 @@ def _plot_multicue_ablation(
     ax0.grid(axis="y", alpha=0.2)
 
     metric_sources = []
-    if "mae_px" in ww.columns:
-        metric_sources.append(("abs_width_error_px", ww, "mae_px"))
     for mcol in ("nn_mean_bidirectional", "hausdorff_max", "coverage_min", "precision_tau", "recall_tau", "f1_tau", "mean_tan_angle_error_deg"):
         if isinstance(mm, pd.DataFrame) and not mm.empty and mcol in mm.columns:
             metric_sources.append((mcol, mm, mcol))
@@ -4341,49 +4509,56 @@ def summarize_dataset_metrics(
         return report
 
     outputs: Dict[str, str] = {}
-    outputs.update(_aggregate_mask_metrics(image_dirs, out_dir, verbose=verbose))
-    outputs.update(_aggregate_width_metrics(image_dirs, out_dir, verbose=verbose))
-    outputs.update(_aggregate_midline_metrics(image_dirs, out_dir, verbose=verbose))
-    outputs.update(_aggregate_invalid_matches(image_dirs, out_dir, verbose=verbose))
-    outputs.update(_aggregate_timing_metrics(image_dirs, out_dir, verbose=verbose))
-    outputs.update(_aggregate_width_distribution(image_dirs, out_dir, verbose=verbose))
-    outputs.update(_aggregate_edge_rs3_selection(image_dirs, out_dir, verbose=verbose))
-    outputs.update(
-        _aggregate_supervision_timings(
-            supervision_root=os.path.join(save_folder, "supervision"),
+
+    supervision_root = os.path.join(save_folder, "supervision")
+    parallel_tasks = {
+        "mask": lambda: _aggregate_mask_metrics(image_dirs, out_dir, verbose=verbose),
+        "width": lambda: _aggregate_width_metrics(image_dirs, out_dir, verbose=verbose),
+        "midline": lambda: _aggregate_midline_metrics(image_dirs, out_dir, verbose=verbose),
+        "invalid": lambda: _aggregate_invalid_matches(image_dirs, out_dir, verbose=verbose),
+        "timing": lambda: _aggregate_timing_metrics(image_dirs, out_dir, verbose=verbose),
+        "width_dist": lambda: _aggregate_width_distribution(image_dirs, out_dir, verbose=verbose),
+        "edge_rs3": lambda: _aggregate_edge_rs3_selection(image_dirs, out_dir, verbose=verbose),
+        "sup_timing": lambda: _aggregate_supervision_timings(
+            supervision_root=supervision_root,
             out_dir=out_dir,
             evaluated_images=evaluated_images_set,
             verbose=verbose,
-        )
-    )
-    outputs.update(
-        _aggregate_gt_component_timings(
-            supervision_root=os.path.join(save_folder, "supervision"),
+        ),
+        "gt_component": lambda: _aggregate_gt_component_timings(
+            supervision_root=supervision_root,
             out_dir=out_dir,
             evaluated_images=evaluated_images_set,
             verbose=verbose,
-        )
-    )
-    outputs.update(
-        _aggregate_depth_generation_timings(
+        ),
+        "depth_timing": lambda: _aggregate_depth_generation_timings(
             out_dir=out_dir,
             depth_timing_csv=depth_timing_csv,
             evaluated_images=evaluated_images_set,
             verbose=verbose,
-        )
-    )
+        ),
+        "baseline_timing": lambda: _aggregate_baseline_timings(
+            out_dir,
+            baseline_roots=baseline_roots,
+            evaluated_images=evaluated_images_set,
+            verbose=verbose,
+        ),
+    }
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {pool.submit(fn): name for name, fn in parallel_tasks.items()}
+        for fut in as_completed(futures):
+            name = futures[fut]
+            try:
+                res = fut.result()
+                if isinstance(res, dict):
+                    outputs.update(res)
+            except Exception as e:
+                _log(verbose, f"[summarize] warning: {name} aggregation failed: {e}")
+
     outputs.update(
         _aggregate_gt_centering_weighted_summaries(
             save_folder=save_folder,
             out_dir=out_dir,
-            evaluated_images=evaluated_images_set,
-            verbose=verbose,
-        )
-    )
-    outputs.update(
-        _aggregate_baseline_timings(
-            out_dir,
-            baseline_roots=baseline_roots,
             evaluated_images=evaluated_images_set,
             verbose=verbose,
         )
@@ -4446,7 +4621,7 @@ def summarize_dataset_metrics(
             verbose=verbose,
         )
     )
-    df_width_all = _safe_read_csv(os.path.join(out_dir, "width", "dataset_width_summary_all.csv"))
+    df_width_all = _safe_read_csv(os.path.join(out_dir, "width", "overview", "dataset_width_summary_all.csv"))
     df_midline_all = _safe_read_csv(os.path.join(out_dir, "midline", "dataset_midline_metrics_all.csv"))
 
     # Supplement midline with ablation per-image rows so dt_depth/etc. appear in multicue plot.
@@ -4475,86 +4650,11 @@ def summarize_dataset_metrics(
 
     outputs.update(_plot_multicue_ablation(df_width_all, df_midline_all, out_dir, verbose=verbose))
 
-    # Width stratified by GT width bin — sample-level length-weighted
+    # Width stratified by GT width bin - sample-level length-weighted
     # Each row in diffs CSV = ~1px arc length, so raw aggregation is length-weighted.
     try:
-        _strat_frames = []
-        for img_dir in image_dirs:
-            image = os.path.basename(img_dir)
-            _found = glob.glob(
-                os.path.join(img_dir, "**", "*_width_diffs_combined.csv"),
-                recursive=True,
-            )
-            for p in _found:
-                try:
-                    df = _safe_read_csv(p)
-                    if df is None or df.empty:
-                        continue
-
-                    rel = os.path.relpath(p, img_dir)
-                    _mt, _mf, _bm = _parse_width_summary_context(rel)
-                    cols_lower = {str(c).lower(): c for c in df.columns}
-
-                    # --- schema normalization ---
-                    # detect gt col
-                    _gc = next(
-                        (cols_lower[k] for k in ("gt_width_px", "gt_width", "gt") if k in cols_lower),
-                        None,
-                    )
-                    # detect diff col
-                    _dc = next(
-                        (cols_lower[k] for k in ("width_diff_px", "diff_px", "diff") if k in cols_lower),
-                        None,
-                    )
-                    # detect method col (baselines have explicit method column)
-                    _mc = next(
-                        (cols_lower[k] for k in ("method",) if k in cols_lower),
-                        None,
-                    )
-
-                    # ET / positional schema: no named gt/diff cols, >=5 columns
-                    # ET row: x, y, gt_width_px, pred_width_px, diff_px, ...
-                    if _gc is None and _dc is None and len(df.columns) >= 5:
-                        if pd.to_numeric(df.iloc[:, 2], errors="coerce").notna().sum() > 0:
-                            df = df.rename(columns={
-                                df.columns[2]: "gt_width_px",
-                                df.columns[4]: "diff_px",
-                            })
-                            cols_lower = {str(c).lower(): c for c in df.columns}
-                            _gc = "gt_width_px"
-                            _dc = "diff_px"
-
-                    if _gc is None or _dc is None:
-                        continue
-
-                    # build slim frame
-                    d = pd.DataFrame({
-                        "gt_width_px": pd.to_numeric(df[_gc], errors="coerce"),
-                        "diff_px":     pd.to_numeric(df[_dc], errors="coerce"),
-                    })
-
-                    # method label: baselines use their method col, models use midline_type
-                    if _mc is not None and _mf == "baseline":
-                        d["_method"] = df[_mc].astype(str)
-                    else:
-                        d["_method"] = _mt
-
-                    d["image"] = image
-                    _strat_frames.append(d)
-
-                except Exception:
-                    continue  # skip bad files silently
-
-        if _strat_frames:
-            _strat_all = pd.concat(_strat_frames, ignore_index=True)
-            _strat_all["gt_width_px"] = pd.to_numeric(_strat_all["gt_width_px"], errors="coerce")
-            _strat_all["diff_px"]     = pd.to_numeric(_strat_all["diff_px"],     errors="coerce")
-            _strat_all = _strat_all[
-                np.isfinite(_strat_all["gt_width_px"]) &
-                np.isfinite(_strat_all["diff_px"]) &
-                (_strat_all["gt_width_px"] > 0)
-            ].copy()
-
+        _strat_all = _load_diffs_frames(image_dirs)
+        if _strat_all is not None and not _strat_all.empty:
             # display labels
             _strat_all["_method_label"] = _strat_all["_method"].astype(str).apply(
                 lambda s: _display_width_method_label(s) if s not in ("dt", "best_dt_depth", "ET")
@@ -4586,31 +4686,38 @@ def summarize_dataset_metrics(
                     "mae_px":       round(float(np.mean(np.abs(d_arr))),  3),
                     "rmse_px":      round(float(np.sqrt(np.mean(d_arr**2))), 3),
                     "bias_px":      round(float(np.mean(d_arr)),           3),
-                    "abs_bias_px":  round(float(np.mean(np.abs(d_arr))),  3),
                 })
 
             if _strat_rows:
                 _strat_df = pd.DataFrame(_strat_rows)
-                _width_out_dir = os.path.join(out_dir, "width")
+                _width_out_dir = os.path.join(out_dir, "width", "stratified")
                 os.makedirs(_width_out_dir, exist_ok=True)
                 _strat_csv = os.path.join(_width_out_dir, "dataset_width_stratified_by_gt_width.csv")
                 _strat_df.to_csv(_strat_csv, index=False)
                 outputs["width_stratified_csv"] = _strat_csv
-                print(f"[stratified] wrote {len(_strat_rows)} rows -> {_strat_csv}")
+                _log(verbose, f"[stratified] wrote {len(_strat_rows)} rows -> {_strat_csv}")
 
-                _methods_order = ["dt", "dt_depth", "MAT (DSE)", "MAT (raw)", "EOB", "ESD", "PCA"]
+                _methods_order = ["dt", "dt_depth", "ET", "MAT (DSE)", "MAT (raw)", "EOB", "ESD", "PCA"]
                 _methods_present = [m for m in _methods_order if m in _strat_df["method"].values]
                 _methods_present += [m for m in _strat_df["method"].unique() if m not in _methods_present]
                 _bins_order = [b for b in _bin_labels if b in _strat_df["gt_width_bin"].values]
                 _x = np.arange(len(_bins_order), dtype=float)
                 _bar_w = 0.8 / max(1, len(_methods_present))
-                _model_color    = "#1f77b4"
-                _baseline_color = "#2ca02c"
+                _strat_method_colors = {
+                    "dt": "#1f77b4",
+                    "dt_depth": "#1f77b4",
+                    "ET": "#d62728",
+                    "MAT (DSE)": "#2ca02c",
+                    "MAT (raw)": "#2ca02c",
+                    "PCA": "#2ca02c",
+                    "ESD": "#2ca02c",
+                    "EOB": "#2ca02c",
+                }
 
                 for _metric, _col, _ylabel in [
                     ("MAE",    "mae_px",      "MAE (px)"),
                     ("RMSE",   "rmse_px",     "RMSE (px)"),
-                    ("|bias|", "abs_bias_px", "|bias| (px)"),
+                    ("bias",   "bias_px",     "bias (px) - signed"),
                 ]:
                     try:
                         fig, ax = plt.subplots(
@@ -4624,7 +4731,7 @@ def summarize_dataset_metrics(
                                 for b in _bins_order
                             ]
                             xpos = _x - 0.4 + (mi + 0.5) * _bar_w
-                            _col_c = _model_color if method in ("dt", "dt_depth", "ET") else _baseline_color
+                            _col_c = _strat_method_colors.get(str(method), "#888888")
                             _alpha = max(0.4, 1.0 - mi * 0.08)
                             ax.bar(xpos, vals, width=_bar_w, color=_col_c,
                                    alpha=_alpha, label=method)
@@ -4638,7 +4745,6 @@ def summarize_dataset_metrics(
                         )
                         ax.legend(fontsize=7, framealpha=0.9, ncol=2)
                         ax.grid(axis="y", alpha=0.2)
-                        # annotate n_samples per bin
                         for bi, b in enumerate(_bins_order):
                             _ns = int(_strat_df[_strat_df["gt_width_bin"] == b]["n_samples"].sum())
                             ax.text(bi, ax.get_ylim()[1] * 0.97,
@@ -4654,14 +4760,14 @@ def summarize_dataset_metrics(
                         plt.close(fig)
                         outputs[f"width_stratified_{_tag}_png"] = _png
                     except Exception as _ep:
-                        print(f"[stratified plot {_metric}] failed: {_ep}")
+                        _log(verbose, f"[stratified plot {_metric}] failed: {_ep}")
             else:
-                print("[stratified] no rows produced after groupby")
+                _log(verbose, "[stratified] no rows produced after groupby")
         else:
-            print("[stratified] no diffs frames loaded")
+            _log(verbose, "[stratified] no diffs frames loaded")
     except Exception as _e_strat:
         import traceback
-        print(f"[summarize] width stratified-by-gt failed: {_e_strat}")
+        _log(verbose, f"[summarize] width stratified-by-gt failed: {_e_strat}")
         traceback.print_exc()
     outputs.update(_plot_gt_supervision_timing_detail(out_dir, verbose=verbose))
 

@@ -579,7 +579,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     try:
-        ORIENT_DEBUG = True
+        ORIENT_DEBUG = False
 
         # -------------------------------------------------------
         # Normalize crop to 8-bit (still needed for plotting)

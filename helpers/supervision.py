@@ -15,6 +15,9 @@ from matplotlib import pyplot as plt
 plt.ioff()
 from helpers.plot_metrics import plot_edges_and_normals
 
+# Set to False to suppress verbose per-image debug prints during batch runs
+_VERBOSE_DEBUG = True
+
 DEBUG_LEVEL = 1
 # 0 = silent
 # 1 = important only
@@ -660,6 +663,24 @@ def _cc_label_for_members(members, atomic, cc_labels):
     labs = np.concatenate(labels, axis=0)
     vals, cnts = np.unique(labs, return_counts=True)
     return int(vals[np.argmax(cnts)]) if len(vals) else None
+
+
+def _cc_labels_for_members(members, atomic, cc_labels):
+    """Return all GT CC labels touched by any member midline point."""
+    H, W = cc_labels.shape[:2]
+    labels_found = set()
+    for m in (members or []):
+        cr = (atomic or {}).get(str(m), {}) or {}
+        mid = np.asarray(cr.get("midline", []), float)
+        if mid.ndim != 2 or mid.shape[1] != 2 or len(mid) < 1:
+            continue
+        ys = np.clip(np.round(mid[:, 1]).astype(int), 0, H - 1)
+        xs = np.clip(np.round(mid[:, 0]).astype(int), 0, W - 1)
+        labs = cc_labels[ys, xs]
+        labs = labs[labs > 0]
+        for l in labs:
+            labels_found.add(int(l))
+    return labels_found
 
 
 
@@ -1685,6 +1706,319 @@ def plot_gt_branch_segments_only(original_image, ux, uy, bbox_local, segs_branch
     os.makedirs(os.path.dirname(out_png), exist_ok=True)
     plt.savefig(out_png, bbox_inches="tight")
     plt.close()
+
+
+def _plot_branch_audit(
+    *,
+    original_image,
+    gt_mask,
+    atomic,
+    members,
+    kept_segs,
+    segments_meta,
+    dom_meta,
+    out_png,
+    tag_name,
+):
+    """Visualize raw per-branch input segments vs dominance survivors."""
+    try:
+        os.makedirs(os.path.dirname(out_png), exist_ok=True)
+        img = np.asarray(original_image)
+        if img.ndim != 3:
+            return
+        canvas = img.copy()
+        mask_u8 = (np.asarray(gt_mask) > 0).astype(np.uint8)
+        if mask_u8.shape[:2] == canvas.shape[:2]:
+            overlay = canvas.copy()
+            overlay[mask_u8 > 0] = np.array([255, 255, 255], dtype=np.uint8)
+            canvas = cv2.addWeighted(overlay, 0.18, canvas, 0.82, 0.0)
+
+        branches = dom_meta.get("branches", []) if isinstance(dom_meta, dict) else []
+        branch_order = dom_meta.get("order", []) if isinstance(dom_meta, dict) else []
+        if not branch_order and branches:
+            branch_order = [int((b or {}).get("branch_id", -1)) for b in branches if int((b or {}).get("branch_id", -1)) >= 0]
+
+        branch_to_atomic = {}
+        for b in branches:
+            if not isinstance(b, dict):
+                continue
+            bi = int(b.get("branch_id", -1))
+            aids = [str(a) for a in (b.get("atomic_ids", []) or [])]
+            if bi >= 0:
+                branch_to_atomic[bi] = aids
+
+        # Fallback if branch stats missing: infer from segment meta.
+        if not branch_to_atomic:
+            for m in (segments_meta or []):
+                if not isinstance(m, dict):
+                    continue
+                bi = int(m.get("branch_id", -1))
+                aid = m.get("atomic_id", None)
+                if bi < 0 or aid is None:
+                    continue
+                branch_to_atomic.setdefault(bi, [])
+                a = str(aid)
+                if a not in branch_to_atomic[bi]:
+                    branch_to_atomic[bi].append(a)
+
+        kept_by_branch_atomic = {}
+        for m in (segments_meta or []):
+            if not isinstance(m, dict):
+                continue
+            bi = int(m.get("branch_id", -1))
+            aid = m.get("atomic_id", None)
+            if bi < 0 or aid is None:
+                continue
+            kept_by_branch_atomic.setdefault(bi, set()).add(str(aid))
+
+        # Build raw per-branch user segments from atomic ids.
+        raw_branch_segs = {}
+        for bi, aids in branch_to_atomic.items():
+            segs = []
+            for aid in aids:
+                cr = (atomic or {}).get(str(aid), {}) or {}
+                S = np.asarray(cr.get("midline", []), float)
+                if S.ndim == 2 and S.shape[1] == 2 and len(S) >= 2:
+                    segs.append((str(aid), S))
+            if segs:
+                raw_branch_segs[int(bi)] = segs
+
+        # Draw raw branch segments with branch colors; dropped segments in red.
+        from matplotlib.lines import Line2D
+        cmap = plt.get_cmap("tab10", max(1, len(raw_branch_segs)))
+        fig, ax = plt.subplots(figsize=(9, 9), dpi=180)
+        ax.imshow(canvas[:, :, ::-1])  # BGR->RGB
+
+        order_use = [int(b) for b in branch_order if int(b) in raw_branch_segs]
+        order_use += [b for b in sorted(raw_branch_segs.keys()) if b not in order_use]
+        branch_colors = {int(bi): cmap(i) for i, bi in enumerate(order_use)}
+
+        branch_handles = []
+        for rank, bi in enumerate(order_use):
+            base_color = branch_colors.get(int(bi), cmap(rank))
+            kept_ids = kept_by_branch_atomic.get(int(bi), set())
+            for aid, S in raw_branch_segs.get(int(bi), []):
+                dropped = str(aid) not in kept_ids
+                col = "#d62728" if dropped else base_color
+                lw = 2.0 if dropped else 1.0
+                alpha = 0.9 if dropped else 0.65
+                ax.plot(S[:, 0], S[:, 1], color=col, linewidth=lw, alpha=alpha)
+            aids = branch_to_atomic.get(int(bi), [])
+            branch_handles.append(
+                Line2D([0], [0], color=base_color, lw=3, label=f"branch {int(bi)}: {aids}")
+            )
+
+        # Overlay kept output segments by branch color, thicker.
+        for i, S in enumerate(kept_segs or []):
+            A = np.asarray(S, float)
+            if A.ndim == 2 and A.shape[1] == 2 and len(A) >= 2:
+                m = segments_meta[i] if i < len(segments_meta) and isinstance(segments_meta[i], dict) else {}
+                bi = int(m.get("branch_id", -1))
+                col = branch_colors.get(bi, (0.0, 1.0, 0.4, 1.0))
+                ax.plot(A[:, 0], A[:, 1], color=col, linewidth=3.0, alpha=0.95)
+
+        extra_handles = [
+            Line2D([0], [0], color="#d62728", lw=2, label="dropped/clipped"),
+            Line2D([0], [0], color="#111111", lw=1, label="raw input (thin)"),
+            Line2D([0], [0], color="#111111", lw=3, label="kept output (thick)"),
+        ]
+        ax.legend(
+            handles=(branch_handles + extra_handles),
+            loc="upper left",
+            fontsize=7,
+            framealpha=0.9,
+        )
+        ax.set_title(f"Branch Audit - {tag_name}")
+        ax.axis("off")
+        plt.tight_layout()
+        fig.savefig(out_png, bbox_inches="tight")
+        plt.close(fig)
+    except Exception as _e:
+        print(f"[BRANCH AUDIT] failed for {tag_name}: {_e}")
+
+
+def _plot_centering_audit_entry(
+    *,
+    entry,
+    original_image,
+    out_png,
+):
+    """Plot GT combined branches vs method centered outputs for one combined entry."""
+    try:
+        if not isinstance(entry, dict) or str(entry.get("type", "")) != "combined":
+            return
+        gt_segs = [np.asarray(S, float) for S in (entry.get("midline_segments", []) or [])]
+        gt_meta = entry.get("midline_segments_meta", []) if isinstance(entry.get("midline_segments_meta", []), list) else []
+        gt_valid = []
+        for i, S in enumerate(gt_segs):
+            if S.ndim == 2 and S.shape[1] == 2 and len(S) >= 2:
+                gt_valid.append((i, S))
+        if not gt_valid:
+            return
+
+        os.makedirs(os.path.dirname(out_png), exist_ok=True)
+        img = np.asarray(original_image)
+        if img.ndim != 3:
+            return
+
+        from matplotlib.lines import Line2D
+        branch_ids = sorted({
+            int((gt_meta[i] if i < len(gt_meta) and isinstance(gt_meta[i], dict) else {}).get("branch_id", -1))
+            for i, _ in gt_valid
+        })
+        branch_ids = [b for b in branch_ids if b >= 0]
+        bmap = plt.get_cmap("tab10", max(1, len(branch_ids)))
+        branch_colors = {int(b): bmap(i) for i, b in enumerate(branch_ids)}
+
+        methods_blob = entry.get("method_variants", {}) if isinstance(entry.get("method_variants", {}), dict) else {}
+        method_keys = [k for k in methods_blob.keys()]
+        mmap = plt.get_cmap("tab20", max(1, len(method_keys)))
+        method_colors = {str(k): mmap(i) for i, k in enumerate(method_keys)}
+
+        fig, ax = plt.subplots(figsize=(10, 10), dpi=180)
+        ax.imshow(img[:, :, ::-1])
+
+        for i, S in gt_valid:
+            m = gt_meta[i] if i < len(gt_meta) and isinstance(gt_meta[i], dict) else {}
+            bi = int(m.get("branch_id", -1))
+            col = branch_colors.get(bi, (0.2, 0.9, 0.2, 1.0))
+            ax.plot(S[:, 0], S[:, 1], color=col, linewidth=3.0, alpha=0.95)
+
+        for mk in method_keys:
+            mv = methods_blob.get(mk, {}) if isinstance(methods_blob.get(mk, {}), dict) else {}
+            m_segs = [np.asarray(S, float) for S in (mv.get("midline_segments", []) or [])]
+            col = method_colors.get(str(mk), (1.0, 0.6, 0.0, 1.0))
+            for S in m_segs:
+                if S.ndim == 2 and S.shape[1] == 2 and len(S) >= 2:
+                    ax.plot(S[:, 0], S[:, 1], color=col, linewidth=1.7, alpha=0.80)
+
+        branch_handles = [Line2D([0], [0], color=branch_colors[b], lw=3, label=f"GT branch {int(b)}") for b in branch_ids]
+        method_handles = [Line2D([0], [0], color=method_colors[k], lw=2, label=f"{str(k)}") for k in method_keys]
+        ax.legend(handles=(branch_handles + method_handles), loc="upper left", fontsize=7, framealpha=0.9, ncol=2)
+        ax.set_title(f"Centering Audit - combined {entry.get('id', '')}")
+        ax.axis("off")
+        plt.tight_layout()
+        fig.savefig(out_png, bbox_inches="tight")
+        plt.close(fig)
+    except Exception as _e:
+        print(f"[CENTERING AUDIT] failed for entry={entry.get('id', '?') if isinstance(entry, dict) else '?'}: {_e}")
+
+
+def _plot_territory_debug(
+    *,
+    original_image,
+    gt_mask_full,
+    branch_terr_masks,
+    branch_bite_masks,
+    branch_allowed_masks,
+    branch_order,
+    dom_meta,
+    ux,
+    uy,
+    uw,
+    uh,
+    out_png,
+):
+    import matplotlib.cm as cm
+    from matplotlib.patches import Patch
+
+    try:
+        os.makedirs(os.path.dirname(out_png), exist_ok=True)
+        img = np.asarray(original_image)
+        if img.ndim != 3:
+            return
+        H, W = img.shape[:2]
+        x0 = max(0, int(ux))
+        y0 = max(0, int(uy))
+        x1 = min(W, int(ux + uw))
+        y1 = min(H, int(uy + uh))
+        if x1 <= x0 or y1 <= y0:
+            return
+
+        img_crop = img[y0:y1, x0:x1]
+        fig_w = max(18.0, float(x1 - x0) / 60.0)
+        fig_h = max(10.0, float(y1 - y0) / 60.0)
+        fig, axes = plt.subplots(1, 3, figsize=(fig_w, fig_h), dpi=120)
+        titles = ["Territory per branch", "Bite per branch", "Allowed mask per branch"]
+
+        order_use = [int(b) for b in (branch_order or [])]
+        cmap = cm.get_cmap("tab10", max(len(order_use), 1))
+        branch_colors = {int(bi): cmap(i) for i, bi in enumerate(order_use)}
+
+        gt_crop = (np.asarray(gt_mask_full)[y0:y1, x0:x1] > 0)
+        for ax, title in zip(axes, titles):
+            ax.imshow(img_crop[:, :, ::-1])  # BGR -> RGB
+            gt_overlay = np.zeros((gt_crop.shape[0], gt_crop.shape[1], 4), float)
+            gt_overlay[..., :3] = (1.0, 1.0, 1.0)
+            gt_overlay[..., 3] = gt_crop.astype(float) * 0.12
+            ax.imshow(gt_overlay)
+            ax.contour(gt_crop.astype(float), levels=[0.5], colors=["white"], linewidths=0.5, alpha=0.5)
+            ax.set_title(title, fontsize=8)
+            ax.axis("off")
+
+        branch_stats = {
+            int((b or {}).get("branch_id", -1)): (b if isinstance(b, dict) else {})
+            for b in (dom_meta.get("branches", []) if isinstance(dom_meta, dict) else [])
+            if int((b or {}).get("branch_id", -1)) >= 0
+        }
+
+        for bi in order_use:
+            bi = int(bi)
+            color = branch_colors.get(bi, (1, 1, 1, 1))
+
+            terr = branch_terr_masks.get(bi, None)
+            if terr is not None:
+                tc = (np.asarray(terr)[y0:y1, x0:x1] > 0).astype(float)
+                if np.any(tc > 0):
+                    overlay = np.zeros((*tc.shape, 4), float)
+                    overlay[..., :3] = color[:3]
+                    overlay[..., 3] = tc * 0.35
+                    axes[0].imshow(overlay)
+                    ys, xs = np.where(tc > 0)
+                    if len(xs):
+                        aids = branch_stats.get(bi, {}).get("atomic_ids", [])
+                        axes[0].text(
+                            float(np.mean(xs)),
+                            float(np.mean(ys)),
+                            f"b{bi}\n{aids}",
+                            fontsize=5,
+                            color="white",
+                            ha="center",
+                            va="center",
+                            bbox=dict(boxstyle="round,pad=0.1", facecolor=color[:3], alpha=0.6),
+                        )
+
+            bite = branch_bite_masks.get(bi, None)
+            if bite is not None:
+                bc = (np.asarray(bite)[y0:y1, x0:x1] > 0).astype(float)
+                if np.any(bc > 0):
+                    red_overlay = np.zeros((*bc.shape, 4), float)
+                    red_overlay[..., 0] = 1.0
+                    red_overlay[..., 3] = bc * 0.55
+                    axes[1].imshow(red_overlay)
+
+            allowed = branch_allowed_masks.get(bi, None)
+            if allowed is not None:
+                ac = (np.asarray(allowed)[y0:y1, x0:x1] > 0).astype(float)
+                if np.any(ac > 0):
+                    axes[2].contour(ac, levels=[0.5], colors=[color[:3]], linewidths=1.0)
+
+        handles = [
+            Patch(
+                facecolor=branch_colors[int(bi)][:3],
+                label=f"b{int(bi)}: {branch_stats.get(int(bi), {}).get('atomic_ids', [])}",
+            )
+            for bi in order_use
+        ]
+        if handles:
+            axes[0].legend(handles=handles, fontsize=5, loc="lower right", framealpha=0.7)
+
+        plt.suptitle(f"Territory debug - {os.path.basename(out_png)}", fontsize=8)
+        plt.tight_layout()
+        fig.savefig(out_png, bbox_inches="tight")
+        plt.close(fig)
+    except Exception as _e:
+        print(f"[TERRITORY DEBUG] failed: {_e}")
 
 
 def _plot_gt_branch_isolation(segs_branch, S_branch, out_dir, base_name, branch_id):
@@ -2737,7 +3071,8 @@ def export_gt_supervision_for_image(
     auto_centering_domain_combined: str = "terr_and_mask",
 ):
     t0_total = time.perf_counter()
-    FAST_EXPORT_MODE = not bool(DEBUG_TARGET and DEBUG_TARGET != "cid1")
+    FAST_EXPORT_MODE = True  # Keep thesis-critical outputs; skip heavy debug visuals.
+    BATCH_PLOTS_ONLY = not bool(DEBUG_TARGET and DEBUG_TARGET != "cid1")  # True in batch, False when debugging single image
     t_plot = 0.0
     t_preview = 0.0
     t_json = 0.0
@@ -2753,10 +3088,13 @@ def export_gt_supervision_for_image(
     # Re-enable full centering pipeline for holistic evaluation.
     enable_auto_centering = True
     auto_centering_debug = bool(DEBUG_TARGET and DEBUG_TARGET != "cid1")
+    # Always keep summary centering outputs (atomic_all/combined overlays) in batch.
+    auto_centering_outputs = True
 
     if bool(HARD_ISOLATION_DISABLE_CENTERING):
         enable_auto_centering = False
         auto_centering_debug = False
+        auto_centering_outputs = False
 
     DEBUG_MODE = False
     DEBUG_CROP_AUDIT = bool(DEBUG_MODE and DEBUG_LEVEL >= 3)
@@ -2774,7 +3112,7 @@ def export_gt_supervision_for_image(
     #os.makedirs(mask_root, exist_ok=True)
     os.makedirs(atomic_crop_root, exist_ok=True)
     os.makedirs(combined_crop_root, exist_ok=True)
-    if enable_auto_centering and auto_centering_debug:
+    if enable_auto_centering:
         os.makedirs(auto_center_root, exist_ok=True)
 
     gt_bin = (gt_mask > 0).astype(np.uint8)
@@ -3175,7 +3513,20 @@ def export_gt_supervision_for_image(
                 allow_teleport=False,
             )
             if not ok_chain or S_chain is None or len(np.asarray(S_chain, float)) < 2:
-                print(f"[WARN] stitch failed for branch {int(bid)}: {reason_chain}")
+                print(
+                    f"[WARN] stitch failed for branch {int(bid)}: {reason_chain} "
+                    f"- emitting {len(segs_b)} segments individually"
+                )
+                for si, S_seg in enumerate(segs_b):
+                    S_arr = np.asarray(S_seg, float)
+                    if S_arr.ndim != 2 or S_arr.shape[1] != 2 or len(S_arr) < 2:
+                        continue
+                    m_out = dict(meta_b[si] or {}) if si < len(meta_b) else {"branch_id": int(bid)}
+                    m_out["branch_id"] = int((m_out or {}).get("branch_id", int(bid)))
+                    m_out["stitched"] = False
+                    m_out["stitch_reason"] = str(reason_chain)
+                    stitched_segs.append(S_arr)
+                    stitched_meta.append(m_out)
                 continue
 
             # Preserve atomic membership provenance on stitched GT branches.
@@ -3257,7 +3608,7 @@ def export_gt_supervision_for_image(
             continue
 
         crack_mask = (cc_labels == lbl).astype(np.uint8)
-        crack_mask_clipped = _clip_mask_to_xywh(crack_mask, [int(x), int(y), int(w), int(h)])
+        crack_mask_clipped = (_crop_local(crack_mask, [int(x), int(y), int(w), int(h)]) > 0).astype(np.uint8)
 
         atomic_jobs.append({
             "order": int(order_i),
@@ -3430,8 +3781,19 @@ def export_gt_supervision_for_image(
                 mask_u8=crack_mask_clipped,
                 bbox_xywh=(x, y, w, h),
             )
+            S = np.asarray(mid_xy, float)
+            bx, by = int(x), int(y)
+            S_local = np.asarray(S, float).copy()
+            if S_local.ndim == 2 and S_local.shape[1] == 2 and len(S_local) >= 1:
+                S_local[:, 0] -= float(bx)
+                S_local[:, 1] -= float(by)
+                print(
+                    f"[ATOMIC_OFFSET_DBG] cid={scid} bx={bx} by={by} "
+                    f"S_before=[{S[0].tolist()}] S_local=[{S_local[0].tolist()}]",
+                    flush=True,
+                )
             terr = build_territory_mask_from_polyline(
-                mid_xy=mid_xy,
+                mid_xy=S_local,
                 crack_mask_u8=crack_mask_clipped,
                 window_half_size=int(auto_centering_window_half_size),
                 dt_domain_u8=None,
@@ -3439,7 +3801,7 @@ def export_gt_supervision_for_image(
             local_depth_crop = _lookup_local_depth_for_atomic(scid)
             t_mid0 = time.perf_counter()
             method_res = compute_midline_method_variants_and_normals(
-                mid_xy=mid_xy,
+                mid_xy=S_local,
                 crack_mask_u8=crack_mask_clipped,
                 domain_u8=None,
                 image_rgb=original_image,
@@ -3721,7 +4083,7 @@ def export_gt_supervision_for_image(
             t_preview += float(time.perf_counter() - t0)
             atomic_debug_done = True
 
-    if auto_centering_debug and atomic_results:
+    if auto_centering_outputs and atomic_results:
         atomic_all_dir = os.path.join(auto_center_root, "atomic_all")
         os.makedirs(atomic_all_dir, exist_ok=True)
         target_methods = list(METHODS_RS3)
@@ -3767,63 +4129,64 @@ def export_gt_supervision_for_image(
             )
             t_preview += float(time.perf_counter() - t0)
 
-        atomic_cost_global_dir = os.path.join(auto_center_root, "atomic_global_cost")
-        os.makedirs(atomic_cost_global_dir, exist_ok=True)
+        if auto_centering_debug:
+            atomic_cost_global_dir = os.path.join(auto_center_root, "atomic_global_cost")
+            os.makedirs(atomic_cost_global_dir, exist_ok=True)
 
-        def _first_non_none(*vals):
-            for v in vals:
-                if v is not None:
-                    return v
-            return None
+            def _first_non_none(*vals):
+                for v in vals:
+                    if v is not None:
+                        return v
+                return None
 
-        for mk in METHODS_RS3:
-            style = method_style.get(mk, {})
-            mslug = str(style.get("slug", mk))
-            use_ridge = mk in {"dt_ridge_valley", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
-            use_depth = mk in {"dt_depth", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
-            use_rgb = mk == "dt_ridge_color_depth"
-            branches_for_global = []
-            for oi in sorted(atomic_results.keys()):
-                ae = atomic_results.get(oi, {})
-                dbg_by_method = ae.get("method_cost_debug", {}) if isinstance(ae.get("method_cost_debug", {}), dict) else {}
-                md = dbg_by_method.get(mk, {}) if isinstance(dbg_by_method.get(mk, {}), dict) else {}
-                cmaps = md.get("costmaps", {}) if isinstance(md.get("costmaps", {}), dict) else {}
-                selected = md.get("selected", None)
-                if selected is None:
+            for mk in METHODS_RS3:
+                style = method_style.get(mk, {})
+                mslug = str(style.get("slug", mk))
+                use_ridge = mk in {"dt_ridge_valley", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
+                use_depth = mk in {"dt_depth", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
+                use_rgb = mk == "dt_ridge_color_depth"
+                branches_for_global = []
+                for oi in sorted(atomic_results.keys()):
+                    ae = atomic_results.get(oi, {})
+                    dbg_by_method = ae.get("method_cost_debug", {}) if isinstance(ae.get("method_cost_debug", {}), dict) else {}
+                    md = dbg_by_method.get(mk, {}) if isinstance(dbg_by_method.get(mk, {}), dict) else {}
+                    cmaps = md.get("costmaps", {}) if isinstance(md.get("costmaps", {}), dict) else {}
+                    selected = md.get("selected", None)
+                    if selected is None:
+                        continue
+                    a_sel = np.asarray(selected, np.float32)
+                    if a_sel.ndim < 2:
+                        continue
+                    bb = md.get("bbox_xywh", ae.get("mask_bbox", None))
+                    if not isinstance(bb, (list, tuple)) or len(bb) != 4:
+                        continue
+                    x0, y0, bw, bh = [int(v) for v in bb]
+                    rgb_src = _first_non_none(cmaps.get("rgb_cue", None), cmaps.get("rgb", None))
+                    ridge_src = _first_non_none(cmaps.get("ridge_valley", None), cmaps.get("dt_ridge_valley", None))
+                    branches_for_global.append({
+                        "bbox": [int(y0), int(y0 + a_sel.shape[0]), int(x0), int(x0 + a_sel.shape[1])],
+                        "dt_norm": md.get("dt_norm", None),
+                        "rgb": rgb_src if use_rgb else None,
+                        "ridge": ridge_src if use_ridge else None,
+                        "depth": md.get("depth_norm", None) if use_depth else None,
+                        "recess_norm": md.get("recess_norm", None) if use_depth else None,
+                        "final_cost": a_sel,
+                        "area": float(max(0, bw) * max(0, bh)),
+                    })
+                if not branches_for_global:
                     continue
-                a_sel = np.asarray(selected, np.float32)
-                if a_sel.ndim < 2:
-                    continue
-                bb = md.get("bbox_xywh", ae.get("mask_bbox", None))
-                if not isinstance(bb, (list, tuple)) or len(bb) != 4:
-                    continue
-                x0, y0, bw, bh = [int(v) for v in bb]
-                rgb_src = _first_non_none(cmaps.get("rgb_cue", None), cmaps.get("rgb", None))
-                ridge_src = _first_non_none(cmaps.get("ridge_valley", None), cmaps.get("dt_ridge_valley", None))
-                branches_for_global.append({
-                    "bbox": [int(y0), int(y0 + a_sel.shape[0]), int(x0), int(x0 + a_sel.shape[1])],
-                    "dt_norm": md.get("dt_norm", None),
-                    "rgb": rgb_src if use_rgb else None,
-                    "ridge": ridge_src if use_ridge else None,
-                    "depth": md.get("depth_norm", None) if use_depth else None,
-                    "recess_norm": md.get("recess_norm", None) if use_depth else None,
-                    "final_cost": a_sel,
-                    "area": float(max(0, bw) * max(0, bh)),
-                })
-            if not branches_for_global:
-                continue
-            maps_global = build_global_cost_maps(branches_for_global, (int(H), int(W)))
-            method_dir = os.path.join(atomic_cost_global_dir, mslug)
-            os.makedirs(method_dir, exist_ok=True)
-            _run_timed_plot(
-                save_global_cost_panel,
-                maps=maps_global,
-                out_path=os.path.join(method_dir, "atomic_global_cost_panel.jpg"),
-                crack_mask_u8=gt_mask,
-                bbox_xywh=None,
-                title=f"atomic global [{style.get('label', mk)}]",
-            )
-            # Temporary: disable overlap-count plot emission.
+                maps_global = build_global_cost_maps(branches_for_global, (int(H), int(W)))
+                method_dir = os.path.join(atomic_cost_global_dir, mslug)
+                os.makedirs(method_dir, exist_ok=True)
+                _run_timed_plot(
+                    save_global_cost_panel,
+                    maps=maps_global,
+                    out_path=os.path.join(method_dir, "atomic_global_cost_panel.jpg"),
+                    crack_mask_u8=gt_mask,
+                    bbox_xywh=None,
+                    title=f"atomic global [{style.get('label', mk)}]",
+                )
+                # Temporary: disable overlap-count plot emission.
 
     # =====================================================
     # 2) COMBINED  (USE UNION OF USER mask_bbox ONLY)
@@ -3880,13 +4243,16 @@ def export_gt_supervision_for_image(
         # -------------------------------------------------
         # GT CC label ONLY for normals + dominance logic
         # -------------------------------------------------
-        lbl = _cc_label_for_members(members, atomic, cc_labels)
-        if lbl is None or lbl <= 0:
+        lbls = _cc_labels_for_members(members, atomic, cc_labels)
+        if not lbls:
             gt_sup_diag["combined_skip_no_cc_label"] += 1
             continue
 
-        crack_mask = (cc_labels == lbl).astype(np.uint8)
-        crack_mask_clipped = _clip_mask_to_xywh(crack_mask, [ux, uy, uw, uh])
+        crack_mask = np.zeros_like(gt_bin, dtype=np.uint8)
+        for lbl in sorted(lbls):
+            if int(lbl) > 0:
+                crack_mask |= (cc_labels == int(lbl)).astype(np.uint8)
+        crack_mask_clipped = (_crop_local(crack_mask, [ux, uy, uw, uh]) > 0).astype(np.uint8)
 
         # -------------------------------------------------
         # Dominance-selected sub-midlines
@@ -3903,12 +4269,40 @@ def export_gt_supervision_for_image(
             debug_dir=debug_dir,
             debug_tag=tag,
         )
+        dom_meta = dom_meta if isinstance(dom_meta, dict) else {}
+        tag_name = str(tag)
+        branch_audit_png = os.path.join(sup_root, "auto_center_debug", f"branch_audit_{tag_name}.jpg")
+        _plot_branch_audit(
+            original_image=original_image,
+            gt_mask=crack_mask,
+            atomic=atomic,
+            members=members,
+            kept_segs=segs,
+            segments_meta=dom_meta.get("segments_meta", []),
+            dom_meta=dom_meta,
+            out_png=branch_audit_png,
+            tag_name=tag_name,
+        )
+        _branches = dom_meta.get("branches", []) if isinstance(dom_meta.get("branches", []), list) else []
+        _order = dom_meta.get("order", []) if isinstance(dom_meta.get("order", []), list) else []
+        _segs_in = int(sum(len((b or {}).get("atomic_ids", []) or []) for b in _branches))
+        print(
+            f"[BRANCH AUDIT] {tag_name} branch_order={_order} "
+            f"branches_in={len(_branches)} segs_in={_segs_in} segs_out={len(segs)}"
+        )
+        for bs in _branches:
+            if not isinstance(bs, dict):
+                continue
+            print(
+                f"[BRANCH AUDIT]   branch={int(bs.get('branch_id', -1))} rank={int(bs.get('rank', -1))} "
+                f"user_len={float(bs.get('user_len', 0.0)):.1f} kept_len={float(bs.get('kept_len', 0.0)):.1f} "
+                f"suppressed={bool(bs.get('suppressed', False))} atomic_ids={list(bs.get('atomic_ids', []) or [])}"
+            )
 
         if not segs:
             gt_sup_diag["combined_skip_no_dominant_segs"] += 1
             continue
 
-        dom_meta = dom_meta if isinstance(dom_meta, dict) else {}
         seg_meta = dom_meta.get("segments_meta", [])
         segs_canon, seg_meta_canon = _canonicalize_segments_with_meta(
             segs,
@@ -4042,15 +4436,16 @@ def export_gt_supervision_for_image(
                 import base64
                 raw = base64.b64decode(b64.encode("utf-8"))
                 bits = np.frombuffer(raw, dtype=np.uint8)
-                arr = np.unpackbits(bits)
 
                 hh = int(shape[0])
                 ww = int(shape[1])
-                n = hh * ww
-                if arr.size < n:
-                    arr = np.pad(arr, (0, n - arr.size), constant_values=0)
-
-                crop = arr[:n].reshape((hh, ww)).astype(np.uint8)
+                # packbits pads each row to a multiple of 8 — unpack row-aware to avoid stride scramble
+                stride = (ww + 7) // 8
+                expected_bytes = hh * stride
+                if bits.size < expected_bytes:
+                    bits = np.pad(bits, (0, expected_bytes - bits.size), constant_values=0)
+                packed_2d = bits[:expected_bytes].reshape((hh, stride))
+                crop = np.unpackbits(packed_2d, axis=1)[:, :ww].astype(np.uint8)
 
                 y1 = min(H, y0 + hh)
                 x1 = min(W, x0 + ww)
@@ -4070,7 +4465,17 @@ def export_gt_supervision_for_image(
         for bi in branch_order:
             bi_str = str(int(bi))
             terr_blob = terr_meta.get(bi_str, {})
-            branch_terr_masks[int(bi)] = _decode_packed_mask_local(terr_blob, Hm, Wm)
+            decoded = _decode_packed_mask_local(terr_blob, Hm, Wm)
+            branch_terr_masks[int(bi)] = decoded
+            ys, xs = np.where(decoded > 0)
+            if len(xs):
+                print(
+                    f"[TERR_BBOX_DBG] branch={bi_str} nnz={len(xs)} "
+                    f"x=[{int(xs.min())},{int(xs.max())}] y=[{int(ys.min())},{int(ys.max())}] "
+                    f"frame=local({int(Hm)}x{int(Wm)})"
+                )
+            else:
+                print(f"[TERR_BBOX_DBG] branch={bi_str} nnz=0")
 
         # Bite per branch (full-image masks)
         bite_meta = dom_meta.get("bite", {}) if isinstance(dom_meta.get("bite", {}), dict) else {}
@@ -4080,7 +4485,17 @@ def export_gt_supervision_for_image(
         for bi in branch_order:
             bi_str = str(int(bi))
             bb = bite_by_branch.get(bi_str, {})
-            branch_bite_masks[int(bi)] = _decode_packed_mask_local(bb, Hm, Wm)
+            decoded_b = _decode_packed_mask_local(bb, Hm, Wm)
+            branch_bite_masks[int(bi)] = decoded_b
+            ys_b, xs_b = np.where(decoded_b > 0)
+            if len(xs_b):
+                print(
+                    f"[TERR_BBOX_DBG] bite branch={bi_str} nnz={len(xs_b)} "
+                    f"x=[{int(xs_b.min())},{int(xs_b.max())}] y=[{int(ys_b.min())},{int(ys_b.max())}] "
+                    f"frame=local({int(Hm)}x{int(Wm)})"
+                )
+            else:
+                print(f"[TERR_BBOX_DBG] bite branch={bi_str} nnz=0")
 
         # Allowed mask per branch:
         # remove only the surviving territory of OTHER branches
@@ -4098,10 +4513,37 @@ def export_gt_supervision_for_image(
 
                 # only forbid territory that branch sj still effectively owns
                 own_j = terr_j & (~bite_j.astype(bool))
+                forbidden_px = int(np.count_nonzero(own_j))
+                print(f"[ALLOWED_DBG] branch={int(bi)} excluding sj={int(sj)} own_j_px={forbidden_px}")
                 forbidden |= own_j.astype(np.uint8)
 
             allowed = global_mask & (~forbidden.astype(bool))
             branch_allowed_masks[bi] = allowed.astype(np.uint8)
+            allowed_px = int(np.count_nonzero(allowed))
+            total_px = int(np.count_nonzero(global_mask))
+            print(
+                f"[ALLOWED_DBG] branch={int(bi)} forbidden_px={int(np.count_nonzero(forbidden))} "
+                f"allowed_px={allowed_px} total_px={total_px}"
+            )
+
+        try:
+            out_terr_dbg = os.path.join(auto_center_root, f"territory_debug_{tag_name}.jpg")
+            _plot_territory_debug(
+                original_image=original_image,
+                gt_mask_full=crack_mask,
+                branch_terr_masks=branch_terr_masks,
+                branch_bite_masks=branch_bite_masks,
+                branch_allowed_masks=branch_allowed_masks,
+                branch_order=branch_order,
+                dom_meta=dom_meta,
+                ux=int(ux),
+                uy=int(uy),
+                uw=int(uw),
+                uh=int(uh),
+                out_png=out_terr_dbg,
+            )
+        except Exception as _e_terr_dbg:
+            _dlog(3, f"[TERRITORY DEBUG] failed call: {_e_terr_dbg}")
 
         # Temporary sanity print for mask sizes
         try:
@@ -4110,7 +4552,8 @@ def export_gt_supervision_for_image(
                 terr_px = int(np.count_nonzero(branch_terr_masks.get(bi, 0)))
                 bite_px = int(np.count_nonzero(branch_bite_masks.get(bi, 0)))
                 allow_px = int(np.count_nonzero(branch_allowed_masks.get(bi, 0)))
-                print(f"[GT_SUP MASKDBG] branch={bi} terr_px={terr_px} bite_px={bite_px} allow_px={allow_px}")
+                if _VERBOSE_DEBUG:
+                    print(f"[GT_SUP MASKDBG] branch={bi} terr_px={terr_px} bite_px={bite_px} allow_px={allow_px}")
         except Exception as _e:
             _dlog(3, f"[GT_SUP MASKDBG] failed: {_e}")
         
@@ -4338,7 +4781,8 @@ def export_gt_supervision_for_image(
                     continue
                 bb_local = _bbox_from_segments(segs_branch, pad=5, Hh=H, Ww=W)
                 if bb_local is None:
-                    print(f"[CACHE SKIP] branch={int(bi)} reason=bb_local_none n_segs={len(segs_branch)}")
+                    if _VERBOSE_DEBUG:
+                        print(f"[CACHE SKIP] branch={int(bi)} reason=bb_local_none n_segs={len(segs_branch)}")
                     continue
                 bx, by, bw, bh = [int(v) for v in bb_local]
 
@@ -4348,10 +4792,11 @@ def export_gt_supervision_for_image(
                 )
                 mask_local = np.asarray(mask_branch_full[by:by + bh, bx:bx + bw], np.uint8)
                 if mask_local.size == 0 or not np.any(mask_local):
-                    print(
-                        f"[CACHE SKIP] branch={int(bi)} reason=empty_mask_local "
-                        f"size={mask_local.size} any={bool(np.any(mask_local))}"
-                    )
+                    if _VERBOSE_DEBUG:
+                        print(
+                            f"[CACHE SKIP] branch={int(bi)} reason=empty_mask_local "
+                            f"size={mask_local.size} any={bool(np.any(mask_local))}"
+                        )
                     continue
                 # Territory-aware island removal for branch-local optimization masks:
                 # keep only connected components that overlap this branch territory.
@@ -4373,22 +4818,32 @@ def export_gt_supervision_for_image(
                                     mask_local = keep
                         except Exception:
                             pass
+                if auto_centering_outputs:
+                    _mask_dbg_dir = os.path.join(auto_center_root, "branch_masks")
+                    os.makedirs(_mask_dbg_dir, exist_ok=True)
+                    _mask_vis = (mask_local * 255).astype(np.uint8)
+                    cv2.imwrite(
+                        os.path.join(_mask_dbg_dir, f"branch_{int(bi):03d}_mask_local.png"),
+                        _mask_vis,
+                    )
 
-                print(
-                    f"[CACHE BUILD] branch={int(bi)} bbox=({bx},{by},{bw},{bh}) "
-                    f"mask_nnz={int(np.count_nonzero(mask_local))} "
-                    f"terr_available={terr_branch_full is not None}"
-                )
+                if _VERBOSE_DEBUG:
+                    print(
+                        f"[CACHE BUILD] branch={int(bi)} bbox=({bx},{by},{bw},{bh}) "
+                        f"mask_nnz={int(np.count_nonzero(mask_local))} "
+                        f"terr_available={terr_branch_full is not None}"
+                    )
 
                 gx0 = int(bx)
                 gy0 = int(by)
                 gx1 = int(min(W, bx + bw))
                 gy1 = int(min(H, by + bh))
                 if gx1 <= gx0 or gy1 <= gy0:
-                    print(
-                        f"[CACHE SKIP] branch={int(bi)} reason=zero_size_global_crop "
-                        f"gx=({gx0},{gx1}) gy=({gy0},{gy1})"
-                    )
+                    if _VERBOSE_DEBUG:
+                        print(
+                            f"[CACHE SKIP] branch={int(bi)} reason=zero_size_global_crop "
+                            f"gx=({gx0},{gx1}) gy=({gy0},{gy1})"
+                        )
                     continue
 
                 rgb_local = np.asarray(original_image[gy0:gy1, gx0:gx1])
@@ -5109,7 +5564,7 @@ def export_gt_supervision_for_image(
                 })
                 _dlog(1, f"[FINAL] combined branches present: {_branch_ids_present}")
 
-            if auto_centering_debug:
+            if auto_centering_outputs:
                 combined_dbg_dir = os.path.join(auto_center_root, "combined", f"ccid_{tag_name}")
                 os.makedirs(combined_dbg_dir, exist_ok=True)
                 terr_vis = build_territory_mask_for_segments(
@@ -5321,7 +5776,7 @@ def export_gt_supervision_for_image(
                             "recess_norm": brec.get("recess_norm") if use_depth else None,
                             "final_cost": a_sel,
                         })
-                    if branches_for_global:
+                    if branches_for_global and not BATCH_PLOTS_ONLY:
                         maps_global = build_global_cost_maps(branches_for_global, np.asarray(crack_mask, np.uint8).shape[:2])
                         print(
                             f"[GLOBAL SIGNAL CHECK] mk={mk} "
@@ -5353,7 +5808,7 @@ def export_gt_supervision_for_image(
                         #     _dlog(1, "[WARN] save_winner_panel unavailable; skipping winner map.")
 
                     # Keep per-branch cost panels in separate folders.
-                    if branch_dbg_list:
+                    if branch_dbg_list and not BATCH_PLOTS_ONLY:
                         for brec in branch_dbg_list:
                             blob_id = str(brec.get("blob_id", "branch_000"))
                             bidx = 0
@@ -5597,6 +6052,20 @@ def export_gt_supervision_for_image(
         print(f"[GT_SUP DIAG] no final_entries produced: {gt_sup_diag}")
     else:
         print(f"[GT_SUP DIAG] entries={len(final_entries)} summary={gt_sup_diag}")
+    # Per-combined final centering audit: GT branches vs each method output.
+    centering_audit_dir = os.path.join(sup_root, "auto_center_debug")
+    os.makedirs(centering_audit_dir, exist_ok=True)
+    for _e in (final_entries or []):
+        if not isinstance(_e, dict) or str(_e.get("type", "")) != "combined":
+            continue
+        _cid = str(_e.get("id", "unknown"))
+        _out = os.path.join(centering_audit_dir, f"centering_audit_{_cid}.jpg")
+        _plot_centering_audit_entry(
+            entry=_e,
+            original_image=original_image,
+            out_png=_out,
+        )
+
     global_png = os.path.join(sup_root, "global_overview.jpg")
     t0 = time.perf_counter()
     _global_overview(final_entries, gt_mask, global_png)

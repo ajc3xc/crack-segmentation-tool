@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 import cracktools as ct
 #from helpers.crackhelpers import *
 # helpers/metrics/metrics.py
@@ -32,6 +32,14 @@ import time
 
 ROUNDING_DIGITS=6
 B1_MAX_PROJ_RADIUS_PX = 30.0
+
+# Set to False to suppress verbose per-image debug prints during batch runs
+_VERBOSE_DEBUG = True
+
+
+def _vdbg_print(*args, **kwargs):
+    if _VERBOSE_DEBUG:
+        print(*args, **kwargs)
 
 # ============================================
 # SINGLE CID CORRESPONDENCE DEBUG CONFIG
@@ -1045,14 +1053,14 @@ import numpy as np
 def _decode_packbits_b64_to_mask(packbits_b64, shape):
     raw = base64.b64decode(packbits_b64.encode("utf-8"))
     bits = np.frombuffer(raw, dtype=np.uint8)
-    arr = np.unpackbits(bits)
 
     H, W = int(shape[0]), int(shape[1])
-    n = H * W
-    if arr.size < n:
-        arr = np.pad(arr, (0, n - arr.size), constant_values=0)
-
-    return arr[:n].reshape((H, W)).astype(np.uint8)
+    stride = (W + 7) // 8
+    expected_bytes = H * stride
+    if bits.size < expected_bytes:
+        bits = np.pad(bits, (0, expected_bytes - bits.size), constant_values=0)
+    packed_2d = bits[:expected_bytes].reshape((H, stride))
+    return np.unpackbits(packed_2d, axis=1)[:, :W].astype(np.uint8)
 
 
 def bite_blob_to_fullmask(bite_blob, H, W, base_bbox=None, assume_local=None):
@@ -3990,7 +3998,7 @@ def _debug_plot_correspondence_single(
 
     nseg = min(len(pts_segs), len(predw_segs), len(gtw_segs))
     if nseg <= 0:
-        print("[CORRESP DEBUG] skipped - no valid segments")
+        _vdbg_print("[CORRESP DEBUG] skipped - no valid segments")
         return
     if gt_pts is not None and gt_pts_segs:
         nseg = min(nseg, len(gt_pts_segs))
@@ -4005,16 +4013,16 @@ def _debug_plot_correspondence_single(
     finite_gt = int(np.sum([np.sum(np.isfinite(w)) for w in gtw_segs]))
     total_samples = int(np.sum([min(len(a), len(b), len(c)) for a, b, c in zip(pts_segs, predw_segs, gtw_segs)]))
 
-    print("\n==============================")
-    print(f"[CORRESP DEBUG] CID={cid} branch={branch_id} seg={seg_idx}")
-    print(f"Segments: {nseg}")
-    print(f"Total samples: {total_samples}")
-    print(f"Finite pred: {finite_pred}")
-    print(f"Finite gt  : {finite_gt}")
-    print("==============================\n")
+    _vdbg_print("\n==============================")
+    _vdbg_print(f"[CORRESP DEBUG] CID={cid} branch={branch_id} seg={seg_idx}")
+    _vdbg_print(f"Segments: {nseg}")
+    _vdbg_print(f"Total samples: {total_samples}")
+    _vdbg_print(f"Finite pred: {finite_pred}")
+    _vdbg_print(f"Finite gt  : {finite_gt}")
+    _vdbg_print("==============================\n")
 
-    print(f"[CORRESP DEBUG EXT] masks={'yes' if gt_mask is not None else 'no'}")
-    print(f"[CORRESP DEBUG EXT] zoom_bbox={zoom_bbox}")
+    _vdbg_print(f"[CORRESP DEBUG EXT] masks={'yes' if gt_mask is not None else 'no'}")
+    _vdbg_print(f"[CORRESP DEBUG EXT] zoom_bbox={zoom_bbox}")
 
     fig = plt.figure(figsize=(16, 8.5))
     gs = fig.add_gridspec(2, 2, width_ratios=[1.6, 1.0])
@@ -4330,9 +4338,9 @@ def _debug_plot_correspondence_single(
     ax_drift.axhline(0.0, color="black", lw=1)
     ax_drift.grid(True)
     if drift_means:
-        print(f"[CORRESP DEBUG EXT] mean |arc-lag| = {float(np.mean(drift_means)):.3f}px")
+        _vdbg_print(f"[CORRESP DEBUG EXT] mean |arc-lag| = {float(np.mean(drift_means)):.3f}px")
     else:
-        print("[CORRESP DEBUG EXT] mean |arc-lag| = n/a (no GT geometry pair)")
+        _vdbg_print("[CORRESP DEBUG EXT] mean |arc-lag| = n/a (no GT geometry pair)")
 
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(
@@ -4344,7 +4352,7 @@ def _debug_plot_correspondence_single(
     fig.savefig(out_path, dpi=100)
     plt.close(fig)
 
-    print(f"[CORRESP DEBUG] wrote {out_path}")
+    _vdbg_print(f"[CORRESP DEBUG] wrote {out_path}")
 
 def plot_sampling_consistency(
     *,
@@ -4834,7 +4842,7 @@ def export_width_distribution_summary(
     gw = gw[mask]
 
     if pw.size < 5 or gw.size < 5:
-        print("[DIST] skipped: insufficient valid samples")
+        _vdbg_print("[DIST] skipped: insufficient valid samples")
         return
 
     # -------------------------------------------------
@@ -4914,7 +4922,7 @@ def export_width_distribution_summary(
     else:
         df.to_csv(out_csv, index=False)
 
-    print(
+    _vdbg_print(
         f"[DIST] wrote distribution row | "
         f"variant={variant} | gt={gt_tier} | "
         f"cid={cid} | group={group_id} | "
@@ -5073,7 +5081,7 @@ def compare_widths_for_aligned_cracks(
     atomic   = ann.get("atomic_cracks")
     combined = ann.get("combined_cracks")
 
-    print(
+    _vdbg_print(
         f"[WIDTH DEBUG] ann keys: "
         f"atomic={None if atomic is None else list(atomic.keys())[:5]}, "
         f"combined={None if combined is None else list(combined.keys())[:5]}"
@@ -5089,7 +5097,7 @@ def compare_widths_for_aligned_cracks(
     mode = "atomic" if atomic is not None else "combined"
     cracks = atomic if mode == "atomic" else combined
 
-    print(f"\n[WIDTH DEBUG] === RUN MODE: {mode.upper()} ===")
+    _vdbg_print(f"\n[WIDTH DEBUG] === RUN MODE: {mode.upper()} ===")
     output_dir = os.path.join(metrics_dir, midline_type or "unknown", crack_type or mode)
     os.makedirs(output_dir, exist_ok=True)
 
@@ -5127,12 +5135,12 @@ def compare_widths_for_aligned_cracks(
                     if aid is not None:
                         gt_sup_atomic[str(aid)] = e
 
-    print(f"[GT SUP] loaded {len(gt_sup_combined)} combined GT entries")
-    print(f"[GT SUP] loaded {len(gt_sup_atomic)} atomic GT entries")
+    _vdbg_print(f"[GT SUP] loaded {len(gt_sup_combined)} combined GT entries")
+    _vdbg_print(f"[GT SUP] loaded {len(gt_sup_atomic)} atomic GT entries")
     if gt_sup_atomic:
-        print(f"[GT SUP] atomic ids sample: {list(gt_sup_atomic.keys())[:10]}")
+        _vdbg_print(f"[GT SUP] atomic ids sample: {list(gt_sup_atomic.keys())[:10]}")
     else:
-        print("[GT SUP] WARNING: no atomic GT entries found. Atomic width eval will skip.")
+        _vdbg_print("[GT SUP] WARNING: no atomic GT entries found. Atomic width eval will skip.")
 
     ORIENT_DEBUG = True
     from helpers.geometry_canonical import assert_direction_consistency as _assert_direction_consistency
@@ -5171,7 +5179,7 @@ def compare_widths_for_aligned_cracks(
                 sid0, i0, s0, _ = items[j - 1]
                 sid1, i1, s1, _ = items[j]
                 d_fwd, d_rev, flag = _orient_cost(s0, s1)
-                print(
+                _vdbg_print(
                     f"[ORIENT DBG] cid={cid_dbg} tag={tag} branch={bid} "
                     f"prev(seg_idx={sid0},i={i0},n={len(s0)}) -> "
                     f"curr(seg_idx={sid1},i={i1},n={len(s1)}) "
@@ -5186,7 +5194,7 @@ def compare_widths_for_aligned_cracks(
             key_counts[k] = key_counts.get(k, 0) + 1
         dup = [(k, c) for (k, c) in key_counts.items() if c > 1]
         for k, c in dup[:20]:
-            print(f"[ORIENT DBG] cid={cid_dbg} tag={tag} duplicate_key={k} count={c}")
+            _vdbg_print(f"[ORIENT DBG] cid={cid_dbg} tag={tag} duplicate_key={k} count={c}")
 
     def _check_branch_direction_consistency(segs, meta, *, tag, cid_dbg):
         if not ORIENT_DEBUG:
@@ -5207,9 +5215,9 @@ def compare_widths_for_aligned_cracks(
             segs_b = [it[2] for it in items]
             try:
                 _assert_direction_consistency(segs_b)
-                print(f"[ORIENT CHECK] cid={cid_dbg} tag={tag} branch={bid} status=PASS")
+                _vdbg_print(f"[ORIENT CHECK] cid={cid_dbg} tag={tag} branch={bid} status=PASS")
             except Exception as e:
-                print(f"[ORIENT CHECK] cid={cid_dbg} tag={tag} branch={bid} status=FAIL err={e}")
+                _vdbg_print(f"[ORIENT CHECK] cid={cid_dbg} tag={tag} branch={bid} status=FAIL err={e}")
 
 
     def _extract_segments_and_meta(crack, cid_dbg=None):
@@ -5931,15 +5939,15 @@ def compare_widths_for_aligned_cracks(
 
         # === DIAG: trace what meta source and atomic_id values were loaded ===
         _dom_seg_meta_diag = ((gt_entry_obj.get("dominance_meta") or {}).get("segments_meta") or [])
-        print(f"[EXTRACT META DIAG] kind={gt_entry_obj.get('kind','?')} id={gt_entry_obj.get('id','?')}")
-        print(f"[EXTRACT META DIAG]   midline_segments_meta present={gt_entry_obj.get('midline_segments_meta') is not None}")
-        print(f"[EXTRACT META DIAG]   dominance_meta present={gt_entry_obj.get('dominance_meta') is not None}")
-        print(f"[EXTRACT META DIAG]   dominance_meta.segments_meta len={len(_dom_seg_meta_diag)}")
+        _vdbg_print(f"[EXTRACT META DIAG] kind={gt_entry_obj.get('kind','?')} id={gt_entry_obj.get('id','?')}")
+        _vdbg_print(f"[EXTRACT META DIAG]   midline_segments_meta present={gt_entry_obj.get('midline_segments_meta') is not None}")
+        _vdbg_print(f"[EXTRACT META DIAG]   dominance_meta present={gt_entry_obj.get('dominance_meta') is not None}")
+        _vdbg_print(f"[EXTRACT META DIAG]   dominance_meta.segments_meta len={len(_dom_seg_meta_diag)}")
         for _i, _dsm in enumerate(_dom_seg_meta_diag[:4]):
-            print(f"[EXTRACT META DIAG]   dom_seg_meta[{_i}] = {_dsm}")
-        print(f"[EXTRACT META DIAG]   resolved meta source len={len(meta) if isinstance(meta, list) else 'NOT_LIST'}")
+            _vdbg_print(f"[EXTRACT META DIAG]   dom_seg_meta[{_i}] = {_dsm}")
+        _vdbg_print(f"[EXTRACT META DIAG]   resolved meta source len={len(meta) if isinstance(meta, list) else 'NOT_LIST'}")
         for _i, _m in enumerate((meta or [])[:4]):
-            print(f"[EXTRACT META DIAG]   meta[{_i}] atomic_id={(_m or {}).get('atomic_id','MISSING')} branch_id={(_m or {}).get('branch_id','MISSING')}")
+            _vdbg_print(f"[EXTRACT META DIAG]   meta[{_i}] atomic_id={(_m or {}).get('atomic_id','MISSING')} branch_id={(_m or {}).get('branch_id','MISSING')}")
         # === END DIAG ===
 
         # Backfill atomic_id from dominance_meta.segments_meta when the primary
@@ -5969,7 +5977,7 @@ def compare_widths_for_aligned_cracks(
                             m["atomic_id"] = str(aid0)
 
         # === DIAG: confirm what atomic_ids look like after backfill ===
-        print(f"[EXTRACT META POST-BACKFILL]   meta atomic_ids after backfill: {[(_m or {}).get('atomic_id') for _m in (meta or [])[:4]]}")
+        _vdbg_print(f"[EXTRACT META POST-BACKFILL]   meta atomic_ids after backfill: {[(_m or {}).get('atomic_id') for _m in (meta or [])[:4]]}")
         # === END DIAG ===
 
         if not isinstance(meta, list):
@@ -6309,26 +6317,26 @@ def compare_widths_for_aligned_cracks(
             if k not in buckets or not buckets[k]:
                 # DEBUG: inspect expected vs available derived keys before failing
                 try:
-                    print(f"[DERIVED MATCH DBG] cid={cid} MISSING key={k}")
-                    print(f"[DERIVED MATCH DBG] midline_meta count={len(mid_keep_meta or [])} derived_meta count={len(dmeta_in or [])}")
+                    _vdbg_print(f"[DERIVED MATCH DBG] cid={cid} MISSING key={k}")
+                    _vdbg_print(f"[DERIVED MATCH DBG] midline_meta count={len(mid_keep_meta or [])} derived_meta count={len(dmeta_in or [])}")
 
                     exp = []
                     for _mm in (mid_keep_meta or []):
                         if not isinstance(_mm, dict):
                             continue
                         exp.append(_k_ab(_mm))
-                    print(f"[DERIVED MATCH DBG] expected(midline) keys sample={exp[:20]}")
+                    _vdbg_print(f"[DERIVED MATCH DBG] expected(midline) keys sample={exp[:20]}")
 
                     avail = []
                     for _dm in (dmeta_in or []):
                         if not isinstance(_dm, dict):
                             continue
                         avail.append(_k_ab(_dm))
-                    print(f"[DERIVED MATCH DBG] available(derived) keys sample={avail[:40]}")
-                    print(f"[DERIVED MATCH DBG] derived atomic_ids={sorted({a for (a, _) in avail if a is not None})}")
+                    _vdbg_print(f"[DERIVED MATCH DBG] available(derived) keys sample={avail[:40]}")
+                    _vdbg_print(f"[DERIVED MATCH DBG] derived atomic_ids={sorted({a for (a, _) in avail if a is not None})}")
                 except Exception as _e:
-                    print(f"[DERIVED MATCH DBG] failed: {_e}")
-                print(f"[DERIVED MATCH SKIP] cid={cid} no derived segment for key={k} -- skipping")
+                    _vdbg_print(f"[DERIVED MATCH DBG] failed: {_e}")
+                _vdbg_print(f"[DERIVED MATCH SKIP] cid={cid} no derived segment for key={k} -- skipping")
                 continue
             Sd, md = buckets[k].pop(0)
             out_segs.append(Sd)
@@ -6338,10 +6346,10 @@ def compare_widths_for_aligned_cracks(
 
     # ---------------- iterate cracks (NO width_baseline_mode; baseline is injected via pred_widths) ----------------
     crack_iter = list(cracks.items())
-    print(f"cracks iterating through: {len(crack_iter)}")
+    _vdbg_print(f"cracks iterating through: {len(crack_iter)}")
 
     for cid, crack in crack_iter:
-        print(f"\n[WIDTH DEBUG] {mode.upper()} cid={cid}")
+        _vdbg_print(f"\n[WIDTH DEBUG] {mode.upper()} cid={cid}")
         cid_opsec_dir = os.path.join(opsec_dir, f"cid{cid}") if mode == "combined" else None
         # Always define this path; some Stage-5 paths reference it even when
         # DEBUG_TOPOLOGY_TRACE is disabled.
@@ -6414,7 +6422,7 @@ def compare_widths_for_aligned_cracks(
             atomic_vs_combined_gt = _atomic_pred_matches_combined_gt(cid, gt_sup_combined)
 
             if predw_full_any is None or predw_full_any.size < 2:
-                print(f"[WIDTH DEBUG] atomic cid={cid} has no usable pred width trace -> skip")
+                _vdbg_print(f"[WIDTH DEBUG] atomic cid={cid} has no usable pred width trace -> skip")
                 _log_failed_segment_row(
                     image=base_name,
                     cid=cid,
@@ -6431,12 +6439,12 @@ def compare_widths_for_aligned_cracks(
             gt_entry_atomic = _lookup_atomic_gt_entry(cid)
             gtw_full_any = _get_gt_width_full(crack, gt_entry_atomic)
             if gtw_full_any is None or gtw_full_any.size < 2:
-                print(f"[WIDTH DEBUG] atomic cid={cid} has no usable GT width trace (payload + supervision) -> skip")
+                _vdbg_print(f"[WIDTH DEBUG] atomic cid={cid} has no usable GT width trace (payload + supervision) -> skip")
                 if gt_entry_atomic is None:
-                    print(f"[WIDTH DEBUG] atomic cid={cid} missing from gt_sup_atomic")
+                    _vdbg_print(f"[WIDTH DEBUG] atomic cid={cid} missing from gt_sup_atomic")
                 else:
-                    print(f"[WIDTH DEBUG] atomic cid={cid} gt_sup keys: {list(gt_entry_atomic.keys())}")
-                print(f"[WIDTH DEBUG] atomic cid={cid} has keys: {list(crack.keys())[:20]}")
+                    _vdbg_print(f"[WIDTH DEBUG] atomic cid={cid} gt_sup keys: {list(gt_entry_atomic.keys())}")
+                _vdbg_print(f"[WIDTH DEBUG] atomic cid={cid} has keys: {list(crack.keys())[:20]}")
                 _log_failed_segment_row(
                     image=base_name,
                     cid=cid,
@@ -6452,7 +6460,7 @@ def compare_widths_for_aligned_cracks(
 
             total_geom = int(sum(len(s) for s in segs if s is not None and len(s) >= 2))
             if total_geom < 2:
-                print(f"[WIDTH DEBUG] atomic cid={cid} has <2 derived geometry samples -> skip")
+                _vdbg_print(f"[WIDTH DEBUG] atomic cid={cid} has <2 derived geometry samples -> skip")
                 _log_failed_segment_row(
                     image=base_name,
                     cid=cid,
@@ -6493,7 +6501,7 @@ def compare_widths_for_aligned_cracks(
                     u_dst = np.linspace(0.0, 1.0, num=L_out)
                     return np.interp(u_dst, u_src, arr).astype(float, copy=False)
 
-                print(
+                _vdbg_print(
                     f"[WIDTH DEBUG] atomic cid={cid} -> align (atomic width length mismatch) "
                     f"pred_len={len(predw_full_any)} gt_len={len(gtw_full_any)} total_geom={total_geom}"
                 )
@@ -6563,7 +6571,7 @@ def compare_widths_for_aligned_cracks(
                         seg_idx="group",
                     )
 
-            print(
+            _vdbg_print(
                 f"[WIDTH DEBUG] atomic cid={cid} aligned streams: "
                 f"geom={total_geom} pred_raw={len(predw_full_any)} gt_raw={len(gtw_full_any)}"
             )
@@ -6690,7 +6698,7 @@ def compare_widths_for_aligned_cracks(
                 overlap=overlap,
                 extra_info=f"n_shared={len(shared)}",
             )
-            print(
+            _vdbg_print(
                 f"[WIDTH DEBUG] combined cid={cid} overlap={overlap:.3f} "
                 f"quality=invalid -> SKIP"
             )
@@ -6714,7 +6722,7 @@ def compare_widths_for_aligned_cracks(
         if not members_iter_ids:
             members_iter_ids = set(effective_members)
 
-        print(
+        _vdbg_print(
             f"[WIDTH DEBUG] cid={cid} quality={match_quality} overlap={overlap:.3f} "
             f"shared_members={sorted(shared)} effective_members={sorted(effective_members)}"
         )
@@ -6754,7 +6762,7 @@ def compare_widths_for_aligned_cracks(
 
                             loss_masks_gt_by_branch[int(bid)] = full
 
-        print(
+        _vdbg_print(
             f"[GT BITE OK] cid={cid} "
             f"branches={sorted(loss_masks_gt_by_branch.keys())}"
         )
@@ -6885,10 +6893,10 @@ def compare_widths_for_aligned_cracks(
             pruned_meta.append(dict(m))
 
         if not pruned_segs:
-            print(f"[WIDTH DEBUG] cid={cid} -> NO SEGMENTS AFTER PRUNE")
+            _vdbg_print(f"[WIDTH DEBUG] cid={cid} -> NO SEGMENTS AFTER PRUNE")
             continue
 
-        print(f"[WIDTH DEBUG] cid={cid} kept {len(pruned_segs)} segments after effective-member prune")
+        _vdbg_print(f"[WIDTH DEBUG] cid={cid} kept {len(pruned_segs)} segments after effective-member prune")
 
         # --------------------------------------------
         # Stage 2: optional branch matching (SYMMETRIC)
@@ -7146,7 +7154,7 @@ def compare_widths_for_aligned_cracks(
             gt_missing_atomic_segs = []
             gt_missing_atomic_meta = []
 
-            print(
+            _vdbg_print(
                 f"[STAGE2 DBG] cid={cid} GT segs={len(gt_segs_all)} "
                 f"GT meta={len(gt_meta_all)} effective_members={sorted(effective_members)}"
             )
@@ -7160,18 +7168,18 @@ def compare_widths_for_aligned_cracks(
 
                     # --- scope gate: drop GT segments not in THIS predicted crack ---
                     if aid is not None and str(aid) not in members_iter_ids:
-                        print(f"[STAGE2 DBG] SKIP GT seg#{i} atomic={aid} (out-of-scope)")
+                        _vdbg_print(f"[STAGE2 DBG] SKIP GT seg#{i} atomic={aid} (out-of-scope)")
                         continue
 
                     if aid is None:
                         gt_missing_atomic_segs.append(np.asarray(Sg, float))
                         gt_missing_atomic_meta.append(dict(mg))
-                        print(f"[STAGE2 META DIAG] seg#{i} full meta dict = {mg}")
-                        print(f"[STAGE2 DBG] HOLD GT seg#{i} atomic=None (fallback candidate)")
+                        _vdbg_print(f"[STAGE2 META DIAG] seg#{i} full meta dict = {mg}")
+                        _vdbg_print(f"[STAGE2 DBG] HOLD GT seg#{i} atomic=None (fallback candidate)")
                         continue
 
                     if str(aid) not in effective_members:
-                        print(f"[STAGE2 DBG] DROP GT seg#{i} atomic={aid} (not in effective set)")
+                        _vdbg_print(f"[STAGE2 DBG] DROP GT seg#{i} atomic={aid} (not in effective set)")
                         continue
 
                     gt_pruned_segs.append(np.asarray(Sg, float))
@@ -7179,7 +7187,7 @@ def compare_widths_for_aligned_cracks(
             else:
                 # For partial overlap we cannot trust GT meta-less segments to be in shared support.
                 if abs(float(overlap) - 1.0) >= 1e-9:
-                    print(
+                    _vdbg_print(
                         f"[STAGE2 DBG] cid={cid} partial-overlap with GT meta mismatch; "
                         f"dropping GT segments to avoid non-shared evaluation"
                     )
@@ -7193,7 +7201,7 @@ def compare_widths_for_aligned_cracks(
             if (not gt_pruned_segs) and gt_missing_atomic_segs:
                 gt_pruned_segs.extend(gt_missing_atomic_segs)
                 gt_pruned_meta.extend(gt_missing_atomic_meta)
-                print(
+                _vdbg_print(
                     f"[STAGE2 DBG] cid={cid} GT fallback -> kept {len(gt_missing_atomic_segs)} "
                     f"segments with atomic=None (strict effective-members prune yielded zero)"
                 )
@@ -7211,7 +7219,7 @@ def compare_widths_for_aligned_cracks(
                     branch_id=None,
                 )
 
-            print(f"[STAGE2 DBG] cid={cid} GT kept {len(gt_pruned_segs)} segs after scoped/effective prune")
+            _vdbg_print(f"[STAGE2 DBG] cid={cid} GT kept {len(gt_pruned_segs)} segs after scoped/effective prune")
 
 
         # ============================================================
@@ -7249,21 +7257,21 @@ def compare_widths_for_aligned_cracks(
             matched_pred_branch_ids = {p for (g, p, s) in matches}
 
             for c in branch_diag.get("scored_candidates", []):
-                print(
+                _vdbg_print(
                     f"[STAGE2 SCORE] cid={cid} pred_branch={c['pr_branch_id']} gt_branch={c['gt_branch_id']} "
                     f"score={c['score']:.3f} L_shared={c['L_shared']:.3f} "
                     f"ns={c['ns']} np={c['np']} ng={c['ng']}"
                 )
 
             if matches:
-                print(
+                _vdbg_print(
                     f"[STAGE2 DBG] cid={cid} branch matches (shared-support): "
                     f"GT={sorted(matched_gt_branch_ids)} "
                     f"PRED={sorted(matched_pred_branch_ids)} "
                     f"scores={[round(s,3) for (_, _, s) in matches]}"
                 )
             else:
-                print(f"[STAGE2 DBG] cid={cid} no matched branches under shared-support scoring")
+                _vdbg_print(f"[STAGE2 DBG] cid={cid} no matched branches under shared-support scoring")
 
             best_scored_by_pred = {}
             for c in branch_diag.get("scored_candidates", []):
@@ -7364,7 +7372,7 @@ def compare_widths_for_aligned_cracks(
                     keep_s.append(S)
                     keep_m.append(m)
                 else:
-                    print(f"[STAGE2 DBG] DROP PRED synth_branch={bid} (unmatched)")
+                    _vdbg_print(f"[STAGE2 DBG] DROP PRED synth_branch={bid} (unmatched)")
                     aid = m.get("atomic_id", None) if isinstance(m, dict) else None
                     print(
                         f"[STAGE2 EXCL] cid={cid} level=atomic atomic={aid} "
@@ -7402,17 +7410,17 @@ def compare_widths_for_aligned_cracks(
                     keep_s.append(S)
                     keep_m.append(m)
                 else:
-                    print(f"[STAGE2 DBG] DROP GT synth_branch={bid} (unmatched)")
+                    _vdbg_print(f"[STAGE2 DBG] DROP GT synth_branch={bid} (unmatched)")
 
             gt_pruned_segs, gt_pruned_meta = keep_s, keep_m
 
 
         if not pruned_segs:
-            print(f"[WIDTH DEBUG] cid={cid} -> NO PRED SEGMENTS AFTER BRANCH MATCH")
+            _vdbg_print(f"[WIDTH DEBUG] cid={cid} -> NO PRED SEGMENTS AFTER BRANCH MATCH")
             continue
 
         if not gt_pruned_segs:
-            print(f"[WIDTH DEBUG] cid={cid} -> NO GT SEGMENTS AFTER BRANCH MATCH")
+            _vdbg_print(f"[WIDTH DEBUG] cid={cid} -> NO GT SEGMENTS AFTER BRANCH MATCH")
             # allowed; Stage-4 should just show GT empty
 
         # ------------------------------------------------------------
@@ -7461,18 +7469,18 @@ def compare_widths_for_aligned_cracks(
 
             all_keys = sorted(set(gt_by_key.keys()) | set(pred_by_key.keys()))
             if not all_keys:
-                print(f"[ORIENT ROOT DBG] cid={cid} no strict (branch_id, seg_idx) keys available")
+                _vdbg_print(f"[ORIENT ROOT DBG] cid={cid} no strict (branch_id, seg_idx) keys available")
             for k in all_keys:
                 g_list = gt_by_key.get(k, [])
                 p_list = pred_by_key.get(k, [])
-                print(
+                _vdbg_print(
                     f"[ORIENT ROOT DBG] cid={cid} key={k} "
                     f"pred_count={len(p_list)} gt_count={len(g_list)}"
                 )
                 n = min(len(p_list), len(g_list))
                 for j in range(n):
                     d_fwd, d_rev, flag = _orient_cost(p_list[j], g_list[j])
-                    print(
+                    _vdbg_print(
                         f"[ORIENT ROOT DBG] cid={cid} key={k} pair_idx={j} "
                         f"n_pred={len(p_list[j])} n_gt={len(g_list[j])} "
                         f"d_fwd={d_fwd:.4f} d_rev={d_rev:.4f} flag={flag}"
@@ -7495,9 +7503,9 @@ def compare_widths_for_aligned_cracks(
 
             if x1 > x0 and y1 > y0:
                 gt_bite_bbox_local = [x0, y0, x1 - x0, y1 - y0]
-                print(f"[STAGE2 DBG] cid={cid} GT-local bite bbox={gt_bite_bbox_local}")
+                _vdbg_print(f"[STAGE2 DBG] cid={cid} GT-local bite bbox={gt_bite_bbox_local}")
             else:
-                print(f"[STAGE2 DBG] cid={cid} GT-local bbox collapsed; leaving None")
+                _vdbg_print(f"[STAGE2 DBG] cid={cid} GT-local bbox collapsed; leaving None")
 
         gt_bite_reframe = {
             "bbox": gt_bite_bbox_local,     # xywh in FULL IMAGE coords
@@ -7753,7 +7761,7 @@ def compare_widths_for_aligned_cracks(
             seg_start[i] = off
             off += len(S)
 
-        print(f"[WIDTH DEBUG] cid={cid} widths_geo={len(widths_geo)}")
+        _vdbg_print(f"[WIDTH DEBUG] cid={cid} widths_geo={len(widths_geo)}")
 
         have_valid_seg_idx = any(
             isinstance(m.get("seg_idx"), int) and m["seg_idx"] in seg_start
@@ -7831,7 +7839,7 @@ def compare_widths_for_aligned_cracks(
         if "gt_pruned_segs" in locals() and gt_pruned_segs:
             gt_plot_segs = gt_pruned_segs
             gt_plot_meta = gt_pruned_meta if "gt_pruned_meta" in locals() else [{}] * len(gt_pruned_segs)
-            print(f"[STAGE4] using gt_pruned_segs ({len(gt_plot_segs)}) for GT plot")
+            _vdbg_print(f"[STAGE4] using gt_pruned_segs ({len(gt_plot_segs)}) for GT plot")
 
         # Fallback: raw GT midlines (only if Stage-2 GT missing)
         elif isinstance(gt_entry, dict):
@@ -7904,7 +7912,7 @@ def compare_widths_for_aligned_cracks(
             - clip is applied in LOCAL coords by intersecting with bbox.
             """
             if bbox_xywh is None or union is None or (not np.any(union)):
-                print(f"[STAGE4] {title}: EMPTY (bbox={bbox_xywh})")
+                _vdbg_print(f"[STAGE4] {title}: EMPTY (bbox={bbox_xywh})")
                 return
 
             bx, by, bw, bh = map(int, bbox_xywh)
@@ -7930,7 +7938,7 @@ def compare_widths_for_aligned_cracks(
                     U = U[ly0:ly1, lx0:lx1]
                 else:
                     # no overlap -> treat as empty plot
-                    print(f"[STAGE4] {title}: clip window does not intersect bite bbox -> skip")
+                    _vdbg_print(f"[STAGE4] {title}: clip window does not intersect bite bbox -> skip")
                     return
 
             fig, ax = plt.subplots(figsize=(6, 6), dpi=100)
@@ -7961,7 +7969,7 @@ def compare_widths_for_aligned_cracks(
             )
 
             _async_savefig(fig, out_png, dpi=100)
-            print(f"[STAGE4] wrote {out_png}")
+            _vdbg_print(f"[STAGE4] wrote {out_png}")
 
         def _paste_pred_into_gt_frame(*, gt_bbox, gt_union, pred_bbox, pred_union):
             """
@@ -8008,7 +8016,7 @@ def compare_widths_for_aligned_cracks(
             Overlay GT (red) and Pred (blue) in GT bite-local frame, optionally clipped to a global window.
             """
             if gt_bbox is None or gt_union is None or not np.any(gt_union):
-                print("[STAGE4] overlay: GT union empty -> skip")
+                _vdbg_print("[STAGE4] overlay: GT union empty -> skip")
                 return
 
             gbx, gby, gbw, gbh = map(int, gt_bbox)
@@ -8033,7 +8041,7 @@ def compare_widths_for_aligned_cracks(
                 iy1 = min(gy1, gby + gbh)
 
                 if ix1 <= ix0 or iy1 <= iy0:
-                    print("[STAGE4] overlay: clip does not intersect GT bite bbox -> skip")
+                    _vdbg_print("[STAGE4] overlay: clip does not intersect GT bite bbox -> skip")
                     return
 
                 lx0 = ix0 - gbx
@@ -8065,7 +8073,7 @@ def compare_widths_for_aligned_cracks(
             )
 
             _async_savefig(fig, out_png, dpi=100)
-            print(f"[STAGE4] wrote {out_png}")
+            _vdbg_print(f"[STAGE4] wrote {out_png}")
 
         # ----------------------------
         # Decode unions in bite-local coordinates (Stage0 style)
@@ -8073,8 +8081,8 @@ def compare_widths_for_aligned_cracks(
         gt_bbox, gt_union_local, _ = _get_bite_union_local(dom_gt)
         pr_bbox, pr_union_local, _ = _get_bite_union_local(dom_pred)
 
-        print(f"[STAGE4] cid={cid} GT bite bbox={gt_bbox} union_px={(0 if gt_union_local is None else int(gt_union_local.sum()))}")
-        print(f"[STAGE4] cid={cid} PR bite bbox={pr_bbox} union_px={(0 if pr_union_local is None else int(pr_union_local.sum()))}")
+        _vdbg_print(f"[STAGE4] cid={cid} GT bite bbox={gt_bbox} union_px={(0 if gt_union_local is None else int(gt_union_local.sum()))}")
+        _vdbg_print(f"[STAGE4] cid={cid} PR bite bbox={pr_bbox} union_px={(0 if pr_union_local is None else int(pr_union_local.sum()))}")
 
         # Build seg lists for overlay:
         gt_segs_for_plot, _ = _extract_gt_stream_segments_and_meta(gt_entry, "midline")
@@ -8099,7 +8107,7 @@ def compare_widths_for_aligned_cracks(
 
         clip_xyxy = (x0, y0, x1, y1)
 
-        print(f"[STAGE4 VIEW] cid={cid} view bbox = {(x0, y0, x1, y1)}")
+        _vdbg_print(f"[STAGE4 VIEW] cid={cid} view bbox = {(x0, y0, x1, y1)}")
 
         # ----------------------------
         # PLOT 1: GT bite-local raw (like Stage 0)
@@ -8442,19 +8450,19 @@ def compare_widths_for_aligned_cracks(
         if pred_source_stage45 is None or np.asarray(pred_source_stage45).size < 2:
             pred_source_stage45 = widths_geo
         if pred_source_stage45 is None or np.asarray(pred_source_stage45).size < 2:
-            print(f"[STAGE4.5] cid={cid} no usable predicted width source")
+            _vdbg_print(f"[STAGE4.5] cid={cid} no usable predicted width source")
             continue
         pred_source_stage45 = np.asarray(pred_source_stage45, float).reshape(-1)
 
         gtw_source_stage45 = _get_gt_width_full(crack, gt_entry)
         if gtw_source_stage45 is None or np.asarray(gtw_source_stage45).size < 2:
-            print(f"[STAGE4.5] cid={cid} no usable GT width source in payload/supervision")
+            _vdbg_print(f"[STAGE4.5] cid={cid} no usable GT width source in payload/supervision")
             continue
         gtw_source_stage45 = np.asarray(gtw_source_stage45, float).reshape(-1)
 
-        print(f"[STAGE4.5] using Stage-2 PRED mid segs: {len(pred_mid_stage2_segs)}")
-        print(f"[STAGE4.5] using Stage-2 PRED derived segs: {len(pred_der_stage2_segs)}")
-        print(f"[STAGE4.5] using Stage-2/4 GT segs: {len(gt_stage5_source_segs)}")
+        _vdbg_print(f"[STAGE4.5] using Stage-2 PRED mid segs: {len(pred_mid_stage2_segs)}")
+        _vdbg_print(f"[STAGE4.5] using Stage-2 PRED derived segs: {len(pred_der_stage2_segs)}")
+        _vdbg_print(f"[STAGE4.5] using Stage-2/4 GT segs: {len(gt_stage5_source_segs)}")
 
         # ------------------------------------------------------------
         # Decode dominance loss masks (FULL FRAME)
@@ -8606,19 +8614,19 @@ def compare_widths_for_aligned_cracks(
                 header=["where", "i", "branch_id", "seg_idx", "npts"],
             )
 
-        print(f"[STAGE4.5] PRED MID kept {len(pred_mid_dom_segs)} runs")
-        print(f"[STAGE4.5] PRED DERIVED kept {len(pred_der_dom_segs)} runs")
-        print(f"[STAGE4.5] GT kept {len(gt_stage5_segs)} runs")
-        print("\n====================")
-        print(f"[TOPO TRACE] CID={cid}")
-        print("====================")
-        print(f"[TRACE] Stage2 derived seg count: {len(pred_der_stage2_segs)}")
-        print(f"[TRACE] Stage4.5 derived seg count: {len(pred_der_dom_segs)}")
-        print(f"[TRACE] Bite-pruned seg count: {len(bite_pruned_pred_der) if bite_pruned_pred_der else 0}")
+        _vdbg_print(f"[STAGE4.5] PRED MID kept {len(pred_mid_dom_segs)} runs")
+        _vdbg_print(f"[STAGE4.5] PRED DERIVED kept {len(pred_der_dom_segs)} runs")
+        _vdbg_print(f"[STAGE4.5] GT kept {len(gt_stage5_segs)} runs")
+        _vdbg_print("\n====================")
+        _vdbg_print(f"[TOPO TRACE] CID={cid}")
+        _vdbg_print("====================")
+        _vdbg_print(f"[TRACE] Stage2 derived seg count: {len(pred_der_stage2_segs)}")
+        _vdbg_print(f"[TRACE] Stage4.5 derived seg count: {len(pred_der_dom_segs)}")
+        _vdbg_print(f"[TRACE] Bite-pruned seg count: {len(bite_pruned_pred_der) if bite_pruned_pred_der else 0}")
         for i, (S2, S3) in enumerate(zip(pred_der_stage2_segs, pred_der_dom_segs)):
             n2 = len(S2) if S2 is not None else 0
             n3 = len(S3) if S3 is not None else 0
-            print(f"[TRACE] seg{i} Stage2 pts={n2} -> Stage4.5 pts={n3}  Delta={n2 - n3}")
+            _vdbg_print(f"[TRACE] seg{i} Stage2 pts={n2} -> Stage4.5 pts={n3}  Delta={n2 - n3}")
 
         _log_branch_orientation(pred_der_stage2_segs, pred_der_stage2_meta, tag="stage2_pred_derived", cid_dbg=cid)
         _log_branch_orientation(pred_der_dom_segs, pred_der_dom_meta, tag="stage45_pred_derived", cid_dbg=cid)
@@ -8670,7 +8678,7 @@ def compare_widths_for_aligned_cracks(
                     if isinstance(mmr, dict):
                         mmr["branch_id"] = int(b_new)
 
-                print(
+                _vdbg_print(
                     f"[STAGE4.75] GT->PRED branch remap applied: {gt_to_pred_bid} "
                     f"(meta_updates={n_remap})"
                 )
@@ -8722,13 +8730,13 @@ def compare_widths_for_aligned_cracks(
             np.sum([len(np.asarray(rec.get("pts", []), float)) for rec in _iter_valid_records(gt_dom_records)])
         )
 
-        print(
+        _vdbg_print(
             f"[STAGE5 PRECHECK] cid={cid} "
             f"pred_width_len={pred_total_pts} gt_width_len={gt_total_pts} "
             f"geom_pts_total={int(sum(len(S) for S in (pred_der_dom_segs or []) if S is not None))}"
         )
         if pred_total_pts != gt_total_pts:
-            print(
+            _vdbg_print(
                 f"[STAGE5 WARN] cid={cid} width vector length mismatch "
                 f"(pred={pred_total_pts} gt={gt_total_pts})"
             )
@@ -8740,16 +8748,16 @@ def compare_widths_for_aligned_cracks(
                 continue
             gt_bucket.setdefault(key, []).append(gt_rec)
 
-        print("\n[DEBUG KEY INSPECTION]")
-        print("GT KEYS:")
+        _vdbg_print("\n[DEBUG KEY INSPECTION]")
+        _vdbg_print("GT KEYS:")
         for k in gt_bucket.keys():
-            print("   ", k, type(k[0]), type(k[1]))
-        print("PRED KEYS:")
+            _vdbg_print("   ", k, type(k[0]), type(k[1]))
+        _vdbg_print("PRED KEYS:")
         for pr_rec in _iter_valid_records(pred_der_dom_records):
             kb = pr_rec.get("branch_id")
             ks = pr_rec.get("seg_idx")
-            print("   ", (kb, ks), type(kb), type(ks))
-        print("[END DEBUG]\n")
+            _vdbg_print("   ", (kb, ks), type(kb), type(ks))
+        _vdbg_print("[END DEBUG]\n")
 
         stage5_strict_skip_csv = os.path.join(topo_dbg_dir, "stage5_strict_skips.csv")
         used_gt_ids = set()
@@ -8766,7 +8774,7 @@ def compare_widths_for_aligned_cracks(
             key = _norm_stage5_key_from_record(pred_rec)
             if key is None:
                 stage5_unmatched_skips += 1
-                print(
+                _vdbg_print(
                     f"[STAGE5 STRICT SKIP] cid={cid} branch_id={branch_dbg} seg_idx={seg_idx_dbg} "
                     f"reason=invalid_key_metadata"
                 )
@@ -8815,7 +8823,7 @@ def compare_widths_for_aligned_cracks(
             predw = np.asarray(pred_rec.get("width", np.full((L,), np.nan, float)), float).reshape(-1)
             if predw.size != L:
                 stage5_unmatched_skips += 1
-                print(
+                _vdbg_print(
                     f"[STAGE5 STRICT SKIP] cid={cid} branch_id={branch_dbg} seg_idx={seg_idx_dbg} "
                     f"reason=invalid_width_alignment_pred predw_len={predw.size} geom_len={L}"
                 )
@@ -8872,7 +8880,7 @@ def compare_widths_for_aligned_cracks(
                 if gtw.size != len(gt_match_seg):
                     stage5_unmatched_skips += 1
                     reason = "invalid_width_alignment_gt"
-                    print(
+                    _vdbg_print(
                         f"[STAGE5 STRICT SKIP] cid={cid} branch_id={branch_dbg} seg_idx={seg_idx_dbg} "
                         f"reason={reason} gtw_len={gtw.size} gt_geom_len={len(gt_match_seg)}"
                     )
@@ -8957,7 +8965,7 @@ def compare_widths_for_aligned_cracks(
                     else:
                         reason = "no_gt_match_strict"
 
-                    print(
+                    _vdbg_print(
                         f"[STAGE5 STRICT SKIP] cid={cid} branch_id={branch_dbg} seg_idx={seg_idx_dbg} "
                         f"reason={reason} key={key}"
                     )
@@ -9018,7 +9026,7 @@ def compare_widths_for_aligned_cracks(
             except Exception:
                 orient_flag = "orientation_check_failed"
 
-            print(
+            _vdbg_print(
                 f"[STAGE5 ORIENT] cid={cid} branch_id={branch_dbg} seg_idx={seg_idx_dbg} "
                 f"mode={gt_match_mode} d_forward={d_forward:.4f} d_reverse={d_reverse:.4f} "
                 f"flag={orient_flag}"
@@ -9036,7 +9044,7 @@ def compare_widths_for_aligned_cracks(
             _pred_real_nonfinite = int(np.sum(_pred_nonfinite_mask))
 
             if (_gt_real_nonfinite > 0) or (_pred_real_nonfinite > 0):
-                print(f"[STAGE5 NONFINITE DETAIL] cid={cid} seg_idx={seg_idx_dbg} branch_id={branch_dbg}")
+                _vdbg_print(f"[STAGE5 NONFINITE DETAIL] cid={cid} seg_idx={seg_idx_dbg} branch_id={branch_dbg}")
                 if _gt_real_nonfinite > 0:
                     bad = np.where((~_gt_padded_mask) & _gt_nonfinite_mask)[0][:10]
                     print(f"  GT NONFINITE (NOT padding): count={_gt_real_nonfinite} first_idx={bad.tolist()}")
@@ -9049,12 +9057,12 @@ def compare_widths_for_aligned_cracks(
                     for j in bad:
                         gv = gtw[j] if int(j) < len(gtw) else np.nan
                         padded_flag = bool(_gt_padded_mask[int(j)]) if int(j) < len(_gt_padded_mask) else False
-                        print(
+                        _vdbg_print(
                             f"    j={int(j)} predw={predw[j]} "
                             f"gtw={gv} padded_gt={padded_flag}"
                         )
 
-            print(
+            _vdbg_print(
                 f"[STAGE5 TRACE] cid={cid} branch_id={branch_dbg} seg_idx={seg_idx_dbg} "
                 f"source=record_strict_match L={L} "
                 f"gt_match={gt_match_mode} gt_seg_len={gt_seg_len} "
@@ -9101,7 +9109,7 @@ def compare_widths_for_aligned_cracks(
                 )
 
             if np.sum(np.isfinite(predw)) < 2:
-                print(f"[STAGE5 TRACE] cid={cid} seg_idx={seg_idx_dbg} drop: predw has <2 finite samples")
+                _vdbg_print(f"[STAGE5 TRACE] cid={cid} seg_idx={seg_idx_dbg} drop: predw has <2 finite samples")
                 continue
 
             predw = np.asarray(predw, float)
@@ -9115,7 +9123,7 @@ def compare_widths_for_aligned_cracks(
                 d = predw_eval - gtw_eval
                 stage4_pairs.append((pts_eval, d))
             else:
-                print(
+                _vdbg_print(
                     f"[STAGE5 TRACE] cid={cid} seg_idx={seg_idx_dbg} "
                     f"no overlap for stage4_pairs (n={nd}); keeping strict joined record"
                 )
@@ -9609,11 +9617,11 @@ def compare_widths_for_aligned_cracks(
         ds_target_px = 1.0  # knob later
         per_crack = {}
 
-        print("\n[PART2 DEBUG] ===============================")
-        print("[PART2 DEBUG] ENTER Part 2")
-        print(f"[PART2 DEBUG] width_pairs count = {len(width_pairs or [])}")
-        print(f"[PART2 DEBUG] ds_target_px = {ds_target_px}")
-        print("[PART2 DEBUG] ===============================")
+        _vdbg_print("\n[PART2 DEBUG] ===============================")
+        _vdbg_print("[PART2 DEBUG] ENTER Part 2")
+        _vdbg_print(f"[PART2 DEBUG] width_pairs count = {len(width_pairs or [])}")
+        _vdbg_print(f"[PART2 DEBUG] ds_target_px = {ds_target_px}")
+        _vdbg_print("[PART2 DEBUG] ===============================")
 
         part2_branch_debug = {}
 
@@ -9752,7 +9760,7 @@ def compare_widths_for_aligned_cracks(
             if entity_part2 is None:
                 entity_part2 = cid_s
 
-            print(
+            _vdbg_print(
                 f"[PART2 DEBUG] ▶ wp: "
                 f"cid={wp.get('cid','')}, "
                 f"type={wp.get('crack_type',mode)}, "
@@ -10070,7 +10078,7 @@ def compare_widths_for_aligned_cracks(
                             bd["zoom_bbox"] = [x0, y0, x1 - x0, y1 - y0]
 
                 d_fwd, d_rev, flag = _orient_cost(np.asarray(pts_rs, float), np.asarray(gt_pts_rs, float))
-                print(
+                _vdbg_print(
                     f"[ORIENT DBG] cid={cid_s} tag=part2_resampled branch={wp.get('branch_id', 'NA')} "
                     f"seg_idx={wp.get('seg_idx', 'NA')} n={mrs} "
                     f"d_fwd={d_fwd:.4f} d_rev={d_rev:.4f} flag={flag}"
@@ -10098,7 +10106,7 @@ def compare_widths_for_aligned_cracks(
             gt_stats   = _count_invalid(gtruthw_rs)
             d_stats    = _count_invalid(d_rs)
 
-            print(f"[PART2 VALIDITY] cid={cid_s}")
+            _vdbg_print(f"[PART2 VALIDITY] cid={cid_s}")
             print(f"  predw_rs: {pred_stats}")
             print(f"  gtruthw_rs: {gt_stats}")
             print(f"  d_rs: {d_stats}")
@@ -10114,7 +10122,7 @@ def compare_widths_for_aligned_cracks(
                 )
                 bad_indices = np.where(invalid_mask)[0]
 
-                print(f"[PART2 VALIDITY]   -> invalid sample count = {len(bad_indices)}")
+                _vdbg_print(f"[PART2 VALIDITY]   -> invalid sample count = {len(bad_indices)}")
 
                 for idx in bad_indices[:10]:
                     print(
@@ -10138,13 +10146,13 @@ def compare_widths_for_aligned_cracks(
                 np.isfinite(gtruthw_rs)
             )
             if np.sum(finite_mask) < 2:
-                print(
+                _vdbg_print(
                     f"[PART2 WARN] cid={cid_s} no finite overlap after resample "
                     f"(finite={int(np.sum(finite_mask))}/{len(finite_mask)})"
                 )
             runs = _contiguous_true_runs(finite_mask)
 
-            print(
+            _vdbg_print(
                 f"[PART2 DEBUG]   runs found = {len(runs)} "
                 f"(finite samples = {int(np.sum(finite_mask))})"
             )
@@ -10726,13 +10734,13 @@ def compare_widths_for_aligned_cracks(
             else:
                 df_out = df_new
             df_out.to_csv(out_path, index=False)
-            print(f"[WIDTH DEBUG] saved invalid/exclusion rows → {out_path}")
+            _vdbg_print(f"[WIDTH DEBUG] saved invalid/exclusion rows → {out_path}")
         except Exception as e:
-            print(f"[WIDTH DEBUG] failed to save invalid/exclusion rows: {e}")
+            _vdbg_print(f"[WIDTH DEBUG] failed to save invalid/exclusion rows: {e}")
 
     # ---------------- plotting ----------------
     if not coords:
-        print("[WIDTH DEBUG] nothing to plot")
+        _vdbg_print("[WIDTH DEBUG] nothing to plot")
         _drain_async_savefigs()
         return [], []
 
@@ -10774,7 +10782,7 @@ def compare_widths_for_aligned_cracks(
     all_d = np.concatenate([d for d in diffs if d is not None and len(d) > 0])
     all_d = all_d[np.isfinite(all_d)]
     if all_d.size == 0:
-        print("[WIDTH DEBUG] no finite diffs")
+        _vdbg_print("[WIDTH DEBUG] no finite diffs")
         _drain_async_savefigs()
         return rows, midline_metric_rows
 
@@ -11634,11 +11642,11 @@ def merged_metric_atomic(authoring_atomic: dict, save_folder: str, image_base: s
             mc = (cr_obj or {}).get("mask_crop", None)
             shp = None if mc is None else tuple(np.asarray(mc).shape)
             src = (cr_obj or {}).get("source", None)
-            print(f"[SNAPSHOT LOAD DEBUG] {tag} cid={cid} source={src}")
-            print(f"  bbox: {bb}")
-            print(f"  crop shape: {shp}")
+            _vdbg_print(f"[SNAPSHOT LOAD DEBUG] {tag} cid={cid} source={src}")
+            _vdbg_print(f"  bbox: {bb}")
+            _vdbg_print(f"  crop shape: {shp}")
         except Exception as e:
-            print(f"[SNAPSHOT LOAD DEBUG] {tag} cid={cid} debug failed: {e}")
+            _vdbg_print(f"[SNAPSHOT LOAD DEBUG] {tag} cid={cid} debug failed: {e}")
 
     for cid, cr in (authoring_atomic or {}).items():
         merged[cid] = dict(cr)

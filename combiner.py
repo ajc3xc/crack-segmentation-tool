@@ -29,11 +29,14 @@ from shapely.geometry import LineString, MultiLineString
 from shapely.ops import unary_union
 from helpers.plot_metrics import *
 
+# Set to False to suppress verbose per-image debug prints during batch runs
+_VERBOSE_DEBUG = True
+
 COMBINER_DEBUG_LEVEL = 1
 
 
 def _c_log(level, msg):
-    if COMBINER_DEBUG_LEVEL >= int(level):
+    if _VERBOSE_DEBUG and COMBINER_DEBUG_LEVEL >= int(level):
         print(msg)
 
 
@@ -851,9 +854,6 @@ def dominant_segments_from_group(
         S0 = atomics[start_idx]["poly"]
         b_start, b_end = _endpoints(S0)
 
-        # track every endpoint already used in the branch
-        branch_endpoints = [b_start.copy(), b_end.copy()]
-
         grew = True
         while grew:
             grew = False
@@ -866,14 +866,17 @@ def dominant_segments_from_group(
 
                 # ------------------------------------------------
                 # LOOP PREVENTION:
-                # candidate must introduce exactly one new endpoint
-                # ------------------------------------------------
-                start_in = any(_pts_close(j_start, ep) for ep in branch_endpoints)
-                end_in   = any(_pts_close(j_end,   ep) for ep in branch_endpoints)
-
-                if start_in and end_in:
-                    # both endpoints already appear somewhere in branch
-                    # -> would close a cycle
+                # only reject when candidate closes current terminal ends
+                # (do not treat interior junctions as branch endpoints).
+                start_near_start = _pts_close(j_start, b_start)
+                start_near_end = _pts_close(j_start, b_end)
+                end_near_start = _pts_close(j_end, b_start)
+                end_near_end = _pts_close(j_end, b_end)
+                would_close_cycle = (
+                    (start_near_start or start_near_end)
+                    and (end_near_start or end_near_end)
+                )
+                if would_close_cycle:
                     continue
 
                 # try attach to branch end
@@ -912,10 +915,8 @@ def dominant_segments_from_group(
                 # update branch endpoints
                 if side == "end":
                     b_end = j_end
-                    branch_endpoints.append(j_end.copy())
                 else:
                     b_start = j_start
-                    branch_endpoints.append(j_start.copy())
 
                 grew = True
 
@@ -1226,9 +1227,126 @@ def dominant_segments_from_group(
             }
         )
 
-    canonical_kept = []
+    def _proximity_subgroups(items, max_jump=10.0):
+        """Split branch items into connected components by endpoint proximity."""
+        segs = [np.asarray((it or {}).get("seg", []), float) for it in (items or [])]
+        n = len(segs)
+        if n <= 1:
+            return [list(items or [])]
+        adj = {i: set() for i in range(n)}
+        for i in range(n):
+            si = segs[i]
+            if si.ndim != 2 or si.shape[1] != 2 or len(si) < 2:
+                continue
+            for j in range(i + 1, n):
+                sj = segs[j]
+                if sj.ndim != 2 or sj.shape[1] != 2 or len(sj) < 2:
+                    continue
+                dmin = min(
+                    float(np.linalg.norm(si[0] - sj[0])),
+                    float(np.linalg.norm(si[0] - sj[-1])),
+                    float(np.linalg.norm(si[-1] - sj[0])),
+                    float(np.linalg.norm(si[-1] - sj[-1])),
+                )
+                if dmin <= float(max_jump):
+                    adj[i].add(j)
+                    adj[j].add(i)
+        visited = set()
+        groups = []
+        for i in range(n):
+            if i in visited:
+                continue
+            comp = []
+            stack = [i]
+            while stack:
+                u = stack.pop()
+                if u in visited:
+                    continue
+                visited.add(u)
+                comp.append(u)
+                stack.extend(list(adj[u] - visited))
+            groups.append([items[k] for k in comp])
+        return groups
+
+    # Validate post-clip stitchability per branch and split disconnected pieces.
     ordered_branch_ids = [int(b) for b in order]
     ordered_branch_ids += [b for b in sorted(branch_to_items.keys()) if b not in ordered_branch_ids]
+    next_synth_bid = (max(ordered_branch_ids) + 1) if ordered_branch_ids else 100
+    expanded_branch_to_items = {}
+    expanded_order = []
+    branch_stats_map = {
+        int((r or {}).get("branch_id", -1)): (r if isinstance(r, dict) else {})
+        for r in (branch_stats or [])
+        if int((r or {}).get("branch_id", -1)) >= 0
+    }
+    for bi in ordered_branch_ids:
+        items = branch_to_items.get(int(bi), [])
+        if not items:
+            continue
+        segs_b = [np.asarray((it or {}).get("seg", []), float) for it in items]
+        _, ok_chain, _reason_chain = shared_stitch_branch_segments(
+            segs_b,
+            max_jump=10.0,
+            allow_teleport=False,
+        )
+        if ok_chain or len(items) <= 1:
+            expanded_branch_to_items[int(bi)] = items
+            expanded_order.append(int(bi))
+            continue
+
+        subgroups = _proximity_subgroups(items, max_jump=10.0)
+        print(
+            f"[DOM_SPLIT] branch={int(bi)} post-clip stitch failed "
+            f"(reason={_reason_chain}) - splitting into {len(subgroups)} sub-branches"
+        )
+        first_used_parent = False
+        parent_stat = branch_stats_map.get(int(bi), {})
+        for sg in subgroups:
+            if not sg:
+                continue
+            if not first_used_parent:
+                out_bid = int(bi)
+                first_used_parent = True
+            else:
+                out_bid = int(next_synth_bid)
+                next_synth_bid += 1
+                if int(bi) in bite_by_losing_branch:
+                    bsrc = bite_by_losing_branch[int(bi)]
+                    bite_by_losing_branch[out_bid] = {
+                        "mask": np.asarray(bsrc.get("mask", 0), np.uint8).copy(),
+                        "territory": np.asarray(bsrc.get("territory", 0), np.uint8).copy(),
+                        "both": np.asarray(bsrc.get("both", 0), np.uint8).copy(),
+                    }
+            expanded_branch_to_items[out_bid] = sg
+            expanded_order.append(int(out_bid))
+            if out_bid != int(bi):
+                aids = []
+                seen_a = set()
+                kept_len = 0.0
+                for it in sg:
+                    a = str((it or {}).get("atomic_id", ""))
+                    if a and a not in seen_a:
+                        aids.append(a)
+                        seen_a.add(a)
+                    seg = np.asarray((it or {}).get("seg", []), float)
+                    if seg.ndim == 2 and seg.shape[1] == 2 and len(seg) >= 2:
+                        kept_len += float(_linestring_length(seg))
+                branch_stats.append(
+                    {
+                        "branch_id": int(out_bid),
+                        "rank": int(parent_stat.get("rank", -1)),
+                        "atomic_ids": aids,
+                        "user_len": float(parent_stat.get("user_len", kept_len)),
+                        "kept_len": float(kept_len),
+                        "suppressed": False,
+                    }
+                )
+    branch_to_items = expanded_branch_to_items
+
+    canonical_kept = []
+    ordered_branch_ids = [int(b) for b in expanded_order]
+    ordered_branch_ids += [b for b in sorted(branch_to_items.keys()) if b not in ordered_branch_ids]
+    order = [int(b) for b in ordered_branch_ids]
 
     for bi in ordered_branch_ids:
         items = branch_to_items.get(int(bi), [])
@@ -1241,13 +1359,15 @@ def dominant_segments_from_group(
         segs_b, assoc_b = enforce_branch_continuity(segs_b, associated_data=assoc_b)
         segs_b, assoc_b, flipped_branch = canonicalize_branch_direction(segs_b, associated_data=assoc_b)
         if flipped_branch:
-            print(f"[CANON] dominant_segments branch={bi} flipped whole branch orientation")
+            if _VERBOSE_DEBUG:
+                print(f"[CANON] dominant_segments branch={bi} flipped whole branch orientation")
         try:
             assert_direction_consistency(segs_b)
         except AssertionError as e:
             # Defensive repair: some branches still arrive with a locally reversed segment.
             # Flip only the offending segment(s) based on endpoint continuity, then re-check.
-            print(f"[CANON] dominant_segments branch={bi} repairing direction inconsistency: {e}")
+            if _VERBOSE_DEBUG:
+                print(f"[CANON] dominant_segments branch={bi} repairing direction inconsistency: {e}")
             segs_b, assoc_b = enforce_branch_continuity(segs_b, associated_data=assoc_b)
             try:
                 assert_direction_consistency(segs_b)
@@ -2874,10 +2994,11 @@ def build_combined_crack_stateless(
                 f"odd={odd} max_deg={max_deg} chain_like={chain_like}",
             )
             if not chain_like:
-                print(
-                    f"[TOPO DEGREE WARN] branch={branch_id} appears non-chain; "
-                    f"stitch may require teleport or fail in manual mode."
-                )
+                if _VERBOSE_DEBUG:
+                    print(
+                        f"[TOPO DEGREE WARN] branch={branch_id} appears non-chain; "
+                        f"stitch may require teleport or fail in manual mode."
+                    )
 
         # Debug endpoint drift vs declared user topology before stitching.
         if len(seg_list) >= 2:
@@ -3223,7 +3344,8 @@ def build_combined_crack_stateless(
                 level=1,
             )
             if np.any(midline_xy_crop_dbg < -5) or np.any(midline_xy_crop_dbg[:, 0] > (bw + 5)) or np.any(midline_xy_crop_dbg[:, 1] > (bh + 5)):
-                print("[DBG_BBOX][WARN] OUT OF BOUNDS AFTER CROP", flush=True)
+                if _VERBOSE_DEBUG:
+                    print("[DBG_BBOX][WARN] OUT OF BOUNDS AFTER CROP", flush=True)
 
             # seeds/tips for THIS run (branch)
             pts_crop = [
@@ -3369,21 +3491,24 @@ def build_combined_crack_stateless(
                 normals_are_vectors=False,
             )
             try:
-                print("\n[DBG_CANON_INPUT]", flush=True)
-                print(f"segA_end: {np.asarray(S_run[-1], float).tolist()}", flush=True)
-                print(f"segB_start: {np.asarray(derived_mid_full[0], float).tolist()}", flush=True)
-                print(f"segB_end: {np.asarray(derived_mid_full[-1], float).tolist()}", flush=True)
-                print(f"segA_bbox: ({int(x0)},{int(y0)},{int(x1 - x0)},{int(y1 - y0)})", flush=True)
-                print(f"segB_bbox: ({int(x0)},{int(y0)},{int(x1 - x0)},{int(y1 - y0)})", flush=True)
+                if _VERBOSE_DEBUG:
+                    print("\n[DBG_CANON_INPUT]", flush=True)
+                    print(f"segA_end: {np.asarray(S_run[-1], float).tolist()}", flush=True)
+                    print(f"segB_start: {np.asarray(derived_mid_full[0], float).tolist()}", flush=True)
+                    print(f"segB_end: {np.asarray(derived_mid_full[-1], float).tolist()}", flush=True)
+                    print(f"segA_bbox: ({int(x0)},{int(y0)},{int(x1 - x0)},{int(y1 - y0)})", flush=True)
+                    print(f"segB_bbox: ({int(x0)},{int(y0)},{int(x1 - x0)},{int(y1 - y0)})", flush=True)
             except Exception as _e:
-                print(f"[DBG_CANON_INPUT] failed: {_e}", flush=True)
+                if _VERBOSE_DEBUG:
+                    print(f"[DBG_CANON_INPUT] failed: {_e}", flush=True)
             if orient_info.get("flipped", False):
                 n1_full = _finite_xy(np.asarray(n1_full, float)[::-1].copy())
                 n2_full = _finite_xy(np.asarray(n2_full, float)[::-1].copy())
-                print(
-                    f"[CANON] combine branch={branch_id} run={run_id} "
-                    f"flipped derived run (d_fwd={orient_info['d_forward']:.4f}, d_rev={orient_info['d_reverse']:.4f})"
-                )
+                if _VERBOSE_DEBUG:
+                    print(
+                        f"[CANON] combine branch={branch_id} run={run_id} "
+                        f"flipped derived run (d_fwd={orient_info['d_forward']:.4f}, d_rev={orient_info['d_reverse']:.4f})"
+                    )
 
             # ---- normals validity + fallback ----
             from cracktools.segmentation import generate_mask_from_edges
@@ -3560,7 +3685,8 @@ def build_combined_crack_stateless(
             d_segs, d_assoc = enforce_branch_continuity(d_segs, associated_data=d_assoc)
             d_segs, d_assoc, flipped_branch = canonicalize_branch_direction(d_segs, associated_data=d_assoc)
             if flipped_branch:
-                print(f"[CANON] combine branch={bi} flipped split-derived branch orientation")
+                if _VERBOSE_DEBUG:
+                    print(f"[CANON] combine branch={bi} flipped split-derived branch orientation")
             assert_direction_consistency(d_segs)
             for j in range(len(d_assoc)):
                 d_assoc[j]["branch_id"] = int(bi)
@@ -3611,7 +3737,8 @@ def build_combined_crack_stateless(
                 mask_bbox=[int(x), int(y), int(w), int(h)]
             )
         except Exception as e:
-            print(f"[COMBINE_DBG] debug_callback failed: {e}")
+            if _VERBOSE_DEBUG:
+                print(f"[COMBINE_DBG] debug_callback failed: {e}")
 
     elapsed = float(time.perf_counter() - t0)
     
