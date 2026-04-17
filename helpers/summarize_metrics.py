@@ -1553,7 +1553,10 @@ def _aggregate_midline_metrics(
     # Fallback safety net: ensure score_mid exists and is finite enough for ranking.
     if ("score_mid" not in all_df.columns) or all_df["score_mid"].isna().any():
         nn = pd.to_numeric(all_df.get("nn_mean_bidirectional"), errors="coerce")
-        hd = pd.to_numeric(all_df.get("hausdorff_max"), errors="coerce")
+        hd = pd.to_numeric(
+            all_df.get("hausdorff_p95", all_df.get("hausdorff_max")),
+            errors="coerce"
+        )
         cov = pd.to_numeric(all_df.get("coverage_min"), errors="coerce")
         nn = nn.fillna(0.0)
         hd = hd.fillna(0.0)
@@ -1590,13 +1593,15 @@ def _aggregate_midline_metrics(
     metric_candidates = [
         "score_mid",
         "nn_mean_bidirectional",
+        "hausdorff_p95",
         "hausdorff_max",
         "coverage_min",
+        "frechet_discrete_ds",
         "mean_tan_angle_error_deg",
         "relative_length_error",
         "orth_mean",
         "orth_std",
-        "frechet_discrete_ds",
+        "curvature_rms_ratio",
     ]
     metric_cols = [c for c in metric_candidates if c in all_df.columns]
     grouped = _aggregate_numeric(all_df, group_cols=group_cols, numeric_cols=metric_cols)
@@ -2874,11 +2879,14 @@ def _aggregate_gt_centering_weighted_summaries(
     metric_order = [
         "lwmean_score_mid",
         "lwmean_nn_mean_bidirectional",
-        "lwmean_hausdorff_max",
-        "lwmean_coverage_min",
         "lwmean_hausdorff_p95",
+        "lwmean_coverage_min",
         "lwmean_frechet_discrete_ds",
         "lwmean_mean_tan_angle_error_deg",
+        "lwmean_relative_length_error",
+        "lwmean_orth_mean",
+        "lwmean_orth_std",
+        "lwmean_curvature_rms_ratio",
     ]
     metric_order = [m for m in metric_order if m in metric_cols]
     if not metric_order:
@@ -2887,7 +2895,7 @@ def _aggregate_gt_centering_weighted_summaries(
     critical_metrics = {
         "lwmean_score_mid",
         "lwmean_nn_mean_bidirectional",
-        "lwmean_hausdorff_max",
+        "lwmean_hausdorff_p95",
         "lwmean_coverage_min",
     }
 
@@ -4059,10 +4067,10 @@ def _plot_multicue_ablation(
     ax0.grid(axis="y", alpha=0.2)
 
     metric_sources = []
-    for mcol in ("nn_mean_bidirectional", "hausdorff_max", "coverage_min", "precision_tau", "recall_tau", "f1_tau", "mean_tan_angle_error_deg"):
+    for mcol in ("nn_mean_bidirectional", "hausdorff_p95", "coverage_min", "frechet_discrete_ds", "mean_tan_angle_error_deg", "relative_length_error", "orth_mean", "orth_std", "curvature_rms_ratio"):
         if isinstance(mm, pd.DataFrame) and not mm.empty and mcol in mm.columns:
             metric_sources.append((mcol, mm, mcol))
-    metric_sources = metric_sources[:8]
+    metric_sources = metric_sources[:9]
 
     if metric_sources:
         x = np.arange(len(metric_sources), dtype=float)
@@ -4306,7 +4314,7 @@ def _aggregate_calibration_ablation(
     )
     score_terms = [
         ("comp_nn_wmean", "#e15759", "nn_mean"),
-        ("comp_hausdorff_wmean", "#b07aa1", "hausdorff_max"),
+        ("comp_hausdorff_wmean", "#b07aa1", "hausdorff_p95"),
         ("comp_coverage_wmean", "#f28e2b", "coverage_min"),
     ]
     has_decomp = all(col in abl_df.columns for col, _, _ in score_terms)
@@ -4632,12 +4640,15 @@ def summarize_dataset_metrics(
                 "variant_id": "midline_type",
                 "lwmean_score_mid": "score_mid",
                 "lwmean_nn_mean_bidirectional": "nn_mean_bidirectional",
+                "lwmean_hausdorff_p95": "hausdorff_p95",
                 "lwmean_hausdorff_max": "hausdorff_max",
                 "lwmean_coverage_min": "coverage_min",
+                "lwmean_frechet_discrete_ds": "frechet_discrete_ds",
                 "lwmean_mean_tan_angle_error_deg": "mean_tan_angle_error_deg",
-                "lwmean_precision_tau": "precision_tau",
-                "lwmean_recall_tau": "recall_tau",
-                "lwmean_f1_tau": "f1_tau",
+                "lwmean_relative_length_error": "relative_length_error",
+                "lwmean_orth_mean": "orth_mean",
+                "lwmean_orth_std": "orth_std",
+                "lwmean_curvature_rms_ratio": "curvature_rms_ratio",
             }
         )
         _abl_mid["crack_type"] = "combined_plus_noncombined_atomic"

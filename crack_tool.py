@@ -1354,92 +1354,8 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             print(f"[GT_SUP] no annotation JSON for {base_name}")
             return
 
-        def _bbox_snapshot_from_atomic(atomic_map):
-            out = {}
-            for _cid, _cr in (atomic_map or {}).items():
-                if not isinstance(_cr, dict):
-                    continue
-                bb = _cr.get("mask_bbox", [])
-                if isinstance(bb, (list, tuple)):
-                    out[str(_cid)] = tuple(bb)
-                else:
-                    out[str(_cid)] = tuple()
-            return out
-
-        def _check_bbox_mutation(stage_name, atomic_map, ref_snapshot):
-            mutated = []
-            for _cid, _cr in (atomic_map or {}).items():
-                if not isinstance(_cr, dict):
-                    continue
-                curr = tuple((_cr.get("mask_bbox", []) or []))
-                prev = tuple(ref_snapshot.get(str(_cid), tuple()))
-                if curr != prev:
-                    mutated.append((str(_cid), prev, curr))
-            if mutated:
-                print(f"\n[ERROR] BBOX MUTATION DETECTED @ {stage_name}")
-                for _cid, _prev, _curr in mutated:
-                    print(f"  atomic {_cid}: {_prev} -> {_curr}")
-            else:
-                print(f"[CHECK] No bbox mutation @ {stage_name}")
-
-        # Optional one-shot bbox repair called from GT supervision export.
-        DEBUG_CALL_BBOX_REPAIR_IN_GT_SUP = True
-        repaired_ann_json = None
-        if DEBUG_CALL_BBOX_REPAIR_IN_GT_SUP:
-            try:
-                from pathlib import Path
-                from tools.repair_atomic_bboxes import repair_bboxes as _repair_atomic_bboxes
-
-                gt_sup_root = os.path.join(self.save_folder, "supervision", base_name)
-                gt_sup_analysis = os.path.join(gt_sup_root, "analysis")
-                os.makedirs(gt_sup_analysis, exist_ok=True)
-
-                image_path = None
-                try:
-                    if hasattr(self, "image_names") and isinstance(getattr(self, "image_names", None), list):
-                        image_path = self.image_names[self.n]
-                except Exception:
-                    image_path = None
-
-                before_png = os.path.join(gt_sup_analysis, "bbox_repair_before.png")
-                after_png = os.path.join(gt_sup_analysis, "bbox_repair_after.png")
-
-                repaired_count, repaired_data = _repair_atomic_bboxes(
-                    json_path=Path(ann_path),
-                    contain_thresh=0.8,
-                    weak_thresh=0.3,
-                    image_path=(Path(image_path) if image_path else None),
-                    before_png=Path(before_png),
-                    after_png=Path(after_png),
-                    return_data=True,
-                )
-                print(
-                    f"[GT_SUP] bbox repair executed from export_gt_supervision_for_current_image "
-                    f"(changed={int(repaired_count)})"
-                )
-
-                # Commit repaired state into live in-memory annotation (no heavy change_image()).
-                if isinstance(repaired_data, dict):
-                    repaired_ann_json = repaired_data
-                    self.annotation = repaired_data
-                    ann_root_live = self.annotation.setdefault("annotations", {})
-                    self.combined_cracks = ann_root_live.get("combined_cracks", {}) or {}
-                    try:
-                        # Refresh light-weight snapshot structures from repaired authoring state.
-                        self._sync_metrics_snapshot_from_authoring(
-                            refresh_combine=False,
-                            persist=False,
-                        )
-                    except Exception as _se:
-                        print(f"[GT_SUP] snapshot refresh after bbox repair skipped: {_se}")
-            except Exception as _e:
-                print(f"[GT_SUP] bbox repair skipped/fail: {_e}")
-
-        if isinstance(repaired_ann_json, dict):
-            ann_json = repaired_ann_json
-        else:
-            with open(ann_path, "r", encoding="utf-8") as f:
-                ann_json = json.load(f)
+        with open(ann_path, "r", encoding="utf-8") as f:
+            ann_json = json.load(f)
 
         authoring_atomic = (
             ann_json.get("annotations", {}) or {}
@@ -1458,35 +1374,11 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             if _is_manual(cr)
         }
 
-        try:
-            atomic_debug_list = []
-            for _cid, _cr in atomic.items():
-                if not isinstance(_cr, dict):
-                    continue
-                atomic_debug_list.append({
-                    "id": str(_cid),
-                    "mask_bbox": _cr.get("mask_bbox"),
-                    "midline": _cr.get("midline", []),
-                })
-            raw_dbg_png = os.path.join(self.save_folder, f"{base_name}_raw_json_atomics_debug.png")
-            debug_plot_all_atomics(
-                self.original_image,
-                atomic_debug_list,
-                title=f"RAW JSON DEBUG - {base_name}",
-                out_png=raw_dbg_png,
-                show=False,
-            )
-        except Exception as _e:
-            print(f"[DEBUG ATOMICS] failed to render raw json view: {_e}")
-
         print(f"[GT_SUP] using {len(atomic)} manual atomics for {base_name}")
 
         if not atomic:
             print("[GT_SUP] no manual atomics, aborting.")
             return
-
-        bbox_snapshot = _bbox_snapshot_from_atomic(atomic)
-        _check_bbox_mutation("post-repair", atomic, bbox_snapshot)
 
         # -----------------------------------------
         # GT grouping (midlines + GT mask + endpoints)
@@ -1497,14 +1389,12 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             H=H,
             W=W,
         )
-        _check_bbox_mutation("after-midline", atomic, bbox_snapshot)
 
         print(f"[GT_SUP] GT grouping produced {len(combined_groups)} combined groups.")
 
         # -----------------------------------------
         # Export manual GT supervision (atomic+combined)
         # -----------------------------------------
-        _check_bbox_mutation("before-export", atomic, bbox_snapshot)
         # Temporarily set supervision debug target to current image.
         try:
             import helpers.supervision as _sup_mod
@@ -1520,6 +1410,7 @@ class CrackToolsApplication(MetricsEngine, ManualDrawing, TrackSegmentPipeline, 
             atomic=atomic,
             combined_groups=combined_groups,
             gt_mask=gt_mask,
+            ann_path=ann_path,
             depth_full=getattr(self, "current_depth", None),
         )
 

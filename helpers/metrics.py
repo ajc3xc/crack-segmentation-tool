@@ -9437,7 +9437,7 @@ def compare_widths_for_aligned_cracks(
                     if len(pred_mid) >= 2 and len(gt_mid) >= 2:
                         mm = compute_midline_metrics(pred_mid, gt_mid)
                         ch  = float(mm.get("nn_mean_bidirectional", np.inf))
-                        hd  = float(mm.get("hausdorff_max", np.inf))
+                        hd  = float(mm.get("hausdorff_p95", np.nan))
                         cov = float(mm.get("coverage_min", 0.0))
                         score_mid = (math.log1p(max(ch, 0.0)) + 0.5 * math.log1p(max(hd, 0.0)) + (1.0 - float(np.clip(cov, 0.0, 1.0))))
 
@@ -9455,7 +9455,8 @@ def compare_widths_for_aligned_cracks(
                             "length_px": _linestring_length(gt_mid),
                             "bbox_area": float(bbox0[2] * bbox0[3]) if bbox0 else np.nan,
                             "nn_mean_bidirectional": ch,
-                            "hausdorff_max": hd,
+                            "hausdorff_p95": hd,
+                            "hausdorff_max": float(mm.get("hausdorff_max", np.nan)),
                             "coverage_min": cov,
                             "score_mid": score_mid,
                             "frechet_discrete_ds": mm.get("frechet_discrete_ds"),
@@ -9484,7 +9485,7 @@ def compare_widths_for_aligned_cracks(
                     if len(pred_der) >= 2 and len(gt_mid) >= 2:
                         mm = compute_midline_metrics(pred_der, gt_mid)
                         ch  = float(mm.get("nn_mean_bidirectional", np.inf))
-                        hd  = float(mm.get("hausdorff_max", np.inf))
+                        hd  = float(mm.get("hausdorff_p95", np.nan))
                         cov = float(mm.get("coverage_min", 0.0))
                         score_mid = (math.log1p(max(ch, 0.0)) + 0.5 * math.log1p(max(hd, 0.0)) + (1.0 - float(np.clip(cov, 0.0, 1.0))))
 
@@ -9502,7 +9503,8 @@ def compare_widths_for_aligned_cracks(
                             "length_px": _linestring_length(gt_mid),
                             "bbox_area": float(bbox0[2] * bbox0[3]) if bbox0 else np.nan,
                             "nn_mean_bidirectional": ch,
-                            "hausdorff_max": hd,
+                            "hausdorff_p95": hd,
+                            "hausdorff_max": float(mm.get("hausdorff_max", np.nan)),
                             "coverage_min": cov,
                             "score_mid": score_mid,
                             "frechet_discrete_ds": mm.get("frechet_discrete_ds"),
@@ -11353,6 +11355,7 @@ def compute_midline_metrics_baseline(pred_xy, gt_xy, tau=3.0):
 
         return {
             "nn_mean_bidirectional": np.nan,
+            "hausdorff_p95": np.nan,
             "hausdorff_max": np.nan,
             "coverage_min": np.nan,
             "precision_tau": np.nan,
@@ -11438,7 +11441,7 @@ def compute_midline_metrics(auto_xy, man_xy, tau=3.0):
     B = _finite_xy(auto_xy)
     if len(A) < 2 or len(B) < 2:
         return {k: np.nan for k in
-                ("nn_mean_bidirectional","hausdorff_max","frechet_discrete_ds",
+                ("nn_mean_bidirectional","hausdorff_p95","hausdorff_max","frechet_discrete_ds",
                 "mean_tan_angle_error_deg","relative_length_error","coverage_min",
                 "orth_mean","orth_std","signed_bias_z",
                 "curvature_rms_auto","curvature_rms_manual","curvature_rms_ratio")}

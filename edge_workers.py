@@ -564,6 +564,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     original_image = payload.get("original_image", None)
 
     calib_only = bool(payload.get("calibration_only", False))
+    batch_plots_only = bool(payload.get("batch_plots_only", False))
 
     seg_mode = str(P.get("seg_mode", "new")).lower()
     if seg_mode not in ("old", "new"):
@@ -796,7 +797,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         # =======================================================
         # 1) Pretty edges + normals (crop-level)
         # =======================================================
-        if not calib_only:
+        if not batch_plots_only and not calib_only:
             pretty_path = os.path.join(dbg_dir, "edges_midlines_normals_pretty.png")
             try:
                 print(f"[EDGE_STALL_DBG] cid={cid} stage=plot_pretty:start", flush=True)
@@ -831,7 +832,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             metrics_all = {**base, **bnd, **surf}
 
             # IoU-style overlay (crop-level, 3x upscaled)
-            if not calib_only:
+            if not batch_plots_only and not calib_only:
                 try:
                     vis_gray = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR).astype(np.float32) / 255.0
                     dark_base = np.clip(vis_gray * 0.35, 0.0, 1.0)
@@ -862,7 +863,7 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         # =======================================================
         # 3) Widths colormap (crop-level)
         # =======================================================
-        if not calib_only:
+        if not batch_plots_only and not calib_only:
             widths_path = os.path.join(dbg_dir, "widths_colormap_on_crop.png")
             try:
                 print(f"[EDGE_STALL_DBG] cid={cid} stage=widths_plot:start", flush=True)

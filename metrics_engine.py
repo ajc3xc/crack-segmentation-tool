@@ -276,12 +276,15 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 "lwmean_score_term_hd",
                 "lwmean_score_term_cov",
                 "lwmean_nn_mean_bidirectional",
+                "lwmean_hausdorff_p95",
                 "lwmean_hausdorff_max",
                 "lwmean_coverage_min",
+                "lwmean_frechet_discrete_ds",
                 "lwmean_mean_tan_angle_error_deg",
-                "lwmean_precision_tau",
-                "lwmean_recall_tau",
-                "lwmean_f1_tau",
+                "lwmean_relative_length_error",
+                "lwmean_orth_mean",
+                "lwmean_orth_std",
+                "lwmean_curvature_rms_ratio",
             ):
                 if cc in d.columns and cc not in keep_cols:
                     keep_cols.append(cc)
@@ -333,7 +336,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             comp_wmeans = {}
             comp_cols_map = [
                 ("comp_nn_wmean", ["lwmean_score_term_nn", "lwmean_nn_mean_bidirectional"]),
-                ("comp_hausdorff_wmean", ["lwmean_score_term_hd", "lwmean_hausdorff_max"]),
+                ("comp_hausdorff_wmean", ["lwmean_score_term_hd", "lwmean_hausdorff_p95", "lwmean_hausdorff_max"]),
                 ("comp_coverage_wmean", ["lwmean_score_term_cov", "lwmean_coverage_min"]),
             ]
             for out_col, candidates in comp_cols_map:
@@ -355,7 +358,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 vals = xc[okc]
                 if picked == "lwmean_nn_mean_bidirectional":
                     vals = np.log1p(np.maximum(vals, 0.0))
-                elif picked == "lwmean_hausdorff_max":
+                elif picked in ("lwmean_hausdorff_p95", "lwmean_hausdorff_max"):
                     vals = 0.5 * np.log1p(np.maximum(vals, 0.0))
                 elif picked == "lwmean_coverage_min":
                     vals = 1.0 - np.clip(vals, 0.0, 1.0)
@@ -827,6 +830,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     crack_ids=manual_ids,
                     cpu_max_workers=edge_parallel_workers,
                     edge_params_fixed=(edge_params or {"window_half_size": 45, "mu": 0.0, "l": 5, "p": 14, "seg_mode": "new"}),
+                    batch_plots_only=True,
                 )
                 timing_breakdown["edge_tracking_s"] = float(time.perf_counter() - t_edge0)
             elif not manual_ids:
@@ -960,9 +964,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         # -- Hardcoded toggles for fast iteration --
         #resolved_indices = [0,101,97,108,113,129]
         #resolved_indices = [5,7,9,11,13,16,18,20,101,107,110,116]
-        resolved_indices = [5,16, 116]
-        #resolved_indices= None
-        base_names = ["6","17", "117"]
+        #resolved_indices = [9]
+        resolved_indices= None
+        #base_names = ["10"]
         SKIP_ALREADY_PROCESSED = False
         SKIP_PASS1 = False   # skip GT supervision export (pass1) - use when supervision already exists
         FAST_RUN_EDGE_SWEEP = False
@@ -1249,56 +1253,61 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         section_wall_s["pass2a_edge_sweep_and_selection"] = float(time.perf_counter() - _t_sec)
 
         _t_sec = time.perf_counter()
-        print(f"[batch dt_best_et] pass2b edge tracking on {len(idxs)} image(s)")
-        orig_n = int(getattr(self, "n", 0))
-        try:
-            for n, idx in enumerate(idxs, 1):
-                base = _base(idx)
-                print(f"\n[batch dt_best_et] -- pass2b {n}/{len(idxs)}: {base} (edge tracking)")
-                _cur_base = os.path.splitext(os.path.basename(str(getattr(self, "name", ""))))[0]
-                if str(_cur_base) != str(base):
-                    self.n = int(idx)
-                    self.change_image()
-                t_edge0 = time.perf_counter()
-                # Ensure metric snapshots are loaded for this image.
-                try:
-                    self._sync_metrics_snapshot_from_authoring(refresh_combine=False, persist=False)
-                except Exception as _e_sync:
-                    print(f"  -> [{base}] snapshot sync failed: {_e_sync}")
-                manual_ids = _manual_ids_for_current_image()
-                if manual_ids:
-                    print(f"  -> [{base}] edge tracking ({len(manual_ids)} crack(s))...")
-                    self.run_edge_tracking_parallel(
-                        crack_ids=manual_ids,
-                        cpu_max_workers=edge_parallel_workers,
-                        edge_params_fixed=best_edge_params,
-                    )
-                else:
-                    print(f"  -> [{base}] no manual cracks for edge tracking")
-                row = {
-                    "ok": True,
-                    "image": base,
-                    "idx": int(idx),
-                    "cracks": int(len(manual_ids)),
-                    "elapsed_s": float(time.perf_counter() - t_edge0),
-                }
-                pass2b_rows.append(row)
-                _record_image_timing(
-                    base,
-                    {
-                        "stage": "pass2b",
-                        "image": base,
-                        "elapsed_s": float(row.get("elapsed_s", np.nan)),
-                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    },
-                )
-        finally:
+        _pass1_ran_et = not SKIP_PASS1
+        if _pass1_ran_et and best_edge_params == DEFAULT_EDGE:
+            print("[batch dt_best_et] pass2b SKIPPED — best_edge_params == DEFAULT_EDGE, pass1 already ran ET")
+            section_wall_s["pass2b_edge_tracking"] = 0.0
+        else:
+            print(f"[batch dt_best_et] pass2b edge tracking on {len(idxs)} image(s)")
+            orig_n = int(getattr(self, "n", 0))
             try:
-                self.n = orig_n
-                self.change_image()
-            except Exception:
-                pass
-        section_wall_s["pass2b_edge_tracking"] = float(time.perf_counter() - _t_sec)
+                for n, idx in enumerate(idxs, 1):
+                    base = _base(idx)
+                    print(f"\n[batch dt_best_et] -- pass2b {n}/{len(idxs)}: {base} (edge tracking)")
+                    _cur_base = os.path.splitext(os.path.basename(str(getattr(self, "name", ""))))[0]
+                    if str(_cur_base) != str(base):
+                        self.n = int(idx)
+                        self.change_image()
+                    t_edge0 = time.perf_counter()
+                    # Ensure metric snapshots are loaded for this image.
+                    try:
+                        self._sync_metrics_snapshot_from_authoring(refresh_combine=False, persist=False)
+                    except Exception as _e_sync:
+                        print(f"  -> [{base}] snapshot sync failed: {_e_sync}")
+                    manual_ids = _manual_ids_for_current_image()
+                    if manual_ids:
+                        print(f"  -> [{base}] edge tracking ({len(manual_ids)} crack(s))...")
+                        self.run_edge_tracking_parallel(
+                            crack_ids=manual_ids,
+                            cpu_max_workers=edge_parallel_workers,
+                            edge_params_fixed=best_edge_params,
+                        )
+                    else:
+                        print(f"  -> [{base}] no manual cracks for edge tracking")
+                    row = {
+                        "ok": True,
+                        "image": base,
+                        "idx": int(idx),
+                        "cracks": int(len(manual_ids)),
+                        "elapsed_s": float(time.perf_counter() - t_edge0),
+                    }
+                    pass2b_rows.append(row)
+                    _record_image_timing(
+                        base,
+                        {
+                            "stage": "pass2b",
+                            "image": base,
+                            "elapsed_s": float(row.get("elapsed_s", np.nan)),
+                            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        },
+                    )
+            finally:
+                try:
+                    self.n = orig_n
+                    self.change_image()
+                except Exception:
+                    pass
+            section_wall_s["pass2b_edge_tracking"] = float(time.perf_counter() - _t_sec)
 
         _t_sec = time.perf_counter()
         print(f"[batch dt_best_et] pass2c width metrics on {len(idxs)} image(s)")
@@ -2164,6 +2173,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     atomic=atomic,
                     combined_groups=gt_combined,
                     gt_mask=gt_full,
+                    ann_path=ann_path,
                     depth_full=getattr(self, "current_depth", None),
                 )
 
@@ -3503,7 +3513,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
                             mm = compute_midline_metrics_baseline(pred_xy, gt_xy)
                             nn = float(mm.get("nn_mean_bidirectional", np.nan))
-                            hd = float(mm.get("hausdorff_max", np.nan))
+                            hd = float(mm.get("hausdorff_p95", mm.get("hausdorff_max", np.nan)))
                             cov = float(mm.get("coverage_min", np.nan))
 
                             def _safe(x):
@@ -3532,6 +3542,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                                 "score_mid": score_mid,
                                 "nn_mean_bidirectional": mm.get("nn_mean_bidirectional"),
                                 "hausdorff_max": mm.get("hausdorff_max"),
+                                "hausdorff_p95": mm.get("hausdorff_p95"),
                                 "coverage_min": mm.get("coverage_min"),
                                 "precision_tau": mm.get("precision_tau"),
                                 "recall_tau": mm.get("recall_tau"),
@@ -3631,7 +3642,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                                         return float("nan")
 
                                 _nn = _sf("nn_mean_bidirectional")
-                                _hd = _sf("hausdorff_max")
+                                _hd = _sf("hausdorff_p95") if np.isfinite(_sf("hausdorff_p95")) else _sf("hausdorff_max")
                                 _cov = _sf("coverage_min")
                                 if all(np.isfinite(v) for v in [_nn, _hd, _cov]):
                                     _score = float(
@@ -3652,7 +3663,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                                     "length_px": float(_sf("length_px")) if "length_px" in _r.index else 0.0,
                                     "score_mid": _score,
                                     "nn_mean_bidirectional": _nn,
-                                    "hausdorff_max": _hd,
+                                    "hausdorff_p95": _hd,
+                                    "hausdorff_max": _sf("hausdorff_max"),
                                     "coverage_min": _cov,
                                 }]
                                 _vdbg_print(f"[MIDLINE ABL] pulled score from ablation CSV for {variant_id}: score={_score:.4f}")
@@ -4556,6 +4568,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         prefer_auto_best=False,
         plot_only=False,
         per_crack_geom=None,
+        batch_plots_only=False,
     ):
         """
         Parallelize edge-mask + edge-tracking and save results into per-crack files.
@@ -4648,6 +4661,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
             p = dict(payload)
             p["params"] = dict(edge_params_fixed)
+            p["batch_plots_only"] = bool(batch_plots_only)
             tasks.append((cid, p))
 
         if not tasks:
@@ -5070,7 +5084,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
                 # --- selection metrics (AUTHORITATIVE) ---
                 ch  = float(m.get("nn_mean_bidirectional", np.inf))
-                hd  = float(m.get("hausdorff_max", np.inf))
+                hd  = float(m.get("hausdorff_p95", m.get("hausdorff_max", np.inf)))
                 cov = float(m.get("coverage_min", 0.0))
 
                 score_mid = (
@@ -5098,7 +5112,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
                     # --- selection metrics ---
                     "nn_mean_bidirectional": ch,
-                    "hausdorff_max": hd,
+                    "hausdorff_max": m.get("hausdorff_max"),
+                    "hausdorff_p95": hd,
                     "coverage_min": cov,
                     "score_mid": score_mid,
 
