@@ -1178,6 +1178,7 @@ def plot_costmap_debug(
     pred_segs,
     costmap=None,
     normals=None,
+    normals_offset_xy=None,
     title="",
     pred_color="magenta",
 ):
@@ -1186,33 +1187,43 @@ def plot_costmap_debug(
 
     M = (np.asarray(crack_mask_u8) > 0).astype(np.uint8)
     H, W = M.shape[:2]
+    ys, xs = np.where(M > 0)
+    if xs.size > 0 and ys.size > 0:
+        pad = 25
+        x0 = max(0, int(xs.min()) - pad)
+        y0 = max(0, int(ys.min()) - pad)
+        x1 = min(W, int(xs.max()) + 1 + pad)
+        y1 = min(H, int(ys.max()) + 1 + pad)
+    else:
+        x0, y0, x1, y1 = 0, 0, W, H
+
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     axL, axR = axes
 
-    axL.imshow(M, cmap="gray")
+    axL.imshow(M[y0:y1, x0:x1], cmap="gray")
     axL.axis("off")
     axL.set_title("Geometry", fontsize=10)
     for S in (manual_segs or []):
         S = np.asarray(S, float)
         if S.ndim == 2 and S.shape[1] == 2 and len(S) >= 2:
-            axL.plot(S[:, 0], S[:, 1], "--", color="orange", linewidth=2.0)
+            axL.plot(S[:, 0] - x0, S[:, 1] - y0, "--", color="orange", linewidth=2.0)
     for S in (pred_segs or []):
         S = np.asarray(S, float)
         if S.ndim == 2 and S.shape[1] == 2 and len(S) >= 2:
-            axL.plot(S[:, 0], S[:, 1], "-", color=pred_color, linewidth=2.0)
+            axL.plot(S[:, 0] - x0, S[:, 1] - y0, "-", color=pred_color, linewidth=2.0)
 
     if costmap is not None:
         C = np.asarray(costmap, np.float32)
         if C.ndim >= 2:
-            axR.imshow(C, cmap="inferno")
+            axR.imshow(C[y0:y1, x0:x1], cmap="inferno")
         else:
-            axR.imshow(np.zeros((H, W), np.float32), cmap="inferno")
+            axR.imshow(np.zeros((max(1, y1 - y0), max(1, x1 - x0)), np.float32), cmap="inferno")
     else:
-        axR.imshow(np.zeros((H, W), np.float32), cmap="inferno")
+        axR.imshow(np.zeros((max(1, y1 - y0), max(1, x1 - x0)), np.float32), cmap="inferno")
     for S in (pred_segs or []):
         S = np.asarray(S, float)
         if S.ndim == 2 and S.shape[1] == 2 and len(S) >= 2:
-            axR.plot(S[:, 0], S[:, 1], "-", color="cyan", linewidth=2.0)
+            axR.plot(S[:, 0] - x0, S[:, 1] - y0, "-", color="cyan", linewidth=2.0)
     axR.axis("off")
     axR.set_title("Costmap", fontsize=10)
 
@@ -1221,6 +1232,10 @@ def plot_costmap_debug(
         normals_iter = [normals]
     elif isinstance(normals, (list, tuple)):
         normals_iter = [n for n in normals if isinstance(n, dict)]
+    if normals_offset_xy is not None and len(normals_offset_xy) == 2:
+        nox, noy = float(normals_offset_xy[0]), float(normals_offset_xy[1])
+    else:
+        nox, noy = 0.0, 0.0
     for nrm in normals_iter:
         e1 = _split_xy_none_seps(nrm.get("edge1_x", []), nrm.get("edge1_y", []))
         e2 = _split_xy_none_seps(nrm.get("edge2_x", []), nrm.get("edge2_y", []))
@@ -1234,7 +1249,13 @@ def plot_costmap_debug(
             for i in range(0, n, step):
                 p1 = aa[i]
                 p2 = bb[i]
-                axL.plot([p1[0], p2[0]], [p1[1], p2[1]], color="blue", lw=0.9, alpha=0.7)
+                axL.plot(
+                    [p1[0] - nox - x0, p2[0] - nox - x0],
+                    [p1[1] - noy - y0, p2[1] - noy - y0],
+                    color="blue",
+                    lw=0.9,
+                    alpha=0.7,
+                )
 
     handles = [
         Line2D([], [], color="yellow", lw=2.0, linestyle="--", label="Manual"),
@@ -1243,6 +1264,58 @@ def plot_costmap_debug(
     ]
     fig.legend(handles=handles, loc="lower center", ncol=3, framealpha=0.9, fontsize=9)
     fig.suptitle(str(title), fontsize=11)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_gt_normals_debug_global(
+    *,
+    out_path,
+    crack_mask_u8,
+    gt_midline_segs,
+    gt_normals,
+    title="GT normals debug",
+):
+    import matplotlib.pyplot as plt
+
+    M = (np.asarray(crack_mask_u8) > 0).astype(np.uint8)
+    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+    ax.imshow(M, cmap="gray", vmin=0, vmax=1, interpolation="nearest")
+
+    for S in (gt_midline_segs or []):
+        S = np.asarray(S, float)
+        if S.ndim == 2 and S.shape[1] == 2 and len(S) >= 2:
+            ax.plot(S[:, 0], S[:, 1], color="cyan", lw=1.8, alpha=0.95)
+
+    normals_iter = []
+    if isinstance(gt_normals, dict):
+        normals_iter = [gt_normals]
+    elif isinstance(gt_normals, (list, tuple)):
+        normals_iter = [n for n in gt_normals if isinstance(n, dict)]
+
+    for nrm in normals_iter:
+        e1 = _split_xy_none_seps(nrm.get("edge1_x", []), nrm.get("edge1_y", []))
+        e2 = _split_xy_none_seps(nrm.get("edge2_x", []), nrm.get("edge2_y", []))
+        for a, b in zip(e1, e2):
+            aa = np.asarray(a, float)
+            bb = np.asarray(b, float)
+            n = min(len(aa), len(bb))
+            if n <= 0:
+                continue
+            _step = max(1, n // 40)
+            for i in range(0, n, _step):
+                p1 = aa[i]
+                p2 = bb[i]
+                if (
+                    not np.isfinite(p1[0]) or not np.isfinite(p1[1]) or
+                    not np.isfinite(p2[0]) or not np.isfinite(p2[1])
+                ):
+                    continue
+                ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color="red", lw=1.0, alpha=0.7)
+
+    ax.set_title(str(title), fontsize=10)
+    ax.axis("off")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
@@ -4666,13 +4739,34 @@ def export_gt_supervision_for_image(
         def _combined_seg_worker(si, S):
             seg_diag = {}
             bi = int(seg_meta[si].get("branch_id", -1)) if si < len(seg_meta) else -1
-            mask_use = branch_allowed_masks.get(
-                bi,
-                (crack_mask_clipped > 0).astype(np.uint8),
-            )
+            # For width/normal measurement use full crack mask, not territory-restricted allowed mask.
+            # Territory restriction is only for the midline solver, not for measuring crack width.
+            mask_use = (crack_mask_clipped > 0).astype(np.uint8)
+            S_arr = np.asarray(S, float)
+            S_local = S_arr.copy()
+            # Combined branch masks are in crack_mask_clipped-local coords (origin ux,uy).
+            # Convert segment to local for normal solving, then convert solved edges back.
+            if S_local.ndim == 2 and S_local.shape[1] == 2 and len(S_local) >= 1:
+                S_local[:, 0] -= float(ux)
+                S_local[:, 1] -= float(uy)
+            # CC-filter: keep only crack components touched by this branch's midline.
+            # This preserves full local crack width while removing distant disconnected blobs.
+            try:
+                num_labels, labels = cv2.connectedComponents(mask_use.astype(np.uint8), 8)
+            except Exception:
+                num_labels, labels = 0, None
+            if int(num_labels) > 2 and labels is not None and S_local.ndim == 2 and len(S_local) >= 1:
+                _xi = np.clip(np.round(S_local[:, 0]).astype(int), 0, int(mask_use.shape[1]) - 1)
+                _yi = np.clip(np.round(S_local[:, 1]).astype(int), 0, int(mask_use.shape[0]) - 1)
+                _touched = {int(labels[y, x]) for x, y in zip(_xi, _yi) if int(labels[y, x]) > 0}
+                if _touched:
+                    _keep = np.zeros_like(mask_use, dtype=np.uint8)
+                    for _lbl in _touched:
+                        _keep[labels == int(_lbl)] = 1
+                    mask_use = _keep
             t_rs0 = time.perf_counter()
             (e1x, e1y, e2x, e2y, widths), _ = normals_from_mask_for_midline(
-                S,
+                S_local,
                 mask_use > 0,
                 max_radius=50,
                 diagnostics=seg_diag,
@@ -4680,6 +4774,13 @@ def export_gt_supervision_for_image(
                 endpoint_mode="combined",
             )
             accP["rs"] += float(time.perf_counter() - t_rs0)
+            try:
+                e1x = np.asarray(e1x, float) + float(ux)
+                e1y = np.asarray(e1y, float) + float(uy)
+                e2x = np.asarray(e2x, float) + float(ux)
+                e2y = np.asarray(e2y, float) + float(uy)
+            except Exception:
+                pass
             sdiag_brief = _normals_diag_summary(seg_diag)
             return si, e1x, e1y, e2x, e2y, widths, seg_diag, sdiag_brief
 
@@ -4853,7 +4954,30 @@ def export_gt_supervision_for_image(
                 segs_branch = [np.asarray(segs[i], float) for i in idxs]
                 if not segs_branch:
                     continue
-                bb_local = _bbox_from_segments(segs_branch, pad=5, Hh=H, Ww=W)
+                # Build branch bbox from territory-mask support (local crack_mask_clipped frame),
+                # then convert to global image coordinates.
+                terr_full = np.asarray(
+                    branch_terr_masks.get(int(bi), np.zeros((Hm, Wm), np.uint8)),
+                    np.uint8,
+                )
+                _ty, _tx = np.where(terr_full > 0)
+                bb_local = None
+                if _tx.size > 0 and _ty.size > 0:
+                    _pad = 20
+                    _lx0 = max(0, int(_tx.min()) - _pad)
+                    _ly0 = max(0, int(_ty.min()) - _pad)
+                    _lx1 = min(int(Wm), int(_tx.max()) + 1 + _pad)
+                    _ly1 = min(int(Hm), int(_ty.max()) + 1 + _pad)
+                    if _lx1 > _lx0 and _ly1 > _ly0:
+                        bb_local = (
+                            int(ux + _lx0),
+                            int(uy + _ly0),
+                            int(_lx1 - _lx0),
+                            int(_ly1 - _ly0),
+                        )
+                if bb_local is None:
+                    # Fallback for malformed/missing territory blobs.
+                    bb_local = _bbox_from_segments(segs_branch, pad=5, Hh=H, Ww=W)
                 if bb_local is None:
                     if _VERBOSE_DEBUG:
                         print(f"[CACHE SKIP] branch={int(bi)} reason=bb_local_none n_segs={len(segs_branch)}")
@@ -4881,29 +5005,37 @@ def export_gt_supervision_for_image(
                             f"size={mask_local.size} any={bool(np.any(mask_local))}"
                         )
                     continue
-                # Territory-aware island removal for branch-local optimization masks:
-                # keep only connected components that overlap this branch territory.
-                terr_branch_full = branch_terr_masks.get(int(bi), None)
-                if terr_branch_full is not None:
-                    territory_local = (
-                        np.asarray(
-                            terr_branch_full[by_in_mask:by_in_mask + bh, bx_in_mask:bx_in_mask + bw],
-                            np.uint8,
-                        ) > 0
-                    )
-                    if territory_local.size == mask_local.size and np.any(territory_local):
-                        try:
-                            num_labels, labels = cv2.connectedComponents((mask_local > 0).astype(np.uint8), 8)
-                            if int(num_labels) > 2:
-                                keep = np.zeros_like(mask_local, np.uint8)
-                                for lab in range(1, int(num_labels)):
-                                    comp = (labels == lab)
-                                    if np.any(comp & territory_local):
-                                        keep[comp] = 1
-                                if np.any(keep):
-                                    mask_local = keep
-                        except Exception:
-                            pass
+                # From cache-build onward, branch_allowed_masks should represent the
+                # per-branch bbox crop used by branch-local centering.
+                branch_allowed_masks[int(bi)] = np.asarray(mask_local, np.uint8)
+                print(
+                    f"[MASK_SHAPE_DBG] branch={int(bi)} "
+                    f"allowed_mask.shape={np.asarray(branch_allowed_masks[int(bi)]).shape} "
+                    f"bbox=(bx={int(bx)},by={int(by)},bw={int(bw)},bh={int(bh)}) "
+                    f"expected=({int(bh)},{int(bw)})"
+                )
+                # Keep only connected components that this branch's midline samples touch.
+                # This avoids discarding valid crack width just because territory is narrow.
+                try:
+                    num_labels, labels = cv2.connectedComponents((mask_local > 0).astype(np.uint8), 8)
+                    if int(num_labels) > 2:
+                        _mid_mask = np.zeros_like(mask_local, np.uint8)
+                        for _si in idxs:
+                            _Sm = np.asarray(segs[_si], float)
+                            if _Sm.ndim != 2 or _Sm.shape[1] != 2 or len(_Sm) < 1:
+                                continue
+                            _xi = np.clip(np.round(_Sm[:, 0]).astype(int) - int(bx), 0, int(bw) - 1)
+                            _yi = np.clip(np.round(_Sm[:, 1]).astype(int) - int(by), 0, int(bh) - 1)
+                            _mid_mask[_yi, _xi] = 1
+                        keep = np.zeros_like(mask_local, np.uint8)
+                        for lab in range(1, int(num_labels)):
+                            comp = (labels == lab)
+                            if np.any(comp & (_mid_mask > 0)):
+                                keep[comp] = 1
+                        if np.any(keep):
+                            mask_local = keep
+                except Exception:
+                    pass
                 if auto_centering_outputs:
                     _mask_dbg_dir = os.path.join(auto_center_root, "branch_masks")
                     os.makedirs(_mask_dbg_dir, exist_ok=True)
@@ -4917,7 +5049,7 @@ def export_gt_supervision_for_image(
                     print(
                         f"[CACHE BUILD] branch={int(bi)} bbox=({bx},{by},{bw},{bh}) "
                         f"mask_nnz={int(np.count_nonzero(mask_local))} "
-                        f"terr_available={terr_branch_full is not None}"
+                        f"terr_available={branch_terr_masks.get(int(bi)) is not None}"
                     )
 
                 gx0 = int(bx)
@@ -5319,6 +5451,8 @@ def export_gt_supervision_for_image(
                                     "manual_local": manual_local,
                                     "pred_local": pred_local,
                                     "normals": mnorm if isinstance(mnorm, dict) else None,
+                                    "bx": int(bx),
+                                    "by": int(by),
                                 }
                     if bool(emit_cost_debug) and isinstance(mdebug, dict):
                         cm = mdebug.get("costmap", None)
@@ -5653,6 +5787,80 @@ def export_gt_supervision_for_image(
                     if isinstance(m, dict)
                 })
                 _dlog(1, f"[FINAL] combined branches present: {_branch_ids_present}")
+
+            try:
+                _gt_normals_plot = combined_entry.get("gt_normals", {})
+                if isinstance(_gt_normals_plot, dict):
+                    _e1x_raw = _gt_normals_plot.get("edge1_x", [])
+                    _e1y_raw = _gt_normals_plot.get("edge1_y", [])
+                    _e2x_raw = _gt_normals_plot.get("edge2_x", [])
+                    _e2y_raw = _gt_normals_plot.get("edge2_y", [])
+                    _vals_x = []
+                    _vals_y = []
+                    for _v in (_e1x_raw or []):
+                        if _v is not None:
+                            try:
+                                _vals_x.append(float(_v))
+                            except Exception:
+                                pass
+                    for _v in (_e2x_raw or []):
+                        if _v is not None:
+                            try:
+                                _vals_x.append(float(_v))
+                            except Exception:
+                                pass
+                    for _v in (_e1y_raw or []):
+                        if _v is not None:
+                            try:
+                                _vals_y.append(float(_v))
+                            except Exception:
+                                pass
+                    for _v in (_e2y_raw or []):
+                        if _v is not None:
+                            try:
+                                _vals_y.append(float(_v))
+                            except Exception:
+                                pass
+
+                    _likely_local_normals = False
+                    if _vals_x and _vals_y:
+                        _xmin, _xmax = float(np.nanmin(_vals_x)), float(np.nanmax(_vals_x))
+                        _ymin, _ymax = float(np.nanmin(_vals_y)), float(np.nanmax(_vals_y))
+                        _likely_local_normals = (
+                            (_xmin >= -2.0) and (_ymin >= -2.0) and
+                            (_xmax <= float(uw) + 2.0) and (_ymax <= float(uh) + 2.0)
+                        )
+
+                    if _likely_local_normals and (int(ux) != 0 or int(uy) != 0):
+                        def _shift_packed(vals, d):
+                            out = []
+                            for vv in (vals or []):
+                                if vv is None:
+                                    out.append(None)
+                                else:
+                                    try:
+                                        out.append(float(vv) + float(d))
+                                    except Exception:
+                                        out.append(vv)
+                            return out
+                        _gt_normals_plot = dict(_gt_normals_plot)
+                        _gt_normals_plot["edge1_x"] = _shift_packed(_e1x_raw, ux)
+                        _gt_normals_plot["edge2_x"] = _shift_packed(_e2x_raw, ux)
+                        _gt_normals_plot["edge1_y"] = _shift_packed(_e1y_raw, uy)
+                        _gt_normals_plot["edge2_y"] = _shift_packed(_e2y_raw, uy)
+
+                gt_normals_dir = os.path.join(sup_root, "analysis", "combined_gt_normals_debug", f"ccid_{tag_name}")
+                gt_normals_png = os.path.join(gt_normals_dir, "gt_normals_debug.png")
+                _run_timed_plot(
+                    plot_gt_normals_debug_global,
+                    out_path=gt_normals_png,
+                    crack_mask_u8=np.asarray(crack_mask, np.uint8),
+                    gt_midline_segs=[np.asarray(S, float) for S in (segs or []) if S is not None and len(np.asarray(S, float)) >= 2],
+                    gt_normals=_gt_normals_plot,
+                    title=f"{tag_name} GT midline + normals (global)",
+                )
+            except Exception as _e_gt_norm_dbg:
+                _dlog(2, f"[GT NORMALS DEBUG] failed: {_e_gt_norm_dbg}")
 
             if auto_centering_outputs:
                 combined_dbg_dir = os.path.join(auto_center_root, "combined", f"ccid_{tag_name}")
@@ -6100,6 +6308,7 @@ def export_gt_supervision_for_image(
                             pred_segs=[np.asarray(pdbg.get("pred_local"), float)] if pdbg.get("pred_local") is not None else [],
                             costmap=np.asarray(pdbg.get("costmap"), np.float32) if pdbg.get("costmap") is not None else None,
                             normals=pdbg.get("normals"),
+                            normals_offset_xy=(pdbg.get("bx", 0), pdbg.get("by", 0)),
                             title=f"{tag_name} - {style.get('label', mk)}",
                             pred_color="magenta",
                         )
