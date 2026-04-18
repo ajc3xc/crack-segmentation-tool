@@ -842,7 +842,20 @@ def dominant_segments_from_group(
     branches = []  # list[list[atomic indices]]
     attach_orders = {}  # atomic_idx -> order within branch (1-based)
 
+    # Pre-compute endpoint degree across all atomics in this group.
+    # Endpoints touched by 3+ segments are junction/loop nodes.
+    ep_degree = {}
+    for i, a in enumerate(atomics):
+        s, e = _endpoints(a["poly"])
+        for pt in (s, e):
+            key = (round(float(pt[0]), 1), round(float(pt[1]), 1))
+            ep_degree[key] = ep_degree.get(key, 0) + 1
+    junction_pts = {k for k, v in ep_degree.items() if v >= 3}
+    if junction_pts:
+        print(f"[LOOP_DETECT] found {len(junction_pts)} junction/loop nodes: {junction_pts}", flush=True)
+
     while unused:
+        loop_rejected = set()  # reset per branch
         # start new branch with longest remaining segment
         start_idx = max(unused, key=lambda i: atomics[i]["length"])
         unused.remove(start_idx)
@@ -854,71 +867,129 @@ def dominant_segments_from_group(
         S0 = atomics[start_idx]["poly"]
         b_start, b_end = _endpoints(S0)
 
-        grew = True
-        while grew:
-            grew = False
-            best_j = None
-            best_len = -1.0
-            best_attach_mode = None  # ("start"/"end", flip_bool)
-            for j in list(unused):
-                Sj = atomics[j]["poly"]
-                j_start, j_end = _endpoints(Sj)
+        restarted = True
+        while restarted:
+            restarted = False
 
-                # ------------------------------------------------
-                # LOOP PREVENTION:
-                # only reject when candidate closes current terminal ends
-                # (do not treat interior junctions as branch endpoints).
-                start_near_start = _pts_close(j_start, b_start)
-                start_near_end = _pts_close(j_start, b_end)
-                end_near_start = _pts_close(j_end, b_start)
-                end_near_end = _pts_close(j_end, b_end)
-                would_close_cycle = (
-                    (start_near_start or start_near_end)
-                    and (end_near_start or end_near_end)
-                )
-                if would_close_cycle:
-                    continue
+            grew = True
+            while grew:
+                grew = False
+                best_j = None
+                best_len = -1.0
+                best_attach_mode = None  # ("start"/"end", flip_bool)
+                for j in list(unused):
+                    if j in loop_rejected:
+                        print(
+                            f"[GREEDY_DBG] branch_so_far={[atomics[i]['atomic_id'] for i in branch]} "
+                            f"candidate={atomics[j]['atomic_id']} skipped=loop_rejected",
+                            flush=True
+                        )
+                        continue
+                    Sj = atomics[j]["poly"]
+                    j_start, j_end = _endpoints(Sj)
 
-                # try attach to branch end
-                if _pts_close(b_end, j_start):
-                    mode = ("end", False)
-                elif _pts_close(b_end, j_end):
-                    mode = ("end", True)
+                    # try attach to branch end
+                    if _pts_close(b_end, j_start):
+                        mode = ("end", False)
+                    elif _pts_close(b_end, j_end):
+                        mode = ("end", True)
 
-                # try attach to branch start
-                elif _pts_close(b_start, j_end):
-                    mode = ("start", False)
-                elif _pts_close(b_start, j_start):
-                    mode = ("start", True)
-                else:
-                    continue
+                    # try attach to branch start
+                    elif _pts_close(b_start, j_end):
+                        mode = ("start", False)
+                    elif _pts_close(b_start, j_start):
+                        mode = ("start", True)
+                    else:
+                        print(
+                            f"[GREEDY_DBG] branch_so_far={[atomics[i]['atomic_id'] for i in branch]} "
+                            f"candidate={atomics[j]['atomic_id']} "
+                            f"b_start={b_start.tolist()} b_end={b_end.tolist()} "
+                            f"j_start={j_start.tolist()} j_end={j_end.tolist()} "
+                            f"attach_pt=None in_junction=False skipped=no_endpoint_match",
+                            flush=True
+                        )
+                        continue
 
-                if atomics[j]["length"] > best_len:
-                    best_len = atomics[j]["length"]
-                    best_j = j
-                    best_attach_mode = mode
+                    attach_pt = b_end if mode[0] == "end" else b_start
+                    apt_key = (round(float(attach_pt[0]), 1), round(float(attach_pt[1]), 1))
+                    print(
+                        f"[GREEDY_DBG] branch_so_far={[atomics[i]['atomic_id'] for i in branch]} "
+                        f"candidate={atomics[j]['atomic_id']} "
+                        f"b_start={b_start.tolist()} b_end={b_end.tolist()} "
+                        f"j_start={j_start.tolist()} j_end={j_end.tolist()} "
+                        f"attach_pt={attach_pt.tolist() if attach_pt is not None else None} "
+                        f"in_junction={attach_pt is not None and apt_key in junction_pts}",
+                        flush=True
+                    )
 
-            if best_j is not None:
-                side, flip = best_attach_mode
-                unused.remove(best_j)
-                branch.append(best_j)
+                    if atomics[j]["length"] > best_len:
+                        best_len = atomics[j]["length"]
+                        best_j = j
+                        best_attach_mode = mode
 
-                order_in_branch += 1
-                attach_orders[int(best_j)] = int(order_in_branch)
+                if best_j is not None:
+                    side, flip = best_attach_mode
 
-                Sj = atomics[best_j]["poly"]
-                if flip:
-                    Sj = Sj[::-1].copy()
+                    unused.remove(best_j)
+                    branch.append(best_j)
 
-                j_start, j_end = _endpoints(Sj)
+                    order_in_branch += 1
+                    attach_orders[int(best_j)] = int(order_in_branch)
 
-                # update branch endpoints
-                if side == "end":
-                    b_end = j_end
-                else:
-                    b_start = j_start
+                    Sj = atomics[best_j]["poly"]
+                    if flip:
+                        Sj = Sj[::-1].copy()
 
-                grew = True
+                    j_start, j_end = _endpoints(Sj)
+
+                    # update branch endpoints
+                    if side == "end":
+                        b_end = j_end
+                    else:
+                        b_start = j_start
+
+                    grew = True
+
+            # AFTER while grew exits: check if terminal landed on a junction
+            for side_check, terminal in [("end", b_end), ("start", b_start)]:
+                tk = (round(float(terminal[0]), 1), round(float(terminal[1]), 1))
+                if tk in junction_pts and len(branch) >= 1:
+                    popped = branch.pop()
+                    attach_orders.pop(int(popped), None)
+                    if len(branch) >= 1:
+                        if side_check == "end":
+                            b_end = _endpoints(atomics[branch[-1]]["poly"])[1]
+                        else:
+                            b_start = _endpoints(atomics[branch[-1]]["poly"])[0]
+                    if len(branch) >= 1:
+                        pop_s, pop_e = _endpoints(atomics[popped]["poly"])
+                        pop_other = pop_e if _pts_close(pop_s, terminal) else pop_s
+                        last_s, last_e = _endpoints(atomics[branch[-1]]["poly"])
+                        if _pts_close(last_s, pop_other) or _pts_close(last_e, pop_other):
+                            pulled = branch.pop()
+                            attach_orders.pop(int(pulled), None)
+                            branches.append([pulled, popped])
+                            attach_orders[int(pulled)] = 1
+                            attach_orders[int(popped)] = 2
+                            print(
+                                f"[LOOP_BACKSTEP] saved [{atomics[pulled]['atomic_id']},{atomics[popped]['atomic_id']}] as pair",
+                                flush=True
+                            )
+                            # Refresh terminal after pulling - branch[-1] is now the new tip.
+                            if len(branch) >= 1:
+                                if side_check == "end":
+                                    b_end = _endpoints(atomics[branch[-1]]["poly"])[1]
+                                else:
+                                    b_start = _endpoints(atomics[branch[-1]]["poly"])[0]
+                        else:
+                            branches.append([popped])
+                            attach_orders[int(popped)] = 1
+                            print(
+                                f"[LOOP_SOLO] saved [{atomics[popped]['atomic_id']}] as solo",
+                                flush=True
+                            )
+                    restarted = True  # re-run greedy on trimmed branch
+                    break
 
         branches.append(branch)
 

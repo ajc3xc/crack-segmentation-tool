@@ -497,6 +497,15 @@ def _compute_dijkstra_midline(
     H, W = dom.shape[:2]
     start_local = np.asarray(S[0], float)
     end_local = np.asarray(S[-1], float)
+    _endpoint_dist = float(np.linalg.norm(start_local - end_local))
+    print(
+        f"[LOOP_DBG] branch={branch_id} mk={method_key} "
+        f"start={start_local.tolist()} end={end_local.tolist()} "
+        f"endpoint_dist={_endpoint_dist:.1f}px "
+        f"mid_len={len(S)} "
+        f"{'*** NEAR-ZERO ENDPOINTS - LIKELY LOOP COLLAPSE ***' if _endpoint_dist < 20.0 else ''}",
+        flush=True
+    )
     dbg_on = bool(DEBUG_CC_TRACE) and _cc_dbg(base_name, branch_id)
 
     def _check(pt):

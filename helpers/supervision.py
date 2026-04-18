@@ -3271,7 +3271,7 @@ def export_gt_supervision_for_image(
     DEBUG_GT_BRANCH_ONLY = False
 
     # Re-enable full centering pipeline for holistic evaluation.
-    enable_auto_centering = False
+    enable_auto_centering = True
     auto_centering_debug = bool(DEBUG_TARGET and DEBUG_TARGET != "cid1")
     # Always keep summary centering outputs (atomic_all/combined overlays) in batch.
     auto_centering_outputs = True
