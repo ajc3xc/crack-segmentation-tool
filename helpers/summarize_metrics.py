@@ -938,6 +938,19 @@ def _load_diffs_frames(image_dirs: List[str]) -> pd.DataFrame:
         & np.isfinite(out["diff_px"])
         & (out["gt_width_px"] > 0)
     ].copy()
+
+    # Per-image absolute bias, merged back as a column.
+    # Keep diff_px signed so raw data is preserved.
+    # abs_bias_per_image = |mean(diff_px)| per (method, image),
+    # avoiding cross-image sign cancellation downstream.
+    _img_bias = (
+        out.groupby(["_method", "image"])["diff_px"]
+        .mean()
+        .abs()
+        .reset_index()
+        .rename(columns={"diff_px": "abs_bias_per_image"})
+    )
+    out = out.merge(_img_bias, on=["_method", "image"], how="left")
     return out
 
 
@@ -1240,6 +1253,7 @@ def _aggregate_width_metrics(
                 continue
             ad = np.abs(diff)
             sd = np.square(diff)
+            _img_abs = g.groupby("image")["abs_bias_per_image"].first().dropna().to_numpy(float)
             rows.append(
                 {
                     "method": str(display_label),
@@ -1251,9 +1265,9 @@ def _aggregate_width_metrics(
                     "rmse_px": float(np.sqrt(np.mean(sd))),
                     "rmse_q1": float(np.sqrt(np.percentile(sd, 25))),
                     "rmse_q3": float(np.sqrt(np.percentile(sd, 75))),
-                    "bias_px": float(np.mean(diff)),
-                    "bias_q1": float(np.percentile(diff, 25)),
-                    "bias_q3": float(np.percentile(diff, 75)),
+                    "bias_px": float(np.mean(_img_abs)) if _img_abs.size > 0 else np.nan,
+                    "bias_q1": float(np.percentile(_img_abs, 25)) if _img_abs.size > 0 else np.nan,
+                    "bias_q3": float(np.percentile(_img_abs, 75)) if _img_abs.size > 0 else np.nan,
                 }
             )
         if not rows:
@@ -4690,13 +4704,14 @@ def summarize_dataset_metrics(
                 d_arr = d_arr[np.isfinite(d_arr)]
                 if d_arr.size == 0:
                     continue
+                _img_abs_s = g.groupby("image")["abs_bias_per_image"].first().dropna().to_numpy(float)
                 _strat_rows.append({
                     "method":       str(method),
                     "gt_width_bin": str(wbin),
                     "n_samples":    int(d_arr.size),
                     "mae_px":       round(float(np.mean(np.abs(d_arr))),  3),
                     "rmse_px":      round(float(np.sqrt(np.mean(d_arr**2))), 3),
-                    "bias_px":      round(float(np.mean(d_arr)),           3),
+                    "bias_px":      round(float(np.mean(_img_abs_s)) if _img_abs_s.size > 0 else np.nan, 3),
                 })
 
             if _strat_rows:
@@ -4708,9 +4723,12 @@ def summarize_dataset_metrics(
                 outputs["width_stratified_csv"] = _strat_csv
                 _log(verbose, f"[stratified] wrote {len(_strat_rows)} rows -> {_strat_csv}")
 
-                _methods_order = ["dt", "dt_depth", "ET", "MAT (DSE)", "MAT (raw)", "EOB", "ESD", "PCA"]
-                _methods_present = [m for m in _methods_order if m in _strat_df["method"].values]
-                _methods_present += [m for m in _strat_df["method"].unique() if m not in _methods_present]
+                _method_mean_bias = (
+                    _strat_df.groupby("method")["bias_px"]
+                    .mean()
+                    .sort_values(ascending=True)
+                )
+                _methods_present = _method_mean_bias.index.tolist()
                 _bins_order = [b for b in _bin_labels if b in _strat_df["gt_width_bin"].values]
                 _x = np.arange(len(_bins_order), dtype=float)
                 _bar_w = 0.8 / max(1, len(_methods_present))
@@ -4728,7 +4746,7 @@ def summarize_dataset_metrics(
                 for _metric, _col, _ylabel in [
                     ("MAE",    "mae_px",      "MAE (px)"),
                     ("RMSE",   "rmse_px",     "RMSE (px)"),
-                    ("bias",   "bias_px",     "bias (px) - signed"),
+                    ("bias",   "bias_px",     "bias (px)"),
                 ]:
                     try:
                         fig, ax = plt.subplots(
@@ -4770,6 +4788,64 @@ def summarize_dataset_metrics(
                         fig.savefig(_png, bbox_inches="tight")
                         plt.close(fig)
                         outputs[f"width_stratified_{_tag}_png"] = _png
+                        try:
+                            _strat_df_no_et = _strat_df[
+                                ~_strat_df["method"].astype(str).map(_is_et_like)
+                            ].copy()
+                            if not _strat_df_no_et.empty:
+                                _methods_no_et = [m for m in _methods_present
+                                                  if not _is_et_like(str(m))]
+                                fig_ne, ax_ne = plt.subplots(
+                                    figsize=(max(8.0, 1.5 * len(_bins_order)), 4.8), dpi=170
+                                )
+                                _bar_w_ne = 0.8 / max(1, len(_methods_no_et))
+                                for mi, method in enumerate(_methods_no_et):
+                                    sub = _strat_df_no_et[_strat_df_no_et["method"] == method]
+                                    vals = [
+                                        float(sub.loc[sub["gt_width_bin"] == b, _col].iloc[0])
+                                        if len(sub[sub["gt_width_bin"] == b]) > 0 else np.nan
+                                        for b in _bins_order
+                                    ]
+                                    xpos = _x - 0.4 + (mi + 0.5) * _bar_w_ne
+                                    ax_ne.bar(
+                                        xpos,
+                                        vals,
+                                        width=_bar_w_ne,
+                                        color=_strat_method_colors.get(str(method), "#888888"),
+                                        alpha=max(0.4, 1.0 - mi * 0.08),
+                                        label=method,
+                                    )
+                                ax_ne.set_xticks(_x)
+                                ax_ne.set_xticklabels(_bins_order)
+                                ax_ne.set_xlabel("GT crack width bin")
+                                ax_ne.set_ylabel(_ylabel)
+                                ax_ne.set_title(
+                                    f"Width {_metric} by GT Width Bin (no ET)\n"
+                                    f"(length-weighted, n_samples per bin)"
+                                )
+                                ax_ne.legend(fontsize=7, framealpha=0.9, ncol=2)
+                                ax_ne.grid(axis="y", alpha=0.2)
+                                for bi, b in enumerate(_bins_order):
+                                    _ns = int(_strat_df_no_et[_strat_df_no_et["gt_width_bin"] == b]["n_samples"].sum())
+                                    ax_ne.text(
+                                        bi,
+                                        ax_ne.get_ylim()[1] * 0.97,
+                                        f"n={_ns:,}",
+                                        ha="center",
+                                        va="top",
+                                        fontsize=6,
+                                        color="#555555",
+                                    )
+                                plt.tight_layout()
+                                _png_ne = os.path.join(
+                                    _width_out_dir,
+                                    f"dataset_width_stratified_{_tag}_no_et.png",
+                                )
+                                fig_ne.savefig(_png_ne, bbox_inches="tight")
+                                plt.close(fig_ne)
+                                outputs[f"width_stratified_{_tag}_no_et_png"] = _png_ne
+                        except Exception as _ep_ne:
+                            _log(verbose, f"[stratified plot {_metric} no_et] failed: {_ep_ne}")
                     except Exception as _ep:
                         _log(verbose, f"[stratified plot {_metric}] failed: {_ep}")
             else:

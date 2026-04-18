@@ -964,7 +964,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         # -- Hardcoded toggles for fast iteration --
         #resolved_indices = [0,101,97,108,113,129]
         #resolved_indices = [5,7,9,11,13,16,18,20,101,107,110,116]
-        #resolved_indices = [9]
+        resolved_indices = [9,20,101,110,116]
         resolved_indices= None
         #base_names = ["10"]
         SKIP_ALREADY_PROCESSED = False
