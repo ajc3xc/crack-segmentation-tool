@@ -956,6 +956,15 @@ def dominant_segments_from_group(
                 if tk in junction_pts and len(branch) >= 1:
                     popped = branch.pop()
                     attach_orders.pop(int(popped), None)
+                    # Singleton guard: if this was the only segment, save it as solo.
+                    if len(branch) == 0:
+                        branches.append([popped])
+                        attach_orders[int(popped)] = 1
+                        print(
+                            f"[LOOP_SOLO] saved [{atomics[popped]['atomic_id']}] as solo (singleton)",
+                            flush=True
+                        )
+                        break  # restarted stays False; outer while unused picks next segment
                     if len(branch) >= 1:
                         if side_check == "end":
                             b_end = _endpoints(atomics[branch[-1]]["poly"])[1]
@@ -991,7 +1000,8 @@ def dominant_segments_from_group(
                     restarted = True  # re-run greedy on trimmed branch
                     break
 
-        branches.append(branch)
+        if branch:
+            branches.append(branch)
 
     _c_log(1, "\n[BRANCH SUMMARY]")
     for bi, br in enumerate(branches):
