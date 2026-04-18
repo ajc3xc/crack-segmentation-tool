@@ -1328,7 +1328,7 @@ def plot_gt_normals_debug_global(
             n = min(len(aa), len(bb))
             if n <= 0:
                 continue
-            _step = max(1, n // 35)
+            _step = max(1, n // max(3, n // 8))
             for i in range(0, n, _step):
                 p1 = aa[i]
                 p2 = bb[i]
@@ -1437,7 +1437,7 @@ def plot_combined_overlay_debug(
             n = min(len(aa), len(bb))
             if n <= 0:
                 continue
-            step = max(1, n // 35)
+            step = max(1, n // max(3, n // 8))
             for i in range(0, n, step):
                 p1 = aa[i]
                 p2 = bb[i]
@@ -3271,7 +3271,7 @@ def export_gt_supervision_for_image(
     DEBUG_GT_BRANCH_ONLY = False
 
     # Re-enable full centering pipeline for holistic evaluation.
-    enable_auto_centering = True
+    enable_auto_centering = False
     auto_centering_debug = bool(DEBUG_TARGET and DEBUG_TARGET != "cid1")
     # Always keep summary centering outputs (atomic_all/combined overlays) in batch.
     auto_centering_outputs = True

@@ -358,7 +358,7 @@ def plot_gt_normals_on_gtbw(gt_mask_u8, derived_midline_xy, midline_xy, e1, e2, 
         handles.append(Line2D([], [], color='red', lw=1.8, label='Midline'))
 
     if e1 is not None and e2 is not None and len(e1) > 1 and len(e2) > 1:
-        step = max(1, len(e1)//60)
+        step = max(1, len(e1) // max(3, len(e1) // 8))
         idx = np.arange(0, len(e1), step, dtype=int)
         idx = idx[(idx >= 0) & (idx < len(e1)) & (idx < len(e2))]
         #_pdbg(f"normals_segments:prep count={len(idx)} step={step}")
