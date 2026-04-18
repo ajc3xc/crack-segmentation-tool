@@ -171,7 +171,7 @@ class ManualDrawing(CrackUtils):
                 ax.plot(e1[:, 0], e1[:, 1], 'r-', lw=1, label="edge1")
                 ax.plot(e2[:, 0], e2[:, 1], 'b-', lw=1, label="edge2")
 
-                step = max(1, len(mid_x) // 40)
+                step = max(1, len(mid_x) // max(3, len(mid_x) // 8))
                 for i in range(0, len(mid_x), step):
                     if np.isfinite(e1x[i]) and np.isfinite(e2x[i]):
                         ax.plot([mid_x[i], e1x[i]], [mid_y[i], e1y[i]], 'c-', lw=0.8)

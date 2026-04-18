@@ -3009,7 +3009,8 @@ class CrackUtils:
                     n2 = np.array(n2, float)
 
                 if n1.ndim == 2 and n2.ndim == 2 and len(n1) and len(n2):
-                    step = max(1, min(len(n1), len(n2)) // 70)
+                    n = min(len(n1), len(n2))
+                    step = max(1, n // max(3, n // 8))
                     for i in range(0, min(len(n1), len(n2)), step):
                         if np.isfinite(n1[i]).all() and np.isfinite(n2[i]).all():
                             ax.plot([n1[i,0], n2[i,0]],
