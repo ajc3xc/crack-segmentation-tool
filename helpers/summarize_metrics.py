@@ -202,9 +202,9 @@ def _display_width_method_label(name: str) -> str:
 
 
 _METHOD_DISPLAY_NAMES = {
-    "dt_ridge_valley": "dt_ridge",
-    "dt_ridge_valley_depth": "dt_ridge_depth",
-    "dt_ridge_color_depth": "dt_ridge_color_depth",
+    "dt_trench": "dt_trench",
+    "dt_trench_depth": "dt_trench_depth",
+    "dt_trench_color_depth": "dt_trench_color_depth",
     "best_dt_depth": "dt_depth",
     "best_dt": "dt",
     "skel_mat_dse": "MAT (DSE)",
@@ -1506,8 +1506,8 @@ def _aggregate_midline_metrics(
                     "manual": "ET",
                     "dt": "dt",
                     "dt_depth": "best_dt_depth",
-                    "dt_ridge_color_depth": "best_dt_depth",
-                    "dt_ridge_valley_depth": "best_dt_depth",
+                    "dt_trench_color_depth": "best_dt_depth",
+                    "dt_trench_depth": "best_dt_depth",
                 }
                 _abl_df = _abl_df[_abl_df["variant_id"].astype(str).isin(_vid_map)].copy()
                 if _abl_df.empty:
@@ -1730,7 +1730,7 @@ def _aggregate_midline_metrics(
                 if _is_et_like(row.get("midline_type", "")):
                     return "ET"
                 mt = str(row.get("midline_type", "")).lower()
-                if mt in ("dt", "best_dt_depth", "dt_depth", "dt_ridge_color_depth", "dt_ridge_valley_depth"):
+                if mt in ("dt", "best_dt_depth", "dt_depth", "dt_trench_color_depth", "dt_trench_depth"):
                     return "model"
                 return "auto"
 
@@ -3048,7 +3048,7 @@ def _aggregate_gt_component_timings(
     dt_files = glob.glob(os.path.join(supervision_root, "**", "dt", "timing.csv"), recursive=True)
     depth_files = glob.glob(os.path.join(supervision_root, "**", "multi_cue_track", "timing.csv"), recursive=True)
     depth_files += glob.glob(os.path.join(supervision_root, "**", "multi_cue", "timing.csv"), recursive=True)
-    depth_files += glob.glob(os.path.join(supervision_root, "**", "dt_ridge_color_depth", "timing.csv"), recursive=True)
+    depth_files += glob.glob(os.path.join(supervision_root, "**", "dt_trench_color_depth", "timing.csv"), recursive=True)
     depth_files = list(dict.fromkeys(depth_files))
 
     def _collect(files: List[str]) -> pd.DataFrame:
@@ -3999,7 +3999,7 @@ def _plot_multicue_ablation(
     if df_width is None or df_width.empty:
         return outputs
 
-    multicue_methods = ["ET", "dt", "dt_depth", "dt_ridge_valley", "dt_ridge_valley_depth", "dt_ridge_color_depth"]
+    multicue_methods = ["ET", "dt", "dt_depth", "dt_trench", "dt_trench_depth", "dt_trench_color_depth"]
 
     def _norm_method(v: str) -> str:
         s = str(v or "").strip()
@@ -4051,7 +4051,7 @@ def _plot_multicue_ablation(
     # score_mid decomposition terms.
     score_terms = [
         ("nn_mean_bidirectional", "#e15759", "nn_mean", lambda v: np.log1p(np.maximum(v, 0.0))),
-        ("hausdorff_max", "#b07aa1", "hausdorff_max", lambda v: 0.5 * np.log1p(np.maximum(v, 0.0))),
+        ("hausdorff_p95", "#b07aa1", "hausdorff_p95", lambda v: 0.5 * np.log1p(np.maximum(v, 0.0))),
         ("coverage_min", "#f28e2b", "coverage_min", lambda v: 1.0 - np.clip(v, 0.0, 1.0)),
     ]
     comp_data = {}
@@ -4460,6 +4460,268 @@ def _aggregate_calibration_ablation(
     return outputs
 
 
+def _aggregate_gt_centering_displacement(
+    save_folder: str,
+    out_dir: str,
+    *,
+    evaluated_images: Optional[set] = None,
+    verbose: bool = True,
+) -> Dict[str, str]:
+    outputs: Dict[str, str] = {}
+    sup_root = os.path.join(save_folder, "supervision")
+    if not os.path.isdir(sup_root):
+        return outputs
+
+    eval_set = {str(x) for x in (evaluated_images or set())}
+    frames = []
+    for image_dir in glob.glob(os.path.join(sup_root, "*", "analysis")):
+        image = os.path.basename(os.path.dirname(image_dir))
+        if eval_set and image not in eval_set:
+            continue
+        p = os.path.join(image_dir, "gt_centering_displacement_metrics.csv")
+        if not os.path.isfile(p):
+            continue
+        df = _safe_read_csv(p)
+        if df is None or df.empty:
+            continue
+        df["image"] = image
+        frames.append(df)
+
+    if not frames:
+        _log(verbose, "[gt_centering_displacement] no displacement CSVs found")
+        return outputs
+
+    disp_dir = os.path.join(out_dir, "gt_centering_displacement")
+    os.makedirs(disp_dir, exist_ok=True)
+
+    df_all = pd.concat(frames, ignore_index=True)
+    all_csv = os.path.join(disp_dir, "dataset_gt_centering_displacement_all.csv")
+    df_all.to_csv(all_csv, index=False)
+    outputs["gt_centering_displacement_all_csv"] = all_csv
+
+    # helpers
+    score_terms = [
+        ("nn_mean_bidirectional", "#e15759", "NN mean",
+         lambda v: np.log1p(np.maximum(v, 0.0))),
+        ("hausdorff_p95",        "#b07aa1", "Hausdorff p95",
+         lambda v: 0.5 * np.log1p(np.maximum(v, 0.0))),
+        ("coverage_min",         "#f28e2b", "1 - coverage",
+         lambda v: 1.0 - np.clip(v, 0.0, 1.0)),
+    ]
+    all_metric_cols = [c for c in [
+        "nn_mean_bidirectional", "hausdorff_p95", "coverage_min",
+        "frechet_discrete_ds", "mean_tan_angle_error_deg",
+        "relative_length_error", "orth_mean", "orth_std", "curvature_rms_ratio",
+    ] if c in df_all.columns]
+
+    groups = []
+    for grp_label, flag_col in [
+        ("Atomic",   "is_atomic"),
+        ("Combined", "is_combined"),
+        ("All",      None),
+    ]:
+        if flag_col is not None and flag_col in df_all.columns:
+            sub = df_all[pd.to_numeric(df_all[flag_col], errors="coerce") == 1].copy()
+        else:
+            sub = df_all.copy()
+        if not sub.empty:
+            groups.append((grp_label, sub))
+
+    _GRP_COLORS = {"Atomic": "#4c78a8", "Combined": "#f58518", "All": "#54a24b"}
+    from matplotlib.patches import Patch as _Patch
+
+    # dataset lw mean NN
+    nn_col = pd.to_numeric(df_all.get("nn_mean_bidirectional",
+                           pd.Series(dtype=float)), errors="coerce")
+    lw_col = pd.to_numeric(df_all.get("length_px",
+                           pd.Series(np.ones(len(df_all)))), errors="coerce")
+    _ok = (np.isfinite(nn_col.to_numpy()) & np.isfinite(lw_col.to_numpy())
+           & (lw_col.to_numpy() > 0))
+    nn_all = nn_col.to_numpy()[_ok]
+    lw_all = lw_col.to_numpy()[_ok]
+    dataset_lw_mean = (float(np.sum(nn_all * lw_all) / np.sum(lw_all))
+                       if _ok.any() else np.nan)
+    dataset_median  = float(np.median(nn_all)) if nn_all.size else np.nan
+    dataset_std     = float(np.std(nn_all))    if nn_all.size else np.nan
+
+    # Plot 1: NN dist histogram (PRIMARY)
+    if nn_all.size > 0:
+        fig1, ax = plt.subplots(figsize=(7.0, 4.5), dpi=180)
+        ax.hist(nn_all, bins=40, color="#4c78a8", alpha=0.80,
+                edgecolor="white", linewidth=0.4, label="Crack segments")
+        ax.axvline(dataset_lw_mean, color="#e45756", lw=2.0, linestyle="--",
+                   label=f"LW mean = {dataset_lw_mean:.2f} px")
+        ax.axvline(dataset_median, color="#f28e2b", lw=1.8, linestyle=":",
+                   label=f"Median = {dataset_median:.2f} px")
+        # light shading: mean +- std
+        ax.axvspan(max(0, dataset_lw_mean - dataset_std),
+                   dataset_lw_mean + dataset_std,
+                   alpha=0.10, color="#e45756", label=f"+-1 std ({dataset_std:.2f} px)")
+        ax.set_xlabel("NN mean bidirectional displacement (px)")
+        ax.set_ylabel("Number of crack segments")
+        ax.set_title(
+            "GT Annotation Centering Displacement\n"
+            "(manual annotation -> DT-ridge snapped centerline, all segments)"
+        )
+        ax.legend(fontsize=9, framealpha=0.9)
+        ax.grid(axis="y", alpha=0.2)
+        plt.tight_layout()
+        nn_png = os.path.join(disp_dir, "gt_centering_nn_dist.png")
+        fig1.savefig(nn_png, bbox_inches="tight")
+        plt.close(fig1)
+        outputs["gt_centering_nn_dist_png"] = nn_png
+
+    # Plot 2: RS3 decomp + full metrics (DIAGNOSTIC)
+    if groups and all_metric_cols:
+        fig2, (ax0, ax1) = plt.subplots(
+            2, 1,
+            figsize=(max(7.0, 1.6 * len(groups)), 9.5),
+            dpi=180, height_ratios=[1.1, 1.0],
+        )
+
+        # Top — RS3 stacked decomp
+        x0 = np.arange(len(groups), dtype=float)
+        bottoms = np.zeros(len(groups), dtype=float)
+        legend_handles = []
+        for col, color, lbl, fn in score_terms:
+            vals = []
+            for _, sub in groups:
+                raw = (pd.to_numeric(sub[col], errors="coerce").to_numpy(float)
+                       if col in sub.columns else np.array([], dtype=float))
+                raw = raw[np.isfinite(raw)]
+                vals.append(float(np.mean(fn(raw))) if raw.size else 0.0)
+            vals = np.where(np.isfinite(vals), vals, 0.0)
+            ax0.bar(x0, vals, bottom=bottoms, color=color, alpha=0.85)
+            legend_handles.append(_Patch(facecolor=color, edgecolor="none", label=lbl))
+            bottoms += vals
+        # RS3 total dots
+        rs3_totals = []
+        for _, sub in groups:
+            sc = pd.to_numeric(sub.get("score_mid", pd.Series(dtype=float)),
+                               errors="coerce").to_numpy(float)
+            sc = sc[np.isfinite(sc)]
+            rs3_totals.append(float(np.mean(sc)) if sc.size else np.nan)
+        rs3_arr = np.asarray(rs3_totals, float)
+        fin = np.isfinite(rs3_arr)
+        ax0.plot(x0[fin], rs3_arr[fin], "o", color="black",
+                 markersize=6, zorder=5)
+        legend_handles.append(_Patch(facecolor="black", edgecolor="none",
+                                     label="RS3 score (mean)"))
+        ax0.set_xticks(x0)
+        ax0.set_xticklabels([g[0] for g in groups], fontsize=11)
+        ax0.set_ylabel("RS3 Score")
+        ax0.set_title("GT Centering — RS3 Score Decomposition")
+        ax0.legend(handles=legend_handles, loc="best", fontsize=8, framealpha=0.9)
+        ax0.grid(axis="y", alpha=0.2)
+
+        # Bottom — all metrics grouped bars
+        x1 = np.arange(len(all_metric_cols), dtype=float)
+        bar_w = 0.8 / max(1, len(groups))
+        for i, (grp_label, sub) in enumerate(groups):
+            means, lo_errs, hi_errs = [], [], []
+            for col in all_metric_cols:
+                v = pd.to_numeric(sub[col], errors="coerce").to_numpy(float)
+                v = v[np.isfinite(v)]
+                if v.size == 0:
+                    means.append(np.nan); lo_errs.append(0.0); hi_errs.append(0.0)
+                else:
+                    mn = float(np.mean(v))
+                    means.append(mn)
+                    lo_errs.append(max(0.0, mn - float(np.percentile(v, 25))))
+                    hi_errs.append(max(0.0, float(np.percentile(v, 75)) - mn))
+            means_arr = np.asarray(means, float)
+            lo_arr    = np.asarray(lo_errs, float)
+            hi_arr    = np.asarray(hi_errs, float)
+            xpos  = x1 - 0.4 + (i + 0.5) * bar_w
+            valid = np.isfinite(means_arr)
+            ax1.bar(xpos[valid], means_arr[valid], width=bar_w * 0.9,
+                    color=_GRP_COLORS.get(grp_label, "#4c78a8"),
+                    alpha=0.85, label=grp_label)
+            ax1.errorbar(xpos[valid], means_arr[valid],
+                         yerr=np.vstack([lo_arr[valid], hi_arr[valid]]),
+                         fmt="none", ecolor="black", elinewidth=0.8, capsize=2)
+        ax1.set_xticks(x1)
+        ax1.set_xticklabels(all_metric_cols, rotation=25, ha="right", fontsize=8)
+        ax1.set_ylabel("mean +/- IQR")
+        ax1.set_title("GT Centering — Full Metric Breakdown")
+        ax1.legend(loc="best", fontsize=8, framealpha=0.9)
+        ax1.grid(axis="y", alpha=0.2)
+
+        plt.tight_layout()
+        full_png = os.path.join(disp_dir, "gt_centering_displacement_full.png")
+        fig2.savefig(full_png, bbox_inches="tight")
+        plt.close(fig2)
+        outputs["gt_centering_displacement_full_png"] = full_png
+
+    # Plot 3: variant RS3 + centering NN reference line (CONTEXT)
+    _abl_candidates = [
+        os.path.join(out_dir, "dataset_gt_centering_weighted_summary_all.csv"),
+        os.path.join(out_dir, "midline", "dataset_midline_lw_summary.csv"),
+    ]
+    df_abl = None
+    for _p in _abl_candidates:
+        _df = _safe_read_csv(_p)
+        if _df is not None and not _df.empty:
+            df_abl = _df
+            break
+
+    if (df_abl is not None
+            and "lwmean_score_mid" in df_abl.columns
+            and "variant_id" in df_abl.columns
+            and not np.isnan(dataset_lw_mean)):
+        if "group" in df_abl.columns:
+            df_abl = df_abl[
+                df_abl["group"] == "combined_plus_noncombined_atomic"].copy()
+        variant_order = ["dt", "dt_depth", "dt_trench", "dt_trench_rgb",
+                         "dt_trench_depth", "dt_trench_color_depth"]
+        df_abl_grp = (
+            df_abl[df_abl["variant_id"].isin(variant_order)]
+            .groupby("variant_id")["lwmean_score_mid"]
+            .mean()
+            .reindex(variant_order)
+            .dropna()
+            .reset_index()
+        )
+        if not df_abl_grp.empty:
+            fig3, ax_rs3 = plt.subplots(
+                figsize=(max(8.0, 0.9 * len(df_abl_grp)), 5.0), dpi=180)
+            x2 = np.arange(len(df_abl_grp), dtype=float)
+            ax_rs3.bar(x2, df_abl_grp["lwmean_score_mid"].to_numpy(float),
+                       color="#4c78a8", alpha=0.85, label="RS3 score (variants)")
+            ax_rs3.set_ylabel("RS3 Score (length-weighted mean)")
+            ax_rs3.set_xlabel("Costmap variant")
+            ax_nn = ax_rs3.twinx()
+            ax_nn.axhline(dataset_lw_mean, color="#e45756", lw=2.0,
+                          linestyle="--",
+                          label=f"Centering NN mean = {dataset_lw_mean:.2f} px")
+            ax_nn.set_ylabel("Centering displacement — NN mean (px)",
+                             color="#e45756")
+            ax_nn.tick_params(axis="y", labelcolor="#e45756")
+            ax_nn.set_ylim(bottom=0)
+            ax_rs3.set_xticks(x2)
+            ax_rs3.set_xticklabels(
+                [_display_method_name(v)
+                 for v in df_abl_grp["variant_id"].tolist()],
+                rotation=45, ha="right", fontsize=9,
+            )
+            ax_rs3.set_title(
+                "Variant RS3 Score vs GT Centering Displacement\n"
+                "(length-weighted, combined + orphan atomics)"
+            )
+            ax_rs3.grid(axis="y", alpha=0.2)
+            h1, l1 = ax_rs3.get_legend_handles_labels()
+            h2, l2 = ax_nn.get_legend_handles_labels()
+            ax_rs3.legend(h1 + h2, l1 + l2, fontsize=8, loc="lower right")
+            plt.tight_layout()
+            ctx_png = os.path.join(disp_dir, "gt_centering_vs_rs3_context.png")
+            fig3.savefig(ctx_png, bbox_inches="tight")
+            plt.close(fig3)
+            outputs["gt_centering_vs_rs3_context_png"] = ctx_png
+
+    _log(verbose, f"[gt_centering_displacement] outputs: {list(outputs.keys())}")
+    return outputs
+
+
 def summarize_dataset_metrics(
     save_folder: str,
     *,
@@ -4587,6 +4849,14 @@ def summarize_dataset_metrics(
     )
     outputs.update(
         _aggregate_calibration_ablation(
+            save_folder=save_folder,
+            out_dir=out_dir,
+            evaluated_images=evaluated_images_set,
+            verbose=verbose,
+        )
+    )
+    outputs.update(
+        _aggregate_gt_centering_displacement(
             save_folder=save_folder,
             out_dir=out_dir,
             evaluated_images=evaluated_images_set,

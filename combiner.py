@@ -142,43 +142,42 @@ def plot_greedy_branch_debug(
     cmap = plt.get_cmap("tab10")
     for b_idx, branch in enumerate(branches):
         color = cmap(int(b_idx % 10))
-        for atomic_idx in branch:
+        for seg_position_in_branch, atomic_idx in enumerate(branch):
             S = np.asarray(atomics[atomic_idx]["poly"], float)
             if S.ndim != 2 or len(S) < 2:
                 continue
             ax_b.plot(S[:, 0], S[:, 1], color=color, linewidth=2.8)
             mid = S[len(S) // 2]
-            order = attach_orders.get(int(atomic_idx), None)
-            if order is not None:
-                # Offset text slightly off the centerline so digits don't sit on top of the branch.
-                if len(S) >= 3:
-                    i = len(S) // 2
-                    v = S[min(i + 1, len(S) - 1)] - S[max(i - 1, 0)]
-                else:
-                    v = S[-1] - S[0]
-                n = np.array([-v[1], v[0]], float)
-                nn = float(np.linalg.norm(n))
-                if nn > 1e-9:
-                    n /= nn
-                else:
-                    n[:] = 0.0
-                off = 4.0 * n
-                ax_b.text(
-                    float(mid[0] + off[0]),
-                    float(mid[1] + off[1]),
-                    str(int(order)),
-                    color="black",
-                    fontsize=7,
-                    ha="center",
-                    va="center",
-                    zorder=50,
-                    bbox=dict(
-                        boxstyle="round,pad=0.1",
-                        facecolor="white",
-                        edgecolor="none",
-                        alpha=0.65,
-                    ),
-                )
+            order_label = int(seg_position_in_branch) + 1
+            # Offset text slightly off the centerline so digits don't sit on top of the branch.
+            if len(S) >= 3:
+                i = len(S) // 2
+                v = S[min(i + 1, len(S) - 1)] - S[max(i - 1, 0)]
+            else:
+                v = S[-1] - S[0]
+            n = np.array([-v[1], v[0]], float)
+            nn = float(np.linalg.norm(n))
+            if nn > 1e-9:
+                n /= nn
+            else:
+                n[:] = 0.0
+            off = 4.0 * n
+            ax_b.text(
+                float(mid[0] + off[0]),
+                float(mid[1] + off[1]),
+                str(order_label),
+                color="black",
+                fontsize=7,
+                ha="center",
+                va="center",
+                zorder=50,
+                bbox=dict(
+                    boxstyle="round,pad=0.1",
+                    facecolor="white",
+                    edgecolor="none",
+                    alpha=0.65,
+                ),
+            )
 
     ax_b.set_title("B - Greedy Branch Construction (numbers = attachment order)")
     ax_b.set_aspect("equal", adjustable="box")
@@ -954,6 +953,17 @@ def dominant_segments_from_group(
             for side_check, terminal in [("end", b_end), ("start", b_start)]:
                 tk = (round(float(terminal[0]), 1), round(float(terminal[1]), 1))
                 if tk in junction_pts and len(branch) >= 1:
+                    # Only treat this as a loop/backstep event if the same
+                    # junction appears elsewhere in THIS branch (excluding
+                    # the terminal segment itself).
+                    branch_endpoint_keys = set()
+                    for idx in branch[:-1]:
+                        s, e = _endpoints(atomics[idx]["poly"])
+                        branch_endpoint_keys.add((round(float(s[0]), 1), round(float(s[1]), 1)))
+                        branch_endpoint_keys.add((round(float(e[0]), 1), round(float(e[1]), 1)))
+                    if tk not in branch_endpoint_keys:
+                        break  # genuine dead-end tip at a globally-shared junction
+
                     popped = branch.pop()
                     attach_orders.pop(int(popped), None)
                     # Singleton guard: if this was the only segment, save it as solo.
@@ -2336,7 +2346,7 @@ def recompute_dominance_geometry_from_derived(
             derived_pts += int(len(S))
 
             r = seg_radius(S)
-            rad = int(max(4, min(2.0 * r, float(window_half_size))))
+            rad = int(max(4, min(1.5 * r, float(window_half_size))))
             line = _polyline_mask(S, H, W)
             kernel = cv2.getStructuringElement(
                 cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1)

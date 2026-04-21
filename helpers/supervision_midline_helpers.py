@@ -226,7 +226,7 @@ def smooth_polyline(
     return np.asarray(out, float)
 
 
-def _ridge_ascent_polyline(
+def _trench_ascent_polyline(
     S,
     dt,
     gx,
@@ -311,7 +311,7 @@ def _ridge_ascent_polyline(
     return out
 
 
-def snap_polyline_to_dt_ridge(
+def snap_polyline_to_dt_trench(
     mid_xy,
     domain_mask_u8,
     *,
@@ -357,7 +357,7 @@ def snap_polyline_to_dt_ridge(
 
     gx, gy = compute_dt_gradient(dt, ksize=int(grad_ksize))
 
-    S = _ridge_ascent_polyline(
+    S = _trench_ascent_polyline(
         S,
         dt,
         gx,
@@ -410,9 +410,9 @@ def _compute_dt_for_domain(
     }
 
 
-def _compute_dt_ridge_midline(mid_xy, domain_u8, dt_float, snap_kwargs):
+def _compute_dt_trench_midline(mid_xy, domain_u8, dt_float, snap_kwargs):
     t0 = time.perf_counter()
-    centered = snap_polyline_to_dt_ridge(
+    centered = snap_polyline_to_dt_trench(
         np.asarray(mid_xy, float),
         (np.asarray(domain_u8) > 0).astype(np.uint8),
         dt_float=dt_float,
@@ -1103,7 +1103,12 @@ def _prepare_gray_image(image_rgb_or_gray, target_hw):
     return np.clip(arr, 0.0, 1.0).astype(np.float32, copy=False)
 
 
-def _compute_rgb_ridge_valley_cues(image_gray_f32, domain_u8):
+def _compute_ridge_valley_cues(image_gray_f32, domain_u8):
+    """
+    Compute Frangi/Hessian ridge cue and LoG+Sobel valley cue on pre-smoothed input.
+    Input expected to be pre-smoothed (G_2*I from _compute_rgb_trench_signal).
+    Returns (ridge_n, valley_n, meta).
+    """
     t0 = time.perf_counter()
     dom = (np.asarray(domain_u8) > 0)
     g = np.asarray(image_gray_f32, np.float32)
@@ -1118,34 +1123,51 @@ def _compute_rgb_ridge_valley_cues(image_gray_f32, domain_u8):
         meta["compute_s"] = float(time.perf_counter() - t0)
         return z, z, meta
 
-    gs = cv2.GaussianBlur(g, (0, 0), sigmaX=1.2, sigmaY=1.2).astype(np.float32)
-
+    # --------------------------------------------------
+    # RIDGE: Frangi vesselness or Hessian eigenvalue fallback
+    # Detects dark tubular structures at crack width scales.
+    # Input is already G_2*I so Frangi effective scales are
+    # σ ∈ {√5, √8, √13} ≈ {2.24, 2.83, 3.61} on original image.
+    # --------------------------------------------------
     ridge = None
     try:
         from skimage.filters import frangi
-        ridge = frangi(gs, sigmas=(1.0, 2.0, 3.0), black_ridges=True).astype(np.float32, copy=False)
+        ridge = frangi(g, sigmas=(1.0, 2.0, 3.0), black_ridges=True).astype(np.float32, copy=False)
         meta["ridge_backend"] = "skimage.filters.frangi"
     except Exception:
         try:
+            print("Frangi filter failed!")
             from skimage.feature import hessian_matrix, hessian_matrix_eigvals
-            h_elems = hessian_matrix(gs, sigma=1.6, order="rc", use_gaussian_derivatives=True)
+            h_elems = hessian_matrix(g, sigma=1.6, order="rc", use_gaussian_derivatives=True)
             eigs = hessian_matrix_eigvals(h_elems)
             l1 = np.asarray(eigs[0], np.float32)
             l2 = np.asarray(eigs[1], np.float32)
-            # Dark-line cue: stronger negative principal curvature.
             ridge = np.maximum(0.0, -np.minimum(l1, l2)).astype(np.float32)
             meta["ridge_backend"] = "skimage.feature.hessian_eigvals"
         except Exception:
-            lap = cv2.Laplacian(gs, cv2.CV_32F, ksize=3)
-            ridge = np.maximum(0.0, -lap).astype(np.float32)
-            meta["ridge_backend"] = "cv2.laplacian_fallback"
+            print("FAIL! Not even hessian matrix can save you now.")
+            meta["reason"] = "all_ridge_backends_failed"
+            meta["compute_s"] = float(time.perf_counter() - t0)
+            return z, z, meta
 
-    gx = cv2.Sobel(gs, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(gs, cv2.CV_32F, 0, 1, ksize=3)
+    # --------------------------------------------------
+    # VALLEY: LoG (0.6) + Sobel gradient magnitude (0.4)
+    # LoG finds intensity minima at trench center (primary).
+    # Sobel adds edge continuity for low-contrast cracks (secondary).
+    # Additional σ=1.0 blur before LoG to suppress noise at fine scale.
+    # --------------------------------------------------
+    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
     grad_mag = np.sqrt(gx * gx + gy * gy).astype(np.float32, copy=False)
-    log = cv2.Laplacian(cv2.GaussianBlur(gs, (0, 0), sigmaX=1.0, sigmaY=1.0), cv2.CV_32F, ksize=3)
+    log = cv2.Laplacian(
+        cv2.GaussianBlur(g, (0, 0), sigmaX=1.0, sigmaY=1.0),
+        cv2.CV_32F, ksize=3
+    )
     valley_core = np.maximum(0.0, -log).astype(np.float32, copy=False)
-    valley = (0.6 * _normalize_01_masked(valley_core, dom) + 0.4 * _normalize_01_masked(grad_mag, dom)).astype(np.float32)
+    valley = (
+        0.6 * _normalize_01_masked(valley_core, dom) +
+        0.4 * _normalize_01_masked(grad_mag, dom)
+    ).astype(np.float32)
 
     ridge_n = _normalize_01_masked(ridge, dom).astype(np.float32, copy=False)
     valley_n = _normalize_01_masked(valley, dom).astype(np.float32, copy=False)
@@ -1153,6 +1175,7 @@ def _compute_rgb_ridge_valley_cues(image_gray_f32, domain_u8):
     valley_n[~dom] = 0.0
     meta["compute_s"] = float(time.perf_counter() - t0)
     return ridge_n, valley_n, meta
+
 
 def _compute_rgb_trench_signal(image_gray_f32, domain_u8, image_rgb=None):
     t0 = time.perf_counter()
@@ -1164,7 +1187,7 @@ def _compute_rgb_trench_signal(image_gray_f32, domain_u8, image_rgb=None):
     meta = {
         "compute_s": 0.0,
         "reason": None,
-        "mode": "valley_structural_fused",
+        "mode": "ridge_valley_fused",
     }
 
     if g.ndim != 2 or g.shape != dom.shape or not np.any(dom):
@@ -1173,48 +1196,45 @@ def _compute_rgb_trench_signal(image_gray_f32, domain_u8, image_rgb=None):
         return z, z, z, z, meta
 
     # --------------------------------------------------
-    # 1) STRUCTURAL SMOOTHING (not texture blur)
+    # 1) SINGLE PRE-SMOOTH
+    # g_small = G_2 * I — shared input for ridge/valley/Sobel.
     # --------------------------------------------------
-    g_s = cv2.GaussianBlur(g, (0, 0), sigmaX=2.0, sigmaY=2.0)
+    g_small = cv2.GaussianBlur(g, (0, 0), sigmaX=2.0, sigmaY=2.0)
 
     # --------------------------------------------------
-    # 2) MULTI-SCALE VALLEY (key fix)
+    # 2) RIDGE + VALLEY CUES
+    # Frangi ridge: dark tubular structure detector.
+    # LoG+Sobel valley: intensity minima + edge continuity.
+    # Both computed on g_small (G_2*I).
+    # Ridge blurred σ=2 to avoid leopard-spot artifacts.
     # --------------------------------------------------
-    g_small = cv2.GaussianBlur(g_s, (0, 0), sigmaX=2.0)
-    g_large = cv2.GaussianBlur(g_s, (0, 0), sigmaX=8.0)
-
-    valley = np.maximum(0.0, g_large - g_small)
-    valley_good = _normalize_01_masked(valley, dom)
-
-    # --------------------------------------------------
-    # 3) RIDGE PRIOR (SOFT, not multiplicative)
-    # --------------------------------------------------
-    ridge_good, _, _ = _compute_rgb_ridge_valley_cues(g_s, dom.astype(np.uint8))
+    ridge_good, valley_good, _ = _compute_ridge_valley_cues(g_small, dom.astype(np.uint8))
     ridge_good = np.clip(ridge_good, 0.0, 1.0)
-
-    # soften ridge → avoid leopard effect
+    valley_good = np.clip(valley_good, 0.0, 1.0)
     ridge_soft = cv2.GaussianBlur(ridge_good, (0, 0), sigmaX=2.0)
 
     # --------------------------------------------------
-    # 4) EDGE AWARE SUPPRESSION (weak)
+    # 3) EDGE SUPPRESSION (weak)
+    # Sobel on g_small. High gradient = crack edge = suppress.
     # --------------------------------------------------
-    gx = cv2.Sobel(g_s, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(g_s, cv2.CV_32F, 0, 1, ksize=3)
+    gx = cv2.Sobel(g_small, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(g_small, cv2.CV_32F, 0, 1, ksize=3)
     grad = np.sqrt(gx * gx + gy * gy)
-
     edge_n = _normalize_01_masked(grad, dom)
     edge_suppress = 1.0 - edge_n
 
     # --------------------------------------------------
-    # 5) Optional weak color anomaly cue (secondary only)
+    # 4) OPTIONAL COLOR ANOMALY
+    # Sum of absolute RGB channel differences.
+    # Only included when image_rgb is passed (dt_trench_color variants).
     # --------------------------------------------------
     if image_rgb is not None:
         try:
             rgb = np.asarray(image_rgb, np.float32)
             if rgb.ndim == 3 and rgb.shape[:2] == g.shape[:2] and rgb.shape[2] >= 3:
-                b = rgb[:, :, 0]
+                b    = rgb[:, :, 0]
                 g_ch = rgb[:, :, 1]
-                r = rgb[:, :, 2]
+                r    = rgb[:, :, 2]
                 color_anomaly = np.abs(r - g_ch) + np.abs(r - b)
                 color_anomaly = _normalize_01_masked(color_anomaly, dom)
             else:
@@ -1225,34 +1245,48 @@ def _compute_rgb_trench_signal(image_gray_f32, domain_u8, image_rgb=None):
         color_anomaly = np.zeros_like(g, dtype=np.float32)
 
     # --------------------------------------------------
-    # 6) FUSION (ADDITIVE, grayscale-primary + weak color)
+    # 5) ADDITIVE FUSION
+    # Weights manually set based on relative signal reliability:
+    #   valley     — primary centering: LoG finds intensity minima
+    #                at trench center, Sobel adds edge continuity
+    #   ridge_soft — structural continuity: Frangi responds to
+    #                elongated dark structures, complements LoG
+    #   edge_supp  — weak boundary suppression to discourage
+    #                path routing along crack edges
+    #   color      — chromatic anomaly, only active when
+    #                image_rgb is passed, zero otherwise
+    # Weights are not systematically optimized and represent a
+    # manually chosen starting configuration.
     # --------------------------------------------------
+    if image_rgb is not None:
+        # color active: 0.45 / 0.30 / 0.10 / 0.15
+        _w_valley, _w_ridge, _w_edge, _w_color = 0.45, 0.30, 0.10, 0.15
+    else:
+        # color inactive: redistribute 0.15 proportionally to valley/ridge
+        _w_valley, _w_ridge, _w_edge, _w_color = 0.563, 0.338, 0.10, 0.0
+
     rgb_trench = (
-        0.5 * valley_good +      # dominant
-        0.25 * ridge_soft +      # structure prior
-        0.1 * edge_suppress +    # weak helper
-        0.15 * color_anomaly     # weak color anomaly cue
+        _w_valley * valley_good   +
+        _w_ridge  * ridge_soft    +
+        _w_edge   * edge_suppress +
+        _w_color  * color_anomaly
     )
 
-    rgb_trench = np.clip(rgb_trench, 0.0, 1.0)
-
     # --------------------------------------------------
-    # 7) LIGHT STRUCTURE SMOOTHING (NOT HEAVY BLUR)
+    # 6) FINAL SMOOTHING + RENORMALIZE
+    # Light σ=1.5 smooth to reduce quantization artifacts.
     # --------------------------------------------------
     rgb_trench = cv2.GaussianBlur(rgb_trench, (0, 0), sigmaX=1.5)
-
     rgb_trench = _normalize_01_masked(rgb_trench, dom)
 
-    # mask out
-    valley_good[~dom] = 0.0
-    ridge_soft[~dom] = 0.0
-    edge_suppress[~dom] = 0.0
-    color_anomaly[~dom] = 0.0
-    rgb_trench[~dom] = 0.0
+    valley_good[~dom]    = 0.0
+    ridge_soft[~dom]     = 0.0
+    edge_suppress[~dom]  = 0.0
+    color_anomaly[~dom]  = 0.0
+    rgb_trench[~dom]     = 0.0
 
     meta["compute_s"] = float(time.perf_counter() - t0)
-    return rgb_trench, valley_good, ridge_soft, edge_suppress, meta
-
+    return rgb_trench, valley_good, ridge_soft, edge_suppress, color_anomaly, meta
 
 METHOD_SPECS = {
     "dt": {
@@ -1267,20 +1301,26 @@ METHOD_SPECS = {
         "use_depth": True,
         "use_color": False,
     },
-    "dt_ridge_valley": {
-        "label": "DT + Ridge/Valley",
+    "dt_trench": {
+        "label": "DT + Trench",
         "use_rgb": True,
         "use_depth": False,
         "use_color": False,
     },
-    "dt_ridge_valley_depth": {
-        "label": "DT + Ridge/Valley + Depth",
+    "dt_trench_rgb": {
+        "label": "DT + Trench + RGB",
+        "use_rgb": True,
+        "use_depth": False,
+        "use_color": True,
+    },
+    "dt_trench_depth": {
+        "label": "DT + Trench + Depth",
         "use_rgb": True,
         "use_depth": True,
         "use_color": False,
     },
-    "dt_ridge_color_depth": {
-        "label": "DT + Ridge/Valley + Color + Depth",
+    "dt_trench_color_depth": {
+        "label": "DT + Trench + Color + Depth",
         "use_rgb": True,
         "use_depth": True,
         "use_color": True,
@@ -1330,7 +1370,7 @@ def _smooth_costmap_in_domain(costmap_f32, domain_u8, sigma=2.5):
     out[ok] = (vb[ok] / wb[ok]).astype(np.float32)
     return out.astype(np.float32, copy=False)
 
-def _build_ridge_valley_method_costmaps(
+def _build_trench_valley_method_costmaps(
     domain_u8,
     dt_norm,
     *,
@@ -1392,16 +1432,18 @@ def _build_ridge_valley_method_costmaps(
         costmaps["rgb_cue"] = np.full_like(dtn, inf, dtype=np.float32)
         costmaps["rgb_cue"][dom] = rgb_bad[dom]
 
-        costmaps["dt_ridge_valley"] = np.full_like(dtn, inf, dtype=np.float32)
-        costmaps["dt_ridge_valley"][dom] = (dt_bad[dom] * rgb_bad[dom]).astype(np.float32)
+        costmaps["dt_trench"] = np.full_like(dtn, inf, dtype=np.float32)
+        costmaps["dt_trench"][dom] = (dt_bad[dom] * rgb_bad[dom]).astype(np.float32)
+        costmaps["dt_trench_rgb"] = np.full_like(dtn, inf, dtype=np.float32)
+        costmaps["dt_trench_rgb"][dom] = (dt_bad[dom] * rgb_bad[dom]).astype(np.float32)
 
         if depth_term is not None:
-            costmaps["dt_ridge_valley_depth"] = np.full_like(dtn, inf, dtype=np.float32)
-            costmaps["dt_ridge_valley_depth"][dom] = (
+            costmaps["dt_trench_depth"] = np.full_like(dtn, inf, dtype=np.float32)
+            costmaps["dt_trench_depth"][dom] = (
                 dt_bad[dom] * rgb_bad[dom] * depth_term[dom]
             ).astype(np.float32)
-            costmaps["dt_ridge_color_depth"] = np.full_like(dtn, inf, dtype=np.float32)
-            costmaps["dt_ridge_color_depth"][dom] = (
+            costmaps["dt_trench_color_depth"] = np.full_like(dtn, inf, dtype=np.float32)
+            costmaps["dt_trench_color_depth"][dom] = (
                 dt_bad[dom] * rgb_bad[dom] * depth_term[dom]
             ).astype(np.float32)
     elif ridge_norm is not None and valley_norm is not None:
@@ -1421,16 +1463,18 @@ def _build_ridge_valley_method_costmaps(
         costmaps["rgb_cue"] = np.full_like(dtn, inf, dtype=np.float32)
         costmaps["rgb_cue"][dom] = rgb_bad[dom]
 
-        costmaps["dt_ridge_valley"] = np.full_like(dtn, inf, dtype=np.float32)
-        costmaps["dt_ridge_valley"][dom] = (dt_bad[dom] * rgb_bad[dom]).astype(np.float32)
+        costmaps["dt_trench"] = np.full_like(dtn, inf, dtype=np.float32)
+        costmaps["dt_trench"][dom] = (dt_bad[dom] * rgb_bad[dom]).astype(np.float32)
+        costmaps["dt_trench_rgb"] = np.full_like(dtn, inf, dtype=np.float32)
+        costmaps["dt_trench_rgb"][dom] = (dt_bad[dom] * rgb_bad[dom]).astype(np.float32)
 
         if depth_term is not None:
-            costmaps["dt_ridge_valley_depth"] = np.full_like(dtn, inf, dtype=np.float32)
-            costmaps["dt_ridge_valley_depth"][dom] = (
+            costmaps["dt_trench_depth"] = np.full_like(dtn, inf, dtype=np.float32)
+            costmaps["dt_trench_depth"][dom] = (
                 dt_bad[dom] * rgb_bad[dom] * depth_term[dom]
             ).astype(np.float32)
-            costmaps["dt_ridge_color_depth"] = np.full_like(dtn, inf, dtype=np.float32)
-            costmaps["dt_ridge_color_depth"][dom] = (
+            costmaps["dt_trench_color_depth"] = np.full_like(dtn, inf, dtype=np.float32)
+            costmaps["dt_trench_color_depth"][dom] = (
                 dt_bad[dom] * rgb_bad[dom] * depth_term[dom]
             ).astype(np.float32)
 
@@ -1598,6 +1642,7 @@ def _precompute_method_shared_inputs(
         "available": False,
         "gray": None,
         "rgb_trench_norm": None,
+        "rgb_trench_color_norm": None,
         "ridge_norm": None,
         "valley_norm": None,
         "edge_suppress_norm": None,
@@ -1625,19 +1670,29 @@ def _precompute_method_shared_inputs(
             rgb_bundle["reason"] = "missing_rgb_image"
         else:
             t_rgb_cues0 = time.perf_counter()
-            rgb_trench_norm, valley_norm, ridge_norm, edge_suppress_norm, rgb_meta = _compute_rgb_trench_signal(
+            rgb_trench_norm, valley_norm, ridge_norm, edge_suppress_norm, _, rgb_meta = _compute_rgb_trench_signal(
                 gray,
                 domain_local,
-                image_rgb=image_rgb if use_color_any else None,
+                image_rgb=None,
             )
+            rgb_trench_color_norm = np.asarray(rgb_trench_norm, np.float32)
+            color_anomaly_norm = None
+            if use_color_any:
+                rgb_trench_color_norm, _, _, _, color_anomaly_norm, _ = _compute_rgb_trench_signal(
+                    gray,
+                    domain_local,
+                    image_rgb=image_rgb,
+                )
             shared_timing["rgb_cues_s"] = float(time.perf_counter() - t_rgb_cues0)
             rgb_bundle.update({
                 "available": True,
                 "gray": np.asarray(gray, np.float32),
                 "rgb_trench_norm": np.asarray(rgb_trench_norm, np.float32),
+                "rgb_trench_color_norm": np.asarray(rgb_trench_color_norm, np.float32),
                 "ridge_norm": np.asarray(ridge_norm, np.float32),
                 "valley_norm": np.asarray(valley_norm, np.float32),
                 "edge_suppress_norm": np.asarray(edge_suppress_norm, np.float32),
+                "color_anomaly_norm": np.asarray(color_anomaly_norm, np.float32) if use_color_any else None,
                 "cue_meta": rgb_meta if isinstance(rgb_meta, dict) else {},
                 "reason": None,
             })
@@ -1707,6 +1762,7 @@ def _run_single_midline_method(
             "valley_norm": None,
             "rgb_cue_norm": None,
             "edge_suppress_norm": None,
+            "color_anomaly_norm": None,
             "dt_term": None,
             "multi_cue_term": None,
             "costmap": None,
@@ -1775,7 +1831,7 @@ def _run_single_midline_method(
         if not bool(depth_bundle.get("available", False)):
             out["meta"]["reason"] = str(depth_bundle.get("reason", "multi_cue_precompute_failed"))
             _log_method_failure(method_key, "multi_cue_precompute_failed", depth_bundle)
-            if str(method_key) in ("dt_depth", "dt_ridge_valley_depth", "dt_ridge_color_depth"):
+            if str(method_key) in ("dt_depth", "dt_trench_depth", "dt_trench_color_depth"):
                 raise RuntimeError(f"[CRITICAL] Depth required but failed for {method_key}")
             timing["total_s"] = float(time.perf_counter() - t0_method)
             return out
@@ -1795,13 +1851,17 @@ def _run_single_midline_method(
             _log_method_failure(method_key, "rgb_precompute_failed", rgb_bundle)
             timing["total_s"] = float(time.perf_counter() - t0_method)
             return out
+        use_color = bool(method_spec.get("use_color", False))
         ridge_norm = rgb_bundle.get("ridge_norm")
         valley_norm = rgb_bundle.get("valley_norm")
-        rgb_cue_norm = rgb_bundle.get("rgb_trench_norm")
+        rgb_cue_norm = rgb_bundle.get("rgb_trench_color_norm" if use_color else "rgb_trench_norm")
         out["debug"]["ridge_norm"] = np.asarray(ridge_norm, np.float32)
         out["debug"]["valley_norm"] = np.asarray(valley_norm, np.float32)
         out["debug"]["rgb_cue_norm"] = np.asarray(rgb_cue_norm, np.float32)
         out["debug"]["edge_suppress_norm"] = np.asarray(rgb_bundle.get("edge_suppress_norm"), np.float32)
+        out["debug"]["rgb_trench_intensity_norm"] = np.asarray(rgb_bundle.get("rgb_trench_norm"), np.float32)
+        out["debug"]["rgb_trench_color_norm"] = np.asarray(rgb_bundle.get("rgb_trench_color_norm"), np.float32) if use_color else None
+        out["debug"]["color_anomaly_norm"] = np.asarray(rgb_bundle.get("color_anomaly_norm"), np.float32) if use_color else None
 
     print(
         f"[COSTMAP_IN] method={method_key} dom_shape={tuple(dom.shape)} dom_nz={int(np.sum(dom))} "
@@ -1809,7 +1869,7 @@ def _run_single_midline_method(
         f"dtn_max={float(dtn[dom > 0].max()) if np.any(dom) else 'N/A'}",
         flush=True,
     )
-    costmaps, score_debug, cost_meta = _build_ridge_valley_method_costmaps(
+    costmaps, score_debug, cost_meta = _build_trench_valley_method_costmaps(
         dom,
         dtn,
         method_key=str(method_key),
@@ -1937,8 +1997,6 @@ def _run_single_midline_method(
     out["normals_diag"] = normals_diag
     out["debug"]["dt_term"] = score_debug.get("dt_term")
     out["debug"]["multi_cue_term"] = score_debug.get("multi_cue_term")
-    out["debug"]["ridge_norm"] = score_debug.get("ridge_term")
-    out["debug"]["valley_norm"] = score_debug.get("valley_term")
     out["debug"]["rgb_cue_norm"] = score_debug.get("rgb_cue_term")
     out["debug"]["costmap"] = np.asarray(route_costmap, np.float32)
     out["debug"]["selected_cost_key"] = str(selected_key)
@@ -2000,9 +2058,9 @@ def compute_midline_method_variants_and_normals(
     Compute the 5-method thesis family in one pass:
       dt
       dt_depth
-      dt_ridge_valley
-      dt_ridge_valley_depth
-      dt_ridge_color_depth
+      dt_trench
+      dt_trench_depth
+      dt_trench_color_depth
     """
     if snap_kwargs is None:
         snap_kwargs = {}
@@ -2126,9 +2184,9 @@ def compute_midline_methods_and_normals(
 
     methods = res.get("methods", {}) if isinstance(res, dict) else {}
     m_dt = methods.get("dt", {}) if isinstance(methods.get("dt", {}), dict) else {}
-    m_depth = methods.get("dt_ridge_color_depth", {}) if isinstance(methods.get("dt_ridge_color_depth", {}), dict) else {}
+    m_depth = methods.get("dt_trench_color_depth", {}) if isinstance(methods.get("dt_trench_color_depth", {}), dict) else {}
     if m_depth.get("midline") is None:
-        m_depth = methods.get("dt_ridge_valley_depth", {}) if isinstance(methods.get("dt_ridge_valley_depth", {}), dict) else {}
+        m_depth = methods.get("dt_trench_depth", {}) if isinstance(methods.get("dt_trench_depth", {}), dict) else {}
     if m_depth.get("midline") is None:
         m_depth = methods.get("dt_depth", {}) if isinstance(methods.get("dt_depth", {}), dict) else {}
     shared = res.get("shared", {}) if isinstance(res.get("shared", {}), dict) else {}
@@ -2148,7 +2206,7 @@ def compute_midline_methods_and_normals(
         mid_local_for_center = np.asarray(shared.get("mid_local", mid_xy), float)
         mask_local_for_center = (np.asarray(shared.get("mask_u8", crack_mask_u8)) > 0).astype(np.uint8)
         if domain_u8_used is not None and dt_float_used is not None:
-            centered_midline_local, t_centered = _compute_dt_ridge_midline(
+            centered_midline_local, t_centered = _compute_dt_trench_midline(
                 mid_local_for_center,
                 np.asarray(domain_u8_used, np.uint8),
                 np.asarray(dt_float_used, np.float32),

@@ -170,7 +170,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         import json
         import os
 
-        allowed = {"dt_depth", "dt_ridge_valley", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
+        allowed = {"dt_depth", "dt_trench", "dt_trench_depth", "dt_trench_color_depth"}
         p = best_json_path or self._best_ablation_json_path()
         if not os.path.isfile(p):
             return None
@@ -192,7 +192,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         import json
         import os
 
-        allowed = {"dt_depth", "dt_ridge_valley", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
+        allowed = {"dt_depth", "dt_trench", "dt_trench_depth", "dt_trench_color_depth"}
         p = best_json_path or self._best_ablation_json_path()
         if not os.path.isfile(p):
             raise RuntimeError(
@@ -411,7 +411,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         import numpy as np
 
         method_key = str(method_key or "").strip()
-        allowed = {"dt", "dt_depth", "dt_ridge_valley", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
+        allowed = {"dt", "dt_depth", "dt_trench", "dt_trench_depth", "dt_trench_color_depth"}
         if method_key not in allowed:
             print(f"[METHOD PAYLOAD] unsupported method key: {method_key}")
             return {}, {}
@@ -964,8 +964,9 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         # -- Hardcoded toggles for fast iteration --
         #resolved_indices = [0,101,97,108,113,129]
         #resolved_indices = [5,7,9,11,13,16,18,20,101,107,110,116]
-        resolved_indices = [9,20,101,110,116]
-        resolved_indices= None
+        #resolved_indices = [9,20,101,110,116]
+        #resolved_indices = [41]
+        #resolved_indices= None
         #base_names = ["10"]
         SKIP_ALREADY_PROCESSED = False
         SKIP_PASS1 = False   # skip GT supervision export (pass1) - use when supervision already exists

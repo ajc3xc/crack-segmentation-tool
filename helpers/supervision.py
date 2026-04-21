@@ -33,9 +33,10 @@ PER_ATOMIC_METHOD_DEBUG = False  # keep False: use aggregated atomic-all method 
 METHODS_RS3 = [
     "dt",
     "dt_depth",
-    "dt_ridge_valley",
-    "dt_ridge_valley_depth",
-    "dt_ridge_color_depth",
+    "dt_trench",
+    "dt_trench_rgb",
+    "dt_trench_depth",
+    "dt_trench_color_depth",
 ]
 ISOLATE_GT_BRANCH_GEOMETRY = False
 ISOLATE_GT_IMAGE = None
@@ -446,8 +447,8 @@ def _plot_single_debug(entry, gt_mask_u8, original_image, out_path):
     method_order = [
         ("dt", "DT", "white"),
         ("dt_depth", "Depth", "cyan"),
-        ("dt_ridge_valley_depth", "DT+Depth (ridge)", "magenta"),
-        ("dt_ridge_color_depth", "Final (multi-cue)", "yellow"),
+        ("dt_trench_depth", "DT+Depth (ridge)", "magenta"),
+        ("dt_trench_color_depth", "Final (multi-cue)", "yellow"),
     ]
     method_segs = []
     for mkey, label, color in method_order:
@@ -925,7 +926,7 @@ from helpers.supervision_midline_helpers import (
     METHOD_SPECS,
     compute_midline_method_variants_and_normals,
     compute_centered_midline_and_normals,
-    snap_polyline_to_dt_ridge,
+    snap_polyline_to_dt_trench,
     _dbg_coord,
 )
 
@@ -2103,9 +2104,10 @@ def _plot_territory_debug(
 
         for ax, title in zip(axes, titles):
             ax.imshow(img_crop[:, :, ::-1])  # BGR -> RGB
+            # Dark crack-mask underlay makes unclaimed pixels easier to see.
             gt_overlay = np.zeros((gt_crop.shape[0], gt_crop.shape[1], 4), float)
-            gt_overlay[..., :3] = (1.0, 1.0, 1.0)
-            gt_overlay[..., 3] = gt_crop.astype(float) * 0.12
+            gt_overlay[..., :3] = (0.15, 0.15, 0.15)
+            gt_overlay[..., 3] = gt_crop.astype(float) * 0.60
             ax.imshow(gt_overlay)
             ax.contour(gt_crop.astype(float), levels=[0.5], colors=["white"], linewidths=0.5, alpha=0.5)
             ax.set_title(title, fontsize=8)
@@ -2319,9 +2321,9 @@ def plot_depth_cost_diagnostic(
 
         if selected is None:
             for k in (
-                "dt_ridge_color_depth",
-                "dt_ridge_valley_depth",
-                "dt_ridge_valley",
+                "dt_trench_color_depth",
+                "dt_trench_depth",
+                "dt_trench",
                 "dt_depth",
                 "dt",
             ):
@@ -2335,8 +2337,8 @@ def plot_depth_cost_diagnostic(
         if dt_norm is not None:
             panels.append(("DT", _unit_as_is(dt_norm), "viridis"))
 
-        if "ridge_valley" in costmaps_dict:
-            panels.append(("Ridge/Valley", _unit_as_is(costmaps_dict["ridge_valley"]), "magma"))
+        if "trench" in costmaps_dict:
+            panels.append(("Trench", _unit_as_is(costmaps_dict["trench"]), "magma"))
         elif "rgb_cue" in costmaps_dict:
             panels.append(("RGB cue", _unit_as_is(costmaps_dict["rgb_cue"]), "magma"))
 
@@ -2381,9 +2383,15 @@ def build_global_cost_maps(branches, full_shape):
     global_cost = np.full((H, W), np.nan, dtype=np.float32)
     global_dt = np.full((H, W), np.nan, dtype=np.float32)
     global_rgb = np.full((H, W), np.nan, dtype=np.float32)
-    global_ridge = np.full((H, W), np.nan, dtype=np.float32)
+    global_trench = np.full((H, W), np.nan, dtype=np.float32)
     global_depth = np.full((H, W), np.nan, dtype=np.float32)
     global_recess = np.full((H, W), np.nan, dtype=np.float32)
+    global_rgb_intensity = np.full((H, W), np.nan, dtype=np.float32)
+    global_rgb_color = np.full((H, W), np.nan, dtype=np.float32)
+    global_valley = np.full((H, W), np.nan, dtype=np.float32)
+    global_ridge_frangi = np.full((H, W), np.nan, dtype=np.float32)
+    global_edge_suppress = np.full((H, W), np.nan, dtype=np.float32)
+    global_color_anomaly = np.full((H, W), np.nan, dtype=np.float32)
     global_count = np.zeros((H, W), np.float32)
     winner_id = np.full((H, W), -1, np.int32)
 
@@ -2423,6 +2431,9 @@ def build_global_cost_maps(branches, full_shape):
         ridge_src = _ks(b.get("ridge", None))
         depth_src = _ks(b.get("depth", None))
         recess_src = _ks(b.get("recess_norm", None))
+        valley_src = _ks(b.get("valley_norm", None))
+        ridge_frangi_src = _ks(b.get("ridge_norm", None))
+        edge_suppress_src = _ks(b.get("edge_suppress_norm", None))
         cost_src = _ks(b.get("final_cost", None))
 
         bbox = b.get("bbox", None)
@@ -2463,16 +2474,28 @@ def build_global_cost_maps(branches, full_shape):
 
         _write(global_dt, dt_src, y0, yy1, x0, xx1, mode="max")
         _write(global_rgb, rgb_src, y0, yy1, x0, xx1, mode="max")
-        _write(global_ridge, ridge_src, y0, yy1, x0, xx1, mode="max")
+        _write(global_trench, ridge_src, y0, yy1, x0, xx1, mode="max")
         _write(global_depth, depth_src, y0, yy1, x0, xx1, mode="max")
         _write(global_recess, recess_src, y0, yy1, x0, xx1, mode="max")
+        _write(global_rgb_intensity, _ks(b.get("rgb_trench_intensity_norm", None)), y0, yy1, x0, xx1, mode="max")
+        _write(global_rgb_color, _ks(b.get("rgb_trench_color_norm", None)), y0, yy1, x0, xx1, mode="max")
+        _write(global_valley, valley_src, y0, yy1, x0, xx1, mode="max")
+        _write(global_ridge_frangi, ridge_frangi_src, y0, yy1, x0, xx1, mode="max")
+        _write(global_edge_suppress, edge_suppress_src, y0, yy1, x0, xx1, mode="max")
+        _write(global_color_anomaly, _ks(b.get("color_anomaly_norm", None)), y0, yy1, x0, xx1, mode="max")
 
     return {
         "dt": global_dt.astype(np.float32, copy=False),
         "rgb": global_rgb.astype(np.float32, copy=False),
-        "ridge": global_ridge.astype(np.float32, copy=False),
+        "ridge": global_trench.astype(np.float32, copy=False),
         "depth": global_depth.astype(np.float32, copy=False),
         "recess": global_recess.astype(np.float32, copy=False),
+        "rgb_intensity": global_rgb_intensity.astype(np.float32, copy=False),
+        "rgb_color": global_rgb_color.astype(np.float32, copy=False),
+        "valley": global_valley.astype(np.float32, copy=False),
+        "ridge_frangi": global_ridge_frangi.astype(np.float32, copy=False),
+        "edge_suppress": global_edge_suppress.astype(np.float32, copy=False),
+        "color_anomaly": global_color_anomaly.astype(np.float32, copy=False),
         "cost": global_cost.astype(np.float32, copy=False),
         "count": global_count.astype(np.float32, copy=False),
         "winner_id": winner_id.astype(np.int32, copy=False),
@@ -2562,8 +2585,14 @@ def save_global_cost_panel(
     cost = _ks(maps.get("cost", None))
     rgb = _ks(maps.get("rgb", None))
     ridge = _ks(maps.get("ridge", None))
+    rgb_intensity_raw = _ks(maps.get("rgb_intensity", None))
+    rgb_color_raw = _ks(maps.get("rgb_color", None))
+    valley = _ks(maps.get("valley", None))
+    ridge_frangi = _ks(maps.get("ridge_frangi", None))
+    edge_sup = _ks(maps.get("edge_suppress", None))
+    color_anomaly_raw = _ks(maps.get("color_anomaly", None))
     if ridge is None:
-        ridge = _ks(maps.get("ridge_valley", None))
+        ridge = _ks(maps.get("trench", None))
 
     H = W = None
     M = None
@@ -2604,6 +2633,12 @@ def save_global_cost_panel(
     dt_v = _norm_cost(dt, mask=crack_mask_u8)
     rgb_v = _norm_rgb(rgb, mask=crack_mask_u8)
     ridge_v = _norm_rgb(ridge, mask=crack_mask_u8)
+    rgb_intensity_v = _norm_rgb(rgb_intensity_raw, mask=crack_mask_u8)
+    rgb_color_v = _norm_rgb(rgb_color_raw, mask=crack_mask_u8)
+    valley_v = _norm_rgb(valley, mask=crack_mask_u8)
+    ridge_frangi_v = _norm_rgb(ridge_frangi, mask=crack_mask_u8)
+    edge_sup_v = _unit(edge_sup, mask=crack_mask_u8)
+    color_anomaly_v = _norm_rgb(color_anomaly_raw, mask=crack_mask_u8)
     depth_v = _unit(depth, mask=crack_mask_u8)
     recess_v = _unit(recess, mask=crack_mask_u8)
     cost_v = _norm_cost(cost, mask=crack_mask_u8)
@@ -2615,19 +2650,41 @@ def save_global_cost_panel(
         if not np.any(np.isfinite(a)):
             return False
         vals = a[np.isfinite(a)]
-        return bool((vals.size > 10) and (float(np.nanstd(vals)) > 1e-6))
+        return bool((vals.size > 10) and (float(np.nanstd(vals)) > 1e-8))
+
+    _valley_std = float(np.nanstd(valley_v[np.isfinite(valley_v)])) if valley_v is not None and np.any(np.isfinite(valley_v)) else float("nan")
+    _ridge_std = float(np.nanstd(ridge_frangi_v[np.isfinite(ridge_frangi_v)])) if ridge_frangi_v is not None and np.any(np.isfinite(ridge_frangi_v)) else float("nan")
+    print(
+        f"[PANEL DBG] valley_v={None if valley_v is None else 'ok'} "
+        f"ridge_v={None if ridge_frangi_v is None else 'ok'} "
+        f"rgb_v={None if rgb_color_v is None else 'ok'} "
+        f"edge_v={None if edge_sup_v is None else 'ok'} "
+        f"valley_std={_valley_std:.6f} "
+        f"ridge_std={_ridge_std:.6f}"
+    )
 
     panels = []
     if _has_signal(dt_v):
         panels.append(("DT cost", dt_v, "inferno"))
-    if _has_signal(rgb_v):
-        panels.append(("RGB cue", rgb_v, "magma"))
-    if _has_signal(ridge_v):
-        panels.append(("Ridge / Valley", ridge_v, "cividis"))
     if _has_signal(depth_v):
         panels.append(("Depth map", depth_v, "viridis"))
     if _has_signal(recess_v):
-        panels.append(("Depth signal", recess_v, "plasma"))
+        panels.append(("Depth recess", recess_v, "plasma"))
+    if _has_signal(ridge_frangi_v):
+        panels.append(("Frangi ridge", ridge_frangi_v, "cividis"))
+    if _has_signal(valley_v):
+        panels.append(("LoG+Sobel valley", valley_v, "hot"))
+    if _has_signal(edge_sup_v):
+        panels.append(("Edge suppression", edge_sup_v, "cool"))
+    if _has_signal(color_anomaly_v):
+        panels.append(("Color anomaly", color_anomaly_v, "RdPu"))
+
+    # One fused trench panel — label reflects whether color was active
+    _color_active = _has_signal(color_anomaly_v)
+    _fused = rgb_color_v if (_color_active and _has_signal(rgb_color_v)) else rgb_intensity_v
+    if _has_signal(_fused):
+        panels.append(("RGB trench" if _color_active else "Intensity trench", _fused, "magma"))
+
     if cost_v is not None and np.any(np.isfinite(cost_v)):
         panels.append(("Final cost", cost_v, "viridis"))
 
@@ -2983,9 +3040,9 @@ def export_gt_centering_metrics(
     method_cmp_specs = [
         ("et_vs_dt", "dt"),
         ("et_vs_dt_depth", "dt_depth"),
-        ("et_vs_dt_ridge_valley", "dt_ridge_valley"),
-        ("et_vs_dt_ridge_valley_depth", "dt_ridge_valley_depth"),
-        ("et_vs_dt_ridge_color_depth", "dt_ridge_color_depth"),
+        ("et_vs_dt_trench", "dt_trench"),
+        ("et_vs_dt_trench_depth", "dt_trench_depth"),
+        ("et_vs_dt_trench_color_depth", "dt_trench_color_depth"),
     ]
 
     def _coerce_seg_list(entry, *, seg_keys=(), packed_keys=()):
@@ -3057,6 +3114,28 @@ def export_gt_centering_metrics(
                     "g22": np.nan,
                     "g33": np.nan,
                 }, et_mid, pred_mid)
+
+            centered_mid = np.asarray(entry.get("centered_midline", []), float)
+            if centered_mid.ndim == 2 and centered_mid.shape[1] == 2 and len(centered_mid) >= 2:
+                _queue_metric_row({
+                    "image": base_name,
+                    "crack_id": cid,
+                    "crack_kind": kind,
+                    "comparison_label": "manual_vs_centered",
+                    "variant_id": "centered",
+                    "segment_index": int(seg_idx),
+                    "branch_id": int(branch_id),
+                    "is_atomic": 1,
+                    "is_combined": 0,
+                    "is_noncombined_atomic": int(cid not in combined_member_ids),
+                    "geometry_type": "centering_displacement",
+                    "length_px": float(np.sum(np.hypot(np.diff(et_mid[:, 0]), np.diff(et_mid[:, 1])))),
+                    "bbox_area": bbox_area,
+                    "os_mode": "centered",
+                    "g11": np.nan,
+                    "g22": np.nan,
+                    "g33": np.nan,
+                }, et_mid, centered_mid)
             continue
 
         if kind == "combined":
@@ -3122,6 +3201,63 @@ def export_gt_centering_metrics(
                         "g33": np.nan,
                     }, et_all, pred_all)
 
+            centered_parts = _coerce_seg_list(
+                entry,
+                seg_keys=("centered_midline_segments",),
+                packed_keys=("centered_midline",),
+            )
+            aligned_centered = len(et_parts) > 0 and len(et_parts) == len(centered_parts)
+            if aligned_centered:
+                for si, (et_mid, centered_mid) in enumerate(zip(et_parts, centered_parts)):
+                    et_mid = np.asarray(et_mid, float)
+                    centered_mid = np.asarray(centered_mid, float)
+                    if et_mid.ndim != 2 or centered_mid.ndim != 2 or len(et_mid) < 2 or len(centered_mid) < 2:
+                        continue
+                    bm = et_meta[si] if si < len(et_meta) and isinstance(et_meta[si], dict) else {}
+                    branch_id = int(bm.get("branch_id", si))
+                    _queue_metric_row({
+                        "image": base_name,
+                        "crack_id": cid,
+                        "crack_kind": kind,
+                        "comparison_label": "manual_vs_centered",
+                        "variant_id": "centered",
+                        "segment_index": int(si),
+                        "branch_id": int(branch_id),
+                        "is_atomic": 0,
+                        "is_combined": 1,
+                        "is_noncombined_atomic": 0,
+                        "geometry_type": "centering_displacement",
+                        "length_px": float(np.sum(np.hypot(np.diff(et_mid[:, 0]), np.diff(et_mid[:, 1])))),
+                        "bbox_area": bbox_area,
+                        "os_mode": "centered",
+                        "g11": np.nan,
+                        "g22": np.nan,
+                        "g33": np.nan,
+                    }, et_mid, centered_mid)
+            else:
+                et_all = np.vstack(et_parts) if et_parts else np.empty((0, 2), float)
+                centered_all = np.vstack(centered_parts) if centered_parts else np.empty((0, 2), float)
+                if len(et_all) >= 2 and len(centered_all) >= 2:
+                    _queue_metric_row({
+                        "image": base_name,
+                        "crack_id": cid,
+                        "crack_kind": kind,
+                        "comparison_label": "manual_vs_centered",
+                        "variant_id": "centered",
+                        "segment_index": -1,
+                        "branch_id": -1,
+                        "is_atomic": 0,
+                        "is_combined": 1,
+                        "is_noncombined_atomic": 0,
+                        "geometry_type": "centering_displacement_concat_fallback",
+                        "length_px": float(np.sum(np.hypot(np.diff(et_all[:, 0]), np.diff(et_all[:, 1])))),
+                        "bbox_area": bbox_area,
+                        "os_mode": "centered",
+                        "g11": np.nan,
+                        "g22": np.nan,
+                        "g33": np.nan,
+                    }, et_all, centered_all)
+
     if metric_jobs:
         t_met0 = time.perf_counter()
         metric_out = []
@@ -3171,12 +3307,28 @@ def export_gt_centering_metrics(
 
     if df_all.empty:
         df_all.to_csv(out_csv_all, index=False)
+        centering_csv = os.path.join(analysis_dir, "gt_centering_displacement_metrics.csv")
+        df_all.to_csv(centering_csv, index=False)
         pd.DataFrame([]).to_csv(os.path.join(analysis_dir, "gt_ablation_midline_weighted_summary.csv"), index=False)
+        print(f"[GT_SUP] wrote centering displacement metrics -> {centering_csv}")
         print(f"[GT_SUP] wrote ablation metrics -> {out_csv_all}")
         return df_all
 
     df_all.to_csv(out_csv_all, index=False)
+    # Split centering displacement rows into separate CSV
+    df_centering = df_all[df_all["comparison_label"] == "manual_vs_centered"].copy()
+    df_variants = df_all[df_all["comparison_label"] != "manual_vs_centered"].copy()
+
+    centering_csv = os.path.join(analysis_dir, "gt_centering_displacement_metrics.csv")
+    df_centering.to_csv(centering_csv, index=False)
+    print(f"[GT_SUP] wrote centering displacement metrics -> {centering_csv}")
+
+    # Overwrite main ablation CSV with variants only
+    df_variants.to_csv(out_csv_all, index=False)
     print(f"[GT_SUP] wrote ablation metrics -> {out_csv_all}")
+
+    # Update df_all for downstream summary to variants only
+    df_all = df_variants
 
     summary_rows = []
     for (cmp_label, variant_id), dcmp in df_all.groupby(["comparison_label", "variant_id"], dropna=False):
@@ -3429,9 +3581,9 @@ def export_gt_supervision_for_image(
         methods_blob = timing_blob.get("methods", {}) if isinstance(timing_blob.get("methods", {}), dict) else {}
         if methods_blob:
             m_dt = methods_blob.get("dt", {}) if isinstance(methods_blob.get("dt", {}), dict) else {}
-            m_depth = methods_blob.get("dt_ridge_color_depth", {}) if isinstance(methods_blob.get("dt_ridge_color_depth", {}), dict) else {}
+            m_depth = methods_blob.get("dt_trench_color_depth", {}) if isinstance(methods_blob.get("dt_trench_color_depth", {}), dict) else {}
             if not m_depth:
-                m_depth = methods_blob.get("dt_ridge_valley_depth", {}) if isinstance(methods_blob.get("dt_ridge_valley_depth", {}), dict) else {}
+                m_depth = methods_blob.get("dt_trench_depth", {}) if isinstance(methods_blob.get("dt_trench_depth", {}), dict) else {}
             if not m_depth:
                 m_depth = methods_blob.get("dt_depth", {}) if isinstance(methods_blob.get("dt_depth", {}), dict) else {}
             timing_totals["dt_compute_s"] += float(m_dt.get("dt_compute_s", 0.0) or 0.0)
@@ -3461,9 +3613,10 @@ def export_gt_supervision_for_image(
     method_style = {
         "dt": {"slug": "dt", "label": "DT", "compare_label": "DT Midline", "color": "cyan"},
         "dt_depth": {"slug": "dt_depth", "label": "DT + Depth", "compare_label": "DT + Depth Midline", "color": "magenta"},
-        "dt_ridge_valley": {"slug": "dt_ridge_valley", "label": "DT + Ridge/Valley", "compare_label": "DT + Ridge/Valley Midline", "color": "deepskyblue"},
-        "dt_ridge_valley_depth": {"slug": "dt_ridge_valley_depth", "label": "DT + Ridge/Valley + Depth", "compare_label": "DT + Ridge/Valley + Depth Midline", "color": "orange"},
-        "dt_ridge_color_depth": {"slug": "dt_ridge_color_depth", "label": "DT + Ridge/Valley + RGB + Depth", "compare_label": "DT + Ridge/Valley + RGB + Depth Midline", "color": "lime"},
+        "dt_trench": {"slug": "dt_trench", "label": "DT + Trench", "compare_label": "DT + Trench Midline", "color": "deepskyblue"},
+        "dt_trench_rgb": {"slug": "dt_trench_rgb", "label": "DT + Trench + RGB", "compare_label": "DT + Trench + RGB Midline", "color": "yellow"},
+        "dt_trench_depth": {"slug": "dt_trench_depth", "label": "DT + Trench + Depth", "compare_label": "DT + Trench + Depth Midline", "color": "orange"},
+        "dt_trench_color_depth": {"slug": "dt_trench_color_depth", "label": "DT + Trench + RGB + Depth", "compare_label": "DT + Trench + RGB + Depth Midline", "color": "lime"},
     }
     ATOMIC_PER_SEG_DEBUG = False  # temporary: disable per-atomic seg_### debug folders
 
@@ -3526,9 +3679,9 @@ def export_gt_supervision_for_image(
         mk = str(method_key)
         if mk == "dt_depth" and not has_depth:
             return False
-        if mk == "dt_ridge_valley" and not has_rgb:
+        if mk in {"dt_trench", "dt_trench_rgb"} and not has_rgb:
             return False
-        if mk in {"dt_ridge_valley_depth", "dt_ridge_color_depth"} and (not has_rgb or not has_depth):
+        if mk in {"dt_trench_depth", "dt_trench_color_depth"} and (not has_rgb or not has_depth):
             return False
         return True
 
@@ -3597,9 +3750,10 @@ def export_gt_supervision_for_image(
     right_title_by_cost_key = {
         "dt": "DT-preferred region",
         "dt_depth": "DT + depth preferred region",
-        "dt_ridge_valley": "DT + ridge/valley preferred region",
-        "dt_ridge_valley_depth": "DT + ridge/valley + depth preferred region",
-        "dt_ridge_color_depth": "DT + ridge/valley + RGB + depth preferred region",
+        "dt_trench": "DT + ridge/valley preferred region",
+        "dt_trench_rgb": "DT + ridge/valley + RGB preferred region",
+        "dt_trench_depth": "DT + ridge/valley + depth preferred region",
+        "dt_trench_color_depth": "DT + ridge/valley + RGB + depth preferred region",
     }
 
     def _canonicalize_segments_with_meta(
@@ -4049,8 +4203,8 @@ def export_gt_supervision_for_image(
             methods = method_res.get("methods", {}) if isinstance(method_res.get("methods", {}), dict) else {}
             m1 = methods.get("dt", {}) if isinstance(methods.get("dt", {}), dict) else {}
             m3 = methods.get("dt_depth", {}) if isinstance(methods.get("dt_depth", {}), dict) else {}
-            m4 = methods.get("dt_ridge_valley_depth", {}) if isinstance(methods.get("dt_ridge_valley_depth", {}), dict) else {}
-            m5 = methods.get("dt_ridge_color_depth", {}) if isinstance(methods.get("dt_ridge_color_depth", {}), dict) else {}
+            m4 = methods.get("dt_trench_depth", {}) if isinstance(methods.get("dt_trench_depth", {}), dict) else {}
+            m5 = methods.get("dt_trench_color_depth", {}) if isinstance(methods.get("dt_trench_color_depth", {}), dict) else {}
             fused_pick = m5 if m5.get("midline", None) is not None else (m4 if m4.get("midline", None) is not None else m3)
             timing_by_method = _timing_by_method(methods)
             atomic_center_sec += _sum_centering_seconds({"methods": {k: (v.get("timing", {}) if isinstance(v, dict) else {}) for k, v in methods.items()}})
@@ -4116,8 +4270,8 @@ def export_gt_supervision_for_image(
 
             atomic_entry["multi_cue_cost_meta"] = {
                 "dt_depth": m3.get("meta", {}) if isinstance(m3.get("meta", {}), dict) else {},
-                "dt_ridge_valley_depth": m4.get("meta", {}) if isinstance(m4.get("meta", {}), dict) else {},
-                "dt_ridge_color_depth": m5.get("meta", {}) if isinstance(m5.get("meta", {}), dict) else {},
+                "dt_trench_depth": m4.get("meta", {}) if isinstance(m4.get("meta", {}), dict) else {},
+                "dt_trench_color_depth": m5.get("meta", {}) if isinstance(m5.get("meta", {}), dict) else {},
             }
             atomic_entry["timing"]["methods"] = timing_by_method
 
@@ -4225,7 +4379,7 @@ def export_gt_supervision_for_image(
                             pred_color="magenta",
                         )
 
-                    depth_lbl = "global" if mk in ("dt_depth", "dt_ridge_valley_depth", "dt_ridge_color_depth") else None
+                    depth_lbl = "global" if mk in ("dt_depth", "dt_trench_depth", "dt_trench_color_depth") else None
                     mslug = str(style.get("slug", mk))
                     out_cost = os.path.join(atomic_dbg_dir, f"{mslug}_cost.png")
                     _run_timed_plot(
@@ -4370,9 +4524,9 @@ def export_gt_supervision_for_image(
             for mk in METHODS_RS3:
                 style = method_style.get(mk, {})
                 mslug = str(style.get("slug", mk))
-                use_ridge = mk in {"dt_ridge_valley", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
-                use_depth = mk in {"dt_depth", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
-                use_rgb = mk == "dt_ridge_color_depth"
+                use_trench = mk in {"dt_trench", "dt_trench_rgb", "dt_trench_depth", "dt_trench_color_depth"}
+                use_depth = mk in {"dt_depth", "dt_trench_depth", "dt_trench_color_depth"}
+                use_rgb = mk in {"dt_trench_rgb", "dt_trench_color_depth"}
                 branches_for_global = []
                 for oi in sorted(atomic_results.keys()):
                     ae = atomic_results.get(oi, {})
@@ -4390,14 +4544,20 @@ def export_gt_supervision_for_image(
                         continue
                     x0, y0, bw, bh = [int(v) for v in bb]
                     rgb_src = _first_non_none(cmaps.get("rgb_cue", None), cmaps.get("rgb", None))
-                    ridge_src = _first_non_none(cmaps.get("ridge_valley", None), cmaps.get("dt_ridge_valley", None))
+                    ridge_src = _first_non_none(cmaps.get("trench", None), cmaps.get("dt_trench", None))
                     branches_for_global.append({
                         "bbox": [int(y0), int(y0 + a_sel.shape[0]), int(x0), int(x0 + a_sel.shape[1])],
                         "dt_norm": md.get("dt_norm", None),
                         "rgb": rgb_src if use_rgb else None,
-                        "ridge": ridge_src if use_ridge else None,
+                        "ridge": ridge_src if use_trench else None,
                         "depth": md.get("depth_norm", None) if use_depth else None,
                         "recess_norm": md.get("recess_norm", None) if use_depth else None,
+                        "rgb_trench_intensity_norm": md.get("rgb_trench_intensity_norm", None) if use_trench else None,
+                        "rgb_trench_color_norm": md.get("rgb_trench_color_norm", None) if use_trench else None,
+                        "valley_norm": md.get("valley_norm", None) if use_trench else None,
+                        "ridge_norm": md.get("ridge_norm", None) if use_trench else None,
+                        "edge_suppress_norm": md.get("edge_suppress_norm", None) if use_trench else None,
+                        "color_anomaly_norm": md.get("color_anomaly_norm", None) if use_trench else None,
                         "final_cost": a_sel,
                         "area": float(max(0, bw) * max(0, bh)),
                     })
@@ -5616,6 +5776,12 @@ def export_gt_supervision_for_image(
                                     "depth_norm": mdebug.get("depth_norm"),
                                     "recess_norm": mdebug.get("recess_norm"),
                                     "multi_cue_score": mdebug.get("score_for_refine"),
+                                    "rgb_trench_intensity_norm": mdebug.get("rgb_trench_intensity_norm"),
+                                    "rgb_trench_color_norm": mdebug.get("rgb_trench_color_norm"),
+                                    "valley_norm": mdebug.get("valley_norm"),
+                                    "ridge_norm": mdebug.get("ridge_norm"),
+                                    "edge_suppress_norm": mdebug.get("edge_suppress_norm"),
+                                    "color_anomaly_norm": mdebug.get("color_anomaly_norm"),
                                     "bx": int(bx),
                                     "by": int(by),
                                 })
@@ -5631,9 +5797,9 @@ def export_gt_supervision_for_image(
                     # after aggregation, so per-blob caches are no longer needed here.
 
                 m1_local = methods_local.get("dt", {}) if isinstance(methods_local.get("dt", {}), dict) else {}
-                fused_local = methods_local.get("dt_ridge_color_depth", {}) if isinstance(methods_local.get("dt_ridge_color_depth", {}), dict) else {}
+                fused_local = methods_local.get("dt_trench_color_depth", {}) if isinstance(methods_local.get("dt_trench_color_depth", {}), dict) else {}
                 if not fused_local:
-                    fused_local = methods_local.get("dt_ridge_valley_depth", {}) if isinstance(methods_local.get("dt_ridge_valley_depth", {}), dict) else {}
+                    fused_local = methods_local.get("dt_trench_depth", {}) if isinstance(methods_local.get("dt_trench_depth", {}), dict) else {}
                 if not fused_local:
                     fused_local = methods_local.get("dt_depth", {}) if isinstance(methods_local.get("dt_depth", {}), dict) else {}
                 if suppress_branch_reuse:
@@ -5648,9 +5814,9 @@ def export_gt_supervision_for_image(
 
             for seg_i, S, w_manual, methods_local, mask_use, bx, by, blob_id, blob_manual_seg, emit_cost_debug in seg_work_items:
                 m1_local = methods_local.get("dt", {}) if isinstance(methods_local.get("dt", {}), dict) else {}
-                fused_local = methods_local.get("dt_ridge_color_depth", {}) if isinstance(methods_local.get("dt_ridge_color_depth", {}), dict) else {}
+                fused_local = methods_local.get("dt_trench_color_depth", {}) if isinstance(methods_local.get("dt_trench_color_depth", {}), dict) else {}
                 if not fused_local:
-                    fused_local = methods_local.get("dt_ridge_valley_depth", {}) if isinstance(methods_local.get("dt_ridge_valley_depth", {}), dict) else {}
+                    fused_local = methods_local.get("dt_trench_depth", {}) if isinstance(methods_local.get("dt_trench_depth", {}), dict) else {}
                 if not fused_local:
                     fused_local = methods_local.get("dt_depth", {}) if isinstance(methods_local.get("dt_depth", {}), dict) else {}
 
@@ -6217,9 +6383,9 @@ def export_gt_supervision_for_image(
                         )
 
                     # (3) Global aggregated cost panel (MIN for final cost, AVG for intermediates).
-                    use_ridge = mk in {"dt_ridge_valley", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
-                    use_depth = mk in {"dt_depth", "dt_ridge_valley_depth", "dt_ridge_color_depth"}
-                    use_rgb = mk == "dt_ridge_color_depth"
+                    use_trench = mk in {"dt_trench", "dt_trench_rgb", "dt_trench_depth", "dt_trench_color_depth"}
+                    use_depth = mk in {"dt_depth", "dt_trench_depth", "dt_trench_color_depth"}
+                    use_rgb = mk in {"dt_trench_rgb", "dt_trench_color_depth"}
 
                     def _first_non_none(*vals):
                         for v in vals:
@@ -6239,7 +6405,7 @@ def export_gt_supervision_for_image(
                     for brec in branch_dbg_list:
                         cmaps = brec.get("costmaps", {}) if isinstance(brec.get("costmaps", {}), dict) else {}
                         rgb_src = _first_non_none(cmaps.get("rgb_cue", None), cmaps.get("rgb", None))
-                        ridge_src = _first_non_none(cmaps.get("ridge_valley", None), cmaps.get("dt_ridge_valley", None))
+                        ridge_src = _first_non_none(cmaps.get("trench", None), cmaps.get("dt_trench", None))
                         selected_b = cmaps.get("selected", None)
                         if selected_b is None:
                             sk = str(cmaps.get("selected_key", "dt"))
@@ -6255,9 +6421,15 @@ def export_gt_supervision_for_image(
                             "bbox": [by, by + int(a_sel.shape[0]), bx, bx + int(a_sel.shape[1])],
                             "dt_norm": _ks(brec.get("dt_norm")),
                             "rgb": _ks(rgb_src) if use_rgb else None,
-                            "ridge": _ks(ridge_src) if use_ridge else None,
+                            "ridge": _ks(ridge_src) if use_trench else None,
                             "depth": _ks(brec.get("depth_norm")) if use_depth else None,
                             "recess_norm": _ks(brec.get("recess_norm")) if use_depth else None,
+                            "rgb_trench_intensity_norm": _ks(brec.get("rgb_trench_intensity_norm")) if use_trench else None,
+                            "rgb_trench_color_norm": _ks(brec.get("rgb_trench_color_norm")) if use_trench else None,
+                            "valley_norm": _ks(brec.get("valley_norm")) if use_trench else None,
+                            "ridge_norm": _ks(brec.get("ridge_norm")) if use_trench else None,
+                            "edge_suppress_norm": _ks(brec.get("edge_suppress_norm")) if use_trench else None,
+                            "color_anomaly_norm": _ks(brec.get("color_anomaly_norm")) if use_trench else None,
                             "final_cost": _ks(a_sel),
                         })
                     if branches_for_global and not BATCH_PLOTS_ONLY:
@@ -6304,7 +6476,7 @@ def export_gt_supervision_for_image(
                             out_cost = os.path.join(method_dir, f"branch_{int(bidx):03d}_cost.png")
                             _cm = brec.get("costmaps", {}) if isinstance(brec.get("costmaps", {}), dict) else {}
                             _rgb_src = _first_non_none(_cm.get("rgb_cue"), _cm.get("rgb"))
-                            _ridge_src = _first_non_none(_cm.get("ridge_valley"), _cm.get("dt_ridge_valley"))
+                            _trench_src = _first_non_none(_cm.get("trench"), _cm.get("dt_trench"))
                             print(
                                 f"[COSTMAP KEYS] mk={mk} branch={int(bidx):03d} "
                                 f"keys={sorted(_cm.keys())} "
@@ -6682,6 +6854,9 @@ def export_gt_supervision_for_image(
         f"Mx:{t_metrics_export:.2f}s "
         f"T:{t_total:.2f}s"
     )
+
+
+
 
 
 
