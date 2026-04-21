@@ -1855,13 +1855,20 @@ def _run_single_midline_method(
         ridge_norm = rgb_bundle.get("ridge_norm")
         valley_norm = rgb_bundle.get("valley_norm")
         rgb_cue_norm = rgb_bundle.get("rgb_trench_color_norm" if use_color else "rgb_trench_norm")
-        out["debug"]["ridge_norm"] = np.asarray(ridge_norm, np.float32)
-        out["debug"]["valley_norm"] = np.asarray(valley_norm, np.float32)
         out["debug"]["rgb_cue_norm"] = np.asarray(rgb_cue_norm, np.float32)
-        out["debug"]["edge_suppress_norm"] = np.asarray(rgb_bundle.get("edge_suppress_norm"), np.float32)
-        out["debug"]["rgb_trench_intensity_norm"] = np.asarray(rgb_bundle.get("rgb_trench_norm"), np.float32)
-        out["debug"]["rgb_trench_color_norm"] = np.asarray(rgb_bundle.get("rgb_trench_color_norm"), np.float32) if use_color else None
-        out["debug"]["color_anomaly_norm"] = np.asarray(rgb_bundle.get("color_anomaly_norm"), np.float32) if use_color else None
+        if not bool(globals().get("BATCH_PLOTS_ONLY", True)):
+            out["debug"]["ridge_norm"] = np.asarray(ridge_norm, np.float16)
+            out["debug"]["valley_norm"] = np.asarray(valley_norm, np.float16)
+            out["debug"]["edge_suppress_norm"] = np.asarray(
+                rgb_bundle.get("edge_suppress_norm"), np.float16)
+            out["debug"]["rgb_trench_intensity_norm"] = np.asarray(
+                rgb_bundle.get("rgb_trench_norm"), np.float16)
+            out["debug"]["rgb_trench_color_norm"] = (
+                np.asarray(rgb_bundle.get("rgb_trench_color_norm"), np.float16)
+                if use_color else None)
+            out["debug"]["color_anomaly_norm"] = (
+                np.asarray(rgb_bundle.get("color_anomaly_norm"), np.float16)
+                if use_color else None)
 
     print(
         f"[COSTMAP_IN] method={method_key} dom_shape={tuple(dom.shape)} dom_nz={int(np.sum(dom))} "

@@ -966,7 +966,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         #resolved_indices = [5,7,9,11,13,16,18,20,101,107,110,116]
         #resolved_indices = [9,20,101,110,116]
         #resolved_indices = [41]
-        #resolved_indices= None
+        resolved_indices= None
         #base_names = ["10"]
         SKIP_ALREADY_PROCESSED = False
         SKIP_PASS1 = False   # skip GT supervision export (pass1) - use when supervision already exists

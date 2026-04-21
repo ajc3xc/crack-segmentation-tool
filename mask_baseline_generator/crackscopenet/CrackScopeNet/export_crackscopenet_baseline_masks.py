@@ -13,8 +13,12 @@ from models.crackscopenet import CrackScopeNet
 
 # Hardcoded config (simple export-only script)
 INPUT_DIR = Path(r"C:\Users\13144\Documents\Masters_Thesis\datasets\SUT_Compressed\Original_Image")
-OUTPUT_DIR = Path(r"C:\Users\13144\Documents\Masters_Thesis\datasets\SUT_Compressed\seg_baselines\crackscopenet")
-WEIGHTS_PATH = Path(r"C:\Users\13144\Documents\Masters_Thesis\CURRENT_PROJECT_CODE\mask_baseline_generator\crackscopenet\crackscopenet_9k\best_model\model.pdparams")
+#CrackScopeNet
+#OUTPUT_DIR = Path(r"C:\Users\13144\Documents\Masters_Thesis\datasets\SUT_Compressed\seg_baselines\crackscopenet")
+#WEIGHTS_PATH = Path(r"C:\Users\13144\Documents\Masters_Thesis\CURRENT_PROJECT_CODE\mask_baseline_generator\crackscopenet\crackscopenet_9k\best_model\model.pdparams")
+#CrackScopeNet9k_Large
+OUTPUT_DIR = Path(r"C:\Users\13144\Documents\Masters_Thesis\datasets\SUT_Compressed\seg_baselines\crackscopenet_large")
+WEIGHTS_PATH = Path(r"C:\Users\13144\Documents\Masters_Thesis\CURRENT_PROJECT_CODE\mask_baseline_generator\crackscopenet\crackscopenet_9k_large\best_model\model.pdparams")
 DEVICE = "gpu"  # "cpu" or "gpu"
 MAX_IMAGES = None  # e.g., 100 for quick test
 OUTPUT_MODE = "rerun"  # "skip", "rerun", "recreate"
