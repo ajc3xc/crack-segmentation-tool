@@ -2230,7 +2230,7 @@ def run_distribution_analysis_from_npz(
         os.path.join(dist_dir, "dataset_method_quantile_iqr_outlier_bars.png"),
     )
 
-    # Dataset-concatenated histograms by method
+    # Dataset-concatenated histograms
     hist_curve_rows = []
     dataset_summary_rows = []
     method_prob: Dict[str, np.ndarray] = {}

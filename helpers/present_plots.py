@@ -2450,7 +2450,7 @@ def plot_rs3_midline_decomposition(
     title="Midline Metrics - Full Decomposition (All Metrics)",
 ):
     """
-    Edge-decomposition style stacked chart for all midline metrics by method/group.
+    Edge-decomposition style stacked chart for all midline metrics/group.
     """
     import os
     import numpy as np

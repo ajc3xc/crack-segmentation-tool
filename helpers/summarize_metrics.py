@@ -322,7 +322,7 @@ def _plot_width_metric(
         ax.legend(
             handles=[
                 Patch(facecolor=cmap.get("ET", "#d62728"), edgecolor="none", label="ET"),
-                Patch(facecolor=cmap.get("model", "#1f77b4"), edgecolor="none", label="model (dt/dt_depth)"),
+                Patch(facecolor=cmap.get("model", "#1f77b4"), edgecolor="none", label="model"),
                 Patch(facecolor=cmap.get("baseline", "#2ca02c"), edgecolor="none", label="baseline"),
             ],
             loc="best",
@@ -383,7 +383,7 @@ def _plot_width_metric(
     ax.legend(
         handles=[
             Patch(facecolor=cmap.get("ET", "#d62728"), edgecolor="none", label="ET"),
-            Patch(facecolor=cmap.get("model", "#1f77b4"), edgecolor="none", label="model (dt/dt_depth)"),
+            Patch(facecolor=cmap.get("model", "#1f77b4"), edgecolor="none", label="model"),
             Patch(facecolor=cmap.get("baseline", "#2ca02c"), edgecolor="none", label="baseline"),
             Patch(facecolor="#f58518", edgecolor="none", label="IQR"),
         ],
@@ -585,11 +585,17 @@ def _aggregate_mask_metrics(
             df["method"] = "geodesic"
         if "crack_type" not in df.columns:
             df["crack_type"] = "unknown"
-        df["variant"] = (
-            df["supervision"].astype(str).str.strip()
-            + ":"
-            + df["method"].astype(str).str.strip()
-        )
+
+        def _make_variant_label(row):
+            sup = str(row.get("supervision", "") or "").strip().lower()
+            method = str(row.get("method", "") or "").strip()
+            if sup == "baseline":
+                return method
+            if sup == "et" or _is_et_like(method):
+                return "ET"
+            return method if method else sup
+
+        df["variant"] = df.apply(_make_variant_label, axis=1)
         frames.append(df)
 
     if not frames:
@@ -863,7 +869,7 @@ def _aggregate_mask_metrics(
                     for ax in axes:
                         ax.set_xticks(x)
                         ax.set_xticklabels(labels, rotation=20, ha="right")
-                    fig.suptitle("Dataset Mask ASSD / HD95 by method", fontsize=11, fontweight="bold")
+                    fig.suptitle("Dataset Mask ASSD / HD95", fontsize=11, fontweight="bold")
                     plt.tight_layout()
                     out_png = os.path.join(mask_dir, "dataset_mask_assd_hd95.png")
                     fig.savefig(out_png, bbox_inches="tight")
@@ -1152,7 +1158,7 @@ def _aggregate_width_metrics(
                         df=_df_total,
                         metric_col="mae_px",
                         out_png=os.path.join(overview_dir, "dataset_width_mae_by_method.png"),
-                        title="Dataset width MAE by method (mean + IQR + outliers)",
+                        title="Dataset width MAE (mean + IQR + outliers)",
                         ylabel="MAE (px)",
                         plot_type="bar",
                         color_map=COLOR_MAP,
@@ -1164,7 +1170,7 @@ def _aggregate_width_metrics(
                         df=_df_total,
                         metric_col="mae_px",
                         out_png=os.path.join(overview_dir, "dataset_width_mae_box_by_method.png"),
-                        title="Dataset width MAE by method (box+whisker)",
+                        title="Dataset width MAE (box+whisker)",
                         ylabel="MAE (px)",
                         plot_type="box",
                         color_map=COLOR_MAP,
@@ -1181,7 +1187,7 @@ def _aggregate_width_metrics(
                         df=_df_total,
                         metric_col="rmse_px",
                         out_png=os.path.join(overview_dir, "dataset_width_rmse_by_method.png"),
-                        title="Dataset width RMSE by method (mean + IQR + outliers)",
+                        title="Dataset width RMSE (mean + IQR + outliers)",
                         ylabel="RMSE (px)",
                         plot_type="bar",
                         color_map=COLOR_MAP,
@@ -1193,7 +1199,7 @@ def _aggregate_width_metrics(
                         df=_df_total,
                         metric_col="rmse_px",
                         out_png=os.path.join(overview_dir, "dataset_width_rmse_box_by_method.png"),
-                        title="Dataset width RMSE by method (box+whisker)",
+                        title="Dataset width RMSE (box+whisker)",
                         ylabel="RMSE (px)",
                         plot_type="box",
                         color_map=COLOR_MAP,
@@ -1303,7 +1309,7 @@ def _aggregate_width_metrics(
             ax.legend(
                 handles=[
                     Patch(facecolor=COLOR_MAP["ET"], edgecolor="none", label="ET"),
-                    Patch(facecolor=COLOR_MAP["model"], edgecolor="none", label="model (dt/dt_depth)"),
+                    Patch(facecolor=COLOR_MAP["model"], edgecolor="none", label="model"),
                     Patch(facecolor=COLOR_MAP["baseline"], edgecolor="none", label="baseline"),
                     Patch(facecolor="#f58518", edgecolor="none", label="IQR"),
                 ],
@@ -1315,19 +1321,19 @@ def _aggregate_width_metrics(
             fig.savefig(out_png, bbox_inches="tight")
             plt.close(fig)
 
-        _plot_lw(lw_df, "mae_px", "mae_q1", "mae_q3", os.path.join(length_weighted_dir, "dataset_width_lw_mae.png"), "Length-weighted width MAE by method", "MAE (px)")
+        _plot_lw(lw_df, "mae_px", "mae_q1", "mae_q3", os.path.join(length_weighted_dir, "dataset_width_lw_mae.png"), "Length-weighted width MAE", "MAE (px)")
         lw_outputs["width_lw_mae_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_mae.png")
-        _plot_lw(lw_df, "rmse_px", "rmse_q1", "rmse_q3", os.path.join(length_weighted_dir, "dataset_width_lw_rmse.png"), "Length-weighted width RMSE by method", "RMSE (px)")
+        _plot_lw(lw_df, "rmse_px", "rmse_q1", "rmse_q3", os.path.join(length_weighted_dir, "dataset_width_lw_rmse.png"), "Length-weighted width RMSE", "RMSE (px)")
         lw_outputs["width_lw_rmse_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_rmse.png")
-        _plot_lw(lw_df, "abs_bias_px", "abs_bias_q1", "abs_bias_q3", os.path.join(length_weighted_dir, "dataset_width_lw_bias.png"), "Length-weighted width |bias| by method", "|bias| (px)")
+        _plot_lw(lw_df, "abs_bias_px", "abs_bias_q1", "abs_bias_q3", os.path.join(length_weighted_dir, "dataset_width_lw_bias.png"), "Length-weighted width |bias|", "|bias| (px)")
         lw_outputs["width_lw_bias_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_bias.png")
 
         lw_no_et = lw_df[~lw_df["method"].astype(str).map(_is_et_like)].copy()
-        _plot_lw(lw_no_et, "mae_px", "mae_q1", "mae_q3", os.path.join(length_weighted_dir, "dataset_width_lw_mae_no_et.png"), "Length-weighted width MAE by method (no ET)", "MAE (px)")
+        _plot_lw(lw_no_et, "mae_px", "mae_q1", "mae_q3", os.path.join(length_weighted_dir, "dataset_width_lw_mae_no_et.png"), "Length-weighted width MAE (no ET)", "MAE (px)")
         lw_outputs["width_lw_mae_no_et_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_mae_no_et.png")
-        _plot_lw(lw_no_et, "rmse_px", "rmse_q1", "rmse_q3", os.path.join(length_weighted_dir, "dataset_width_lw_rmse_no_et.png"), "Length-weighted width RMSE by method (no ET)", "RMSE (px)")
+        _plot_lw(lw_no_et, "rmse_px", "rmse_q1", "rmse_q3", os.path.join(length_weighted_dir, "dataset_width_lw_rmse_no_et.png"), "Length-weighted width RMSE (no ET)", "RMSE (px)")
         lw_outputs["width_lw_rmse_no_et_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_rmse_no_et.png")
-        _plot_lw(lw_no_et, "abs_bias_px", "abs_bias_q1", "abs_bias_q3", os.path.join(length_weighted_dir, "dataset_width_lw_bias_no_et.png"), "Length-weighted width |bias| by method (no ET)", "|bias| (px)")
+        _plot_lw(lw_no_et, "abs_bias_px", "abs_bias_q1", "abs_bias_q3", os.path.join(length_weighted_dir, "dataset_width_lw_bias_no_et.png"), "Length-weighted width |bias| (no ET)", "|bias| (px)")
         lw_outputs["width_lw_bias_no_et_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_bias_no_et.png")
         return lw_outputs
 
@@ -1382,7 +1388,7 @@ def _plot_width_metrics_with_without_et(
                     df=df_no_et,
                     metric_col="mae_px",
                     out_png=os.path.join(out_dir, "dataset_width_mae_no_et.png"),
-                    title="Dataset width MAE by method (mean + IQR + outliers)",
+                    title="Dataset width MAE (mean + IQR + outliers)",
                     ylabel="MAE (px)",
                     plot_type="bar",
                     color_map=color_map,
@@ -1399,7 +1405,7 @@ def _plot_width_metrics_with_without_et(
                     df=df_bias_all,
                     metric_col="abs_bias_px",
                     out_png=os.path.join(bias_dir, "dataset_width_bias_by_method.png"),
-                    title="Dataset width |bias| by method (mean + IQR + outliers)",
+                    title="Dataset width |bias| (mean + IQR + outliers)",
                     ylabel="|bias| (px)",
                     plot_type="bar",
                     color_map=color_map,
@@ -1416,7 +1422,7 @@ def _plot_width_metrics_with_without_et(
                         df=df_bias_no_et,
                         metric_col="abs_bias_px",
                         out_png=os.path.join(out_dir, "dataset_width_bias_no_et.png"),
-                        title="Dataset width |bias| by method (mean + IQR + outliers, no ET)",
+                        title="Dataset width |bias| (mean + IQR + outliers, no ET)",
                         ylabel="|bias| (px)",
                         plot_type="bar",
                         color_map=color_map,
@@ -1431,7 +1437,7 @@ def _plot_width_metrics_with_without_et(
                     df=df_no_et,
                     metric_col="rmse_px",
                     out_png=os.path.join(out_dir, "dataset_width_rmse_no_et.png"),
-                    title="Dataset width RMSE by method (mean + IQR + outliers, no ET)",
+                    title="Dataset width RMSE (mean + IQR + outliers, no ET)",
                     ylabel="RMSE (px)",
                     plot_type="bar",
                     color_map=color_map,
@@ -1630,7 +1636,7 @@ def _aggregate_midline_metrics(
                 m_comb = d["crack_type"].astype(str).str.lower().str.contains("combined", na=False)
                 if m_comb.any():
                     d = d[m_comb].copy()
-            # Group by method+crack_type, collapsing geometry_type by taking min score.
+            # Group+crack_type, collapsing geometry_type by taking min score.
             # Include baseline_method so baselines are not merged into ET buckets.
             gcols = [c for c in ["midline_type", "method_family", "baseline_method", "crack_type"] if c in d.columns]
             d = (
@@ -1667,7 +1673,7 @@ def _aggregate_midline_metrics(
             grp_colors = d.apply(_grp_color, axis=1).tolist()
             legend_items = [
                 ("ET", grp_color_map["ET"]),
-                ("model (dt/dt_depth)", grp_color_map.get("model", grp_color_map["auto"])),
+                ("model", grp_color_map.get("model", grp_color_map["auto"])),
                 ("baseline", grp_color_map["baseline"]),
             ]
             out_png = os.path.join(midline_dir, "dataset_midline_score_by_method_crack.png")
@@ -3544,7 +3550,6 @@ def _plot_dataset_full_timing_overview(
             category_label = "ET" if sup == "manual" else sup
             _add(mean_rows, method_label, mean_sec, category_label, s)
             _add(sum_rows, method_label, total_sec, category_label, float(s * np.sqrt(max(1, n))))
-
     # GT supervision timing rollup (dataset-level): explicit atomic/combined rows.
     df_sup = _safe_read(os.path.join(out_dir, "dataset_gt_supervision_timings.csv"))
     df_sup_core = _safe_read(os.path.join(out_dir, "dataset_gt_supervision_core_timings.csv"))
@@ -3805,6 +3810,317 @@ def _plot_dataset_full_timing_overview(
         "Multi-Cue Dataset Components",
         os.path.join(out_dir, "dataset_multi_cue_components.png"),
     )
+    if df_depth is not None and not df_depth.empty and multicue_comp_cols:
+        _mc_rows = []
+        for c in multicue_comp_cols:
+            if c not in df_depth.columns:
+                continue
+            arr = pd.to_numeric(df_depth[c], errors="coerce").to_numpy(float)
+            arr_pos = arr[arr > 0] if np.any(arr > 0) else arr[np.isfinite(arr)]
+            if arr_pos.size == 0:
+                continue
+            _mc_rows.append({
+                "component": re.sub(r"(_s|_sec)$", "", c),
+                "mean_s": round(float(np.mean(arr_pos)), 4),
+                "median_s": round(float(np.median(arr_pos)), 4),
+                "std_s": round(float(np.std(arr_pos)), 4),
+                "q1_s": round(float(np.percentile(arr_pos, 25)), 4),
+                "q3_s": round(float(np.percentile(arr_pos, 75)), 4),
+                "n": int(arr_pos.size),
+            })
+        if _mc_rows:
+            _mc_csv = os.path.join(out_dir, "dataset_multi_cue_components.csv")
+            pd.DataFrame(_mc_rows).to_csv(_mc_csv, index=False)
+            outputs["multi_cue_components_csv"] = _mc_csv
+    # ET two-panel timing figure
+    df_tc_grp = _safe_read(os.path.join(out_dir, "dataset_timings_core_grouped.csv"))
+    _edge_par_csv = os.path.join(out_dir, "dataset_edge_parallel_results_all.csv")
+    if not os.path.isfile(_edge_par_csv):
+        # fallback: search per-image metric dirs
+        _ep_frames = []
+        _base_dir = os.path.abspath(os.path.join(out_dir, os.pardir, os.pardir))
+        for _d in os.listdir(_base_dir):
+            _img_dir = os.path.join(_base_dir, _d)
+            if not os.path.isdir(_img_dir):
+                continue
+            _ep = _safe_read(os.path.join(_img_dir, "edge_parallel_results.csv"))
+            if _ep is not None and not _ep.empty:
+                _ep_frames.append(_ep)
+        if _ep_frames:
+            pd.concat(_ep_frames, ignore_index=True).to_csv(_edge_par_csv, index=False)
+    df_ep = _safe_read(_edge_par_csv)
+    # Use the uploaded file path as absolute fallback
+    if df_ep is None or df_ep.empty:
+        import glob as _glob
+        _candidates = _glob.glob(
+            os.path.join(out_dir, "..", "..", "**", "edge_parallel_results.csv"),
+            recursive=True,
+        )
+        if _candidates:
+            _ep_frames = [_safe_read(p) for p in _candidates]
+            _ep_frames = [f for f in _ep_frames if f is not None and not f.empty]
+            if _ep_frames:
+                df_ep = pd.concat(_ep_frames, ignore_index=True)
+
+    if df_tc_grp is not None and not df_tc_grp.empty:
+        et_row = df_tc_grp[
+            (df_tc_grp["supervision"].astype(str).str.upper() == "ET")
+            & (df_tc_grp["crack_type"].astype(str).str.lower() == "combined")
+        ]
+        if not et_row.empty:
+            r = et_row.iloc[0]
+
+            # Left panel data
+            total_v = float(pd.to_numeric(r.get("build_combined_sec_mean", np.nan), errors="coerce"))
+            total_e = float(pd.to_numeric(r.get("build_combined_sec_std", 0.0), errors="coerce"))
+            n_segs_est = 2.0
+            n_rows = float(pd.to_numeric(r.get("n_rows", np.nan), errors="coerce"))
+            n_images = float(pd.to_numeric(r.get("n_images", np.nan), errors="coerce"))
+            if np.isfinite(n_rows) and np.isfinite(n_images) and n_images > 0:
+                n_segs_est = n_rows / n_images
+
+            bar_labels = ["Stitching", "Edge Masks", "ET", "Post-process", "TOTAL*"]
+            idx = {l: i for i, l in enumerate(bar_labels)}
+            p1_vals = [0.0] * len(bar_labels)
+            p2_vals = [0.0] * len(bar_labels)
+            p1_errs = [0.0] * len(bar_labels)
+            p2_errs = [0.0] * len(bar_labels)
+
+            for lbl, mc, sc in [
+                ("Stitching", "stitching_sec_mean", "stitching_sec_std"),
+                ("Post-process", "combine_postprocess_sec_mean", "combine_postprocess_sec_std"),
+            ]:
+                v = float(pd.to_numeric(r.get(mc, np.nan), errors="coerce"))
+                e = float(pd.to_numeric(r.get(sc, 0.0), errors="coerce"))
+                if np.isfinite(v):
+                    p2_vals[idx[lbl]] = v
+                    p2_errs[idx[lbl]] = e if np.isfinite(e) else 0.0
+
+            if df_ep is not None and not df_ep.empty:
+                arr = pd.to_numeric(df_ep.get("time_edge_masks_sec"), errors="coerce").dropna().to_numpy(float)
+                if arr.size:
+                    p1_vals[idx["Edge Masks"]] = float(np.mean(arr)) * n_segs_est
+                    p1_errs[idx["Edge Masks"]] = float(np.std(arr)) * n_segs_est if arr.size > 1 else 0.0
+
+                et_p1 = np.zeros(len(df_ep), dtype=float)
+                for col in ["time_edges_tracking_sec", "time_edges_pair_normals_sec"]:
+                    if col in df_ep.columns:
+                        et_p1 += pd.to_numeric(df_ep[col], errors="coerce").fillna(0.0).to_numpy(float)
+                et_p1 = et_p1[np.isfinite(et_p1) & (et_p1 > 0)]
+                if et_p1.size:
+                    p1_vals[idx["ET"]] = float(np.mean(et_p1)) * n_segs_est
+                    p1_errs[idx["ET"]] = float(np.std(et_p1)) * n_segs_est if et_p1.size > 1 else 0.0
+
+            v = float(pd.to_numeric(r.get("combine_edge_masks_sec_mean", np.nan), errors="coerce"))
+            e = float(pd.to_numeric(r.get("combine_edge_masks_sec_std", 0.0), errors="coerce"))
+            if np.isfinite(v):
+                p2_vals[idx["Edge Masks"]] = v
+                p2_errs[idx["Edge Masks"]] = e if np.isfinite(e) else 0.0
+
+            v = float(pd.to_numeric(r.get("combine_edge_tracking_sec_mean", np.nan), errors="coerce"))
+            e = float(pd.to_numeric(r.get("combine_edge_tracking_sec_std", 0.0), errors="coerce"))
+            if np.isfinite(v):
+                p2_vals[idx["ET"]] = v
+                p2_errs[idx["ET"]] = e if np.isfinite(e) else 0.0
+
+            p1_vals[idx["TOTAL*"]] = sum(p1_vals[:-1])
+            p2_vals[idx["TOTAL*"]] = sum(p2_vals[:-1])
+            true_total = p1_vals[idx["TOTAL*"]] + p2_vals[idx["TOTAL*"]]
+            true_total_err = float(np.sqrt((sum(np.square(p1_errs[:-1]))) + (sum(np.square(p2_errs[:-1])))))
+
+            # Right panel data
+            right_labels, right_vals, right_errs = [], [], []
+            right_note = ""
+            if df_ep is not None and not df_ep.empty:
+                geo_cols = [
+                    ("Geodesic 1\n(edge 1 solve)", "time_edges_geodesic1_sec"),
+                    ("Geodesic 2\n(edge 2 solve)", "time_edges_geodesic2_sec"),
+                    ("Derived midline", "time_derived_midline_sec"),
+                    ("Normal pairs", "time_edges_pair_normals_sec"),
+                ]
+                for lbl, col in geo_cols:
+                    if col not in df_ep.columns:
+                        continue
+                    arr = pd.to_numeric(df_ep[col], errors="coerce").dropna().to_numpy(float)
+                    if arr.size:
+                        right_labels.append(lbl)
+                        right_vals.append(float(np.mean(arr)))
+                        right_errs.append(float(np.std(arr)) if arr.size > 1 else 0.0)
+                right_note = f"(calibration subset, n={len(df_ep)} cracks)"
+
+            if not (np.isfinite(total_v) or np.isfinite(true_total)):
+                return outputs  # nothing to plot
+
+            # Build figure
+            has_right = len(right_vals) > 0
+            nrows = 2 if has_right else 1
+            fig, axes = plt.subplots(
+                nrows, 1,
+                figsize=(7.2, 4.2 * nrows),
+                dpi=180,
+            )
+            if nrows == 1:
+                axes = [axes]
+            ax_left, ax_right = (axes[0], axes[1]) if has_right else (axes[0], None)
+
+            # Left panel
+            lx = np.arange(len(bar_labels))
+            bar_w = 0.55
+            ax_left.bar(lx, p1_vals, bar_w, color="#f28e2b", alpha=0.88, label="Phase 1 (per-atomic x est. segs)")
+            ax_left.bar(lx, p2_vals, bar_w, bottom=p1_vals, color="#4c78a8", alpha=0.88, label="Phase 2 (combined crack)")
+            total_vals = [p1 + p2 for p1, p2 in zip(p1_vals, p2_vals)]
+            total_errs = [float(np.sqrt((e1 ** 2) + (e2 ** 2))) for e1, e2 in zip(p1_errs, p2_errs)]
+            ax_left.errorbar(
+                lx,
+                total_vals,
+                yerr=np.asarray(total_errs, float),
+                fmt="none",
+                ecolor="black",
+                elinewidth=1.1,
+                capsize=3,
+                zorder=3,
+            )
+            ax_left.set_xticks(lx)
+            ax_left.set_xticklabels(bar_labels, rotation=30, ha="right", fontsize=9)
+            ax_left.set_ylabel("seconds (mean per combined crack)")
+            ax_left.set_title(
+                f"ET Timing Components - P1 per-atomic (orange) + P2 combined (blue)\n"
+                f"*dominant_segments_from_group not timed. P1 scaled by {n_segs_est:.1f} segs/crack est."
+            )
+            ax_left.legend(fontsize=8, loc="upper left")
+            ax_left.grid(axis="y", alpha=0.25)
+
+            # Right panel
+            if ax_right is not None and right_vals:
+                rx = np.arange(len(right_labels))
+                ax_right.bar(rx, right_vals, color="#f28e2b", alpha=0.85)
+                ax_right.errorbar(
+                    rx,
+                    right_vals,
+                    yerr=np.asarray(right_errs, float),
+                    fmt="none",
+                    ecolor="black",
+                    elinewidth=1.1,
+                    capsize=3,
+                    zorder=3,
+                )
+                ax_right.set_xticks(rx)
+                ax_right.set_xticklabels(right_labels, rotation=30, ha="right", fontsize=9)
+                ax_right.set_ylabel("seconds (mean per crack)")
+                ax_right.set_title(
+                    f"ET edge_tracking Decomposition\n{right_note}"
+                )
+                ax_right.grid(axis="y", alpha=0.25)
+
+            plt.tight_layout()
+            timing_dir = os.path.join(out_dir, "timing")
+            os.makedirs(timing_dir, exist_ok=True)
+            et_png = os.path.join(timing_dir, "dataset_et_components.png")
+            fig.savefig(et_png, bbox_inches="tight")
+            plt.close(fig)
+            outputs["et_components_png"] = et_png
+            _et_csv_rows = []
+            _left_map = [
+                ("Stitching", "stitching_sec_mean", "stitching_sec_std"),
+                ("Edge Masks", "combine_edge_masks_sec_mean", "combine_edge_masks_sec_std"),
+                ("ET", "combine_edge_tracking_sec_mean", "combine_edge_tracking_sec_std"),
+                ("Post-process", "combine_postprocess_sec_mean", "combine_postprocess_sec_std"),
+                ("TOTAL", "build_combined_sec_mean", "build_combined_sec_std"),
+            ]
+            for lbl, mc, sc in _left_map:
+                v = float(pd.to_numeric(r.get(mc, np.nan), errors="coerce"))
+                e = float(pd.to_numeric(r.get(sc, 0.0), errors="coerce"))
+                if np.isfinite(v):
+                    pct = round(100.0 * v / total_v, 1) if (np.isfinite(total_v) and total_v > 0 and lbl != "TOTAL") else ""
+                    _et_csv_rows.append({
+                        "level": "per_combined_crack",
+                        "panel": "Combined Crack (dataset)",
+                        "component": lbl,
+                        "mean_s": round(v, 3),
+                        "std_s": round(e, 3) if np.isfinite(e) else "",
+                        "pct_of_total": pct,
+                        "source": "timings_core_grouped (n=32 images)",
+                    })
+
+            if df_ep is not None and not df_ep.empty:
+                arr = pd.to_numeric(df_ep.get("time_edge_masks_sec"), errors="coerce").dropna().to_numpy(float)
+                if arr.size:
+                    v = float(np.mean(arr)) * n_segs_est
+                    e = float(np.std(arr)) * n_segs_est if arr.size > 1 else 0.0
+                    _et_csv_rows.append({
+                        "level": "phase1_per_atomic_scaled",
+                        "panel": f"Phase 1 - Per-Atomic (x{n_segs_est:.1f} segs)",
+                        "component": "Edge Masks",
+                        "mean_s": round(v, 3),
+                        "std_s": round(e, 3),
+                        "pct_of_total": round(100.0 * v / true_total, 1) if np.isfinite(true_total) and true_total > 0 else "",
+                        "source": f"edge_parallel_results (n={len(df_ep)} cracks, scaled by est. {n_segs_est:.1f} segs/crack)",
+                    })
+                et_p1 = np.zeros(len(df_ep), dtype=float)
+                for col in ["time_edges_tracking_sec", "time_edges_pair_normals_sec"]:
+                    if col in df_ep.columns:
+                        et_p1 += pd.to_numeric(df_ep[col], errors="coerce").fillna(0.0).to_numpy(float)
+                et_p1 = et_p1[np.isfinite(et_p1) & (et_p1 > 0)]
+                if et_p1.size:
+                    v = float(np.mean(et_p1)) * n_segs_est
+                    e = float(np.std(et_p1)) * n_segs_est if et_p1.size > 1 else 0.0
+                    _et_csv_rows.append({
+                        "level": "phase1_per_atomic_scaled",
+                        "panel": f"Phase 1 - Per-Atomic (x{n_segs_est:.1f} segs)",
+                        "component": "ET",
+                        "mean_s": round(v, 3),
+                        "std_s": round(e, 3),
+                        "pct_of_total": round(100.0 * v / true_total, 1) if np.isfinite(true_total) and true_total > 0 else "",
+                        "source": f"edge_parallel_results (n={len(df_ep)} cracks, scaled by est. {n_segs_est:.1f} segs/crack)",
+                    })
+
+            if df_ep is not None and not df_ep.empty:
+                _right_map = [
+                    ("Gradients", "time_edges_gradients_sec"),
+                    ("Structure Tensor", "time_edges_tensor_sec"),
+                    ("Mask Norm", "time_edges_mask_norm_sec"),
+                    ("Metric Build", "time_edges_metric_build_sec"),
+                    ("Geodesic 1", "time_edges_geodesic1_sec"),
+                    ("Geodesic 2", "time_edges_geodesic2_sec"),
+                    ("Derived Midline", "time_derived_midline_sec"),
+                    ("Normal Pairs", "time_edges_pair_normals_sec"),
+                    ("Edge Tracking (total)", "time_edges_tracking_sec"),
+                ]
+                n_ep = len(df_ep)
+                for lbl, col in _right_map:
+                    if col not in df_ep.columns:
+                        continue
+                    arr = pd.to_numeric(df_ep[col], errors="coerce").dropna().to_numpy(float)
+                    if arr.size == 0:
+                        continue
+                    total_et = float(pd.to_numeric(df_ep["time_edges_tracking_sec"], errors="coerce").mean())
+                    v = float(np.mean(arr))
+                    e = float(np.std(arr)) if arr.size > 1 else 0.0
+                    pct = round(100.0 * v / total_et, 1) if (np.isfinite(total_et) and total_et > 0 and "total" not in lbl.lower()) else ""
+                    _et_csv_rows.append({
+                        "level": "per_segment",
+                        "panel": "Edge Tracking Decomposition (calibration)",
+                        "component": lbl,
+                        "mean_s": round(v, 4),
+                        "std_s": round(e, 4) if np.isfinite(e) else "",
+                        "pct_of_total": pct,
+                        "source": f"edge_parallel_results (n={n_ep} cracks)",
+                    })
+            if np.isfinite(true_total):
+                _et_csv_rows.append({
+                    "level": "total",
+                    "panel": "TOTAL (P1+P2, dominant_segments_from_group excluded)",
+                    "component": "TOTAL*",
+                    "mean_s": round(true_total, 3),
+                    "std_s": round(true_total_err, 3),
+                    "pct_of_total": "",
+                    "source": "estimated",
+                })
+
+            if _et_csv_rows:
+                _et_timing_csv = os.path.join(timing_dir, "dataset_et_timing_table.csv")
+                pd.DataFrame(_et_csv_rows).to_csv(_et_timing_csv, index=False)
+                outputs["et_timing_table_csv"] = _et_timing_csv
 
     # Atomic vs combined charts
     outputs["gt_centering_atomic_vs_combined_chart"] = _plot_atomic_vs_combined(
@@ -3950,7 +4266,7 @@ def _aggregate_invalid_matches(
         )
         outputs["dataset_invalid_reason_length_total_png"] = out_png
 
-    # Stacked bar: reasons by method.
+    # Stacked bar: reasons.
     pivot = (
         all_df.groupby(["method", "reason"], dropna=False)
         .size()
@@ -4885,16 +5201,20 @@ def summarize_dataset_metrics(
         _tc_all_csv = os.path.join(out_dir, "dataset_edge_variant_timings_all.csv")
         _tc_all.to_csv(_tc_all_csv, index=False)
         outputs["edge_variant_timings_all_csv"] = _tc_all_csv
-        _grp_cols = [c for c in ("supervision", "algo_variant", "crack_type") if c in _tc_all.columns]
+        _grp_cols = [c for c in ("supervision", "algo_variant") if c in _tc_all.columns]
         _time_col = next((c for c in ("elapsed_s", "total_s", "edge_total_s") if c in _tc_all.columns), None)
+        if "crack_type" in _tc_all.columns:
+            _tc_plot = _tc_all[_tc_all["crack_type"].astype(str).str.lower() == "combined"].copy()
+        else:
+            _tc_plot = _tc_all.copy()
         if _grp_cols and _time_col:
             _tc_grp = (
-                _tc_all.groupby(_grp_cols)[_time_col]
+                _tc_plot.groupby(_grp_cols)[_time_col]
                 .agg(mean_s="mean", std_s="std", n="count")
                 .reset_index()
             )
             _tc_grp["label"] = _tc_grp.apply(
-                lambda r: f"{r.get('supervision', '')}/{r.get('algo_variant', '')}".strip("/"),
+                lambda r: str(r.get("algo_variant", r.get("supervision", ""))),
                 axis=1,
             )
             _tc_grp = _tc_grp.sort_values("mean_s", ascending=False)
@@ -4908,7 +5228,7 @@ def summarize_dataset_metrics(
                 _ax.set_xticks(_x)
                 _ax.set_xticklabels(_tc_grp["label"].tolist(), rotation=35, ha="right", fontsize=8)
                 _ax.set_ylabel("mean seconds")
-                _ax.set_title("Edge-tracking variant timings (mean +/- std per image)")
+                _ax.set_title("Multi-cue variant timings (mean +/- std per image)")
                 _ax.grid(axis="y", alpha=0.2)
                 plt.tight_layout()
                 _vt_png = os.path.join(out_dir, "dataset_edge_variant_timings.png")
