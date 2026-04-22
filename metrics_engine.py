@@ -969,8 +969,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         resolved_indices= None
         #base_names = ["10"]
         SKIP_ALREADY_PROCESSED = False
-        SKIP_PASS1 = False   # skip GT supervision export (pass1) - use when supervision already exists
-        FAST_RUN_EDGE_SWEEP = False
+        SKIP_PASS1 = True   # skip GT supervision export (pass1) - use when supervision already exists
+        FAST_RUN_EDGE_SWEEP = True
 
         idxs = self._resolve_metrics_image_indices(image_indices=resolved_indices, base_names=base_names)
         if not idxs:

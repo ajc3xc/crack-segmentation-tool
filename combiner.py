@@ -745,6 +745,51 @@ def dominant_segments_from_group(
         b64 = base64.b64encode(packed.tobytes()).decode("ascii")
         return {"shape": [int(mask_u8.shape[0]), int(mask_u8.shape[1])], "packbits_b64": b64}
 
+    def _midline_global_from_atomic(cr, S_in):
+        """
+        Normalize an atomic midline into full-image/global coordinates.
+
+        Some persisted atomics may carry crop-local midlines while mask_bbox stays global.
+        Detect that frame mismatch and shift by (bx, by) exactly once.
+        """
+        S = np.asarray(S_in, float)
+        if S.ndim != 2 or S.shape[1] != 2 or len(S) < 2:
+            return S
+
+        bb = (cr or {}).get("mask_bbox", None)
+        if not (isinstance(bb, (list, tuple)) and len(bb) == 4):
+            return S
+
+        try:
+            bx, by, bw, bh = [float(v) for v in bb]
+        except Exception:
+            return S
+
+        if bw <= 0 or bh <= 0:
+            return S
+
+        # Heuristic:
+        # - local-like if points mostly inside [0..bw]x[0..bh]
+        # - global-like if points mostly inside [bx..bx+bw]x[by..by+bh]
+        # If local-like and not global-like, shift to global frame.
+        local_like = np.mean(
+            (S[:, 0] >= -1.0) & (S[:, 0] <= bw + 1.0) &
+            (S[:, 1] >= -1.0) & (S[:, 1] <= bh + 1.0)
+        )
+        global_like = np.mean(
+            (S[:, 0] >= bx - 1.0) & (S[:, 0] <= bx + bw + 1.0) &
+            (S[:, 1] >= by - 1.0) & (S[:, 1] <= by + bh + 1.0)
+        )
+
+        if (bx > 0 or by > 0) and local_like >= 0.95 and global_like < 0.5:
+            S = S + np.array([bx, by], float)
+            _c_log(
+                1,
+                f"[FRAME_FIX] atomic midline local->global via mask_bbox "
+                f"offset atomic_bbox=({int(bx)},{int(by)},{int(bw)},{int(bh)})",
+            )
+        return S
+
     # -----------------------------
     # 1) collect atomic segments
     # -----------------------------
@@ -757,6 +802,7 @@ def dominant_segments_from_group(
             S = _finite_xy(S)
             if S is None or len(S) < 2:
                 continue
+            S = _midline_global_from_atomic(cr, S)
             atomics.append(
                 {
                     "atomic_id": str(m),
@@ -765,6 +811,17 @@ def dominant_segments_from_group(
                     "endpoints": get_user_endpoints(cr),
                 }
             )
+
+    for a in atomics:
+        S = a["poly"]
+        bb = (atomic.get(str(a["atomic_id"]), {}) or {}).get("mask_bbox")
+        print(
+            f"[ATOMIC_FRAME_DBG] id={a['atomic_id']} "
+            f"bbox={bb} "
+            f"midline_x=[{S[:,0].min():.1f},{S[:,0].max():.1f}] "
+            f"midline_y=[{S[:,1].min():.1f},{S[:,1].max():.1f}] "
+            f"n={len(S)}"
+        )
 
     if not atomics:
         return [], {"branches": [], "segments_meta": [], "bite": None}
@@ -1162,6 +1219,18 @@ def dominant_segments_from_group(
                 m |= (am > 0).astype(np.uint8)
         branch_atomic_masks[bi] = m
 
+    # If no member has a usable mask, dominance suppression is unstable for
+    # midline-only annotations. Keep all branch geometry in this mode.
+    no_atomic_masks_mode = (
+        crack_mask is None
+        and not any(np.any(mm > 0) for mm in branch_atomic_masks.values())
+    )
+    if no_atomic_masks_mode:
+        print(
+            "[DOMINANCE FALLBACK] no usable atomic masks for members; "
+            "keeping all branch segments (no suppression)."
+        )
+
     bite_by_losing_branch = {}
 
     for rank, bi in enumerate(order):
@@ -1215,6 +1284,24 @@ def dominant_segments_from_group(
                     branch_terr = keep
 
         branch_terr_masks[bi] = branch_terr.copy()
+
+        if no_atomic_masks_mode:
+            kept_len = 0.0
+            for atomic_id, S_user in branch_user_segs[bi]:
+                if S_user is None or len(S_user) < 2:
+                    continue
+                kept_meta.append((bi, atomic_id, S_user, bool(rank == 0)))
+                kept_len += _linestring_length(S_user)
+            branch_stats.append({
+                "branch_id": int(bi),
+                "rank": int(rank),
+                "atomic_ids": [aid for (aid, _) in branch_user_segs[bi]],
+                "user_len": float(branch_user_len[bi]),
+                "kept_len": float(kept_len),
+                "suppressed": False,
+            })
+            claimed |= branch_terr
+            continue
 
         # -------------------------------------------------
         # Suppression gate
@@ -2217,8 +2304,27 @@ def plot_combined_debug(
     out_dir,
 ):
     os.makedirs(out_dir, exist_ok=True)
-
     out_png = os.path.join(out_dir, "edges_midlines_normals_pretty.png")
+
+    # Expand bbox to cover all plotted geometry, not just the union mask.
+    expanded_bbox = mask_bbox
+    if mask_bbox is not None:
+        all_pts = []
+        for seg_list in [segs, derived_midline_segs, edge1_segs, edge2_segs]:
+            for seg in (seg_list or []):
+                arr = np.asarray(seg, float)
+                if arr.ndim == 2 and arr.shape[1] == 2 and len(arr) >= 2:
+                    finite = arr[np.isfinite(arr).all(axis=1)]
+                    if len(finite):
+                        all_pts.append(finite)
+        if all_pts:
+            pts = np.vstack(all_pts)
+            x0, y0, w, h = mask_bbox
+            x_min = min(x0, int(np.floor(pts[:, 0].min())))
+            y_min = min(y0, int(np.floor(pts[:, 1].min())))
+            x_max = max(x0 + w, int(np.ceil(pts[:, 0].max())))
+            y_max = max(y0 + h, int(np.ceil(pts[:, 1].max())))
+            expanded_bbox = [x_min, y_min, x_max - x_min, y_max - y_min]
 
     plot_edges_and_normals(
         base_image=original_image,
@@ -2228,7 +2334,7 @@ def plot_combined_debug(
         edge2_segs=edge2_segs,
         norm1_segs=norm1_segs,
         norm2_segs=norm2_segs,
-        bbox=mask_bbox,
+        bbox=expanded_bbox,
         out_png=out_png,
         title=f"Combined Crack (members={', '.join(member_ids)})",
     )
@@ -3005,7 +3111,7 @@ def build_combined_crack_stateless(
     segs, dom_meta = dominant_segments_from_group(
         members=member_ids,
         atomic=authoring_atomic,
-        # crack_mask_u8=crack_mask_full,
+        crack_mask_u8=crack_mask_full,
         window_half_size=window_half_size,
         debug_dir=debug_dir,
         debug_tag="dominance_grouping",
@@ -3429,6 +3535,13 @@ def build_combined_crack_stateless(
             max_jump=10.0,
             allow_teleport=allow_teleport,
         )
+        print(
+            f"[STITCH RESULT] branch={branch_id} ok={ok} reason={reason} "
+            f"n={len(S_branch) if S_branch is not None else 0} "
+            f"x_range=[{S_branch[:,0].min():.1f},{S_branch[:,0].max():.1f}] "
+            f"y_range=[{S_branch[:,1].min():.1f},{S_branch[:,1].max():.1f}]"
+            if S_branch is not None else ""
+        )
 
         if not ok:
             print(f"[STITCH FAIL] branch={branch_id}: {reason}")
@@ -3605,6 +3718,10 @@ def build_combined_crack_stateless(
                 continue
             
             derived_mid = np.asarray(res.get("derived_midline", []), float)
+            print(
+                f"[EDGE LENGTHS] branch={branch_id} run={run_id} "
+                f"e1={len(e1)} e2={len(e2)} derived_mid={len(derived_mid)}"
+            )
             if derived_mid.ndim != 2 or derived_mid.shape[1] != 2 or len(derived_mid) < 2:
                 raise ValueError("[COMBINER] edges_tracking returned no derived midline")
 

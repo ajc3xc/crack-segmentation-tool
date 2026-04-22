@@ -26,9 +26,9 @@ def _log(verbose: bool, msg: str) -> None:
 def _clean_plot_label(s: str) -> str:
     """Normalize plot titles and axis labels to consistent terminology."""
     replacements = [
-        (r"\bscore_mid_wmean\b", "Mid Score"),
-        (r"\bscore_mid\b", "Mid Score"),
-        (r"\blwmean_score_mid\b", "Mid Score"),
+        (r"\bscore_mid_wmean\b", "RS3 Score"),
+        (r"\bscore_mid\b", "RS3 Score"),
+        (r"\blwmean_score_mid\b", "RS3 Score"),
         (r"\(combined cracks,?\s*lower\s*=\s*better\)", "(combined)"),
         (r"\(combined cracks\)", "(combined)"),
         (r"\(combined,?\s*lower\s*is\s*better\)", "(combined)"),
@@ -42,8 +42,8 @@ def _clean_plot_label(s: str) -> str:
         (r"^Dataset width \|bias\|\b", "Mean Width |Bias|"),
         (r"^Dataset width bias\b", "Mean Width Bias"),
         (r"^Dataset width metrics\b", "Mean Width MAE"),
-        (r"RS3-Style Score", "Mid Score"),
-        (r"score_mid_wmean \(lower is better\)", "Mid Score"),
+        (r"RS3-Style Score", "RS3 Score"),
+        (r"score_mid_wmean \(lower is better\)", "RS3 Score"),
     ]
     result = str(s or "")
     for pattern, repl in replacements:
@@ -1678,7 +1678,7 @@ def _aggregate_midline_metrics(
                 color_legend=legend_items,
                 out_png=out_png,
                 title="Dataset Midline Score (min over geometry)",
-                ylabel="Mid Score",
+                ylabel="RS3 Score",
             )
             outputs["midline_score_by_method_crack_png"] = out_png
 
@@ -1818,8 +1818,8 @@ def _aggregate_midline_metrics(
                 ax.bar(x, vals, color=colors, alpha=0.88)
                 ax.set_xticks(x)
                 ax.set_xticklabels(top["label"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
-                ax.set_ylabel("Mid Score")
-                ax.set_title("Dataset Midline Mid Score (combined)")
+                ax.set_ylabel("RS3 Score")
+                ax.set_title("Dataset Midline RS3 Score (combined)")
                 ax.grid(axis="y", alpha=0.2)
                 present_cls = set(top["source_class"].astype(str).tolist())
                 legend_handles = [
@@ -1851,8 +1851,8 @@ def _aggregate_midline_metrics(
                     ax2.bar(x2, vals2, color=colors_no_et, alpha=0.88)
                     ax2.set_xticks(x2)
                     ax2.set_xticklabels(top_no_et["label"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
-                    ax2.set_ylabel("Mid Score")
-                    ax2.set_title("Dataset Midline Mid Score (combined, no ET)")
+                    ax2.set_ylabel("RS3 Score")
+                    ax2.set_title("Dataset Midline RS3 Score (combined, no ET)")
                     ax2.grid(axis="y", alpha=0.2)
                     present_no_et = set(top_no_et["source_class"].astype(str).tolist())
                     legend_handles_no_et = [
@@ -3594,6 +3594,11 @@ def _plot_dataset_full_timing_overview(
     if df_abl_tim is not None and not df_abl_tim.empty:
         for _, r in df_abl_tim.iterrows():
             method = str(r.get("method", ""))
+            method_low = method.lower()
+            if method_low.startswith("dt_best_et_pass") and method_low != "dt_best_et_pass2b_edge_tracking":
+                continue
+            if method_low == "dt_best_et_pass2b_edge_tracking":
+                method = "ET"
             mean_s = _safe_num(r.get("mean_sec"))
             std_s = _safe_num(r.get("std_sec", 0.0))
             n = int(pd.to_numeric(r.get("n", 1), errors="coerce") or 1)
@@ -4075,8 +4080,8 @@ def _plot_multicue_ablation(
     method_display = [_display_method_name(m) for m in methods]
     ax0.set_xticks(np.arange(len(methods)))
     ax0.set_xticklabels(method_display, rotation=25, ha="right")
-    ax0.set_title("Multi-Cue Ablation - Mid Score decomposition\n(combined cracks, per-crack mean)")
-    ax0.set_ylabel("Mid Score")
+    ax0.set_title("Multi-Cue Ablation - RS3 Score decomposition\n(combined cracks, per-crack mean)")
+    ax0.set_ylabel("RS3 Score")
     ax0.legend(loc="best", fontsize=8, framealpha=0.9)
     ax0.grid(axis="y", alpha=0.2)
 
@@ -4397,6 +4402,9 @@ def _aggregate_calibration_ablation(
             continue
         stem = os.path.splitext(os.path.basename(p))[0]
         if stem in timing_skip:
+            continue
+        stem_low = str(stem).lower()
+        if stem_low.startswith("dt_best_et_pass") and stem_low != "dt_best_et_pass2b_edge_tracking":
             continue
         method_label = timing_display.get(stem, stem)
         img_col = next((c for c in ("image", "image_name", "stem") if c in df.columns), None)

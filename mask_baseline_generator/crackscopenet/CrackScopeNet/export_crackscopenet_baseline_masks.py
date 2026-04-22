@@ -9,7 +9,8 @@ import cv2
 import numpy as np
 import paddle
 
-from models.crackscopenet import CrackScopeNet
+#from models.crackscopenet import CrackScopeNet
+from models.crackscopenet import CrackScopeNet_Large
 
 # Hardcoded config (simple export-only script)
 INPUT_DIR = Path(r"C:\Users\13144\Documents\Masters_Thesis\datasets\SUT_Compressed\Original_Image")
@@ -18,7 +19,7 @@ INPUT_DIR = Path(r"C:\Users\13144\Documents\Masters_Thesis\datasets\SUT_Compress
 #WEIGHTS_PATH = Path(r"C:\Users\13144\Documents\Masters_Thesis\CURRENT_PROJECT_CODE\mask_baseline_generator\crackscopenet\crackscopenet_9k\best_model\model.pdparams")
 #CrackScopeNet9k_Large
 OUTPUT_DIR = Path(r"C:\Users\13144\Documents\Masters_Thesis\datasets\SUT_Compressed\seg_baselines\crackscopenet_large")
-WEIGHTS_PATH = Path(r"C:\Users\13144\Documents\Masters_Thesis\CURRENT_PROJECT_CODE\mask_baseline_generator\crackscopenet\crackscopenet_9k_large\best_model\model.pdparams")
+WEIGHTS_PATH = Path(r"E:\camerer_ml\finished_models\crackscopenet_large_9k\best_model\model.pdparams")
 DEVICE = "gpu"  # "cpu" or "gpu"
 MAX_IMAGES = None  # e.g., 100 for quick test
 OUTPUT_MODE = "rerun"  # "skip", "rerun", "recreate"
@@ -88,7 +89,8 @@ def main():
     print("[CrackScopeNet] Images: %d" % len(images))
     print("[CrackScopeNet] Output: %s" % OUTPUT_DIR)
 
-    model = CrackScopeNet(num_classes=2)
+    #model = CrackScopeNet(num_classes=2)
+    model = CrackScopeNet_Large(num_classes=2)
     model.set_state_dict(paddle.load(str(WEIGHTS_PATH)))
     model.eval()
 

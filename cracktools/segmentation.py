@@ -1209,6 +1209,26 @@ def generate_mask_from_edges(
             return np.empty((0, 2))
         return A[np.isfinite(A).all(1)]
 
+    def _resample_polyline_xy(P, n_out):
+        """
+        Arc-length resample for (N,2) polylines.
+        """
+        P = finite_xy(P)
+        n_out = int(max(2, n_out))
+        if len(P) < 2:
+            return P
+        if len(P) == n_out:
+            return P
+        d = np.sqrt(np.sum(np.diff(P, axis=0) ** 2, axis=1))
+        s = np.concatenate([[0.0], np.cumsum(d)])
+        total = float(s[-1])
+        if total <= 1e-9:
+            return np.repeat(P[:1], n_out, axis=0)
+        t = np.linspace(0.0, total, n_out)
+        x = np.interp(t, s, P[:, 0])
+        y = np.interp(t, s, P[:, 1])
+        return np.column_stack([x, y])
+
     e1 = finite_xy(edge1_xy)
     e2 = finite_xy(edge2_xy)
 
@@ -1247,31 +1267,61 @@ def generate_mask_from_edges(
     if good_frac < 0.70:
         raise ValueError(f"insufficient usable normals ({good_frac*100.0:.1f}%)")
 
+    n1_good = n1[good]
+    n2_good = n2[good]
+    if len(n1_good) < 2 or len(n2_good) < 2:
+        raise ValueError("normals_xy has insufficient valid paired points")
+
+    # Defensively equalize both sides to a shared parameterization to avoid
+    # long, mismatched quad bridges when one side is sparse/degraded.
+    n_target = int(max(16, min(4 * max(2, len(mid)), max(len(n1_good), len(n2_good)))))
+    n1r = _resample_polyline_xy(n1_good, n_target)
+    n2r = _resample_polyline_xy(n2_good, n_target)
+    if len(n1r) < 2 or len(n2r) < 2:
+        raise ValueError("resampled normals are insufficient")
+
     mask = np.zeros((H, W), np.uint8)
     raster_quads = []
 
-    # Fill a continuous strip by rasterizing quads between consecutive normals.
-    good_idx = np.where(good)[0]
-    for k in range(len(good_idx) - 1):
-        i0 = int(good_idx[k])
-        i1 = int(good_idx[k + 1])
+    # Fill a continuous strip by rasterizing quads between consecutive normal pairs.
+    widths = np.sqrt(np.sum((n1r - n2r) ** 2, axis=1))
+    mid_from_resampled_normals = 0.5 * (n1r + n2r)
+    steps = np.sqrt(np.sum(np.diff(mid_from_resampled_normals, axis=0) ** 2, axis=1)) if len(mid_from_resampled_normals) >= 2 else np.array([], float)
+    med_w = float(np.median(widths[np.isfinite(widths)])) if np.any(np.isfinite(widths)) else 1.0
+    med_step = float(np.median(steps[np.isfinite(steps)])) if len(steps) and np.any(np.isfinite(steps)) else 1.0
+    max_quad_area = float(max(256.0, 12.0 * med_w * med_step))
 
-        # Avoid bridging over invalid gaps; only connect true neighbors.
-        if i1 != i0 + 1:
-            continue
-
+    kept_quads = 0
+    skipped_large = 0
+    skipped_long_bridge = 0
+    for i0 in range(len(n1r) - 1):
+        i1 = i0 + 1
         quad = np.array([
-            n1[i0],  # side 1 at i
-            n1[i1],  # side 1 at i+1
-            n2[i1],  # side 2 at i+1
-            n2[i0],  # side 2 at i
+            n1r[i0],  # side 1 at i
+            n1r[i1],  # side 1 at i+1
+            n2r[i1],  # side 2 at i+1
+            n2r[i0],  # side 2 at i
         ], dtype=np.float32)
+
+        # Guard against catastrophic wedge quads.
+        q_area = float(abs(cv2.contourArea(np.round(quad).astype(np.float32))))
+        side_step = max(
+            float(np.linalg.norm(quad[1] - quad[0])),
+            float(np.linalg.norm(quad[2] - quad[3])),
+        )
+        if q_area > max_quad_area:
+            skipped_large += 1
+            continue
+        if side_step > float(max(10.0, 6.0 * med_step)):
+            skipped_long_bridge += 1
+            continue
 
         quad[:, 0] = np.clip(quad[:, 0], 0, W - 1)
         quad[:, 1] = np.clip(quad[:, 1], 0, H - 1)
         raster_quads.append(quad.copy())
         quad_i = np.round(quad).astype(np.int32).reshape(-1, 1, 2)
         cv2.fillPoly(mask, [quad_i], 1)
+        kept_quads += 1
 
     if not np.any(mask):
         raise ValueError("empty mask after midline-normal span rasterization")
@@ -1305,9 +1355,9 @@ def generate_mask_from_edges(
         d_ee = np.linalg.norm(A[-1] - B[-1])
         #print(f"[MASK DIAG] {name_a}<->{name_b}: ss={d_ss:.2f} se={d_se:.2f} es={d_es:.2f} ee={d_ee:.2f}")
 
-    n1_good = n1[good]
-    n2_good = n2[good]
-    mid_from_normals = 0.5 * (n1_good + n2_good) if (len(n1_good) and len(n1_good) == len(n2_good)) else np.empty((0, 2))
+    n1_good = n1r
+    n2_good = n2r
+    mid_from_normals = mid_from_resampled_normals
 
     _mid_diag = _diag_xy("midline_xy (plotted input)", mid)
     _e1_diag = _diag_xy("edge1_xy (plotted input)", e1)
@@ -1318,6 +1368,11 @@ def generate_mask_from_edges(
     _end_dists("midline_xy", _mid_diag, "mid_from_normals", _mf_diag)
     _end_dists("edge1_xy", _e1_diag, "norm1_xy", _n1_diag)
     _end_dists("edge2_xy", _e2_diag, "norm2_xy", _n2_diag)
+    print(
+        f"[MASK QUAD GUARD] quads_kept={kept_quads} "
+        f"skip_area={skipped_large} skip_bridge={skipped_long_bridge} "
+        f"max_quad_area={max_quad_area:.1f}"
+    )
 
     # Plot-only edge correction: if edges are supplied as (y,x) while normals/midline are (x,y),
     # fix only the overlay inputs. Mask rasterization above already used normals and is correct.

@@ -1866,25 +1866,28 @@ class CrackUtils:
         from skimage.segmentation import mark_boundaries
 
         def _draw_polyline(im, pts, color, thickness=2):
-            """Draw a polyline where NaN rows mark gaps."""
+            """Draw a polyline; any non-finite row (NaN/Inf/None) marks a gap."""
             pts = np.asarray(pts, dtype=float)
             if pts.ndim != 2 or pts.shape[1] != 2:
                 return im
-            valid = ~np.isnan(pts).any(axis=1)
-            if not valid.any():
+            finite = np.isfinite(pts).all(axis=1)
+            if not finite.any():
                 return im
-            idx = np.where(~valid)[0]
-            splits = np.split(np.arange(len(pts)), idx)
-            for seg in splits:
-                seg = [i for i in seg if valid[i]]
-                if len(seg) > 1:
-                    for i in range(1, len(seg)):
-                        x1, y1 = pts[seg[i-1]]
-                        x2, y2 = pts[seg[i]]
-                        cv2.line(im,
-                                (int(round(x1)), int(round(y1))),
-                                (int(round(x2)), int(round(y2))),
-                                color, thickness)
+            split_idx = np.where(~finite)[0] + 1
+            for seg in np.split(pts, split_idx):
+                seg = seg[np.isfinite(seg).all(axis=1)]
+                if len(seg) < 2:
+                    continue
+                for i in range(1, len(seg)):
+                    x1, y1 = seg[i - 1]
+                    x2, y2 = seg[i]
+                    cv2.line(
+                        im,
+                        (int(round(x1)), int(round(y1))),
+                        (int(round(x2)), int(round(y2))),
+                        color,
+                        thickness,
+                    )
             return im
 
         """

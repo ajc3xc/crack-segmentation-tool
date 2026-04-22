@@ -205,27 +205,99 @@ class CombineClearSegments(CrackUtils):
                                 Qt.KeepAspectRatio, Qt.FastTransformation)
             self.ImageScreen.setPixmap(scaled)
 
-        listwidget.itemSelectionChanged.connect(highlight)
-        highlight()
-
-        # detect if any displayed atomic is auto-derived; if yes, force Pred mode
         def is_auto_segment(crack):
             return bool(crack.get("auto_midline")) or str(crack.get("source", "")).lower() == "auto"
 
-        has_auto = any(
-            is_auto_segment(atomic_cracks[cid])
-            for tpe, cid in display_items
-            if tpe == "atomic" and cid in atomic_cracks
-        )
-        if has_auto:
-            rb_gt.setEnabled(False)
-            rb_pred.setChecked(True)
-            lbl_mode_info.setText("GT unavailable: contains auto segments.")
-            lbl_mode_info.setVisible(True)
-        else:
-            rb_gt.setEnabled(True)
-            lbl_mode_info.setText("")
-            lbl_mode_info.setVisible(False)
+        def _segment_has_real_edges(crack):
+            ge = crack.get("geodesic_edges")
+            if not isinstance(ge, dict):
+                return False
+            e1 = ge.get("edge1") or []
+            e2 = ge.get("edge2") or []
+
+            def _n_real(lst):
+                return sum(
+                    1 for p in lst
+                    if isinstance(p, (list, tuple))
+                    and len(p) == 2
+                    and isinstance(p[0], (int, float))
+                    and isinstance(p[1], (int, float))
+                )
+
+            return _n_real(e1) >= 2 and _n_real(e2) >= 2
+
+        def _segment_has_real_mask(crack):
+            mc = crack.get("mask_crop")
+            if mc is None:
+                return False
+            try:
+                arr = np.asarray(mc, dtype=np.uint8)
+                return arr.ndim == 2 and bool(np.any(arr))
+            except Exception:
+                return False
+
+        def _segment_usable_for_pred(crack):
+            return _segment_has_real_edges(crack) or _segment_has_real_mask(crack)
+
+        def _selected_atomic_ids():
+            rows = [i.row() for i in listwidget.selectedIndexes()]
+            out = set()
+            for idx in rows:
+                tpe, cid = display_items[idx]
+                if tpe == "atomic":
+                    out.add(cid)
+                else:
+                    out.update(combined_cracks.get(cid, {}).get("members", []))
+            return out
+
+        def update_mode_buttons():
+            selected_ids = _selected_atomic_ids()
+
+            # No selection yet: keep both available and neutral message.
+            if not selected_ids:
+                rb_gt.setEnabled(True)
+                rb_pred.setEnabled(True)
+                lbl_mode_info.setText("")
+                lbl_mode_info.setVisible(False)
+                return
+
+            has_auto_sel = any(
+                is_auto_segment(atomic_cracks.get(cid, {}))
+                for cid in selected_ids
+            )
+            missing_pred = sorted(
+                [
+                    cid for cid in selected_ids
+                    if (not is_auto_segment(atomic_cracks.get(cid, {})))
+                    and (not _segment_usable_for_pred(atomic_cracks.get(cid, {})))
+                ],
+                key=int
+            )
+
+            if has_auto_sel:
+                rb_gt.setEnabled(False)
+                rb_pred.setEnabled(True)
+                rb_pred.setChecked(True)
+                lbl_mode_info.setText("GT unavailable: selection contains auto segments.")
+                lbl_mode_info.setVisible(True)
+            elif missing_pred:
+                rb_gt.setEnabled(True)
+                rb_pred.setEnabled(False)
+                rb_gt.setChecked(True)
+                ids = ", ".join(sorted(missing_pred, key=int))
+                lbl_mode_info.setText(
+                    f"Pred unavailable: Atomics {ids} have no edges or mask - GT only."
+                )
+                lbl_mode_info.setVisible(True)
+            else:
+                rb_gt.setEnabled(True)
+                rb_pred.setEnabled(True)
+                lbl_mode_info.setText("")
+                lbl_mode_info.setVisible(False)
+        listwidget.itemSelectionChanged.connect(update_mode_buttons)
+        listwidget.itemSelectionChanged.connect(highlight)
+        update_mode_buttons()
+        highlight()
 
         if dlg.exec_() != QDialog.Accepted:
             self.change_image()
@@ -248,11 +320,30 @@ class CombineClearSegments(CrackUtils):
             else:
                 selected_atomic_ids.update(combined_cracks[cid].get("members", []))
 
+        # Final guard (authoritative) so execution matches UI gating.
+        has_auto_sel = any(
+            is_auto_segment(atomic_cracks.get(cid, {}))
+            for cid in selected_atomic_ids
+        )
+        missing_pred = sorted(
+            [
+                cid for cid in selected_atomic_ids
+                if (not is_auto_segment(atomic_cracks.get(cid, {})))
+                and (not _segment_usable_for_pred(atomic_cracks.get(cid, {})))
+            ],
+            key=int
+        )
+
         # ==========================================================
         # CONNECTIVITY CHECK (STRICT MODE: GT or PRED, no fallback)
         # ==========================================================
         candidate = set(selected_atomic_ids)
-        use_gt_mode = rb_gt.isChecked()
+        if has_auto_sel:
+            use_gt_mode = False
+        elif missing_pred:
+            use_gt_mode = True
+        else:
+            use_gt_mode = rb_gt.isChecked()
         connectivity_mode = "gt" if use_gt_mode else "pred"
 
         if use_gt_mode:
