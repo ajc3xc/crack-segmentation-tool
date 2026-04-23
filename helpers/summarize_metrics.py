@@ -3899,8 +3899,8 @@ def _plot_dataset_full_timing_overview(
             if df_ep is not None and not df_ep.empty:
                 arr = pd.to_numeric(df_ep.get("time_edge_masks_sec"), errors="coerce").dropna().to_numpy(float)
                 if arr.size:
-                    p1_vals[idx["Edge Masks"]] = float(np.mean(arr)) * n_segs_est
-                    p1_errs[idx["Edge Masks"]] = float(np.std(arr)) * n_segs_est if arr.size > 1 else 0.0
+                    p1_vals[idx["Edge Masks"]] = float(np.mean(arr))
+                    p1_errs[idx["Edge Masks"]] = float(np.std(arr)) if arr.size > 1 else 0.0
 
                 et_p1 = np.zeros(len(df_ep), dtype=float)
                 for col in ["time_edges_tracking_sec", "time_edges_pair_normals_sec"]:
@@ -3908,8 +3908,8 @@ def _plot_dataset_full_timing_overview(
                         et_p1 += pd.to_numeric(df_ep[col], errors="coerce").fillna(0.0).to_numpy(float)
                 et_p1 = et_p1[np.isfinite(et_p1) & (et_p1 > 0)]
                 if et_p1.size:
-                    p1_vals[idx["ET"]] = float(np.mean(et_p1)) * n_segs_est
-                    p1_errs[idx["ET"]] = float(np.std(et_p1)) * n_segs_est if et_p1.size > 1 else 0.0
+                    p1_vals[idx["ET"]] = float(np.mean(et_p1))
+                    p1_errs[idx["ET"]] = float(np.std(et_p1)) if et_p1.size > 1 else 0.0
 
             v = float(pd.to_numeric(r.get("combine_edge_masks_sec_mean", np.nan), errors="coerce"))
             e = float(pd.to_numeric(r.get("combine_edge_masks_sec_std", 0.0), errors="coerce"))
@@ -3923,20 +3923,24 @@ def _plot_dataset_full_timing_overview(
                 p2_vals[idx["ET"]] = v
                 p2_errs[idx["ET"]] = e if np.isfinite(e) else 0.0
 
-            p1_vals[idx["TOTAL*"]] = sum(p1_vals[:-1])
-            p2_vals[idx["TOTAL*"]] = sum(p2_vals[:-1])
-            true_total = p1_vals[idx["TOTAL*"]] + p2_vals[idx["TOTAL*"]]
-            true_total_err = float(np.sqrt((sum(np.square(p1_errs[:-1]))) + (sum(np.square(p2_errs[:-1])))))
+            p1_vals[idx["TOTAL*"]] = 0.0
+            p2_vals[idx["TOTAL*"]] = total_v if np.isfinite(total_v) else 0.0
+            true_total = p2_vals[idx["TOTAL*"]]
+            true_total_err = total_e if np.isfinite(total_e) else 0.0
 
             # Right panel data
             right_labels, right_vals, right_errs = [], [], []
             right_note = ""
             if df_ep is not None and not df_ep.empty:
                 geo_cols = [
-                    ("Geodesic 1\n(edge 1 solve)", "time_edges_geodesic1_sec"),
-                    ("Geodesic 2\n(edge 2 solve)", "time_edges_geodesic2_sec"),
-                    ("Derived midline", "time_derived_midline_sec"),
-                    ("Normal pairs", "time_edges_pair_normals_sec"),
+                    ("Gradients", "time_edges_gradients_sec"),
+                    ("Structure Tensor", "time_edges_tensor_sec"),
+                    ("Mask Norm", "time_edges_mask_norm_sec"),
+                    ("Metric Build", "time_edges_metric_build_sec"),
+                    ("Geodesic 1", "time_edges_geodesic1_sec"),
+                    ("Geodesic 2", "time_edges_geodesic2_sec"),
+                    ("Derived Midline", "time_derived_midline_sec"),
+                    ("Normals\n(edge pairs)", "time_edges_pair_normals_sec"),
                 ]
                 for lbl, col in geo_cols:
                     if col not in df_ep.columns:
@@ -3966,10 +3970,12 @@ def _plot_dataset_full_timing_overview(
             # Left panel
             lx = np.arange(len(bar_labels))
             bar_w = 0.55
-            ax_left.bar(lx, p1_vals, bar_w, color="#f28e2b", alpha=0.88, label="Phase 1 (per-atomic x est. segs)")
+            ax_left.bar(lx, p1_vals, bar_w, color="#f28e2b", alpha=0.88, label="Phase 1 (per-segment)")
             ax_left.bar(lx, p2_vals, bar_w, bottom=p1_vals, color="#4c78a8", alpha=0.88, label="Phase 2 (combined crack)")
             total_vals = [p1 + p2 for p1, p2 in zip(p1_vals, p2_vals)]
             total_errs = [float(np.sqrt((e1 ** 2) + (e2 ** 2))) for e1, e2 in zip(p1_errs, p2_errs)]
+            total_vals[-1] = total_v if np.isfinite(total_v) else 0.0
+            total_errs[-1] = total_e if np.isfinite(total_e) else 0.0
             ax_left.errorbar(
                 lx,
                 total_vals,
@@ -3984,8 +3990,8 @@ def _plot_dataset_full_timing_overview(
             ax_left.set_xticklabels(bar_labels, rotation=30, ha="right", fontsize=9)
             ax_left.set_ylabel("seconds (mean per combined crack)")
             ax_left.set_title(
-                f"ET Timing Components - P1 per-atomic (orange) + P2 combined (blue)\n"
-                f"*dominant_segments_from_group not timed. P1 scaled by {n_segs_est:.1f} segs/crack est."
+                "ET Timing - Phase 1: per-segment (orange), Phase 2: per-combined-crack (blue)\n"
+                "P1 ET = tracking + normals. TOTAL = Phase 2 only (self-consistent unit)."
             )
             ax_left.legend(fontsize=8, loc="upper left")
             ax_left.grid(axis="y", alpha=0.25)
@@ -4045,16 +4051,16 @@ def _plot_dataset_full_timing_overview(
             if df_ep is not None and not df_ep.empty:
                 arr = pd.to_numeric(df_ep.get("time_edge_masks_sec"), errors="coerce").dropna().to_numpy(float)
                 if arr.size:
-                    v = float(np.mean(arr)) * n_segs_est
-                    e = float(np.std(arr)) * n_segs_est if arr.size > 1 else 0.0
+                    v = float(np.mean(arr))
+                    e = float(np.std(arr)) if arr.size > 1 else 0.0
                     _et_csv_rows.append({
-                        "level": "phase1_per_atomic_scaled",
-                        "panel": f"Phase 1 - Per-Atomic (x{n_segs_est:.1f} segs)",
+                        "level": "phase1_per_segment",
+                        "panel": "Phase 1 - Per Segment (calibration)",
                         "component": "Edge Masks",
                         "mean_s": round(v, 3),
                         "std_s": round(e, 3),
-                        "pct_of_total": round(100.0 * v / true_total, 1) if np.isfinite(true_total) and true_total > 0 else "",
-                        "source": f"edge_parallel_results (n={len(df_ep)} cracks, scaled by est. {n_segs_est:.1f} segs/crack)",
+                        "pct_of_total": "",
+                        "source": f"edge_parallel_results (n={len(df_ep)} cracks, per-segment)",
                     })
                 et_p1 = np.zeros(len(df_ep), dtype=float)
                 for col in ["time_edges_tracking_sec", "time_edges_pair_normals_sec"]:
@@ -4062,16 +4068,16 @@ def _plot_dataset_full_timing_overview(
                         et_p1 += pd.to_numeric(df_ep[col], errors="coerce").fillna(0.0).to_numpy(float)
                 et_p1 = et_p1[np.isfinite(et_p1) & (et_p1 > 0)]
                 if et_p1.size:
-                    v = float(np.mean(et_p1)) * n_segs_est
-                    e = float(np.std(et_p1)) * n_segs_est if et_p1.size > 1 else 0.0
+                    v = float(np.mean(et_p1))
+                    e = float(np.std(et_p1)) if et_p1.size > 1 else 0.0
                     _et_csv_rows.append({
-                        "level": "phase1_per_atomic_scaled",
-                        "panel": f"Phase 1 - Per-Atomic (x{n_segs_est:.1f} segs)",
-                        "component": "ET",
+                        "level": "phase1_per_segment",
+                        "panel": "Phase 1 - Per Segment (calibration)",
+                        "component": "ET (tracking + normals)",
                         "mean_s": round(v, 3),
                         "std_s": round(e, 3),
-                        "pct_of_total": round(100.0 * v / true_total, 1) if np.isfinite(true_total) and true_total > 0 else "",
-                        "source": f"edge_parallel_results (n={len(df_ep)} cracks, scaled by est. {n_segs_est:.1f} segs/crack)",
+                        "pct_of_total": "",
+                        "source": f"edge_parallel_results (n={len(df_ep)} cracks, per-segment)",
                     })
 
             if df_ep is not None and not df_ep.empty:
@@ -4084,7 +4090,6 @@ def _plot_dataset_full_timing_overview(
                     ("Geodesic 2", "time_edges_geodesic2_sec"),
                     ("Derived Midline", "time_derived_midline_sec"),
                     ("Normal Pairs", "time_edges_pair_normals_sec"),
-                    ("Edge Tracking (total)", "time_edges_tracking_sec"),
                 ]
                 n_ep = len(df_ep)
                 for lbl, col in _right_map:
@@ -4106,15 +4111,58 @@ def _plot_dataset_full_timing_overview(
                         "pct_of_total": pct,
                         "source": f"edge_parallel_results (n={n_ep} cracks)",
                     })
-            if np.isfinite(true_total):
+                timed_sum = sum(
+                    float(pd.to_numeric(df_ep[col], errors="coerce").mean())
+                    for _, col in _right_map if col in df_ep.columns
+                )
+                et_total = float(pd.to_numeric(df_ep["time_edges_tracking_sec"], errors="coerce").mean()) if "time_edges_tracking_sec" in df_ep.columns else np.nan
+                normals_mean = float(pd.to_numeric(df_ep["time_edges_pair_normals_sec"], errors="coerce").mean()) if "time_edges_pair_normals_sec" in df_ep.columns else 0.0
+                overhead = et_total - timed_sum if np.isfinite(et_total) else np.nan
+                if np.isfinite(overhead) and overhead > 0:
+                    denom = et_total + normals_mean if np.isfinite(et_total) else np.nan
+                    _et_csv_rows.append({
+                        "level": "per_segment",
+                        "panel": "Edge Tracking Decomposition (calibration)",
+                        "component": "Overhead (untimed)",
+                        "mean_s": round(overhead, 4),
+                        "std_s": "",
+                        "pct_of_total": round(100.0 * overhead / denom, 1) if np.isfinite(denom) and denom > 0 else "",
+                        "source": f"edge_parallel_results (n={len(df_ep)} cracks, derived)",
+                    })
+            if df_ep is not None and not df_ep.empty:
+                phase1_sum = 0.0
+                phase1_var = 0.0
+                arr = pd.to_numeric(df_ep.get("time_edge_masks_sec"), errors="coerce").dropna().to_numpy(float)
+                if arr.size:
+                    phase1_sum += float(np.mean(arr))
+                    phase1_var += float(np.std(arr)) ** 2
+                et_p1 = np.zeros(len(df_ep), dtype=float)
+                for col in ["time_edges_tracking_sec", "time_edges_pair_normals_sec"]:
+                    if col in df_ep.columns:
+                        et_p1 += pd.to_numeric(df_ep[col], errors="coerce").fillna(0.0).to_numpy(float)
+                et_p1 = et_p1[np.isfinite(et_p1) & (et_p1 > 0)]
+                if et_p1.size:
+                    phase1_sum += float(np.mean(et_p1))
+                    phase1_var += float(np.std(et_p1)) ** 2
+                if phase1_sum > 0:
+                    _et_csv_rows.append({
+                        "level": "total_phase1_per_segment",
+                        "panel": "TOTAL Phase 1 (per-segment)",
+                        "component": "TOTAL_P1",
+                        "mean_s": round(phase1_sum, 3),
+                        "std_s": round(float(np.sqrt(phase1_var)), 3),
+                        "pct_of_total": "",
+                        "source": "edge_parallel_results (per-segment)",
+                    })
+            if np.isfinite(total_v):
                 _et_csv_rows.append({
-                    "level": "total",
-                    "panel": "TOTAL (P1+P2, dominant_segments_from_group excluded)",
-                    "component": "TOTAL*",
-                    "mean_s": round(true_total, 3),
-                    "std_s": round(true_total_err, 3),
+                    "level": "total_phase2_per_combined_crack",
+                    "panel": "TOTAL Phase 2 (per-combined-crack)",
+                    "component": "TOTAL_P2",
+                    "mean_s": round(float(total_v), 3),
+                    "std_s": round(float(total_e) if np.isfinite(total_e) else 0.0, 3),
                     "pct_of_total": "",
-                    "source": "estimated",
+                    "source": "timings_core_grouped",
                 })
 
             if _et_csv_rows:
