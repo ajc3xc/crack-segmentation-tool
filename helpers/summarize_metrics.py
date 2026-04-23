@@ -1884,6 +1884,8 @@ def _aggregate_timing_metrics(
     verbose: bool,
 ) -> Dict[str, str]:
     outputs = {}
+    timing_dir = os.path.join(out_dir, "timing")
+    os.makedirs(timing_dir, exist_ok=True)
 
     def _drop_skeleton_graph_cols(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
         if not isinstance(df, pd.DataFrame):
@@ -1924,7 +1926,7 @@ def _aggregate_timing_metrics(
         stage_tag = "edge_tracking_stage"
 
         all_df = pd.concat(timing_frames, ignore_index=True)
-        all_csv = os.path.join(out_dir, f"dataset_{stage_tag}_all.csv")
+        all_csv = os.path.join(timing_dir, f"dataset_{stage_tag}_all.csv")
         all_df.to_csv(all_csv, index=False)
         outputs[f"{stage_tag}_all_csv"] = all_csv
         if WRITE_LEGACY_TIMINGS_CORE_ALIASES:
@@ -1942,7 +1944,7 @@ def _aggregate_timing_metrics(
         ]
         grouped = _aggregate_numeric(all_df, group_cols=group_cols, numeric_cols=num_cols)
         if not grouped.empty:
-            grp_csv = os.path.join(out_dir, f"dataset_{stage_tag}_grouped.csv")
+            grp_csv = os.path.join(timing_dir, f"dataset_{stage_tag}_grouped.csv")
             grouped.to_csv(grp_csv, index=False)
             outputs[f"{stage_tag}_grouped_csv"] = grp_csv
             if WRITE_LEGACY_TIMINGS_CORE_ALIASES:
@@ -2042,7 +2044,7 @@ def _aggregate_timing_metrics(
                 }
             )
         if roll_rows:
-            roll_csv = os.path.join(out_dir, "dataset_edge_tracking_stage_rollup.csv")
+            roll_csv = os.path.join(timing_dir, "dataset_edge_tracking_stage_rollup.csv")
             pd.DataFrame(roll_rows).to_csv(roll_csv, index=False)
             outputs["edge_tracking_stage_rollup_csv"] = roll_csv
 
@@ -2606,6 +2608,7 @@ def _aggregate_baseline_timings(
                 "category": "seg",
                 "component": f"inference_seconds:{method}",
                 "mean_sec": float(np.mean(sec)),
+                # Intentional: segmentation is per-image, not per-crack.
                 "weighted_mean_sec": float(np.mean(sec)),
                 "total_sec": float(np.sum(sec)),
                 "count": int(sec.size),
@@ -2650,8 +2653,10 @@ def _aggregate_supervision_timings(
     if not files:
         return outputs
 
+    # Multi-cue component columns are excluded here; they are aggregated separately
+    # in _aggregate_gt_component_timings via dataset_multi_cue_components_weighted.csv.
     _GT_SUP_EXCLUDE_PATTERNS = (
-        "multi_cue_", "multi_cue_", "dijkstra", "costmap", "multi_cue_generation",
+        "multi_cue_", "dijkstra", "costmap", "multi_cue_generation",
         "normals_depth", "multi_cue_align", "depth_recess",
     )
     rows = []
@@ -3102,10 +3107,116 @@ def _aggregate_gt_component_timings(
             verbose,
             f"[summarize] gt component timings: gt_centering_rows={len(center_df)} dt_rows={len(dt_df)} depth_rows={len(depth_df)}",
         )
+
+    # Length-weighted component summaries (consistent with supervision weighting).
+    _img_weight = {}
+    _edge_csv = os.path.join(out_dir, "dataset_edge_tracking_stage_all.csv")
+    _edge_df = _safe_read_csv(_edge_csv)
+    if _edge_df is not None and not _edge_df.empty and "image" in _edge_df.columns:
+        _wcol = next((c for c in ["crack_px", "length_px", "finite_len_px"] if c in _edge_df.columns), None)
+        if _wcol is not None:
+            _ew = _edge_df[["image", _wcol]].copy()
+            _ew["image"] = _ew["image"].astype(str)
+            _ew[_wcol] = pd.to_numeric(_ew[_wcol], errors="coerce")
+            _ew = _ew[np.isfinite(_ew[_wcol]) & (_ew[_wcol] > 0)]
+            if not _ew.empty:
+                _img_weight = _ew.groupby("image", dropna=False)[_wcol].sum().to_dict()
+
+    def _weighted_component_summary(df: pd.DataFrame, cols: List[str], pipeline: str) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame()
+        rows = []
+        for col in cols:
+            if col not in df.columns:
+                continue
+            arr = pd.to_numeric(df[col], errors="coerce").to_numpy(float)
+            imgs = df["image"].astype(str).to_numpy() if "image" in df.columns else np.array(["unknown"] * len(df))
+            ok = np.isfinite(arr)
+            if not np.any(ok):
+                continue
+            vals = arr[ok]
+            imgs_ok = imgs[ok]
+            mean_t = float(np.mean(vals))
+            if _img_weight:
+                ww = np.asarray([float(_img_weight.get(im, np.nan)) for im in imgs_ok], dtype=float)
+                okw = np.isfinite(ww) & (ww > 0)
+                wmean_t = float(np.sum(vals[okw] * ww[okw]) / np.sum(ww[okw])) if np.any(okw) else mean_t
+            else:
+                wmean_t = mean_t
+            rows.append(
+                {
+                    "pipeline": str(pipeline),
+                    "component": str(col),
+                    "display": re.sub(r"(_s|_sec)$", "", str(col)),
+                    "mean_s": round(float(np.mean(vals)), 4),
+                    "wmean_s": round(float(wmean_t), 4),
+                    "median_s": round(float(np.median(vals)), 4),
+                    "std_s": round(float(np.std(vals)), 4),
+                    "q1_s": round(float(np.percentile(vals, 25)), 4),
+                    "q3_s": round(float(np.percentile(vals, 75)), 4),
+                    "total_s": round(float(np.sum(vals)), 4),
+                    "n_images": int(vals.size),
+                }
+            )
+        return pd.DataFrame(rows)
+
+    _gt_cen_src = depth_df.copy() if not depth_df.empty else pd.DataFrame()
+    if not dt_df.empty:
+        _dt_cen_cols = ["image"] + [c for c in ["centered_snap_s", "normals_centered_s"] if c in dt_df.columns]
+        if len(_dt_cen_cols) > 1 and not _gt_cen_src.empty and "image" in _gt_cen_src.columns:
+            _gt_cen_src = _gt_cen_src.merge(
+                dt_df[_dt_cen_cols].drop_duplicates(subset=["image"]),
+                on="image",
+                how="left",
+            )
+        elif _gt_cen_src.empty:
+            _gt_cen_src = dt_df.copy()
+
+    _GT_CEN_COLS = [
+        "dt_compute_s",
+        "centered_snap_s",
+        "normals_centered_s",
+        "combined_plus_noncombined_atomics_centering_sec",
+    ]
+    if not _gt_cen_src.empty:
+        _gt_cen_sum = _weighted_component_summary(_gt_cen_src, _GT_CEN_COLS, "GT Centering")
+        if not _gt_cen_sum.empty:
+            p = os.path.join(out_dir, "dataset_gt_centering_components_weighted.csv")
+            _gt_cen_sum.to_csv(p, index=False)
+            outputs["dataset_gt_centering_components_weighted_csv"] = p
+
+    _MC_COLS = [
+        "multi_cue_align_s",
+        "depth_recess_s",
+        "multi_cue_costmap_s",
+        "multi_cue_dijkstra_s",
+        "multi_cue_postprocess_s",
+        "normals_depth_s",
+        "combined_plus_noncombined_atomics_centering_sec",
+    ]
+    if not depth_df.empty:
+        _mc_sum = _weighted_component_summary(depth_df, _MC_COLS, "Multi-Cue Generation")
+        if not _mc_sum.empty:
+            p = os.path.join(out_dir, "dataset_multi_cue_components_weighted.csv")
+            _mc_sum.to_csv(p, index=False)
+            outputs["dataset_multi_cue_components_weighted_csv"] = p
+
+    _GT_NORM_COLS = [
+        "atomic_compute_sec",
+        "noncombined_atomic_compute_sec",
+        "combined_compute_sec",
+        "combined_plus_noncombined_atomics_sec",
+    ]
+    if not center_df.empty:
+        _gt_norm_sum = _weighted_component_summary(center_df, _GT_NORM_COLS, "GT Normals")
+        if not _gt_norm_sum.empty:
+            p = os.path.join(out_dir, "dataset_gt_normals_components_weighted.csv")
+            _gt_norm_sum.to_csv(p, index=False)
+            outputs["dataset_gt_normals_components_weighted_csv"] = p
     return outputs
 
 
-def _aggregate_depth_generation_timings(
+def _aggregate_multi_cue_generation_timings(
     *,
     out_dir: str,
     depth_timing_csv: Optional[str],
@@ -3215,6 +3326,8 @@ def _plot_dataset_full_timing_overview(
     verbose: bool = True,
 ):
     outputs = {}
+    timing_dir = os.path.join(out_dir, "timing")
+    os.makedirs(timing_dir, exist_ok=True)
 
     def _log(v, msg):
         if v:
@@ -3247,7 +3360,13 @@ def _plot_dataset_full_timing_overview(
         if not method_rows:
             return None
         method_rows = sorted(method_rows, key=lambda x: x["sec"])
-        labels = [r["method"] for r in method_rows]
+        _TIMING_DISPLAY_LABELS = {
+            "gt_compute": "GT Normals",
+            "gt_centering": "GT Centering\n(wall-clock)",
+            "multi_cue": "Multi-Cue",
+            "multi_cue_generation": "Depth Gen",
+        }
+        labels = [_TIMING_DISPLAY_LABELS.get(str(r["method"]), str(r["method"])) for r in method_rows]
         vals = [r["sec"] for r in method_rows]
         errs = [max(0.0, float(pd.to_numeric(r.get("err", 0.0), errors="coerce") or 0.0)) for r in method_rows]
         colors = {
@@ -3540,12 +3659,27 @@ def _plot_dataset_full_timing_overview(
             total_sec = float(np.nansum(per_row))
             s = float(np.nanstd(per_row))
             n = int(np.count_nonzero(np.isfinite(per_row)))
-            if weight_col:
-                w = pd.to_numeric(g[weight_col], errors="coerce").fillna(0.0).to_numpy(float)
-                ok = np.isfinite(per_row) & np.isfinite(w) & (w > 0)
-                mean_sec = float(np.sum(per_row[ok] * w[ok]) / np.sum(w[ok])) if np.any(ok) else float(np.nanmean(per_row))
+            if sup == "manual":
+                # ET is a segmentation method: compute per-image totals, then simple mean.
+                if "image" in g.columns:
+                    per_image = (
+                        g.assign(_total=per_row)
+                        .groupby("image", dropna=False)["_total"]
+                        .sum()
+                        .to_numpy(float)
+                    )
+                    per_image = per_image[np.isfinite(per_image) & (per_image > 0)]
+                    mean_sec = float(np.mean(per_image)) if per_image.size else float(np.nanmean(per_row))
+                else:
+                    mean_sec = float(np.nanmean(per_row))
             else:
-                mean_sec = float(np.nanmean(per_row))
+                # Non-ET auto methods are per-crack, so crack/length weighting is appropriate.
+                if weight_col:
+                    w = pd.to_numeric(g[weight_col], errors="coerce").fillna(0.0).to_numpy(float)
+                    ok = np.isfinite(per_row) & np.isfinite(w) & (w > 0)
+                    mean_sec = float(np.sum(per_row[ok] * w[ok]) / np.sum(w[ok])) if np.any(ok) else float(np.nanmean(per_row))
+                else:
+                    mean_sec = float(np.nanmean(per_row))
             method_label = "ET" if sup == "manual" else sup
             category_label = "ET" if sup == "manual" else sup
             _add(mean_rows, method_label, mean_sec, category_label, s)
@@ -3580,18 +3714,6 @@ def _plot_dataset_full_timing_overview(
             r = g.iloc[0]
             _add(mean_rows, method_name, r.get("weighted_mean_sec"), "gt_supervision", 0.0)
             _add(sum_rows, method_name, r.get("total_sec"), "gt_supervision", 0.0)
-
-    # dt timing from dt track CSV summary.
-    df_dt = _safe_read(os.path.join(out_dir, "dataset_dt_timing_all.csv"))
-    if df_dt is not None and not df_dt.empty:
-        # Use pure DT compute timing, not full centering loop totals.
-        dt_col = "dt_compute_s" if "dt_compute_s" in df_dt.columns else None
-        if dt_col:
-            dt_arr = pd.to_numeric(df_dt[dt_col], errors="coerce").to_numpy(float)
-            dt_arr = dt_arr[np.isfinite(dt_arr)]
-            if dt_arr.size:
-                _add(mean_rows, "dt", float(np.mean(dt_arr)), "gt_centering", float(np.std(dt_arr)))
-                _add(sum_rows, "dt", float(np.sum(dt_arr)), "gt_centering", float(np.std(dt_arr) * np.sqrt(dt_arr.size)))
 
     # dt / dt_best from calibration ablation timing summary.
     abl_tim_csv = os.path.join(out_dir, "ablation", "ablation_timings_summary.csv")
@@ -3687,7 +3809,14 @@ def _plot_dataset_full_timing_overview(
         )
         # Prefer explicit multi-cue components.
         _mc_component_cols = [
-            c for c in ("dt_compute_s", "multi_cue_costmap_s", "multi_cue_dijkstra_s", "normals_depth_s")
+            c for c in (
+                "multi_cue_align_s",
+                "depth_recess_s",
+                "multi_cue_costmap_s",
+                "multi_cue_dijkstra_s",
+                "multi_cue_postprocess_s",
+                "normals_depth_s",
+            )
             if c in dd.columns
         ]
         if _mc_component_cols:
@@ -3766,7 +3895,7 @@ def _plot_dataset_full_timing_overview(
             | df_mean["method"].astype(str).str.upper().eq("ET")
         ].to_dict("records")
         width_subset = df_mean[
-            df_mean["category"].isin(["baseline_width", "ET", "auto", "multi_cue", "gt_centering"])
+            df_mean["category"].isin(["baseline_width", "ET", "auto", "multi_cue", "gt_centering", "gt_supervision"])
         ].to_dict("records")
         outputs["seg_chart"] = _plot_algorithm_overview(
             seg_subset,
@@ -3781,14 +3910,89 @@ def _plot_dataset_full_timing_overview(
         outputs["overview_chart"] = outputs.get("dataset_algorithm_timing_overview_png")
 
     # Component charts
-    outputs["gt_centering_components_chart"] = _plot_components(
-        df_gt,
-        ["dt_compute_s", "centered_snap_s", "normals_centered_s"],
-        "Dataset GT Centering Components",
-        os.path.join(out_dir, "dataset_gt_centering_components.png"),
-    )
+    _gt_cen_col_labels = {
+        "dt_compute_s": "DT Compute",
+        "centered_snap_s": "Ridge Snap",
+        "normals_centered_s": "Normals",
+    }
+    _gc_weighted = _safe_read(os.path.join(out_dir, "dataset_gt_centering_components_weighted.csv"))
+    if _gc_weighted is not None and not _gc_weighted.empty and {"component", "wmean_s"}.issubset(_gc_weighted.columns):
+        _gc_plot_cols = ["dt_compute_s", "centered_snap_s", "normals_centered_s"]
+        _gc_rebuilt = {}
+        for col in _gc_plot_cols:
+            rr = _gc_weighted[_gc_weighted["component"].astype(str) == col]
+            if rr.empty:
+                continue
+            vv = float(pd.to_numeric(rr.iloc[0].get("wmean_s", np.nan), errors="coerce"))
+            if np.isfinite(vv):
+                _gc_rebuilt[_gt_cen_col_labels.get(col, col)] = [vv]
+        _df_gt_plot = pd.DataFrame(_gc_rebuilt) if _gc_rebuilt else pd.DataFrame()
+        _gt_plot_cols = list(_df_gt_plot.columns)
+        outputs["gt_centering_components_chart"] = _plot_components_with_total(
+            _df_gt_plot,
+            _gt_plot_cols,
+            "GT Centering Pipeline Components (length-weighted mean per image)",
+            os.path.join(timing_dir, "dataset_gt_centering_components.png"),
+        )
+    else:
+        _df_gt_dt = _safe_read(os.path.join(out_dir, "dataset_dt_timing_all.csv"))
+        _src = _df_gt_dt if (_df_gt_dt is not None and not _df_gt_dt.empty) else df_gt
+        if _src is not None and not _src.empty:
+            _df_gt_plot = _src.rename(columns=_gt_cen_col_labels)
+            _gt_plot_cols = [_gt_cen_col_labels[c] for c in _gt_cen_col_labels if c in _src.columns]
+        else:
+            _df_gt_plot = pd.DataFrame()
+            _gt_plot_cols = []
+        outputs["gt_centering_components_chart"] = _plot_components_with_total(
+            _df_gt_plot,
+            _gt_plot_cols,
+            "GT Centering Pipeline Components (mean per image)",
+            os.path.join(timing_dir, "dataset_gt_centering_components.png"),
+        )
+    if df_gt is not None and not df_gt.empty:
+        _gc_rows = []
+        for col, lbl in _gt_cen_col_labels.items():
+            if col not in df_gt.columns:
+                continue
+            arr = pd.to_numeric(df_gt[col], errors="coerce").to_numpy(float)
+            arr = arr[np.isfinite(arr)]
+            if arr.size == 0:
+                continue
+            _gc_rows.append(
+                {
+                    "component": lbl,
+                    "mean_s": round(float(np.mean(arr)), 4),
+                    "median_s": round(float(np.median(arr)), 4),
+                    "std_s": round(float(np.std(arr)), 4),
+                    "q1_s": round(float(np.percentile(arr, 25)), 4),
+                    "q3_s": round(float(np.percentile(arr, 75)), 4),
+                    "n": int(arr.size),
+                    "note": "",
+                }
+            )
+        _wc_col = "combined_plus_noncombined_atomics_centering_sec"
+        if _wc_col in df_gt.columns:
+            arr = pd.to_numeric(df_gt[_wc_col], errors="coerce").to_numpy(float)
+            arr = arr[np.isfinite(arr)]
+            if arr.size:
+                _gc_rows.append(
+                    {
+                        "component": "Wall-Clock Total*",
+                        "mean_s": round(float(np.mean(arr)), 4),
+                        "median_s": round(float(np.median(arr)), 4),
+                        "std_s": round(float(np.std(arr)), 4),
+                        "q1_s": round(float(np.percentile(arr, 25)), 4),
+                        "q3_s": round(float(np.percentile(arr, 75)), 4),
+                        "n": int(arr.size),
+                        "note": "GT Centering + Multi-Cue run in parallel - not separable",
+                    }
+                )
+        if _gc_rows:
+            _gc_csv = os.path.join(timing_dir, "dataset_gt_centering_components.csv")
+            pd.DataFrame(_gc_rows).to_csv(_gc_csv, index=False)
+            outputs["gt_centering_components_csv"] = _gc_csv
+
     multicue_comp_pairs = [
-        ("dt_compute_s", None),
         ("multi_cue_generation_s", None),
         ("multi_cue_align_s", "multi_cue_align_s"),
         ("depth_recess_s", "depth_recess_s"),
@@ -3804,12 +4008,34 @@ def _plot_dataset_full_timing_overview(
                 multicue_comp_cols.append(pref)
             elif legacy and legacy in df_depth.columns:
                 multicue_comp_cols.append(legacy)
-    outputs["multi_cue_components_chart"] = _plot_components_with_total(
-        df_depth,
-        multicue_comp_cols,
-        "Multi-Cue Dataset Components",
-        os.path.join(out_dir, "dataset_multi_cue_components.png"),
-    )
+    _mc_weighted = _safe_read(os.path.join(out_dir, "dataset_multi_cue_components_weighted.csv"))
+    if _mc_weighted is not None and not _mc_weighted.empty and {"component", "wmean_s"}.issubset(_mc_weighted.columns):
+        _mc_rebuilt = {}
+        for col in multicue_comp_cols:
+            src_col = col if col in _mc_weighted["component"].astype(str).values else ("normals_depth_s" if col == "normals_multi_cue_s" else None)
+            if src_col is None:
+                continue
+            rr = _mc_weighted[_mc_weighted["component"].astype(str) == src_col]
+            if rr.empty:
+                continue
+            vv = float(pd.to_numeric(rr.iloc[0].get("wmean_s", np.nan), errors="coerce"))
+            if np.isfinite(vv):
+                _mc_rebuilt[col] = [vv]
+        _df_mc_plot = pd.DataFrame(_mc_rebuilt) if _mc_rebuilt else pd.DataFrame()
+        _mc_plot_cols = list(_df_mc_plot.columns)
+        outputs["multi_cue_components_chart"] = _plot_components_with_total(
+            _df_mc_plot,
+            _mc_plot_cols,
+            "Multi-Cue Dataset Components (length-weighted mean per image)",
+            os.path.join(out_dir, "dataset_multi_cue_components.png"),
+        )
+    else:
+        outputs["multi_cue_components_chart"] = _plot_components_with_total(
+            df_depth,
+            multicue_comp_cols,
+            "Multi-Cue Dataset Components",
+            os.path.join(out_dir, "dataset_multi_cue_components.png"),
+        )
     if df_depth is not None and not df_depth.empty and multicue_comp_cols:
         _mc_rows = []
         for c in multicue_comp_cols:
@@ -3828,6 +4054,22 @@ def _plot_dataset_full_timing_overview(
                 "q3_s": round(float(np.percentile(arr_pos, 75)), 4),
                 "n": int(arr_pos.size),
             })
+        _wc_col = "combined_plus_noncombined_atomics_centering_sec"
+        if _wc_col in df_depth.columns:
+            arr = pd.to_numeric(df_depth[_wc_col], errors="coerce").to_numpy(float)
+            arr = arr[np.isfinite(arr) & (arr > 0)]
+            if arr.size:
+                _mc_rows.append(
+                    {
+                        "component": "Wall-Clock Total* (GT Centering + Multi-Cue parallel)",
+                        "mean_s": round(float(np.mean(arr)), 4),
+                        "median_s": round(float(np.median(arr)), 4),
+                        "std_s": round(float(np.std(arr)), 4),
+                        "q1_s": round(float(np.percentile(arr, 25)), 4),
+                        "q3_s": round(float(np.percentile(arr, 75)), 4),
+                        "n": int(arr.size),
+                    }
+                )
         if _mc_rows:
             _mc_csv = os.path.join(out_dir, "dataset_multi_cue_components.csv")
             pd.DataFrame(_mc_rows).to_csv(_mc_csv, index=False)
@@ -3879,7 +4121,7 @@ def _plot_dataset_full_timing_overview(
             if np.isfinite(n_rows) and np.isfinite(n_images) and n_images > 0:
                 n_segs_est = n_rows / n_images
 
-            bar_labels = ["Stitching", "Edge Masks", "ET", "Post-process", "TOTAL*"]
+            bar_labels = ["Stitching", "Edge Masks", "ET", "Post-process", "TOTAL"]
             idx = {l: i for i, l in enumerate(bar_labels)}
             p1_vals = [0.0] * len(bar_labels)
             p2_vals = [0.0] * len(bar_labels)
@@ -3923,10 +4165,16 @@ def _plot_dataset_full_timing_overview(
                 p2_vals[idx["ET"]] = v
                 p2_errs[idx["ET"]] = e if np.isfinite(e) else 0.0
 
-            p1_vals[idx["TOTAL*"]] = 0.0
-            p2_vals[idx["TOTAL*"]] = total_v if np.isfinite(total_v) else 0.0
-            true_total = p2_vals[idx["TOTAL*"]]
-            true_total_err = total_e if np.isfinite(total_e) else 0.0
+            p1_total = p1_vals[idx["Edge Masks"]] + p1_vals[idx["ET"]]
+            p1_total_err = float(np.sqrt((p1_errs[idx["Edge Masks"]] ** 2) + (p1_errs[idx["ET"]] ** 2)))
+            p2_total = total_v if np.isfinite(total_v) else 0.0
+            p2_total_err = total_e if np.isfinite(total_e) else 0.0
+            p1_vals[idx["TOTAL"]] = p1_total
+            p2_vals[idx["TOTAL"]] = p2_total
+            p1_errs[idx["TOTAL"]] = p1_total_err
+            p2_errs[idx["TOTAL"]] = p2_total_err
+            true_total = p1_total + p2_total
+            true_total_err = float(np.sqrt((p1_total_err ** 2) + (p2_total_err ** 2)))
 
             # Right panel data
             right_labels, right_vals, right_errs = [], [], []
@@ -3991,7 +4239,7 @@ def _plot_dataset_full_timing_overview(
             ax_left.set_ylabel("seconds (mean per combined crack)")
             ax_left.set_title(
                 "ET Timing - Phase 1: per-segment (orange), Phase 2: per-combined-crack (blue)\n"
-                "P1 ET = tracking + normals. TOTAL = Phase 2 only (self-consistent unit)."
+                "P1 ET = tracking + normals. TOTAL stacks estimated P1 + measured P2."
             )
             ax_left.legend(fontsize=8, loc="upper left")
             ax_left.grid(axis="y", alpha=0.25)
@@ -4511,6 +4759,8 @@ def _plot_multicue_ablation(
 
 def _plot_gt_supervision_timing_detail(out_dir: str, *, verbose: bool = False) -> Dict[str, str]:
     outputs: Dict[str, str] = {}
+    timing_dir = os.path.join(out_dir, "timing")
+    os.makedirs(timing_dir, exist_ok=True)
     df_sup = _safe_read_csv(os.path.join(out_dir, "dataset_gt_supervision_timings.csv"))
     df_center = _safe_read_csv(os.path.join(out_dir, "dataset_gt_centering_timing_all.csv"))
     df_multi = _safe_read_csv(os.path.join(out_dir, "dataset_multi_cue_timing_all.csv"))
@@ -4599,39 +4849,73 @@ def _plot_gt_supervision_timing_detail(out_dir: str, *, verbose: bool = False) -
                 plt.close(fig)
                 outputs["dataset_timing_multicue_per_method_png"] = out_png
 
-    if df_center is not None and not df_center.empty:
-        gt_center_cols = [
-            "dt_compute_s",
-            "centered_snap_s",
-            "normals_centered_s",
-            "atomic_centering_sec",
-            "combined_centering_sec",
-        ]
-        labels = []
-        vals = []
-        for c in gt_center_cols:
-            if c not in df_center.columns:
+    if df_sup is not None and not df_sup.empty:
+        normals_rows = df_sup[df_sup["stage"].astype(str) == "normals"].copy()
+        normals_spec = {
+            "atomic_compute_sec": "Atomic GT Normals",
+            "noncombined_atomic_compute_sec": "Orphan Atomic GT Normals",
+            "combined_compute_sec": "Combined GT Normals",
+            "combined_plus_noncombined_atomics_sec": "Total (combined + orphan atomics)",
+        }
+        labels, vals, errs = [], [], []
+        for comp, lbl in normals_spec.items():
+            row = normals_rows[normals_rows["component"].astype(str) == comp]
+            if row.empty:
                 continue
-            arr = pd.to_numeric(df_center[c], errors="coerce").to_numpy(float)
-            arr = arr[np.isfinite(arr)]
-            if arr.size == 0:
-                continue
-            labels.append(re.sub(r"(_s|_sec)$", "", c))
-            vals.append(float(np.mean(arr)))
+            v = float(pd.to_numeric(row.iloc[0].get("weighted_mean_sec"), errors="coerce"))
+            if np.isfinite(v) and v > 0:
+                labels.append(lbl)
+                vals.append(v)
+                errs.append(0.0)
+
         if labels:
-            fig, ax = plt.subplots(figsize=(max(7.0, 0.7 * len(labels)), 4.2), dpi=170)
+            bar_colors = ["#4c78a8"] * (len(labels) - 1) + ["#d62728"]
+            fig, ax = plt.subplots(figsize=(max(6.0, 0.9 * len(labels)), 4.2), dpi=180)
             x = np.arange(len(labels))
-            ax.bar(x, vals, color="#1f77b4", alpha=0.88)
+            ax.bar(x, vals, color=bar_colors, alpha=0.88)
             ax.set_xticks(x)
-            ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
-            ax.set_ylabel("seconds (mean per image)")
-            ax.set_title("GT Centering Components")
-            ax.grid(axis="y", alpha=0.2)
+            ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
+            ax.set_ylabel("seconds (weighted mean per image)")
+            ax.set_title("GT Normals Computation (mean per image)")
+            ax.grid(axis="y", alpha=0.25)
             plt.tight_layout()
-            out_png = os.path.join(out_dir, "dataset_timing_gt_centering_components.png")
-            fig.savefig(out_png, bbox_inches="tight")
+            _normals_png = os.path.join(timing_dir, "dataset_gt_normals_components.png")
+            fig.savefig(_normals_png, bbox_inches="tight")
             plt.close(fig)
-            outputs["dataset_timing_gt_centering_components_png"] = out_png
+            outputs["dataset_gt_normals_components_png"] = _normals_png
+
+        centering_rows = df_sup[df_sup["stage"].astype(str) == "centering"].copy()
+        wallclock_spec = {
+            "combined_plus_noncombined_atomics_centering_sec": "Combined + Orphan Atomics",
+            "centering_total_sec": "All Atomics (incl. combined members)",
+        }
+        labels, vals = [], []
+        for comp, lbl in wallclock_spec.items():
+            row = centering_rows[centering_rows["component"].astype(str) == comp]
+            if row.empty:
+                continue
+            v = float(pd.to_numeric(row.iloc[0].get("weighted_mean_sec"), errors="coerce"))
+            if np.isfinite(v) and v > 0:
+                labels.append(lbl)
+                vals.append(v)
+
+        if labels:
+            fig, ax = plt.subplots(figsize=(5.5, 4.0), dpi=180)
+            x = np.arange(len(labels))
+            ax.bar(x, vals, color=["#4c78a8", "#aec7e8"][: len(labels)], alpha=0.88)
+            ax.set_xticks(x)
+            ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
+            ax.set_ylabel("seconds (weighted mean per image)")
+            ax.set_title(
+                "GT Centering Wall-Clock Total (mean per image)\n"
+                "*covers GT Centering + Multi-Cue running in parallel"
+            )
+            ax.grid(axis="y", alpha=0.25)
+            plt.tight_layout()
+            _wc_png = os.path.join(timing_dir, "dataset_gt_centering_wallclock.png")
+            fig.savefig(_wc_png, bbox_inches="tight")
+            plt.close(fig)
+            outputs["dataset_gt_centering_wallclock_png"] = _wc_png
 
     _log(verbose, f"[summarize] gt timing detail outputs: {list(outputs.keys())}")
     return outputs
@@ -5187,7 +5471,7 @@ def summarize_dataset_metrics(
             evaluated_images=evaluated_images_set,
             verbose=verbose,
         ),
-        "depth_timing": lambda: _aggregate_depth_generation_timings(
+        "depth_timing": lambda: _aggregate_multi_cue_generation_timings(
             out_dir=out_dir,
             depth_timing_csv=depth_timing_csv,
             evaluated_images=evaluated_images_set,
