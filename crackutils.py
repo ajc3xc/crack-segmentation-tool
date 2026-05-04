@@ -3135,6 +3135,9 @@ class CrackUtils:
             color_idx = 0
 
         out_dir = os.path.join(self.save_folder, "debug_outputs")
+        import shutil
+        if os.path.exists(out_dir):
+            shutil.rmtree(out_dir)
         os.makedirs(out_dir, exist_ok=True)
         
         # ----------------------------

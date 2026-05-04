@@ -178,6 +178,29 @@ class CombineClearSegments(CrackUtils):
         # ------------------------------------------------------------------
         # Highlight selection on the image
         # ------------------------------------------------------------------
+        def _draw_midline_safe(img, crack, color, thickness=2):
+            """Draw midline handling [None,None] segment separators correctly."""
+            raw = crack.get("midline", [])
+            if not raw:
+                return
+            segment, segments = [], []
+            for pt in raw:
+                if pt is None or (isinstance(pt, (list, tuple)) and len(pt) == 2
+                                  and (pt[0] is None or pt[1] is None)):
+                    if len(segment) >= 2:
+                        segments.append(segment)
+                    segment = []
+                else:
+                    try:
+                        segment.append([float(pt[0]), float(pt[1])])
+                    except (TypeError, ValueError, IndexError):
+                        pass
+            if len(segment) >= 2:
+                segments.append(segment)
+            for seg in segments:
+                pts = np.round(np.array(seg, dtype=float)[:, :2]).astype(np.int32).reshape(-1, 1, 2)
+                cv2.polylines(img, [pts], False, color, thickness, lineType=cv2.LINE_AA)
+
         def highlight():
             display = self.original_image.copy()
             for i, (tpe, cid) in enumerate(display_items):
@@ -191,13 +214,7 @@ class CombineClearSegments(CrackUtils):
                     overlay = np.zeros_like(display)
                     overlay[m_full.astype(bool)] = seg_color
                     display = cv2.addWeighted(display, 1, overlay, alpha, 0)
-                midline = np.asarray(crack.get("midline", []), dtype=float)
-                if midline.ndim == 2 and midline.shape[0] >= 2 and midline.shape[1] >= 2:
-                    pts = np.round(midline[:, :2]).astype(np.int32).reshape(-1, 1, 2)
-                    cv2.polylines(display, [pts], False, midline_color, 2, lineType=cv2.LINE_AA)
-                elif midline.ndim == 2 and midline.shape[0] == 1 and midline.shape[1] >= 2:
-                    p = tuple(np.round(midline[0, :2]).astype(np.int32))
-                    cv2.circle(display, p, 2, midline_color, -1, lineType=cv2.LINE_AA)
+                _draw_midline_safe(display, crack, midline_color, thickness=2)
             im = display.astype(np.uint8)
             qimage = QImage(im, im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qimage)
@@ -488,13 +505,27 @@ class CombineClearSegments(CrackUtils):
         # Highlight function
         def highlight():
             def draw_midline(img, crack, color, thickness=2):
-                midline = np.asarray(crack.get("midline", []), dtype=float)
-                if midline.ndim == 2 and midline.shape[0] >= 2 and midline.shape[1] >= 2:
-                    pts = np.round(midline[:, :2]).astype(np.int32).reshape(-1, 1, 2)
+                """Draw midline handling [None,None] segment separators correctly."""
+                raw = crack.get("midline", [])
+                if not raw:
+                    return
+                segment, segments = [], []
+                for pt in raw:
+                    if pt is None or (isinstance(pt, (list, tuple)) and len(pt) == 2
+                                      and (pt[0] is None or pt[1] is None)):
+                        if len(segment) >= 2:
+                            segments.append(segment)
+                        segment = []
+                    else:
+                        try:
+                            segment.append([float(pt[0]), float(pt[1])])
+                        except (TypeError, ValueError, IndexError):
+                            pass
+                if len(segment) >= 2:
+                    segments.append(segment)
+                for seg in segments:
+                    pts = np.round(np.array(seg, dtype=float)[:, :2]).astype(np.int32).reshape(-1, 1, 2)
                     cv2.polylines(img, [pts], False, color, thickness, lineType=cv2.LINE_AA)
-                elif midline.ndim == 2 and midline.shape[0] == 1 and midline.shape[1] >= 2:
-                    p = tuple(np.round(midline[0, :2]).astype(np.int32))
-                    cv2.circle(img, p, max(2, thickness), color, -1, lineType=cv2.LINE_AA)
 
             disp = self.original_image.copy()
             for i, cid in enumerate(keys_sorted):
