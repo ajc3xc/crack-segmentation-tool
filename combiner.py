@@ -3084,7 +3084,7 @@ def build_combined_crack_stateless(
 
     if img.ndim == 3:
         bgr_idx = {0: 2, 1: 0, 2: 1}.get(color_channel, 2)
-        gray_full = img[:, :, bgr_idx].astype(float)
+        gray_full = img[:, :, bgr_idx].astype(np.float32)
     else:
         gray_full = img.astype(np.float32)
 
@@ -3586,6 +3586,66 @@ def build_combined_crack_stateless(
                     )
 
             # ------------------------------------------------
+            # Local Gaussian smoothing at sharp bends (>60°)
+            # Only applied in a small window centred on the bend.
+            # ------------------------------------------------
+            _S = np.asarray(S_run, float).copy()
+            if len(_S) >= 4:
+                _tan = np.diff(_S, axis=0)
+                _tlen = np.linalg.norm(_tan, axis=1, keepdims=True).clip(1e-9)
+                _utan = _tan / _tlen
+                _dots = np.einsum('ij,ij->i', _utan[:-1], _utan[1:]).clip(-1.0, 1.0)
+                _turns = np.degrees(np.arccos(_dots))   # len = len(_S)-2
+                _bad = np.where(_turns > 60.0)[0] + 1  # +1 -> index in _S
+
+                if len(_bad) > 0:
+                    # Cluster nearby bend indices (within 5 pts = same junction)
+                    _clusters, _cur = [], [int(_bad[0])]
+                    for _bi in _bad[1:]:
+                        if int(_bi) - _cur[-1] <= 5:
+                            _cur.append(int(_bi))
+                        else:
+                            _clusters.append(_cur); _cur = [int(_bi)]
+                    _clusters.append(_cur)
+
+                    _W     = max(10, int(2 * window_half_size))
+                    _sigma = _W / 3.0
+
+                    from scipy.ndimage import gaussian_filter1d
+
+                    for _cl in _clusters:
+                        _center = int(round(float(np.mean(_cl))))
+                        _lo = max(0, _center - _W)
+                        _hi = min(len(_S) - 1, _center + _W)
+
+                        # Blend weight: Gaussian envelope, 1 at centre, ~0 at edges
+                        _idxs  = np.arange(_lo, _hi + 1)
+                        _blend = np.exp(-0.5 * ((_idxs - _center) / _sigma) ** 2)
+
+                        # Smooth using padded context so edge artefacts don't leak in
+                        _ctx_lo = max(0, _lo - _W)
+                        _ctx_hi = min(len(_S) - 1, _hi + _W)
+                        _xs = gaussian_filter1d(_S[_ctx_lo:_ctx_hi+1, 0], sigma=_sigma, mode='nearest')
+                        _ys = gaussian_filter1d(_S[_ctx_lo:_ctx_hi+1, 1], sigma=_sigma, mode='nearest')
+
+                        _off = _lo - _ctx_lo
+                        _xw  = _xs[_off:_off + len(_idxs)]
+                        _yw  = _ys[_off:_off + len(_idxs)]
+
+                        _S[_lo:_hi+1, 0] = _blend * _xw + (1.0 - _blend) * _S[_lo:_hi+1, 0]
+                        _S[_lo:_hi+1, 1] = _blend * _yw + (1.0 - _blend) * _S[_lo:_hi+1, 1]
+
+                        _peak_turn = float(_turns[np.array(_cl) - 1].max())
+                        print(
+                            f"[BEND_SMOOTH] branch={branch_id} run={run_id} "
+                            f"center={_center} window=[{_lo},{_hi}] W={_W} sigma={_sigma:.1f} "
+                            f"n_bad={len(_cl)} peak_turn={_peak_turn:.1f}deg",
+                            flush=True
+                        )
+
+                    S_run = _S
+
+            # ------------------------------------------------
             # Branch-safe pad
             # ------------------------------------------------
             branch_pad = max(
@@ -3620,6 +3680,14 @@ def build_combined_crack_stateless(
 
             crop = gray_full[y0:y1, x0:x1]
 
+            # ---- DBG: save raw crop image ----
+            if debug_dir is not None:
+                _ddir = os.path.join(debug_dir, f"branch_{branch_id}", f"run_{run_id}")
+                os.makedirs(_ddir, exist_ok=True)
+                cv2.imwrite(os.path.join(_ddir, "crop_raw.png"), crop)
+                print(f"[DBG_CROP] branch={branch_id} run={run_id} crop shape={crop.shape} "
+                      f"dtype={crop.dtype} min={int(crop.min())} max={int(crop.max())}", flush=True)
+
             track_local_yx = np.vstack([
                 S_run[:, 1] - y0,
                 S_run[:, 0] - x0
@@ -3641,6 +3709,35 @@ def build_combined_crack_stateless(
                 S_run[-1] - [x0, y0],
             ]
 
+            # ---- DBG: seed/tip in crop coords + bounds check ----
+            _seed_c = np.asarray(pts_crop[0], float)
+            _tip_c  = np.asarray(pts_crop[1], float)
+            print(f"[DBG_PTS_CROP] branch={branch_id} run={run_id} "
+                  f"seed_crop={_seed_c.tolist()} tip_crop={_tip_c.tolist()} "
+                  f"crop_WH=({bw},{bh})", flush=True)
+            for _lbl, _pt in [("seed", _seed_c), ("tip", _tip_c)]:
+                if _pt[0] < 0 or _pt[0] > bw or _pt[1] < 0 or _pt[1] > bh:
+                    print(f"[DBG_PTS_CROP][WARN] {_lbl} OUT OF CROP BOUNDS: {_pt.tolist()}", flush=True)
+
+            # ---- DBG: midline tangent angle stats (detect V-bend) ----
+            _S = np.asarray(S_run, float)
+            if len(_S) >= 4:
+                _tangents = np.diff(_S, axis=0)
+                _lens = np.linalg.norm(_tangents, axis=1, keepdims=True).clip(1e-9)
+                _unit = _tangents / _lens
+                _angles_deg = np.degrees(np.arctan2(_unit[:, 1], _unit[:, 0]))
+                _n = len(_angles_deg)
+                _q1 = int(_n * 0.10); _q2 = int(_n * 0.45); _q3 = int(_n * 0.55); _q4 = int(_n * 0.90)
+                _ang_start  = float(np.mean(_angles_deg[:max(1, _q1)]))
+                _ang_mid    = float(np.mean(_angles_deg[_q2:max(_q2+1, _q3)]))
+                _ang_end    = float(np.mean(_angles_deg[min(_q4, _n-1):]))
+                _max_turn   = float(np.max(np.abs(np.diff(_angles_deg))))
+                print(f"[DBG_TANGENT] branch={branch_id} run={run_id} "
+                      f"angle_start={_ang_start:.1f}° mid={_ang_mid:.1f}° end={_ang_end:.1f}° "
+                      f"max_single_turn={_max_turn:.1f}° n_pts={len(_S)}", flush=True)
+                if _max_turn > 90:
+                    print(f"[DBG_TANGENT][WARN] sharp bend detected: {_max_turn:.1f}° — ET edge masks likely corrupted at junction", flush=True)
+
             # -------------------------
             # edge_masks
             # -------------------------
@@ -3656,6 +3753,44 @@ def build_combined_crack_stateless(
                 mode=mode
             )
             t_masks_total += (time.perf_counter() - t_em0)
+
+            # ---- Build corridor domain mask ----
+            # Dilate the midline into a binary corridor to prevent the
+            # geodesic shortcutting through empty background.
+            _corridor_radius = int(3 * window_half_size)
+            _mid_mask = np.zeros((bh, bw), dtype=np.uint8)
+            _mid_pts = np.round(midline_xy_crop_dbg).astype(np.int32)
+            _mid_pts[:, 0] = np.clip(_mid_pts[:, 0], 0, bw - 1)
+            _mid_pts[:, 1] = np.clip(_mid_pts[:, 1], 0, bh - 1)
+            for _pt in _mid_pts:
+                _mid_mask[_pt[1], _pt[0]] = 1
+            _kern_r = _corridor_radius * 2 + 1
+            _kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_kern_r, _kern_r))
+            domain_mask_crop = cv2.dilate(_mid_mask, _kern, iterations=1)
+            print(f"[CORRIDOR] branch={branch_id} run={run_id} radius={_corridor_radius}px "
+                  f"coverage={100*domain_mask_crop.mean():.1f}%", flush=True)
+
+            # Save corridor mask for debug
+            if debug_dir is not None:
+                _ddir = os.path.join(debug_dir, f"branch_{branch_id}", f"run_{run_id}")
+                cv2.imwrite(os.path.join(_ddir, "domain_mask.png"), domain_mask_crop * 255)
+            if debug_dir is not None:
+                _ddir = os.path.join(debug_dir, f"branch_{branch_id}", f"run_{run_id}")
+                os.makedirs(_ddir, exist_ok=True)
+                def _save_em(arr, path):
+                    a = np.asarray(arr, float)
+                    mn, mx = a.min(), a.max()
+                    if mx > mn:
+                        a = ((a - mn) / (mx - mn) * 255).astype(np.uint8)
+                    else:
+                        a = np.zeros_like(a, dtype=np.uint8)
+                    cv2.imwrite(path, a)
+                _save_em(em1, os.path.join(_ddir, "em1.png"))
+                _save_em(em2, os.path.join(_ddir, "em2.png"))
+                print(f"[DBG_EM] branch={branch_id} run={run_id} "
+                      f"em1 shape={np.shape(em1)} range=[{float(np.min(em1)):.3f},{float(np.max(em1)):.3f}] "
+                      f"em2 shape={np.shape(em2)} range=[{float(np.min(em2)):.3f},{float(np.max(em2)):.3f}]",
+                      flush=True)
 
             # -------------------------
             # edges_tracking (PER BRANCH now)
@@ -3682,8 +3817,6 @@ def build_combined_crack_stateless(
             branch_debug_dir = None
 
             if debug_dir is not None:
-                import os
-
                 branch_debug_dir = os.path.join(
                     debug_dir,
                     f"branch_{branch_id}",
@@ -3693,20 +3826,34 @@ def build_combined_crack_stateless(
                 os.makedirs(branch_debug_dir, exist_ok=True)
 
             # -------------------------
-            # edges_tracking
+            # edges_tracking (with domain mask; fallback to no mask if solver fails)
             # -------------------------
-            res = edges_tracking(
-                image_crop=crop,
-                pts_cropp=pts_crop,
-                edge_mask1_cropp=em1,
-                edge_mask2_cropp=em2,
-                midline=midline_xy_crop,
-                mu=int(mu), l=int(l), p=int(p),
-                return_normal_edges=True,
-                prefer_gpu=prefer_gpu,
-                mode=mode,
-                debug_dir=branch_debug_dir
-            )
+            res = None
+            for _dm_attempt, _dm_label in [
+                (domain_mask_crop, "with_corridor"),
+                (None,             "no_corridor_fallback"),
+            ]:
+                try:
+                    res = edges_tracking(
+                        image_crop=crop,
+                        pts_cropp=pts_crop,
+                        edge_mask1_cropp=em1,
+                        edge_mask2_cropp=em2,
+                        midline=midline_xy_crop,
+                        mu=int(mu), l=int(l), p=int(p),
+                        return_normal_edges=True,
+                        prefer_gpu=prefer_gpu,
+                        mode=mode,
+                        domain_mask=_dm_attempt,
+                        debug_dir=branch_debug_dir
+                    )
+                    print(f"[ET_ATTEMPT] branch={branch_id} run={run_id} "
+                          f"attempt={_dm_label} succeeded", flush=True)
+                    break
+                except Exception as _et_exc:
+                    print(f"[ET_ATTEMPT] branch={branch_id} run={run_id} "
+                          f"attempt={_dm_label} failed: {_et_exc}", flush=True)
+                    res = None
 
             t_edges_total += (time.perf_counter() - t_et0)
 
@@ -3844,14 +3991,17 @@ def build_combined_crack_stateless(
             norm2_segs.append(n2_full)
 
             try:
+                _mask_out_dir = branch_debug_dir or (
+                    os.path.join(debug_dir, f"branch_{branch_id}", f"run_{run_id}") if debug_dir else None
+                )
                 mask_run = generate_mask_from_edges(
                     img_gray=gray_full,
                     edge1_xy=e1_full,
                     edge2_xy=e2_full,
                     midline_xy=derived_mid_full,
                     normals_xy=(n1_full, n2_full),
-                    out_dir=None,
-                    tag=None,
+                    out_dir=_mask_out_dir,
+                    tag=f"branch{branch_id}_run{run_id}",
                     do_morph=False,
                 )
             except ValueError as e:

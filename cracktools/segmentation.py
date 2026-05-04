@@ -652,6 +652,7 @@ def edges_tracking(
     return_normal_edges=True,
     prefer_gpu=True,
     mode="new",   # "new" or "old"
+    domain_mask=None,   # uint8/bool crop-space mask; metric set to 1e30 outside
 
     # ----------------------------
     # Conservative post-processing
@@ -868,6 +869,33 @@ def edges_tracking(
     # --------------------------------------------------
     # 5. Edge geodesics (UNCHANGED behavior)
     # --------------------------------------------------
+    # Apply corridor domain mask if provided.
+    # We can't use inf or extremely large values (violates HFM positive-definiteness).
+    # Instead, scale the barrier to 1000x the max metric inside the corridor —
+    # large enough to make shortcuts prohibitively expensive, small enough to be stable.
+    if domain_mask is not None:
+        _dm = np.asarray(domain_mask, bool)
+        _forbidden = ~_dm  # (H, W) 2D mask
+
+        # Build a barrier tensor: barrier * Identity at forbidden pixels.
+        # CRITICAL: must be positive definite (det > 0) so HFM solver stays valid.
+        # Setting all 4 components to barrier gives det=0 (singular) → solver breaks.
+        # Correct form: [[barrier,0],[0,barrier]] = barrier*I, det = barrier^2 > 0.
+        _max_inside = float(np.max(metric1[:, :, _dm]))
+        _barrier    = _max_inside * 1000.0
+        _max_inside2 = float(np.max(metric2[:, :, _dm]))
+        _barrier2    = _max_inside2 * 1000.0
+
+        for _met, _bar in [(metric1, _barrier), (metric2, _barrier2)]:
+            _met[0, 0][_forbidden] = _bar   # diagonal: barrier
+            _met[1, 1][_forbidden] = _bar   # diagonal: barrier
+            _met[0, 1][_forbidden] = 0.0    # off-diagonal: zero
+            _met[1, 0][_forbidden] = 0.0    # off-diagonal: zero
+
+        print(f"[DOMAIN_MASK] applied: {int(_forbidden.sum())} px forbidden "
+              f"({100*_forbidden.mean():.1f}% of crop) "
+              f"barrier={_barrier:.2e}", flush=True)
+
     t0 = time.perf_counter()
     g1_yx = _run_geodesic(metric1, seeds_yx, tips_yx, sides, dims, prefer_gpu=prefer_gpu)
     t_geo1 = time.perf_counter() - t0

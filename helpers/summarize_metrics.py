@@ -138,6 +138,8 @@ def _save_bar(
     plt.xticks(xs, labs, rotation=rotate, ha="right")
     plt.ylabel(_clean_plot_label(ylabel))
     plt.title(_clean_plot_label(title))
+    plt.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+    plt.gca().set_axisbelow(True)
     if color_legend:
         handles = [Patch(facecolor=c, edgecolor="none", label=str(lbl)) for lbl, c in color_legend]
         plt.legend(handles=handles, loc="best", framealpha=0.9, fontsize=8)
@@ -227,7 +229,7 @@ def _build_width_method_name(df: pd.DataFrame) -> pd.Series:
         np.where(
             mf.str.lower().eq("baseline"),
             bm.map(_display_width_method_label).where(bm.str.len() > 0, "baseline"),
-            mt.where(mt.str.len() > 0, "model"),
+            mt.where(mt.str.len() > 0, "multi-cue"),
         ),
         index=df.index,
     )
@@ -247,7 +249,7 @@ def _classify_width_source(row) -> str:
         return "baseline"
     if _is_et_like(str(row.get("midline_type", "") or "")) or _is_et_like(str(row.get("method_name", "") or "")):
         return "ET"
-    return "model"
+    return "multi-cue"
 
 
 def _plot_width_metric(
@@ -271,7 +273,7 @@ def _plot_width_metric(
     if d.empty:
         return False
 
-    cmap = color_map or {"baseline": "#2ca02c", "model": "#1f77b4", "ET": "#d62728"}
+    cmap = color_map or {"baseline": "#2ca02c", "multi-cue": "#1f77b4", "ET": "#d62728"}
 
     if str(plot_type).lower() == "box":
         order = (
@@ -309,20 +311,21 @@ def _plot_width_metric(
         for m in med_order:
             g = d.loc[d["method_name"] == m]
             if g.empty:
-                cls_map[m] = "model"
+                cls_map[m] = "multi-cue"
                 continue
             cls_map[m] = str(g["source_class"].iloc[0])
         for box, m in zip(parts["boxes"], med_order):
-            box.set_facecolor(cmap.get(cls_map.get(m, "model"), "#4c78a8"))
+            box.set_facecolor(cmap.get(cls_map.get(m, "multi-cue"), "#4c78a8"))
             box.set_alpha(0.65)
         ax.set_ylabel(_clean_plot_label(ylabel))
         ax.set_title(_clean_plot_label(title))
         ax.set_xticklabels(med_order, rotation=35, ha="right", fontsize=8)
-        ax.grid(axis="y", alpha=0.2)
+        ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+        ax.set_axisbelow(True)
         ax.legend(
             handles=[
                 Patch(facecolor=cmap.get("ET", "#d62728"), edgecolor="none", label="ET"),
-                Patch(facecolor=cmap.get("model", "#1f77b4"), edgecolor="none", label="model"),
+                Patch(facecolor=cmap.get("multi-cue", "#1f77b4"), edgecolor="none", label="multi-cue"),
                 Patch(facecolor=cmap.get("baseline", "#2ca02c"), edgecolor="none", label="baseline"),
             ],
             loc="best",
@@ -332,6 +335,29 @@ def _plot_width_metric(
         plt.tight_layout()
         fig.savefig(out_png, bbox_inches="tight")
         plt.close(fig)
+        companion_csv = out_png.replace(".png", ".csv")
+        try:
+            rows = []
+            for m in med_order:
+                gg = d.loc[d["method_name"] == m, metric_col]
+                vv = pd.to_numeric(gg, errors="coerce").to_numpy(float)
+                vv = vv[np.isfinite(vv)]
+                if vv.size == 0:
+                    continue
+                rows.append(
+                    {
+                        "method": str(m),
+                        "source_class": str(cls_map.get(m, "multi-cue")),
+                        f"{metric_col}_mean": float(np.mean(vv)),
+                        f"{metric_col}_q1": float(np.percentile(vv, 25)),
+                        f"{metric_col}_q3": float(np.percentile(vv, 75)),
+                        "n": int(vv.size),
+                    }
+                )
+            if rows:
+                pd.DataFrame(rows).to_csv(companion_csv, index=False)
+        except Exception:
+            pass
         return True
 
     rows = []
@@ -353,7 +379,7 @@ def _plot_width_metric(
                 "q1": q1,
                 "q3": q3,
                 "outliers": outliers,
-                "source_class": str(g["source_class"].iloc[0]) if "source_class" in g.columns else "model",
+                "source_class": str(g["source_class"].iloc[0]) if "source_class" in g.columns else "multi-cue",
                 "n": int(v.size),
             }
         )
@@ -379,11 +405,12 @@ def _plot_width_metric(
     ax.set_xticklabels(p["method_name"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
     ax.set_ylabel(_clean_plot_label(ylabel))
     ax.set_title(_clean_plot_label(title))
-    ax.grid(axis="y", alpha=0.2)
+    ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+    ax.set_axisbelow(True)
     ax.legend(
         handles=[
             Patch(facecolor=cmap.get("ET", "#d62728"), edgecolor="none", label="ET"),
-            Patch(facecolor=cmap.get("model", "#1f77b4"), edgecolor="none", label="model"),
+            Patch(facecolor=cmap.get("multi-cue", "#1f77b4"), edgecolor="none", label="multi-cue"),
             Patch(facecolor=cmap.get("baseline", "#2ca02c"), edgecolor="none", label="baseline"),
             Patch(facecolor="#f58518", edgecolor="none", label="IQR"),
         ],
@@ -394,6 +421,21 @@ def _plot_width_metric(
     plt.tight_layout()
     fig.savefig(out_png, bbox_inches="tight")
     plt.close(fig)
+    companion_csv = out_png.replace(".png", ".csv")
+    try:
+        p_out = p.copy().rename(
+            columns={
+                "method_name": "method",
+                "mean": f"{metric_col}_mean",
+                "q1": f"{metric_col}_q1",
+                "q3": f"{metric_col}_q3",
+                "n": "n",
+            }
+        )
+        keep_cols = ["method", "source_class", f"{metric_col}_mean", f"{metric_col}_q1", f"{metric_col}_q3", "n"]
+        p_out[[c for c in keep_cols if c in p_out.columns]].to_csv(companion_csv, index=False)
+    except Exception:
+        pass
     return True
 
 
@@ -418,7 +460,7 @@ def _list_image_metric_dirs(metrics_root: str) -> List[str]:
 def _parse_width_summary_context(rel_path: str) -> Tuple[str, str, str]:
     parts = rel_path.replace("\\", "/").split("/")
     baseline_method = ""
-    method_family = "model"
+    method_family = "multi-cue"
     midline_type = "unknown"
 
     if len(parts) >= 2 and parts[0] in ("manual", "auto", "et", "ET"):
@@ -439,7 +481,7 @@ def _parse_midline_context(rel_path: str) -> Tuple[str, str, str]:
         "eob_width_dse", "esd_width_dse", "mat_width_dse", "mat_width_raw",
         "pca_width_dse", "skel_mat_dse", "skel_mat_raw",
     }
-    method_family = "baseline" if (len(parts) > 0 and parts[0].lower() in _KNOWN_BASELINE_METHODS) else "model"
+    method_family = "baseline" if (len(parts) > 0 and parts[0].lower() in _KNOWN_BASELINE_METHODS) else "multi-cue"
     baseline_method = parts[0] if method_family == "baseline" else ""
     midline_type = "unknown"
 
@@ -452,7 +494,7 @@ def _parse_midline_context(rel_path: str) -> Tuple[str, str, str]:
     if mm_idx == 1:
         # model: {midline_type}/midline_metrics/...
         midline_type = parts[0]
-        method_family = "model"
+        method_family = "multi-cue"
     elif mm_idx == 2:
         # baseline: {method}/{midline_type}/midline_metrics/...
         baseline_method = str(parts[0])
@@ -543,13 +585,15 @@ def _aggregate_mask_metrics(
             ax.set_xticklabels(labels, fontsize=8, fontweight="bold")
             ax.set_ylim(0.0, 1.0)
             ax.set_title(ttl, fontsize=12, fontweight="bold")
+            ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+            ax.set_axisbelow(True)
             for i, v in enumerate(vals):
                 txt = "nan" if not np.isfinite(v) else f"{v:.3f}"
                 y = 0.02 if not np.isfinite(v) else min(float(v) + 0.03, 0.98)
                 ax.text(xs[i], y, txt, ha="center", fontsize=7)
 
-        _bar(axes[0], region, "Region metrics (weighted mean)")
-        _bar(axes[1], boundary, "Boundary metrics (weighted mean)")
+        _bar(axes[0], region, "Region metrics")
+        _bar(axes[1], boundary, "Boundary metrics")
 
         im = axes[2].imshow(cm, cmap="Blues")
         axes[2].set_xticks([0, 1])
@@ -735,16 +779,30 @@ def _aggregate_mask_metrics(
                     # Show baseline method name only (e.g., sam3, hrsegnet).
                     p = s.split(":", 1)
                     return p[1] if len(p) == 2 and p[1] else "baseline"
+                # Baselines are now often already stripped to method name by
+                # _make_variant_label; keep display as-is.
                 return s
 
+            # Matches baseline labels produced by _make_variant_label when the
+            # "baseline:" prefix has already been stripped.
+            _KNOWN_BASELINE_NAMES = {
+                "crackscopenet",
+                "crackscopenet_large",
+                "crackscopenet_small",
+                "hrsegnet",
+                "sam3",
+                "segnet",
+                "unet",
+            }
+
             def _variant_class(v: str) -> str:
-                sl = str(v or "").strip().lower()
-                prefix = sl.split(":")[0]
-                if _is_et_like(prefix):
+                s = str(v or "").strip()
+                sl = s.lower()
+                if _is_et_like(sl) or sl == "et":
                     return "ET"
-                if sl.startswith("auto:"):
+                if sl.startswith("auto:") or sl == "auto":
                     return "auto"
-                if sl.startswith("baseline:"):
+                if sl.startswith("baseline:") or sl in _KNOWN_BASELINE_NAMES:
                     return "baseline"
                 return "other"
 
@@ -861,11 +919,13 @@ def _aggregate_mask_metrics(
                     axes[0].bar(x, assd_vals, color=bar_cols, alpha=0.88)
                     axes[0].set_title("ASSD")
                     axes[0].set_ylabel("ASSD")
-                    axes[0].grid(axis="y", alpha=0.2)
+                    axes[0].grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+                    axes[0].set_axisbelow(True)
                     axes[1].bar(x, hd95_vals, color=bar_cols, alpha=0.88)
                     axes[1].set_title("HD95")
                     axes[1].set_ylabel("HD95")
-                    axes[1].grid(axis="y", alpha=0.2)
+                    axes[1].grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+                    axes[1].set_axisbelow(True)
                     for ax in axes:
                         ax.set_xticks(x)
                         ax.set_xticklabels(labels, rotation=20, ha="right")
@@ -983,7 +1043,7 @@ def _aggregate_width_metrics(
     COLOR_MAP = {
         "baseline": "#2ca02c",  # green
         "auto": "#1f77b4",      # blue
-        "model": "#1f77b4",     # blue (same as auto)
+        "multi-cue": "#1f77b4",     # blue (same as auto)
         "ET": "#d62728",        # red
     }
 
@@ -1144,7 +1204,7 @@ def _aggregate_width_metrics(
     rmse_col = "rmse_px_mean" if "rmse_px_mean" in grouped.columns else None
     total_grouped = grouped[grouped["crack_type"].astype(str).str.upper() == "TOTAL"].copy()
     plot_grouped = total_grouped if not total_grouped.empty else grouped
-    legend_items = [(k, v) for k, v in [("ET", COLOR_MAP["ET"]), ("model", COLOR_MAP["model"]), ("baseline", COLOR_MAP["baseline"])]
+    legend_items = [(k, v) for k, v in [("ET", COLOR_MAP["ET"]), ("multi-cue", COLOR_MAP["multi-cue"]), ("baseline", COLOR_MAP["baseline"])]
                     if k in set(plot_grouped["source_class"].astype(str).tolist())]
 
     _df_total = all_df if total_grouped.empty else all_df[all_df["crack_type"].astype(str).str.upper() == "TOTAL"].copy()
@@ -1248,7 +1308,7 @@ def _aggregate_width_metrics(
             elif _is_et_like(raw_key):
                 src_class = "ET"
             else:
-                src_class = "model"
+                src_class = "multi-cue"
             if raw_key in _baseline_raw_keys:
                 display_label = _display_width_method_label(raw_key)
             else:
@@ -1305,11 +1365,12 @@ def _aggregate_width_metrics(
             ax.set_xticklabels(p["method"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
             ax.set_ylabel(ylabel)
             ax.set_title(title)
-            ax.grid(axis="y", alpha=0.2)
+            ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+            ax.set_axisbelow(True)
             ax.legend(
                 handles=[
                     Patch(facecolor=COLOR_MAP["ET"], edgecolor="none", label="ET"),
-                    Patch(facecolor=COLOR_MAP["model"], edgecolor="none", label="model"),
+                    Patch(facecolor=COLOR_MAP["multi-cue"], edgecolor="none", label="multi-cue"),
                     Patch(facecolor=COLOR_MAP["baseline"], edgecolor="none", label="baseline"),
                     Patch(facecolor="#f58518", edgecolor="none", label="IQR"),
                 ],
@@ -1320,6 +1381,11 @@ def _aggregate_width_metrics(
             plt.tight_layout()
             fig.savefig(out_png, bbox_inches="tight")
             plt.close(fig)
+            companion_cols = ["method", "source_class", metric, q1_col, q3_col, "n_samples"]
+            companion_cols = [c for c in companion_cols if c in p.columns]
+            companion_csv = out_png.replace(".png", ".csv")
+            if companion_cols:
+                p[companion_cols].to_csv(companion_csv, index=False)
 
         _plot_lw(lw_df, "mae_px", "mae_q1", "mae_q3", os.path.join(length_weighted_dir, "dataset_width_lw_mae.png"), "Length-weighted width MAE", "MAE (px)")
         lw_outputs["width_lw_mae_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_mae.png")
@@ -1337,7 +1403,7 @@ def _aggregate_width_metrics(
         lw_outputs["width_lw_bias_no_et_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_bias_no_et.png")
         return lw_outputs
 
-    outputs.update(_plot_width_metrics_with_without_et(all_df, no_et_dir, bias_dir, verbose=verbose))
+    outputs.update(_plot_width_metrics_with_without_et(all_df, no_et_dir, overview_dir, verbose=verbose))
     outputs.update(_plot_length_weighted_summary())
 
     # Additional distribution-aware plots: mean bar + IQR + outlier dots.
@@ -1368,7 +1434,7 @@ def _plot_width_metrics_with_without_et(
     os.makedirs(out_dir, exist_ok=True)
     os.makedirs(bias_dir, exist_ok=True)
 
-    color_map = {"baseline": "#2ca02c", "model": "#1f77b4", "ET": "#d62728"}
+    color_map = {"baseline": "#2ca02c", "multi-cue": "#1f77b4", "ET": "#d62728"}
 
     def _drop_et(df: pd.DataFrame) -> pd.DataFrame:
         if "method_family" in df.columns:
@@ -1525,7 +1591,7 @@ def _aggregate_midline_metrics(
                         _abl_df = _abl_df.sort_values("score_mid").groupby("midline_type", as_index=False).first()
                     _abl_df["image"] = image
                     _abl_df["midline_type_path"] = _abl_df["midline_type"]
-                    _abl_df["method_family"] = "model"
+                    _abl_df["method_family"] = "multi-cue"
                     _abl_df["baseline_method"] = ""
                     # Use a path that _parse_midline_context will handle correctly
                     # Format: {midline_type}/midline_metrics/... -> parsed as model with midline_type=midline_type
@@ -1652,13 +1718,13 @@ def _aggregate_midline_metrics(
                 mf = str(row.get("method_family", "") or "").lower()
                 bm = str(row.get("baseline_method", "") or "").strip()
                 mt = str(row.get("midline_type", "") or "").strip()
-                method = bm if (mf == "baseline" and bm) else (_display_midline_label(mt) if mt else "model")
+                method = bm if (mf == "baseline" and bm) else (_display_midline_label(mt) if mt else "multi-cue")
                 return method
 
             d["group_label"] = d.apply(_grp_label, axis=1)
             d = d.sort_values("score_mid_mean", ascending=True).head(20)
 
-            grp_color_map = {"ET": "#d62728", "auto": "#1f77b4", "model": "#1f77b4", "baseline": "#2ca02c"}
+            grp_color_map = {"ET": "#d62728", "auto": "#1f77b4", "multi-cue": "#1f77b4", "baseline": "#2ca02c"}
 
             def _grp_color(row):
                 mf = str(row.get("method_family", "") or "").lower()
@@ -1673,7 +1739,7 @@ def _aggregate_midline_metrics(
             grp_colors = d.apply(_grp_color, axis=1).tolist()
             legend_items = [
                 ("ET", grp_color_map["ET"]),
-                ("model", grp_color_map.get("model", grp_color_map["auto"])),
+                ("multi-cue", grp_color_map.get("multi-cue", grp_color_map["auto"])),
                 ("baseline", grp_color_map["baseline"]),
             ]
             out_png = os.path.join(midline_dir, "dataset_midline_score_by_method_crack.png")
@@ -1725,7 +1791,7 @@ def _aggregate_midline_metrics(
                 d0["method_name"] = np.where(
                     mf.str.lower().eq("baseline"),
                     bm.where(bm.str.len() > 0, "baseline"),
-                    mt.where(mt.str.len() > 0, "model"),
+                    mt.where(mt.str.len() > 0, "multi-cue"),
                 )
             else:
                 d0["method_name"] = "unknown"
@@ -1737,7 +1803,7 @@ def _aggregate_midline_metrics(
                     return "ET"
                 mt = str(row.get("midline_type", "")).lower()
                 if mt in ("dt", "best_dt_depth", "dt_depth", "dt_trench_color_depth", "dt_trench_depth"):
-                    return "model"
+                    return "multi-cue"
                 return "auto"
 
             d0["source_class"] = d0.apply(_src_class, axis=1)
@@ -1815,7 +1881,7 @@ def _aggregate_midline_metrics(
 
                 top = rank_df.head(20).copy()
                 top["label"] = top.get("method_name", pd.Series(["unknown"] * len(top))).astype(str).map(_display_midline_label)
-                color_map = {"ET": "#d62728", "model": "#1f77b4", "auto": "#1f77b4", "baseline": "#2ca02c"}
+                color_map = {"ET": "#d62728", "multi-cue": "#1f77b4", "auto": "#1f77b4", "baseline": "#2ca02c"}
                 colors = [color_map.get(str(c), "#4c78a8") for c in top["source_class"].astype(str).tolist()]
                 fig_w = max(10.0, 0.55 * len(top))
                 fig, ax = plt.subplots(figsize=(fig_w, 5.0), dpi=180)
@@ -1826,11 +1892,12 @@ def _aggregate_midline_metrics(
                 ax.set_xticklabels(top["label"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
                 ax.set_ylabel("RS3 Score")
                 ax.set_title("Dataset Midline RS3 Score (combined)")
-                ax.grid(axis="y", alpha=0.2)
+                ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+                ax.set_axisbelow(True)
                 present_cls = set(top["source_class"].astype(str).tolist())
                 legend_handles = [
                     Patch(facecolor=color_map[cls], edgecolor="none", label=cls)
-                    for cls in ["ET", "model", "auto", "baseline"]
+                    for cls in ["ET", "multi-cue", "auto", "baseline"]
                     if cls in present_cls and cls in color_map
                 ]
                 ax.legend(handles=legend_handles, loc="best", framealpha=0.9, fontsize=8)
@@ -1859,7 +1926,8 @@ def _aggregate_midline_metrics(
                     ax2.set_xticklabels(top_no_et["label"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
                     ax2.set_ylabel("RS3 Score")
                     ax2.set_title("Dataset Midline RS3 Score (combined, no ET)")
-                    ax2.grid(axis="y", alpha=0.2)
+                    ax2.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+                    ax2.set_axisbelow(True)
                     present_no_et = set(top_no_et["source_class"].astype(str).tolist())
                     legend_handles_no_et = [
                         Patch(facecolor=color_map[cls], edgecolor="none", label=cls)
@@ -2321,7 +2389,8 @@ def _aggregate_edge_rs3_selection(
             ax.set_xticklabels(top_plot["label"].tolist(), rotation=65, ha="right", fontsize=8)
             ax.set_ylabel("edge score / components")
             ax.set_title("Dataset edge family score decomposition (lower is better)")
-            ax.grid(axis="y", alpha=0.2)
+            ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+            ax.set_axisbelow(True)
             legend_handles = [
                 Patch(facecolor="#1f77b4", edgecolor="none", label="mode=new (outline)"),
                 Patch(facecolor="#39b54a", edgecolor="none", label="mode=old (outline)"),
@@ -2976,7 +3045,8 @@ def _aggregate_gt_centering_weighted_summaries(
             ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
             ax.set_ylabel("value")
             ax.set_title(f"GT Centering Weighted Summary ({disp_group})")
-            ax.grid(axis="y", alpha=0.2)
+            ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+            ax.set_axisbelow(True)
             legend_handles = [
                 Patch(facecolor="#d62728", edgecolor="none", label="critical"),
                 Patch(facecolor="#4c78a8", edgecolor="none", label="non-critical"),
@@ -3030,7 +3100,8 @@ def _aggregate_gt_centering_weighted_summaries(
                 ax.set_xticklabels(labels)
                 ax.set_ylabel("lwmean_score_mid")
                 ax.set_title("GT Centering RS3 Score (lower is better): Atomic vs Combined")
-                ax.grid(axis="y", alpha=0.2)
+                ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+                ax.set_axisbelow(True)
                 plt.tight_layout()
                 out_png = os.path.join(plot_dir, "gt_centering_weighted_score_mid_atomic_vs_combined.png")
                 fig.savefig(out_png, bbox_inches="tight")
@@ -3399,7 +3470,8 @@ def _plot_dataset_full_timing_overview(
         ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
         ax.set_ylabel(_clean_plot_label("seconds"))
         ax.set_title(_clean_plot_label(title))
-        ax.grid(axis="y", alpha=0.25)
+        ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+        ax.set_axisbelow(True)
         present = []
         for r in method_rows:
             c = str(r.get("category", ""))
@@ -3452,7 +3524,8 @@ def _plot_dataset_full_timing_overview(
         ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
         ax.set_ylabel(_clean_plot_label("seconds"))
         ax.set_title(_clean_plot_label(title))
-        ax.grid(axis="y", alpha=0.25)
+        ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+        ax.set_axisbelow(True)
         plt.tight_layout()
         fig.savefig(out_png, bbox_inches="tight")
         plt.close(fig)
@@ -3518,7 +3591,8 @@ def _plot_dataset_full_timing_overview(
         ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
         ax.set_ylabel(_clean_plot_label("seconds (mean per image)"))
         ax.set_title(_clean_plot_label(title))
-        ax.grid(axis="y", alpha=0.25)
+        ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+        ax.set_axisbelow(True)
         plt.tight_layout()
         fig.savefig(out_png, bbox_inches="tight")
         plt.close(fig)
@@ -3564,7 +3638,8 @@ def _plot_dataset_full_timing_overview(
         )
         ax.set_ylabel(_clean_plot_label("seconds"))
         ax.set_title(_clean_plot_label(title))
-        ax.grid(axis="y", alpha=0.25)
+        ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+        ax.set_axisbelow(True)
         plt.tight_layout()
         fig.savefig(out_png, bbox_inches="tight")
         plt.close(fig)
@@ -4242,8 +4317,8 @@ def _plot_dataset_full_timing_overview(
                 "P1 ET = tracking + normals. TOTAL stacks estimated P1 + measured P2."
             )
             ax_left.legend(fontsize=8, loc="upper left")
-            ax_left.grid(axis="y", alpha=0.25)
-
+            ax_left.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+            ax_left.set_axisbelow(True)
             # Right panel
             if ax_right is not None and right_vals:
                 rx = np.arange(len(right_labels))
@@ -4264,8 +4339,8 @@ def _plot_dataset_full_timing_overview(
                 ax_right.set_title(
                     f"ET edge_tracking Decomposition\n{right_note}"
                 )
-                ax_right.grid(axis="y", alpha=0.25)
-
+                ax_right.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+                ax_right.set_axisbelow(True)
             plt.tight_layout()
             timing_dir = os.path.join(out_dir, "timing")
             os.makedirs(timing_dir, exist_ok=True)
@@ -4592,7 +4667,8 @@ def _aggregate_invalid_matches(
         ax.set_xticklabels(methods, rotation=35, ha="right", fontsize=8)
         ax.set_ylabel("count")
         ax.set_title("Invalid / Exclusion Reasons by Method (Stacked)")
-        ax.grid(axis="y", alpha=0.25)
+        ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+        ax.set_axisbelow(True)
         if handles:
             ax.legend(handles=handles, loc="best", fontsize=8, framealpha=0.9)
         plt.tight_layout()
@@ -4695,8 +4771,8 @@ def _plot_multicue_ablation(
     ax0.set_title("Multi-Cue Ablation - RS3 Score decomposition\n(combined cracks, per-crack mean)")
     ax0.set_ylabel("RS3 Score")
     ax0.legend(loc="best", fontsize=8, framealpha=0.9)
-    ax0.grid(axis="y", alpha=0.2)
-
+    ax0.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+    ax0.set_axisbelow(True)
     metric_sources = []
     for mcol in ("nn_mean_bidirectional", "hausdorff_p95", "coverage_min", "frechet_discrete_ds", "mean_tan_angle_error_deg", "relative_length_error", "orth_mean", "orth_std", "curvature_rms_ratio"):
         if isinstance(mm, pd.DataFrame) and not mm.empty and mcol in mm.columns:
@@ -4745,7 +4821,8 @@ def _plot_multicue_ablation(
         ax1.set_xticks(x)
         ax1.set_xticklabels([ms[0] for ms in metric_sources], rotation=25, ha="right", fontsize=8)
         ax1.set_ylabel("mean +/- IQR")
-        ax1.grid(axis="y", alpha=0.2)
+        ax1.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+        ax1.set_axisbelow(True)
         ax1.legend(loc="best", fontsize=7, ncol=2)
 
     plt.tight_layout()
@@ -4782,7 +4859,8 @@ def _plot_gt_supervision_timing_detail(out_dir: str, *, verbose: bool = False) -
             ax.set_xticklabels(d["image"].tolist(), rotation=35, ha="right", fontsize=8)
             ax.set_ylabel("seconds")
             ax.set_title("GT centering time per image")
-            ax.grid(axis="y", alpha=0.2)
+            ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+            ax.set_axisbelow(True)
             ax.legend(loc="best", fontsize=8)
             plt.tight_layout()
             out_png = os.path.join(out_dir, "dataset_timing_gt_centering.png")
@@ -4842,7 +4920,8 @@ def _plot_gt_supervision_timing_detail(out_dir: str, *, verbose: bool = False) -
                 ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
                 ax.set_ylabel("total seconds")
                 ax.set_title("Per multi-cue method total time")
-                ax.grid(axis="y", alpha=0.2)
+                ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+                ax.set_axisbelow(True)
                 plt.tight_layout()
                 out_png = os.path.join(out_dir, "dataset_timing_multicue_per_method.png")
                 fig.savefig(out_png, bbox_inches="tight")
@@ -4877,7 +4956,8 @@ def _plot_gt_supervision_timing_detail(out_dir: str, *, verbose: bool = False) -
             ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
             ax.set_ylabel("seconds (weighted mean per image)")
             ax.set_title("GT Normals Computation (mean per image)")
-            ax.grid(axis="y", alpha=0.25)
+            ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+            ax.set_axisbelow(True)
             plt.tight_layout()
             _normals_png = os.path.join(timing_dir, "dataset_gt_normals_components.png")
             fig.savefig(_normals_png, bbox_inches="tight")
@@ -4910,7 +4990,8 @@ def _plot_gt_supervision_timing_detail(out_dir: str, *, verbose: bool = False) -
                 "GT Centering Wall-Clock Total (mean per image)\n"
                 "*covers GT Centering + Multi-Cue running in parallel"
             )
-            ax.grid(axis="y", alpha=0.25)
+            ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+            ax.set_axisbelow(True)
             plt.tight_layout()
             _wc_png = os.path.join(timing_dir, "dataset_gt_centering_wallclock.png")
             fig.savefig(_wc_png, bbox_inches="tight")
@@ -5026,7 +5107,8 @@ def _aggregate_calibration_ablation(
     ax.set_xticklabels([_display_method_name(m) for m in methods], rotation=45, ha="right", fontsize=8)
     ax.set_ylabel("RS3 Score")
     ax.set_title("Calibration Ablation - RS3 Score Decomposition\n(combined + orphan atomics, length-weighted)")
-    ax.grid(axis="y", alpha=0.2)
+    ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+    ax.set_axisbelow(True)
     plt.tight_layout()
     out_png = os.path.join(abl_dir, "ablation_rs3_score_decomposition.png")
     fig.savefig(out_png, bbox_inches="tight")
@@ -5101,7 +5183,8 @@ def _aggregate_calibration_ablation(
         ax2.set_xticklabels(tim_df["method"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
         ax2.set_ylabel("mean seconds")
         ax2.set_title("Calibration Ablation - Timing (mean +/- std per image)")
-        ax2.grid(axis="y", alpha=0.2)
+        ax2.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+        ax2.set_axisbelow(True)
         plt.tight_layout()
         out_timing_png = os.path.join(abl_dir, "ablation_timings.png")
         fig2.savefig(out_timing_png, bbox_inches="tight")
@@ -5220,10 +5303,46 @@ def _aggregate_gt_centering_displacement(
             "(manual annotation -> DT-ridge snapped centerline, all segments)"
         )
         ax.legend(fontsize=9, framealpha=0.9)
-        ax.grid(axis="y", alpha=0.2)
+        ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+        ax.set_axisbelow(True)
         plt.tight_layout()
         nn_png = os.path.join(disp_dir, "gt_centering_nn_dist.png")
         fig1.savefig(nn_png, bbox_inches="tight")
+        nn_summary_rows = []
+        _nn_groups = [("All", df_all)] + [(g, s) for g, s in groups if g != "All"]
+        for grp_label, sub in _nn_groups:
+            nn = pd.to_numeric(
+                sub.get("nn_mean_bidirectional", pd.Series(dtype=float)),
+                errors="coerce",
+            ).to_numpy(float)
+            lw = pd.to_numeric(
+                sub.get("length_px", pd.Series(np.ones(len(sub)))),
+                errors="coerce",
+            ).to_numpy(float)
+            ok = np.isfinite(nn) & np.isfinite(lw) & (lw > 0)
+            nn_ok = nn[ok]
+            lw_ok = lw[ok]
+            if nn_ok.size == 0:
+                continue
+            nn_summary_rows.append(
+                {
+                    "group": str(grp_label),
+                    "n_segments": int(nn_ok.size),
+                    "lw_mean_px": round(float(np.sum(nn_ok * lw_ok) / np.sum(lw_ok)), 4),
+                    "mean_px": round(float(np.mean(nn_ok)), 4),
+                    "median_px": round(float(np.median(nn_ok)), 4),
+                    "std_px": round(float(np.std(nn_ok)), 4),
+                    "q1_px": round(float(np.percentile(nn_ok, 25)), 4),
+                    "q3_px": round(float(np.percentile(nn_ok, 75)), 4),
+                    "p95_px": round(float(np.percentile(nn_ok, 95)), 4),
+                    "pct_under_1px": round(float(np.mean(nn_ok < 1.0)) * 100.0, 2),
+                    "pct_under_2px": round(float(np.mean(nn_ok < 2.0)) * 100.0, 2),
+                }
+            )
+        if nn_summary_rows:
+            nn_csv = nn_png.replace(".png", ".csv")
+            pd.DataFrame(nn_summary_rows).to_csv(nn_csv, index=False)
+            outputs["gt_centering_nn_dist_csv"] = nn_csv
         plt.close(fig1)
         outputs["gt_centering_nn_dist_png"] = nn_png
 
@@ -5268,8 +5387,8 @@ def _aggregate_gt_centering_displacement(
         ax0.set_ylabel("RS3 Score")
         ax0.set_title("GT Centering — RS3 Score Decomposition")
         ax0.legend(handles=legend_handles, loc="best", fontsize=8, framealpha=0.9)
-        ax0.grid(axis="y", alpha=0.2)
-
+        ax0.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+        ax0.set_axisbelow(True)
         # Bottom — all metrics grouped bars
         x1 = np.arange(len(all_metric_cols), dtype=float)
         bar_w = 0.8 / max(1, len(groups))
@@ -5301,11 +5420,53 @@ def _aggregate_gt_centering_displacement(
         ax1.set_ylabel("mean +/- IQR")
         ax1.set_title("GT Centering — Full Metric Breakdown")
         ax1.legend(loc="best", fontsize=8, framealpha=0.9)
-        ax1.grid(axis="y", alpha=0.2)
-
+        ax1.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+        ax1.set_axisbelow(True)
         plt.tight_layout()
         full_png = os.path.join(disp_dir, "gt_centering_displacement_full.png")
         fig2.savefig(full_png, bbox_inches="tight")
+        full_rows = []
+        for grp_label, sub in groups:
+            row = {"group": str(grp_label), "panel": "RS3_decomposition"}
+            for col, _, lbl, fn in score_terms:
+                raw = (
+                    pd.to_numeric(sub[col], errors="coerce").to_numpy(float)
+                    if col in sub.columns
+                    else np.array([], dtype=float)
+                )
+                raw = raw[np.isfinite(raw)]
+                row[f"rs3_term_{lbl.replace(' ', '_').lower()}"] = (
+                    round(float(np.mean(fn(raw))), 4) if raw.size else np.nan
+                )
+            sc = pd.to_numeric(
+                sub.get("score_mid", pd.Series(dtype=float)),
+                errors="coerce",
+            ).to_numpy(float)
+            sc = sc[np.isfinite(sc)]
+            row["rs3_total_mean"] = round(float(np.mean(sc)), 4) if sc.size else np.nan
+            full_rows.append(row)
+
+        for grp_label, sub in groups:
+            row = {"group": str(grp_label), "panel": "full_metrics"}
+            for col in all_metric_cols:
+                v = pd.to_numeric(sub[col], errors="coerce").to_numpy(float)
+                v = v[np.isfinite(v)]
+                if v.size:
+                    row[f"{col}_mean"] = round(float(np.mean(v)), 4)
+                    row[f"{col}_median"] = round(float(np.median(v)), 4)
+                    row[f"{col}_q1"] = round(float(np.percentile(v, 25)), 4)
+                    row[f"{col}_q3"] = round(float(np.percentile(v, 75)), 4)
+                else:
+                    row[f"{col}_mean"] = np.nan
+                    row[f"{col}_median"] = np.nan
+                    row[f"{col}_q1"] = np.nan
+                    row[f"{col}_q3"] = np.nan
+            full_rows.append(row)
+
+        if full_rows:
+            full_csv = full_png.replace(".png", ".csv")
+            pd.DataFrame(full_rows).to_csv(full_csv, index=False)
+            outputs["gt_centering_displacement_full_csv"] = full_csv
         plt.close(fig2)
         outputs["gt_centering_displacement_full_png"] = full_png
 
@@ -5364,7 +5525,8 @@ def _aggregate_gt_centering_displacement(
                 "Variant RS3 Score vs GT Centering Displacement\n"
                 "(length-weighted, combined + orphan atomics)"
             )
-            ax_rs3.grid(axis="y", alpha=0.2)
+            ax_rs3.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+            ax_rs3.set_axisbelow(True)
             h1, l1 = ax_rs3.get_legend_handles_labels()
             h2, l2 = ax_nn.get_legend_handles_labels()
             ax_rs3.legend(h1 + h2, l1 + l2, fontsize=8, loc="lower right")
@@ -5561,7 +5723,8 @@ def summarize_dataset_metrics(
                 _ax.set_xticklabels(_tc_grp["label"].tolist(), rotation=35, ha="right", fontsize=8)
                 _ax.set_ylabel("mean seconds")
                 _ax.set_title("Multi-cue variant timings (mean +/- std per image)")
-                _ax.grid(axis="y", alpha=0.2)
+                _ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+                _ax.set_axisbelow(True)
                 plt.tight_layout()
                 _vt_png = os.path.join(out_dir, "dataset_edge_variant_timings.png")
                 _fig.savefig(_vt_png, bbox_inches="tight")
@@ -5596,7 +5759,7 @@ def summarize_dataset_metrics(
             }
         )
         _abl_mid["crack_type"] = "combined_plus_noncombined_atomic"
-        _abl_mid["method_family"] = "model"
+        _abl_mid["method_family"] = "multi-cue"
         _abl_mid["baseline_method"] = ""
         if df_midline_all is not None and not df_midline_all.empty:
             df_midline_all = pd.concat([df_midline_all, _abl_mid], ignore_index=True)
@@ -5703,7 +5866,8 @@ def summarize_dataset_metrics(
                             f"(length-weighted, n_samples per bin)"
                         )
                         ax.legend(fontsize=7, framealpha=0.9, ncol=2)
-                        ax.grid(axis="y", alpha=0.2)
+                        ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+                        ax.set_axisbelow(True)
                         for bi, b in enumerate(_bins_order):
                             _ns = int(_strat_df[_strat_df["gt_width_bin"] == b]["n_samples"].sum())
                             ax.text(bi, ax.get_ylim()[1] * 0.97,
@@ -5754,7 +5918,8 @@ def summarize_dataset_metrics(
                                     f"(length-weighted, n_samples per bin)"
                                 )
                                 ax_ne.legend(fontsize=7, framealpha=0.9, ncol=2)
-                                ax_ne.grid(axis="y", alpha=0.2)
+                                ax_ne.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+                                ax_ne.set_axisbelow(True)
                                 for bi, b in enumerate(_bins_order):
                                     _ns = int(_strat_df_no_et[_strat_df_no_et["gt_width_bin"] == b]["n_samples"].sum())
                                     ax_ne.text(
@@ -5855,3 +6020,7 @@ def summarize_dataset_metrics(
 
     _log(verbose, f"[summarize] wrote dataset summary artifacts to {out_dir}")
     return report
+
+
+
+

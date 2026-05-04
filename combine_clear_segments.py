@@ -412,10 +412,18 @@ class CombineClearSegments(CrackUtils):
         # ------------------------------------------------------------------
         # Build the combined crack (midline + edges + widths + crop)
         # ------------------------------------------------------------------
-        combined_entry = self._build_combined_crack(
-            sorted(selected_atomic_ids, key=lambda s: int(s)),
-            connectivity_mode=connectivity_mode,
-        )
+        try:
+            combined_entry = self._build_combined_crack(
+                sorted(selected_atomic_ids, key=lambda s: int(s)),
+                connectivity_mode=connectivity_mode,
+            )
+        except Exception as _comb_exc:
+            import traceback
+            print(f"[COMBINE CRASH] _build_combined_crack raised: {_comb_exc}", flush=True)
+            traceback.print_exc()
+            error(f"Combine crashed: {_comb_exc}")
+            self.change_image()
+            return
         if combined_entry is None:
             error("Failed to build combined crack (no valid midlines or masks).")
             self.change_image()

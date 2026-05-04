@@ -1,0 +1,106 @@
+## Codex Handoff — Add `dt_trench_rgb` to Ablation Metrics
+
+**Files:** `supervision.py`, `metrics_engine.py`  
+**When to implement:** After early draft submission.  
+**Scope:** Re-run `export_gt_centering_metrics` pass only (reads from existing `gt_supervision.json`) — no full supervision rerun needed.
+
+---
+
+### Fix 1 — `supervision.py` line ~3040
+
+Add `dt_trench_rgb` to `method_cmp_specs`:
+
+```python
+# CURRENT:
+method_cmp_specs = [
+    ("et_vs_dt",                    "dt"),
+    ("et_vs_dt_depth",              "dt_depth"),
+    ("et_vs_dt_trench",             "dt_trench"),
+    ("et_vs_dt_trench_depth",       "dt_trench_depth"),
+    ("et_vs_dt_trench_color_depth", "dt_trench_color_depth"),
+]
+
+# FIX:
+method_cmp_specs = [
+    ("et_vs_dt",                    "dt"),
+    ("et_vs_dt_depth",              "dt_depth"),
+    ("et_vs_dt_trench",             "dt_trench"),
+    ("et_vs_dt_trench_rgb",         "dt_trench_rgb"),        # ← add
+    ("et_vs_dt_trench_depth",       "dt_trench_depth"),
+    ("et_vs_dt_trench_color_depth", "dt_trench_color_depth"),
+]
+```
+
+Also update the docstring on line ~3020 from "5-method ablation family" to "6-method ablation family".
+
+---
+
+### Fix 2 — `summarize_metrics.py` — `_METHOD_DISPLAY_NAMES`
+
+Add `dt_trench_rgb` so it isn't dropped during aggregation:
+
+```python
+# CURRENT:
+_METHOD_DISPLAY_NAMES = {
+    "dt_trench":             "dt_trench",
+    "dt_trench_depth":       "dt_trench_depth",
+    "dt_trench_color_depth": "dt_trench_color_depth",
+    "best_dt_depth":         "dt_depth",
+    "best_dt":               "dt",
+    "skel_mat_dse":          "MAT (DSE)",
+    "skel_mat_raw":          "MAT (raw)",
+}
+
+# FIX:
+_METHOD_DISPLAY_NAMES = {
+    "dt_trench":             "dt_trench",
+    "dt_trench_rgb":         "dt_trench_rgb",        # ← add
+    "dt_trench_depth":       "dt_trench_depth",
+    "dt_trench_color_depth": "dt_trench_color_depth",
+    "best_dt_depth":         "dt_depth",
+    "best_dt":               "dt",
+    "skel_mat_dse":          "MAT (DSE)",
+    "skel_mat_raw":          "MAT (raw)",
+}
+```
+
+---
+
+### Fix 3 — `metrics_engine.py` — `_aggregate_ablation_rs3_length_only`
+
+No code change needed — this function already groups by `variant_id` dynamically, so once `dt_trench_rgb` appears in `gt_ablation_midline_weighted_summary.csv` it will be picked up automatically.
+
+However, verify the `best_non_dt` selection logic at line ~3370:
+
+```python
+pool = summary_df[summary_df["variant_id"].astype(str) != "dt"].copy()
+best_non_dt = str(pool.sort_values("weighted_score_mid", ascending=True).iloc[0]["variant_id"])
+```
+
+This already handles any number of non-dt variants — no change needed.
+
+---
+
+### Re-run procedure after implementing fixes
+
+```python
+# In metrics_engine.py batch runner, set:
+SKIP_PASS1 = False   # re-run export_gt_centering_metrics for all images
+
+# Pass2 (edge tracking, width metrics) can stay:
+SKIP_PASS2 = True
+```
+
+This re-reads `gt_supervision.json` for each image, calls `export_gt_centering_metrics` which now includes `dt_trench_rgb` in `method_cmp_specs`, and regenerates:
+- `supervision/<image>/analysis/gt_ablation_midline_metrics.csv`
+- `supervision/<image>/analysis/gt_ablation_midline_weighted_summary.csv`
+- `metrics/_calibration/ablation_rs3_all_rows.csv`
+- `metrics/_calibration/ablation_rs3_weighted_summary.csv`
+
+Then re-run `summarize_dataset_metrics` to regenerate all summary plots and CSVs.
+
+---
+
+### Expected impact on results
+
+`dt_trench_rgb` = RGB trench + color anomaly, no depth. Sits between `dt_trench` (RGB, no color, no depth) and `dt_trench_color_depth` (RGB + color + depth). Its RS3 score will likely be between those two, confirming depth is the more impactful signal. If it outperforms `dt_trench_color_depth`, that would be the more interesting finding — depth hurts when combined with color.
