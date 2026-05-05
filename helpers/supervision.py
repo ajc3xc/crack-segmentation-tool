@@ -5822,6 +5822,10 @@ def export_gt_supervision_for_image(
                     fused_local = methods_local.get("dt_depth", {}) if isinstance(methods_local.get("dt_depth", {}), dict) else {}
 
                 centered_S = np.asarray(m1_local.get("midline", S), float)
+                if centered_S.ndim == 0 or centered_S.size == 0:
+                    centered_S = np.asarray(S, float)
+                if centered_S.ndim < 2:
+                    centered_S = centered_S.reshape(-1, 2) if centered_S.size % 2 == 0 else np.empty((0, 2), float)
                 centered_normals = m1_local.get("normals", {})
                 if not isinstance(centered_normals, dict):
                     centered_normals = {}
@@ -5881,9 +5885,12 @@ def export_gt_supervision_for_image(
                     dw_list.append(np.asarray([], float))
                     invalid_depth_masks.append(np.asarray([], bool))
 
-                n = min(len(S), len(centered_S))
+                S_arr = np.asarray(S, float)
+                if S_arr.ndim < 2:
+                    S_arr = S_arr.reshape(-1, 2) if S_arr.size % 2 == 0 else np.empty((0, 2), float)
+                n = min(len(S_arr), len(centered_S))
                 if n > 0:
-                    shift_all.append(np.linalg.norm(centered_S[:n] - S[:n], axis=1))
+                    shift_all.append(np.linalg.norm(centered_S[:n] - S_arr[:n], axis=1))
 
                 invalid_manual_masks.append(~np.isfinite(np.asarray(w_manual, float)))
                 invalid_center_masks.append(~np.isfinite(np.asarray(centered_normals.get("width_px", []), float)))

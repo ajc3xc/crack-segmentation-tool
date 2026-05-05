@@ -3145,10 +3145,18 @@ class CrackUtils:
         out_dir = os.path.join(self.save_folder, "debug_outputs")
         import shutil
         try:
-            if os.path.exists(out_dir):
-                shutil.rmtree(out_dir)
-        except Exception as _rm_exc:
-            print(f"[WARN] Could not clear debug_outputs ({_rm_exc}) — continuing anyway", flush=True)
+            import helpers.supervision as _sup_mod
+            _keep_out = getattr(_sup_mod, 'DEBUG_TARGET', None) not in (None, "cid1")
+        except Exception:
+            _keep_out = False
+        if not _keep_out:
+            try:
+                if os.path.exists(out_dir):
+                    shutil.rmtree(out_dir)
+            except Exception as _rm_exc:
+                print(f"[WARN] Could not clear debug_outputs ({_rm_exc}) — continuing anyway", flush=True)
+        else:
+            print(f"[DEBUG] Single-image mode (DEBUG_TARGET set) — debug_outputs preserved", flush=True)
         os.makedirs(out_dir, exist_ok=True)
         
         # ----------------------------

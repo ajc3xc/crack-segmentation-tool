@@ -170,7 +170,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         import json
         import os
 
-        allowed = {"dt_depth", "dt_trench", "dt_trench_depth", "dt_trench_color_depth"}
+        allowed = {"dt_depth", "dt_trench", "dt_trench_depth", "dt_trench_rgb_depth"}
         p = best_json_path or self._best_ablation_json_path()
         if not os.path.isfile(p):
             return None
@@ -192,7 +192,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         import json
         import os
 
-        allowed = {"dt_depth", "dt_trench", "dt_trench_depth", "dt_trench_color_depth"}
+        allowed = {"dt_depth", "dt_trench", "dt_trench_depth", "dt_trench_rgb_depth"}
         p = best_json_path or self._best_ablation_json_path()
         if not os.path.isfile(p):
             raise RuntimeError(
@@ -262,6 +262,10 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             if d is None or d.empty or not need.issubset(set(d.columns)):
                 continue
             d = d[d["group"].astype(str) == "combined_plus_noncombined_atomic"].copy()
+            if d.empty:
+                continue
+            # Drop any rows still using the old _color_ naming (pre-rename artefacts)
+            d = d[~d["variant_id"].astype(str).str.contains("_color_", na=False)].copy()
             if d.empty:
                 continue
             d["lwmean_score_mid"] = pd.to_numeric(d["lwmean_score_mid"], errors="coerce")
@@ -411,7 +415,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         import numpy as np
 
         method_key = str(method_key or "").strip()
-        allowed = {"dt", "dt_depth", "dt_trench", "dt_trench_depth", "dt_trench_color_depth"}
+        allowed = {"dt", "dt_depth", "dt_trench", "dt_trench_depth", "dt_trench_rgb_depth"}
         if method_key not in allowed:
             print(f"[METHOD PAYLOAD] unsupported method key: {method_key}")
             return {}, {}
@@ -969,8 +973,8 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         resolved_indices= None
         #base_names = ["10"]
         SKIP_ALREADY_PROCESSED = False
-        SKIP_PASS1 = True   # skip GT supervision export (pass1) - use when supervision already exists
-        FAST_RUN_EDGE_SWEEP = True
+        SKIP_PASS1 = False   # skip GT supervision export (pass1) - use when supervision already exists
+        FAST_RUN_EDGE_SWEEP = False
 
         idxs = self._resolve_metrics_image_indices(image_indices=resolved_indices, base_names=base_names)
         if not idxs:

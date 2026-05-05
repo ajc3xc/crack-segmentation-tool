@@ -1032,6 +1032,10 @@ def _aggregate_width_metrics(
     # False -> keep all baseline methods
     EXCLUDE_SKEL_BASELINE_METHODS = True
 
+    # Exclude any method still using the old _color_ naming (pre-rename artefacts on disk).
+    # The current method is _rgb_; _color_ should never appear in new runs.
+    EXCLUDE_COLOR_METHODS = True
+
     outputs = {}
     width_dir = os.path.join(out_dir, "width")
     overview_dir = os.path.join(width_dir, "overview")
@@ -1091,8 +1095,17 @@ def _aggregate_width_metrics(
             all_df = all_df.loc[~m_skel_all].copy()
             _log(verbose, f"[summarize] width summary(all): excluded skel_ baseline rows={n_drop_all}")
 
+    if EXCLUDE_COLOR_METHODS and not all_df.empty:
+        for _excl_col in ("supervision", "method", "midline_type", "baseline_method"):
+            if _excl_col in all_df.columns:
+                _m_color = all_df[_excl_col].astype(str).str.contains("_color_", na=False)
+                n_color = int(np.count_nonzero(_m_color.to_numpy(dtype=bool)))
+                if n_color > 0:
+                    all_df = all_df.loc[~_m_color].copy()
+                    _log(verbose, f"[summarize] excluded _color_ methods via col={_excl_col} rows={n_color}")
+
     if all_df.empty:
-        _log(verbose, "[summarize] width summary: empty after skel_ filtering at all_df stage")
+        _log(verbose, "[summarize] width summary: empty after filtering at all_df stage")
         return outputs
 
     all_csv = os.path.join(overview_dir, "dataset_width_summary_all.csv")
@@ -1135,8 +1148,17 @@ def _aggregate_width_metrics(
             grouped = grouped.loc[~m_skel].copy()
             _log(verbose, f"[summarize] width summary: excluded skel_ baseline methods rows={n_drop}")
 
+    if EXCLUDE_COLOR_METHODS and not grouped.empty:
+        for _excl_col in ("supervision", "method", "midline_type", "baseline_method", "method_name"):
+            if _excl_col in grouped.columns:
+                _m_color = grouped[_excl_col].astype(str).str.contains("_color_", na=False)
+                n_color = int(np.count_nonzero(_m_color.to_numpy(dtype=bool)))
+                if n_color > 0:
+                    grouped = grouped.loc[~_m_color].copy()
+                    _log(verbose, f"[summarize] excluded _color_ methods from grouped via col={_excl_col} rows={n_color}")
+
     if grouped.empty:
-        _log(verbose, "[summarize] width summary: empty after skel_ baseline filtering")
+        _log(verbose, "[summarize] width summary: empty after filtering")
         return outputs
 
     grp_csv = os.path.join(overview_dir, "dataset_width_summary_grouped.csv")
@@ -5037,6 +5059,15 @@ def _aggregate_calibration_ablation(
     if abl_df is None or abl_df.empty:
         _log(verbose, "[ablation] ablation_rs3_weighted_summary.csv not found or empty")
         return outputs
+
+    # Drop any rows still using old _color_ naming (pre-rename artefacts)
+    for _col in abl_df.columns:
+        if abl_df[_col].dtype == object:
+            _m = abl_df[_col].astype(str).str.contains("_color_", na=False)
+            if _m.any():
+                abl_df = abl_df.loc[~_m].copy()
+                _log(verbose, f"[ablation] dropped _color_ rows via col={_col}")
+                break
 
     import shutil
     abl_copy_csv = os.path.join(abl_dir, "ablation_rs3_weighted_summary_all.csv")

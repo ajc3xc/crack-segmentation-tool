@@ -959,33 +959,6 @@ class CombineClearSegments(CrackUtils):
                 self.change_image()
                 return
 
-            # ---- TEMP DEBUG: backup JSON so we can restore for looping ----
-            import shutil, json as _json
-            _json_path = getattr(self, '_last_json_path', None)
-            if _json_path is None:
-                try:
-                    _json_path = self.annotation.get("_json_path") or self.annotation.get("json_path")
-                except Exception:
-                    _json_path = None
-            # Try to find JSON path from save_folder
-            if _json_path is None:
-                _sf = getattr(self, 'save_folder', None)
-                _img = getattr(self, 'current_image_index', None) or getattr(self, 'image_index', None)
-                if _sf and _img is not None:
-                    import os as _os
-                    _json_path = _os.path.join(_sf, f"{_img}.json")
-            _backup_path = None
-            if _json_path and _os.path.exists(_json_path):
-                _backup_path = _json_path + ".cleartest_backup"
-                shutil.copy2(_json_path, _backup_path)
-                print(f"[CLEAR_SEG_DEBUG] backed up JSON to {_backup_path}", flush=True)
-
-            # ---- TEMP DEBUG: print combined_cracks BEFORE deletion loop ----
-            print(f"[CLEAR_SEG_BEFORE_DEL] combined_cracks keys={list(combined_cracks.keys())}", flush=True)
-            for _cid, _combo in combined_cracks.items():
-                print(f"  [{_cid}] members={_combo.get('members','MISSING_KEY')} "
-                      f"has_members_key={'members' in _combo}", flush=True)
-
             use_gt_mode = rb_gt.isChecked()
             connectivity_mode = "gt" if use_gt_mode else "pred"
 
@@ -1003,26 +976,17 @@ class CombineClearSegments(CrackUtils):
                     self.change_image()
                     return
 
-            print(f"[DEBUG] clear_segmentation START")
-            print(f"  Atomic cracks before = {list(atomic_cracks.keys())}")
-
             # --- Delete selected ---
             for idx in sorted(selected_indices, reverse=True):
                 tpe, crack_id = items[idx]
                 if tpe == "atomic":
-                    print(f"[DEBUG] Deleting atomic crack_id={crack_id}")
                     atomic_cracks.pop(crack_id, None)
                     # Remove from combined_cracks members if present
                     for cid, combo in list(combined_cracks.items()):
-                        _members_before = combo.get("members", "MISSING_KEY")
                         combo["members"] = [m for m in combo.get("members", []) if m in atomic_cracks]
-                        _members_after = combo["members"]
-                        print(f"[CLEAR_DEL_LOOP] combined {cid}: members {_members_before} -> {_members_after} "
-                              f"(atomic_cracks keys={list(atomic_cracks.keys())})", flush=True)
 
                         # Delete if fewer than 2 members remain
                         if len(combo["members"]) < 2:
-                            print(f"[CLEAR_DEL_LOOP] combined {cid} DELETED (< 2 members)", flush=True)
                             combined_cracks.pop(cid, None)
                             continue
 
@@ -1062,9 +1026,6 @@ class CombineClearSegments(CrackUtils):
                 atomic_cracks.update(new_atomic)
 
             # --- Remap combined crack members after atomic reindex, drop small ones, and rebuild full geometry ---
-            print(f"[CLEAR_SEG_REMAP] combined_cracks keys={list(combined_cracks.keys())} old_to_new={old_to_new if atomic_cracks else 'N/A'}", flush=True)
-            for _cid, _combo in combined_cracks.items():
-                print(f"  combined {_cid}: members={_combo.get('members','MISSING')} all_keys={list(_combo.keys())[:6]}", flush=True)
             if combined_cracks:
                 to_delete = []
                 for cid, combo in list(combined_cracks.items()):
@@ -1128,18 +1089,6 @@ class CombineClearSegments(CrackUtils):
             # --- Save + refresh ---
             self.save_annotation()
             self.change_image()
-
-            # ---- TEMP DEBUG: restore backup so next loop starts fresh ----
-            if _backup_path and _os.path.exists(_backup_path):
-                shutil.copy2(_backup_path, _json_path)
-                print(f"[CLEAR_SEG_DEBUG] JSON restored from backup — rerun to test again", flush=True)
-                # Reload annotation from restored backup
-                import json as _json2
-                with open(_json_path, 'r') as _f:
-                    self.annotation = _json2.load(_f)
-                _ann2 = self.annotation.get("annotations", {})
-                self.combined_cracks = _ann2.get("combined_cracks", {})
-                self.change_image()
         else:
             self.change_image()
  

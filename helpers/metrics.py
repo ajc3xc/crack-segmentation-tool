@@ -4611,14 +4611,20 @@ def plot_part2_width_signals_preservation(
         pw0_mean  = float(np.mean(pw0[ok0]))
 
     # ------------------------------------------------------------
-    # Shared axis limits
+    # Shared axis limits — clip y to 95th percentile so junction
+    # spikes don't compress the rest of the signal for the figure
     # ------------------------------------------------------------
     s_max = float(np.max(s1[ok1]))
-    w_max = float(max(np.max(gtw1[ok1]), np.max(pw1[ok1])))
+
+    all_w_vals = [gtw1[ok1], pw1[ok1]]
+    if have_orig:
+        all_w_vals += [gtw0[ok0], pw0[ok0]]
+    all_w = np.concatenate([v for v in all_w_vals if len(v)])
+    all_w_finite = all_w[np.isfinite(all_w)]
+    w_max = float(np.percentile(all_w_finite, 95)) * 1.15 if len(all_w_finite) else 50.0
 
     if have_orig:
         s_max = max(s_max, float(np.max(s0[ok0])))
-        w_max = max(w_max, float(np.max(gtw0[ok0])), float(np.max(pw0[ok0])))
 
     # ------------------------------------------------------------
     # Plot
@@ -8640,7 +8646,10 @@ def compare_widths_for_aligned_cracks(
         # Root cause of Stage5 key misses: GT/PRED branch_id labels may differ
         # after dominance even when geometry matches.
         # ------------------------------------------------------------
-        if mode == "combined" and gt_stage5_segs and pred_der_dom_segs:
+        _debug_single_image = bool(
+            getattr(__import__('helpers.supervision', fromlist=['DEBUG_TARGET']), 'DEBUG_TARGET', None) not in (None, "cid1")
+        )
+        if (mode == "combined" or _debug_single_image) and gt_stage5_segs and pred_der_dom_segs:
             try:
                 gt_br_45 = _build_branch_table_geom(gt_stage5_segs, gt_stage5_meta, scope_members=effective_members)
                 pr_br_45 = _build_branch_table_geom(pred_der_dom_segs, pred_der_dom_meta, scope_members=effective_members)
@@ -9296,13 +9305,24 @@ def compare_widths_for_aligned_cracks(
             # --------------------------------------------------
             # figure
             # --------------------------------------------------
-            fig, axes = plt.subplots(1, 2, figsize=(10, 5), dpi=100, sharex=True, sharey=True)
+            fig, axes = plt.subplots(1, 2, figsize=(12, 5.5), dpi=130, sharex=True, sharey=True)
+            fig.patch.set_facecolor("#1a1a2e")
 
-            axes[0].set_title("GT supervision (Stage 5, dominance-resolved)", fontsize=10)
-            axes[1].set_title("Prediction (Stage 5, dominance-resolved)", fontsize=10)
+            axes[0].set_title("GT supervision (Stage 5, dominance-resolved)",
+                               fontsize=10, color="white", pad=6)
+            axes[1].set_title("Prediction (Stage 5, dominance-resolved)",
+                               fontsize=10, color="white", pad=6)
 
-            axes[0].imshow(mask_bin[y0:y1, x0:x1], cmap="gray", zorder=0)
-            axes[1].imshow(pred_mask_full[y0:y1, x0:x1], cmap="gray", zorder=0)
+            # Tint GT panel warm, Pred panel cool so they read as distinct
+            gt_bg   = np.zeros((*mask_bin[y0:y1, x0:x1].shape, 3), dtype=np.uint8)
+            pred_bg = np.zeros((*pred_mask_full[y0:y1, x0:x1].shape, 3), dtype=np.uint8)
+            _gt_m   = mask_bin[y0:y1, x0:x1].astype(bool)
+            _pr_m   = pred_mask_full[y0:y1, x0:x1].astype(bool)
+            gt_bg[_gt_m]   = [255, 240, 210]   # warm cream for GT
+            pred_bg[_pr_m] = [210, 235, 255]   # cool blue-white for Pred
+
+            axes[0].imshow(gt_bg,   zorder=0)
+            axes[1].imshow(pred_bg, zorder=0)
 
             for ax in axes:
                 ax.imshow(
@@ -9315,10 +9335,11 @@ def compare_widths_for_aligned_cracks(
                     zorder=1,
                 )
                 ax.axis("off")
+                ax.set_facecolor("#0d0d0d")
 
-            col_keep  = (0.2, 0.4, 0.8)
+            col_keep  = (0.35, 0.65, 1.0)   # brighter blue for visibility
             col_undef = (0.6, 0.6, 0.6)
-            col_bite  = (0.9, 0.6, 0.0)
+            col_bite  = (1.0, 0.7, 0.1)
 
             # --------------------------------------------------
             # GT plot (LEFT)
@@ -9388,8 +9409,11 @@ def compare_widths_for_aligned_cracks(
                 axes[1].legend(
                     handles=legend_items,
                     loc="lower right",
-                    fontsize=6,
-                    framealpha=0.8,
+                    fontsize=7,
+                    framealpha=0.6,
+                    facecolor="#222222",
+                    labelcolor="white",
+                    edgecolor="#555555",
                     markerscale=0.7,
                     handlelength=1.5,
                     borderpad=0.5,
@@ -9397,9 +9421,11 @@ def compare_widths_for_aligned_cracks(
 
             fig.suptitle(
                 f"Stage-5 Geometry Provenance (Dominance-resolved @ 4.5) — cid={cid}",
-                fontsize=11,
+                fontsize=12,
                 fontweight="bold",
+                color="white",
             )
+            fig.tight_layout(rect=[0, 0, 1, 0.93])
 
             os.makedirs(cid_opsec_dir, exist_ok=True)
             out = os.path.join(cid_opsec_dir, "stage5_geom_provenance.png")
@@ -11669,7 +11695,14 @@ def merged_metric_atomic(authoring_atomic: dict, save_folder: str, image_base: s
                     with open(p, "r") as f:
                         snap = json.load(f) or {}
                     _mask_dbg(f"snapshot_file={os.path.basename(p)}", cid, snap)
+                    # Preserve the original manual midline from the authoring annotation.
+                    # The snapshot may contain an auto_best midline (written by
+                    # set_auto_variant_for_crack) which must NOT overwrite the GT midline
+                    # used by export_gt_supervision_for_image.
+                    _original_midline = merged[cid].get("midline")
                     merged[cid].update(snap)
+                    if _original_midline is not None:
+                        merged[cid]["midline"] = _original_midline
                     _mask_dbg("merged_after_update", cid, merged[cid])
                 except Exception:
                     print(f"[merge] warning: failed reading {p}")

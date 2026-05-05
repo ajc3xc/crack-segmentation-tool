@@ -1319,7 +1319,7 @@ METHOD_SPECS = {
         "use_depth": True,
         "use_color": False,
     },
-    "dt_trench_color_depth": {
+    "dt_trench_rgb_depth": {
         "label": "DT + Trench + Color + Depth",
         "use_rgb": True,
         "use_depth": True,
@@ -1442,8 +1442,8 @@ def _build_trench_valley_method_costmaps(
             costmaps["dt_trench_depth"][dom] = (
                 dt_bad[dom] * rgb_bad[dom] * depth_term[dom]
             ).astype(np.float32)
-            costmaps["dt_trench_color_depth"] = np.full_like(dtn, inf, dtype=np.float32)
-            costmaps["dt_trench_color_depth"][dom] = (
+            costmaps["dt_trench_rgb_depth"] = np.full_like(dtn, inf, dtype=np.float32)
+            costmaps["dt_trench_rgb_depth"][dom] = (
                 dt_bad[dom] * rgb_bad[dom] * depth_term[dom]
             ).astype(np.float32)
     elif ridge_norm is not None and valley_norm is not None:
@@ -1473,8 +1473,8 @@ def _build_trench_valley_method_costmaps(
             costmaps["dt_trench_depth"][dom] = (
                 dt_bad[dom] * rgb_bad[dom] * depth_term[dom]
             ).astype(np.float32)
-            costmaps["dt_trench_color_depth"] = np.full_like(dtn, inf, dtype=np.float32)
-            costmaps["dt_trench_color_depth"][dom] = (
+            costmaps["dt_trench_rgb_depth"] = np.full_like(dtn, inf, dtype=np.float32)
+            costmaps["dt_trench_rgb_depth"][dom] = (
                 dt_bad[dom] * rgb_bad[dom] * depth_term[dom]
             ).astype(np.float32)
 
@@ -1831,7 +1831,7 @@ def _run_single_midline_method(
         if not bool(depth_bundle.get("available", False)):
             out["meta"]["reason"] = str(depth_bundle.get("reason", "multi_cue_precompute_failed"))
             _log_method_failure(method_key, "multi_cue_precompute_failed", depth_bundle)
-            if str(method_key) in ("dt_depth", "dt_trench_depth", "dt_trench_color_depth"):
+            if str(method_key) in ("dt_depth", "dt_trench_depth", "dt_trench_rgb_depth"):
                 raise RuntimeError(f"[CRITICAL] Depth required but failed for {method_key}")
             timing["total_s"] = float(time.perf_counter() - t0_method)
             return out
@@ -2067,7 +2067,7 @@ def compute_midline_method_variants_and_normals(
       dt_depth
       dt_trench
       dt_trench_depth
-      dt_trench_color_depth
+      dt_trench_rgb_depth
     """
     if snap_kwargs is None:
         snap_kwargs = {}
@@ -2191,7 +2191,7 @@ def compute_midline_methods_and_normals(
 
     methods = res.get("methods", {}) if isinstance(res, dict) else {}
     m_dt = methods.get("dt", {}) if isinstance(methods.get("dt", {}), dict) else {}
-    m_depth = methods.get("dt_trench_color_depth", {}) if isinstance(methods.get("dt_trench_color_depth", {}), dict) else {}
+    m_depth = methods.get("dt_trench_rgb_depth", {}) if isinstance(methods.get("dt_trench_rgb_depth", {}), dict) else {}
     if m_depth.get("midline") is None:
         m_depth = methods.get("dt_trench_depth", {}) if isinstance(methods.get("dt_trench_depth", {}), dict) else {}
     if m_depth.get("midline") is None:

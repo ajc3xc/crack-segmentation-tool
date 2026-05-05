@@ -1397,9 +1397,14 @@ def dominant_segments_from_group(
             pieces = _clip_polyline_to_mask(S_user, allowed.astype(np.uint8))
             for p in pieces:
                 if p is not None and len(p) >= 2:
+                    _plen = _linestring_length(p)
+                    if _plen < 3.0:
+                        print(f"[DOM_CLIP_FILTER] branch={bi} atomic={atomic_id} "
+                              f"piece dropped: len_px={_plen:.1f} < 3px minimum", flush=True)
+                        continue
                     kept_meta.append((bi, atomic_id, p, False))
                     kept_any = True
-                    kept_len += _linestring_length(p)
+                    kept_len += _plen
 
         branch_stats.append({
             "branch_id": int(bi),
@@ -1980,7 +1985,7 @@ def dominant_segments_from_group(
         ax.axis("off")
 
         out = os.path.join(debug_dir, f"{debug_tag}_final.png")
-        fig.savefig(out, dpi=100)
+        fig.savefig(out, dpi=100, bbox_inches="tight")
         plt.close(fig)
 
     # -----------------------------
@@ -2173,7 +2178,7 @@ def plot_branch_territory_debug_pre(
     ax.axis("off")
 
     out = os.path.join(debug_dir, out_filename or f"{debug_tag}_pre.png")
-    fig.savefig(out, dpi=100)
+    fig.savefig(out, dpi=100, bbox_inches="tight")
     plt.close(fig)
 
 
