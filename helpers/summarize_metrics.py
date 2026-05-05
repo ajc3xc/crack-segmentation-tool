@@ -205,8 +205,9 @@ def _display_width_method_label(name: str) -> str:
 
 _METHOD_DISPLAY_NAMES = {
     "dt_trench": "dt_trench",
+    "dt_trench_rgb": "dt_trench_rgb",
     "dt_trench_depth": "dt_trench_depth",
-    "dt_trench_color_depth": "dt_trench_color_depth",
+    "dt_trench_rgb_depth": "dt_trench_rgb_depth",
     "best_dt_depth": "dt_depth",
     "best_dt": "dt",
     "skel_mat_dse": "MAT (DSE)",
@@ -1578,7 +1579,7 @@ def _aggregate_midline_metrics(
                     "manual": "ET",
                     "dt": "dt",
                     "dt_depth": "best_dt_depth",
-                    "dt_trench_color_depth": "best_dt_depth",
+                    "dt_trench_rgb_depth": "best_dt_depth",
                     "dt_trench_depth": "best_dt_depth",
                 }
                 _abl_df = _abl_df[_abl_df["variant_id"].astype(str).isin(_vid_map)].copy()
@@ -1802,7 +1803,7 @@ def _aggregate_midline_metrics(
                 if _is_et_like(row.get("midline_type", "")):
                     return "ET"
                 mt = str(row.get("midline_type", "")).lower()
-                if mt in ("dt", "best_dt_depth", "dt_depth", "dt_trench_color_depth", "dt_trench_depth"):
+                if mt in ("dt", "best_dt_depth", "dt_depth", "dt_trench_rgb_depth", "dt_trench_depth"):
                     return "multi-cue"
                 return "auto"
 
@@ -3130,7 +3131,7 @@ def _aggregate_gt_component_timings(
     dt_files = glob.glob(os.path.join(supervision_root, "**", "dt", "timing.csv"), recursive=True)
     depth_files = glob.glob(os.path.join(supervision_root, "**", "multi_cue_track", "timing.csv"), recursive=True)
     depth_files += glob.glob(os.path.join(supervision_root, "**", "multi_cue", "timing.csv"), recursive=True)
-    depth_files += glob.glob(os.path.join(supervision_root, "**", "dt_trench_color_depth", "timing.csv"), recursive=True)
+    depth_files += glob.glob(os.path.join(supervision_root, "**", "dt_trench_rgb_depth", "timing.csv"), recursive=True)
     depth_files = list(dict.fromkeys(depth_files))
 
     def _collect(files: List[str]) -> pd.DataFrame:
@@ -4692,7 +4693,7 @@ def _plot_multicue_ablation(
     if df_width is None or df_width.empty:
         return outputs
 
-    multicue_methods = ["ET", "dt", "dt_depth", "dt_trench", "dt_trench_depth", "dt_trench_color_depth"]
+    multicue_methods = ["ET", "dt", "dt_depth", "dt_trench", "dt_trench_rgb", "dt_trench_depth", "dt_trench_rgb_depth"]
 
     def _norm_method(v: str) -> str:
         s = str(v or "").strip()
@@ -5490,7 +5491,7 @@ def _aggregate_gt_centering_displacement(
             df_abl = df_abl[
                 df_abl["group"] == "combined_plus_noncombined_atomic"].copy()
         variant_order = ["dt", "dt_depth", "dt_trench", "dt_trench_rgb",
-                         "dt_trench_depth", "dt_trench_color_depth"]
+                         "dt_trench_depth", "dt_trench_rgb_depth"]
         df_abl_grp = (
             df_abl[df_abl["variant_id"].isin(variant_order)]
             .groupby("variant_id")["lwmean_score_mid"]

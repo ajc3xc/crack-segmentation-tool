@@ -36,7 +36,7 @@ METHODS_RS3 = [
     "dt_trench",
     "dt_trench_rgb",
     "dt_trench_depth",
-    "dt_trench_color_depth",
+    "dt_trench_rgb_depth",
 ]
 ISOLATE_GT_BRANCH_GEOMETRY = False
 ISOLATE_GT_IMAGE = None
@@ -448,7 +448,7 @@ def _plot_single_debug(entry, gt_mask_u8, original_image, out_path):
         ("dt", "DT", "white"),
         ("dt_depth", "Depth", "cyan"),
         ("dt_trench_depth", "DT+Depth (ridge)", "magenta"),
-        ("dt_trench_color_depth", "Final (multi-cue)", "yellow"),
+        ("dt_trench_rgb_depth", "Final (multi-cue)", "yellow"),
     ]
     method_segs = []
     for mkey, label, color in method_order:
@@ -2321,7 +2321,7 @@ def plot_depth_cost_diagnostic(
 
         if selected is None:
             for k in (
-                "dt_trench_color_depth",
+                "dt_trench_rgb_depth",
                 "dt_trench_depth",
                 "dt_trench",
                 "dt_depth",
@@ -3041,8 +3041,9 @@ def export_gt_centering_metrics(
         ("et_vs_dt", "dt"),
         ("et_vs_dt_depth", "dt_depth"),
         ("et_vs_dt_trench", "dt_trench"),
+        ("et_vs_dt_trench_rgb", "dt_trench_rgb"),
         ("et_vs_dt_trench_depth", "dt_trench_depth"),
-        ("et_vs_dt_trench_color_depth", "dt_trench_color_depth"),
+        ("et_vs_dt_trench_rgb_depth", "dt_trench_rgb_depth"),
     ]
 
     def _coerce_seg_list(entry, *, seg_keys=(), packed_keys=()):
@@ -3581,7 +3582,7 @@ def export_gt_supervision_for_image(
         methods_blob = timing_blob.get("methods", {}) if isinstance(timing_blob.get("methods", {}), dict) else {}
         if methods_blob:
             m_dt = methods_blob.get("dt", {}) if isinstance(methods_blob.get("dt", {}), dict) else {}
-            m_depth = methods_blob.get("dt_trench_color_depth", {}) if isinstance(methods_blob.get("dt_trench_color_depth", {}), dict) else {}
+            m_depth = methods_blob.get("dt_trench_rgb_depth", {}) if isinstance(methods_blob.get("dt_trench_rgb_depth", {}), dict) else {}
             if not m_depth:
                 m_depth = methods_blob.get("dt_trench_depth", {}) if isinstance(methods_blob.get("dt_trench_depth", {}), dict) else {}
             if not m_depth:
@@ -3616,7 +3617,7 @@ def export_gt_supervision_for_image(
         "dt_trench": {"slug": "dt_trench", "label": "DT + Trench", "compare_label": "DT + Trench Midline", "color": "deepskyblue"},
         "dt_trench_rgb": {"slug": "dt_trench_rgb", "label": "DT + Trench + RGB", "compare_label": "DT + Trench + RGB Midline", "color": "yellow"},
         "dt_trench_depth": {"slug": "dt_trench_depth", "label": "DT + Trench + Depth", "compare_label": "DT + Trench + Depth Midline", "color": "orange"},
-        "dt_trench_color_depth": {"slug": "dt_trench_color_depth", "label": "DT + Trench + RGB + Depth", "compare_label": "DT + Trench + RGB + Depth Midline", "color": "lime"},
+        "dt_trench_rgb_depth": {"slug": "dt_trench_rgb_depth", "label": "DT + Trench + RGB + Depth", "compare_label": "DT + Trench + RGB + Depth Midline", "color": "lime"},
     }
     ATOMIC_PER_SEG_DEBUG = False  # temporary: disable per-atomic seg_### debug folders
 
@@ -3681,7 +3682,7 @@ def export_gt_supervision_for_image(
             return False
         if mk in {"dt_trench", "dt_trench_rgb"} and not has_rgb:
             return False
-        if mk in {"dt_trench_depth", "dt_trench_color_depth"} and (not has_rgb or not has_depth):
+        if mk in {"dt_trench_depth", "dt_trench_rgb_depth"} and (not has_rgb or not has_depth):
             return False
         return True
 
@@ -3753,7 +3754,7 @@ def export_gt_supervision_for_image(
         "dt_trench": "DT + ridge/valley preferred region",
         "dt_trench_rgb": "DT + ridge/valley + RGB preferred region",
         "dt_trench_depth": "DT + ridge/valley + depth preferred region",
-        "dt_trench_color_depth": "DT + ridge/valley + RGB + depth preferred region",
+        "dt_trench_rgb_depth": "DT + ridge/valley + RGB + depth preferred region",
     }
 
     def _canonicalize_segments_with_meta(
@@ -4204,7 +4205,7 @@ def export_gt_supervision_for_image(
             m1 = methods.get("dt", {}) if isinstance(methods.get("dt", {}), dict) else {}
             m3 = methods.get("dt_depth", {}) if isinstance(methods.get("dt_depth", {}), dict) else {}
             m4 = methods.get("dt_trench_depth", {}) if isinstance(methods.get("dt_trench_depth", {}), dict) else {}
-            m5 = methods.get("dt_trench_color_depth", {}) if isinstance(methods.get("dt_trench_color_depth", {}), dict) else {}
+            m5 = methods.get("dt_trench_rgb_depth", {}) if isinstance(methods.get("dt_trench_rgb_depth", {}), dict) else {}
             fused_pick = m5 if m5.get("midline", None) is not None else (m4 if m4.get("midline", None) is not None else m3)
             timing_by_method = _timing_by_method(methods)
             atomic_center_sec += _sum_centering_seconds({"methods": {k: (v.get("timing", {}) if isinstance(v, dict) else {}) for k, v in methods.items()}})
@@ -4271,7 +4272,7 @@ def export_gt_supervision_for_image(
             atomic_entry["multi_cue_cost_meta"] = {
                 "dt_depth": m3.get("meta", {}) if isinstance(m3.get("meta", {}), dict) else {},
                 "dt_trench_depth": m4.get("meta", {}) if isinstance(m4.get("meta", {}), dict) else {},
-                "dt_trench_color_depth": m5.get("meta", {}) if isinstance(m5.get("meta", {}), dict) else {},
+                "dt_trench_rgb_depth": m5.get("meta", {}) if isinstance(m5.get("meta", {}), dict) else {},
             }
             atomic_entry["timing"]["methods"] = timing_by_method
 
@@ -4379,7 +4380,7 @@ def export_gt_supervision_for_image(
                             pred_color="magenta",
                         )
 
-                    depth_lbl = "global" if mk in ("dt_depth", "dt_trench_depth", "dt_trench_color_depth") else None
+                    depth_lbl = "global" if mk in ("dt_depth", "dt_trench_depth", "dt_trench_rgb_depth") else None
                     mslug = str(style.get("slug", mk))
                     out_cost = os.path.join(atomic_dbg_dir, f"{mslug}_cost.png")
                     _run_timed_plot(
@@ -4524,9 +4525,9 @@ def export_gt_supervision_for_image(
             for mk in METHODS_RS3:
                 style = method_style.get(mk, {})
                 mslug = str(style.get("slug", mk))
-                use_trench = mk in {"dt_trench", "dt_trench_rgb", "dt_trench_depth", "dt_trench_color_depth"}
-                use_depth = mk in {"dt_depth", "dt_trench_depth", "dt_trench_color_depth"}
-                use_rgb = mk in {"dt_trench_rgb", "dt_trench_color_depth"}
+                use_trench = mk in {"dt_trench", "dt_trench_rgb", "dt_trench_depth", "dt_trench_rgb_depth"}
+                use_depth = mk in {"dt_depth", "dt_trench_depth", "dt_trench_rgb_depth"}
+                use_rgb = mk in {"dt_trench_rgb", "dt_trench_rgb_depth"}
                 branches_for_global = []
                 for oi in sorted(atomic_results.keys()):
                     ae = atomic_results.get(oi, {})
@@ -5797,7 +5798,7 @@ def export_gt_supervision_for_image(
                     # after aggregation, so per-blob caches are no longer needed here.
 
                 m1_local = methods_local.get("dt", {}) if isinstance(methods_local.get("dt", {}), dict) else {}
-                fused_local = methods_local.get("dt_trench_color_depth", {}) if isinstance(methods_local.get("dt_trench_color_depth", {}), dict) else {}
+                fused_local = methods_local.get("dt_trench_rgb_depth", {}) if isinstance(methods_local.get("dt_trench_rgb_depth", {}), dict) else {}
                 if not fused_local:
                     fused_local = methods_local.get("dt_trench_depth", {}) if isinstance(methods_local.get("dt_trench_depth", {}), dict) else {}
                 if not fused_local:
@@ -5814,7 +5815,7 @@ def export_gt_supervision_for_image(
 
             for seg_i, S, w_manual, methods_local, mask_use, bx, by, blob_id, blob_manual_seg, emit_cost_debug in seg_work_items:
                 m1_local = methods_local.get("dt", {}) if isinstance(methods_local.get("dt", {}), dict) else {}
-                fused_local = methods_local.get("dt_trench_color_depth", {}) if isinstance(methods_local.get("dt_trench_color_depth", {}), dict) else {}
+                fused_local = methods_local.get("dt_trench_rgb_depth", {}) if isinstance(methods_local.get("dt_trench_rgb_depth", {}), dict) else {}
                 if not fused_local:
                     fused_local = methods_local.get("dt_trench_depth", {}) if isinstance(methods_local.get("dt_trench_depth", {}), dict) else {}
                 if not fused_local:
@@ -6383,9 +6384,9 @@ def export_gt_supervision_for_image(
                         )
 
                     # (3) Global aggregated cost panel (MIN for final cost, AVG for intermediates).
-                    use_trench = mk in {"dt_trench", "dt_trench_rgb", "dt_trench_depth", "dt_trench_color_depth"}
-                    use_depth = mk in {"dt_depth", "dt_trench_depth", "dt_trench_color_depth"}
-                    use_rgb = mk in {"dt_trench_rgb", "dt_trench_color_depth"}
+                    use_trench = mk in {"dt_trench", "dt_trench_rgb", "dt_trench_depth", "dt_trench_rgb_depth"}
+                    use_depth = mk in {"dt_depth", "dt_trench_depth", "dt_trench_rgb_depth"}
+                    use_rgb = mk in {"dt_trench_rgb", "dt_trench_rgb_depth"}
 
                     def _first_non_none(*vals):
                         for v in vals:

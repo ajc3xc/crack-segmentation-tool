@@ -589,10 +589,18 @@ class CrackUtils:
             print(f"[DEBUG] save_annotation END: {len(ann['atomic_cracks'])} cracks kept.")
 
             # ------------------------------------------------------------
-            # 4) Persist combined_cracks if present
+            # 4) Persist combined_cracks — always use the annotation dict
+            #    as authoritative source. Also sync self.combined_cracks
+            #    in case anything still reads from that attribute.
             # ------------------------------------------------------------
-            if hasattr(self, "combined_cracks"):
-                ann["combined_cracks"] = self.combined_cracks
+            ann_combined = ann.get("combined_cracks", {}) or {}
+            if hasattr(self, "combined_cracks") and self.combined_cracks:
+                # Merge: annotation dict takes precedence over stale attribute
+                merged = {**self.combined_cracks, **ann_combined}
+                ann["combined_cracks"] = merged
+            else:
+                ann["combined_cracks"] = ann_combined
+            self.combined_cracks = ann["combined_cracks"]
 
             # ------------------------------------------------------------
             # 5) Safe JSON write
@@ -3136,8 +3144,11 @@ class CrackUtils:
 
         out_dir = os.path.join(self.save_folder, "debug_outputs")
         import shutil
-        if os.path.exists(out_dir):
-            shutil.rmtree(out_dir)
+        try:
+            if os.path.exists(out_dir):
+                shutil.rmtree(out_dir)
+        except Exception as _rm_exc:
+            print(f"[WARN] Could not clear debug_outputs ({_rm_exc}) — continuing anyway", flush=True)
         os.makedirs(out_dir, exist_ok=True)
         
         # ----------------------------
