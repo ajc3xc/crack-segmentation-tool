@@ -123,6 +123,9 @@ def _save_bar(
     vals = arr[keep]
     if len(labs) == 0:
         return
+    order = np.argsort(vals)
+    vals = vals[order]
+    labs = [labs[i] for i in order]
     fig_w = max(7.0, 0.45 * len(labs))
     plt.figure(figsize=(fig_w, 4.2), dpi=180)
     xs = np.arange(len(labs))
@@ -130,6 +133,7 @@ def _save_bar(
     if colors is not None:
         try:
             color_arr = [colors[i] for i in range(len(colors)) if i < len(keep) and keep[i]]
+            color_arr = [color_arr[i] for i in order if i < len(color_arr)]
             if len(color_arr) == len(labs):
                 bar_kwargs["color"] = color_arr
         except Exception:
@@ -651,6 +655,22 @@ def _aggregate_mask_metrics(
     all_df.to_csv(all_csv, index=False)
     outputs["mask_all_csv"] = all_csv
 
+    # Split original-GT rows into a separate subfolder for edited-image analysis
+    orig_gt_dir = os.path.join(mask_dir, "orig_gt")
+    if "variant" in all_df.columns:
+        orig_gt_mask = all_df["variant"].astype(str).str.contains("_orig_gt", na=False)
+        if orig_gt_mask.any():
+            orig_gt_df = all_df.loc[orig_gt_mask].copy()
+            # Strip _orig_gt suffix from variant so the same triplet/plot
+            # logic runs cleanly on this subset
+            orig_gt_df["variant"] = orig_gt_df["variant"].str.replace("_orig_gt", "", regex=False)
+            os.makedirs(orig_gt_dir, exist_ok=True)
+            orig_gt_df.to_csv(os.path.join(orig_gt_dir, "dataset_mask_metrics_orig_gt_all.csv"), index=False)
+            outputs["mask_orig_gt_all_csv"] = os.path.join(orig_gt_dir, "dataset_mask_metrics_orig_gt_all.csv")
+            _log(verbose, f"[summarize] mask: {int(orig_gt_mask.sum())} orig_gt rows split to {orig_gt_dir}")
+        # Remove orig_gt rows from main analysis so they don't contaminate regular summaries
+        all_df = all_df.loc[~orig_gt_mask].copy()
+
     # Dataset-level mask triplet summaries by variant:
     # weighted means for region/boundary + summed confusion counts.
     triplet_src = all_df.copy()
@@ -731,6 +751,8 @@ def _aggregate_mask_metrics(
                 "boundary_precision_wmean": float(boundary["Boundary Precision"]) if np.isfinite(boundary["Boundary Precision"]) else np.nan,
                 "boundary_recall_wmean": float(boundary["Boundary Recall"]) if np.isfinite(boundary["Boundary Recall"]) else np.nan,
                 "boundary_f1_wmean": float(boundary["Boundary F1"]) if np.isfinite(boundary["Boundary F1"]) else np.nan,
+                "ASSD_mean": _wm("ASSD"),
+                "HD95_mean": _wm("HD95"),
             }
             triplet_rows.append(row)
 
@@ -862,34 +884,48 @@ def _aggregate_mask_metrics(
 
                 def _pick_row(token: str):
                     tok = str(token).strip().lower()
-                    m = t0["variant_l"].str.contains(tok, na=False)
+                    # exact match first
+                    m = t0["variant_l"] == tok
+                    if not m.any():
+                        # fallback: contains match
+                        m = t0["variant_l"].str.contains(tok, na=False)
                     if not m.any():
                         return None
                     s = t0.loc[m].copy()
-                    # prefer TOTAL row with largest support if duplicates exist.
                     if "n_rows" in s.columns:
                         s["n_rows_num"] = pd.to_numeric(s["n_rows"], errors="coerce").fillna(0.0)
                         s = s.sort_values("n_rows_num", ascending=False)
                     return s.iloc[0]
 
                 def _pick_et_row():
-                    r = _pick_row("manual:")
-                    if r is not None:
-                        return r
-                    return _pick_row("et:")
+                    # exact match on "et" variant label
+                    m = t0["variant_l"] == "et"
+                    if m.any():
+                        return t0.loc[m].iloc[0]
+                    return None
 
-                # Build picks dynamically: ET first, then every unique baseline:* variant.
+                # Build picks: ET first, then all other variants as baselines.
                 picks = [("ET", _pick_et_row())]
-                seen_baseline_tokens = set()
-                for v in t0["variant"].astype(str).tolist():
+                for v in t0["variant"].astype(str).unique().tolist():
                     vl = v.strip().lower()
-                    if vl.startswith("baseline:"):
-                        token = vl
-                        if token in seen_baseline_tokens:
-                            continue
-                        seen_baseline_tokens.add(token)
-                        display = v.split(":", 1)[1] if ":" in v else v
-                        picks.append((display, _pick_row(token)))
+                    if vl == "et" or _is_et_like(vl):
+                        continue
+                    picks.append((v, _pick_row(vl)))
+
+                # Sort by ASSD ascending (smallest left, largest right),
+                # keeping ET pinned at the left.
+                def _assd_val(pick):
+                    lab, row = pick
+                    if lab == "ET":
+                        return -1.0   # always leftmost
+                    if row is None:
+                        return float("inf")
+                    try:
+                        v = row[assd_col]
+                        return float(pd.to_numeric(v, errors="coerce"))
+                    except Exception:
+                        return float("inf")
+                picks = sorted(picks, key=_assd_val)
                 labels = []
                 assd_vals = []
                 hd95_vals = []
@@ -4781,6 +4817,19 @@ def _plot_multicue_ablation(
                 per_method.append(float(np.mean(fn(raw))) if raw.size else 0.0)
             comp_data[col] = np.asarray(per_method, float)
 
+    # Order methods by ascending RS3 decomposition total (left = best/smallest).
+    if len(methods):
+        rs3_totals = np.zeros(len(methods), dtype=float)
+        for col, _, _, _ in score_terms:
+            vals = comp_data.get(col, np.zeros(len(methods), dtype=float))
+            vals = np.where(np.isfinite(vals), vals, 0.0)
+            rs3_totals += vals
+        order = np.argsort(rs3_totals)
+        methods = [methods[i] for i in order]
+        for col, _, _, _ in score_terms:
+            if col in comp_data:
+                comp_data[col] = comp_data[col][order]
+
     bottoms = np.zeros(len(methods), dtype=float)
     for col, color, lbl, _ in score_terms:
         vals = comp_data.get(col, np.zeros(len(methods)))
@@ -4806,11 +4855,14 @@ def _plot_multicue_ablation(
         x = np.arange(len(metric_sources), dtype=float)
         bar_w = 0.8 / max(1, len(methods))
         tab_colors = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948"]
-        for i, method in enumerate(methods):
+        # Keep method colors stable, but sort method positions within each metric block.
+        method_to_color = {m: tab_colors[i % len(tab_colors)] for i, m in enumerate(methods)}
+        legend_added = set()
+        for j, (_, df_src, col) in enumerate(metric_sources):
             means = []
             lo_errs = []
             hi_errs = []
-            for _, df_src, col in metric_sources:
+            for method in methods:
                 sub = df_src[df_src["method"] == method]
                 v = pd.to_numeric(sub[col], errors="coerce").to_numpy(float)
                 v = v[np.isfinite(v)]
@@ -4825,21 +4877,36 @@ def _plot_multicue_ablation(
                     means.append(mn)
                     lo_errs.append(max(0.0, mn - q1))
                     hi_errs.append(max(0.0, q3 - mn))
+
             means_arr = np.asarray(means, float)
             lo_arr = np.asarray(lo_errs, float)
             hi_arr = np.asarray(hi_errs, float)
-            xpos = x - 0.4 + (i + 0.5) * bar_w
-            color = tab_colors[i % len(tab_colors)]
-            valid = np.isfinite(means_arr)
-            ax1.bar(
-                xpos[valid],
-                means_arr[valid],
-                width=bar_w * 0.9,
-                color=color,
-                alpha=0.85,
-                label=_display_method_name(method),
-            )
-            ax1.errorbar(xpos[valid], means_arr[valid], yerr=np.vstack([lo_arr[valid], hi_arr[valid]]), fmt="none", ecolor="black", elinewidth=0.8, capsize=2)
+            valid_idx = np.where(np.isfinite(means_arr))[0]
+            if valid_idx.size == 0:
+                continue
+            sorted_valid = valid_idx[np.argsort(means_arr[valid_idx])]
+            for rank, midx in enumerate(sorted_valid):
+                method = methods[midx]
+                xpos = x[j] - 0.4 + (rank + 0.5) * bar_w
+                label = _display_method_name(method) if method not in legend_added else None
+                ax1.bar(
+                    xpos,
+                    means_arr[midx],
+                    width=bar_w * 0.9,
+                    color=method_to_color[method],
+                    alpha=0.85,
+                    label=label,
+                )
+                ax1.errorbar(
+                    [xpos],
+                    [means_arr[midx]],
+                    yerr=np.asarray([[lo_arr[midx]], [hi_arr[midx]]], float),
+                    fmt="none",
+                    ecolor="black",
+                    elinewidth=0.8,
+                    capsize=2,
+                )
+                legend_added.add(method)
 
         ax1.set_xticks(x)
         ax1.set_xticklabels([ms[0] for ms in metric_sources], rotation=25, ha="right", fontsize=8)

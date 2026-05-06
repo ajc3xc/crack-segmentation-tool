@@ -2545,10 +2545,11 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             except Exception as e:
                 print(f"[DEBUG MASK] comparison grid failed: {e}")
 
-        def _compute_and_record_baseline_total(method_name, pred_full):
-            base = compute_mask_metrics(gt_full, pred_full)
-            bnd = boundary_fscore(gt_full, pred_full, tau=2.0)
-            surf = assd_hd95(gt_full, pred_full)
+        def _compute_and_record_baseline_total(method_name, pred_full, gt_mask=None, variant="external_mask"):
+            _gt = gt_mask if gt_mask is not None else gt_full
+            base = compute_mask_metrics(_gt, pred_full)
+            bnd = boundary_fscore(_gt, pred_full, tau=2.0)
+            surf = assd_hd95(_gt, pred_full)
 
             _append_mask_row(
                 crack_type="TOTAL",
@@ -2559,7 +2560,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 surf=surf,
                 supervision="baseline",
                 method=method_name,
-                variant="external_mask",
+                variant=variant,
             )
 
             _save_total_overlay(pred_full, supervision="baseline", method=method_name)
@@ -3054,8 +3055,29 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             print(f"[DEBUG MASK] loading baselines from: {baseline_root}")
             t_baseline0 = time.perf_counter()
             baseline_pred_masks = _load_baseline_masks_for_image(baseline_root, base_name)
+
+            # Load original unedited GT if this image was edited
+            original_gt = None
+            original_gt_path = getattr(self, "current_gt_source_path", None)
+            modified_gt_path = getattr(self, "current_modified_gt_path", None)
+            if modified_gt_path and original_gt_path and os.path.isfile(original_gt_path):
+                try:
+                    original_gt = self._load_binary_mask_from_path(original_gt_path)
+                    print(f"[BASELINE] image was edited — also computing vs original GT: {original_gt_path}")
+                except Exception as _e:
+                    print(f"[BASELINE] could not load original GT: {_e}")
+                    original_gt = None
+
             for method_name, pred_full in baseline_pred_masks.items():
-                _compute_and_record_baseline_total(method_name, pred_full)
+                # Standard: vs edited GT (or original if not edited)
+                _compute_and_record_baseline_total(method_name, pred_full, variant="external_mask")
+                # Additional: vs original unedited GT (only when image was edited)
+                if original_gt is not None:
+                    _compute_and_record_baseline_total(
+                        method_name, pred_full,
+                        gt_mask=original_gt,
+                        variant="external_mask_orig_gt",
+                    )
             _record_driver_timing("baseline_mask_metrics_s", time.perf_counter() - t_baseline0)
 
         variant_masks = [("ET:geodesic", (agg_manual > 0).astype(np.uint8))]
