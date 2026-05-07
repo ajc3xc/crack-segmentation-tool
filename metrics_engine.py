@@ -976,23 +976,21 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         resolved_indices= None
         base_names = None
         SKIP_ALREADY_PROCESSED = False
-        SKIP_PASS1 = True
+        SKIP_PASS1 = False
         FAST_RUN_EDGE_SWEEP = False
         MASK_ONLY = False
 
         # ------------------------------------------------------------------
-        # MASK_ONLY pass for all 30 edited images — refreshes mask_metrics.csv
-        # with orig_gt rows. Width CSVs untouched. Run then summarize.
+        # Full dataset rerun — blank slate. Recovery block disabled.
         # ------------------------------------------------------------------
         _ALL_EDITED = [
             "6","8","14","17","18","29","30","33","34","35","37","39","43","44",
             "87","88","89","92","98","100","101","102","108","110","111","117",
             "128","129","130","12"
         ]
-        # These need full recompute (ET + width + mask) — run WITHOUT mask_only_mode
-        _NEED_FULL = {"117"}
+        _NEED_FULL = set()   # empty — full batch pipeline handles everything
         _MASK_ONLY_IMAGES = []
-        _FULL_IMAGES      = [x for x in _ALL_EDITED if x in _NEED_FULL]
+        _FULL_IMAGES      = []
 
         # --- Step 1: Full recompute for images ---
         if _FULL_IMAGES:
@@ -1062,8 +1060,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 self.change_image()
             except Exception:
                 pass
-        print("[RECOVERY] Done.")
-        return {"ok": True, "recovery": True}
+        print("[RECOVERY] Done (no-op — full batch pipeline runs below).")
 
         idxs = self._resolve_metrics_image_indices(image_indices=resolved_indices, base_names=base_names)
         if not idxs:

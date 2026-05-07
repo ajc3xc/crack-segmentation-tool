@@ -111,6 +111,7 @@ def _save_bar(
     out_png: str,
     title: str,
     ylabel: str,
+    subtitle: Optional[str] = None,
     rotate: int = 30,
 ) -> None:
     if not labels or not values:
@@ -147,7 +148,9 @@ def _save_bar(
     if color_legend:
         handles = [Patch(facecolor=c, edgecolor="none", label=str(lbl)) for lbl, c in color_legend]
         plt.legend(handles=handles, loc="best", framealpha=0.9, fontsize=8)
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0.04 if subtitle else 0, 1, 1])
+    if subtitle:
+        plt.gcf().text(0.5, 0.01, subtitle, ha="center", va="bottom", fontsize=7, style="italic", color="#555555")
     plt.savefig(out_png)
     plt.close()
 
@@ -644,6 +647,8 @@ def _aggregate_mask_metrics(
                 return "ET"
             return method if method else sup
 
+        # Preserve raw variant so we can detect orig_gt rows after concat
+        df["variant_raw"] = df["variant"].astype(str) if "variant" in df.columns else ""
         df["variant"] = df.apply(_make_variant_label, axis=1)
         frames.append(df)
 
@@ -656,18 +661,26 @@ def _aggregate_mask_metrics(
     outputs["mask_all_csv"] = all_csv
 
     # Split original-GT rows into a separate subfolder for edited-image analysis
+    orig_gt_df = None
     orig_gt_dir = os.path.join(mask_dir, "orig_gt")
-    if "variant" in all_df.columns:
-        orig_gt_mask = all_df["variant"].astype(str).str.contains("_orig_gt", na=False)
+    if "variant_raw" in all_df.columns:
+        orig_gt_mask = all_df["variant_raw"].astype(str).str.contains("_orig_gt", na=False)
         if orig_gt_mask.any():
-            orig_gt_df = all_df.loc[orig_gt_mask].copy()
-            # Strip _orig_gt suffix from variant so the same triplet/plot
-            # logic runs cleanly on this subset
-            orig_gt_df["variant"] = orig_gt_df["variant"].str.replace("_orig_gt", "", regex=False)
+            baseline_og = all_df.loc[orig_gt_mask].copy()
+            # Which images have orig_gt rows? Pull ET TOTAL rows for those same images as reference
+            og_images = set(baseline_og["image"].astype(str).unique())
+            et_ref_mask = (
+                all_df["image"].astype(str).isin(og_images)
+                & (all_df["variant"].astype(str) == "ET")
+                & (all_df["crack_type"].astype(str).str.upper() == "TOTAL")
+                & (~orig_gt_mask)
+            )
+            et_ref = all_df.loc[et_ref_mask].copy()
+            orig_gt_df = pd.concat([baseline_og, et_ref], ignore_index=True)
             os.makedirs(orig_gt_dir, exist_ok=True)
             orig_gt_df.to_csv(os.path.join(orig_gt_dir, "dataset_mask_metrics_orig_gt_all.csv"), index=False)
             outputs["mask_orig_gt_all_csv"] = os.path.join(orig_gt_dir, "dataset_mask_metrics_orig_gt_all.csv")
-            _log(verbose, f"[summarize] mask: {int(orig_gt_mask.sum())} orig_gt rows split to {orig_gt_dir}")
+            _log(verbose, f"[summarize] mask: {int(orig_gt_mask.sum())} orig_gt baseline rows + {int(et_ref_mask.sum())} ET ref rows → {orig_gt_dir}")
         # Remove orig_gt rows from main analysis so they don't contaminate regular summaries
         all_df = all_df.loc[~orig_gt_mask].copy()
 
@@ -860,6 +873,7 @@ def _aggregate_mask_metrics(
                     out_png=out_png,
                     title="Dataset TOTAL IoU by variant",
                     ylabel="IoU",
+                    subtitle="★ ET evaluated on edited GT  |  Baselines on edited GT",
                 )
                 outputs["mask_total_iou_png"] = out_png
             if bf1_col:
@@ -872,6 +886,7 @@ def _aggregate_mask_metrics(
                     out_png=out_png,
                     title="Dataset TOTAL boundary F1 by variant",
                     ylabel="Boundary F1",
+                    subtitle="★ ET evaluated on edited GT  |  Baselines on edited GT",
                 )
                 outputs["mask_total_bf1_png"] = out_png
 
@@ -974,6 +989,120 @@ def _aggregate_mask_metrics(
                     outputs["mask_assd_hd95_compare_png"] = out_png
 
     _log(verbose, f"[summarize] mask metrics rows={len(all_df)}")
+
+    # ----------------------------------------------------------------
+    # Second pass: repeat key plots for orig_gt subset (edited images)
+    # ----------------------------------------------------------------
+    # Load orig_gt df — use the in-memory copy if available, else fall back to CSV
+    orig_gt_df_for_plots = orig_gt_df
+    if orig_gt_df_for_plots is None:
+        _ogcsv = outputs.get("mask_orig_gt_all_csv")
+        if _ogcsv and os.path.isfile(_ogcsv):
+            try:
+                orig_gt_df_for_plots = pd.read_csv(_ogcsv)
+            except Exception:
+                pass
+
+    if orig_gt_df_for_plots is not None and not orig_gt_df_for_plots.empty:
+        _og_dir = orig_gt_dir
+        os.makedirs(_og_dir, exist_ok=True)
+
+        _og_triplet_src = orig_gt_df_for_plots.copy()
+        _og_ct_col = _find_col_ci(_og_triplet_src, "crack_type")
+        if _og_ct_col is not None:
+            _og_m_total = _og_triplet_src[_og_ct_col].astype(str).str.upper() == "TOTAL"
+            if _og_m_total.any():
+                _og_triplet_src = _og_triplet_src[_og_m_total].copy()
+
+        if not _og_triplet_src.empty and "variant" in _og_triplet_src.columns:
+            _og_tp = _find_col_ci(_og_triplet_src, "tp")
+            _og_fp = _find_col_ci(_og_triplet_src, "fp")
+            _og_fn = _find_col_ci(_og_triplet_src, "fn")
+            _og_tn = _find_col_ci(_og_triplet_src, "tn")
+            _og_area = _find_col_ci(_og_triplet_src, "gt_area_px") or _find_col_ci(_og_triplet_src, "union_area_px")
+
+            _og_triplet_rows = []
+            _og_triplet_dir = os.path.join(_og_dir, "mask_triplets")
+            os.makedirs(_og_triplet_dir, exist_ok=True)
+
+            for _og_variant, _og_g in _og_triplet_src.groupby("variant", dropna=False):
+                if _og_g.empty:
+                    continue
+                if all(c is not None for c in (_og_tp, _og_fp, _og_fn, _og_tn)):
+                    _og_w = (
+                        pd.to_numeric(_og_g[_og_tp], errors="coerce").fillna(0).to_numpy(float)
+                        + pd.to_numeric(_og_g[_og_fp], errors="coerce").fillna(0).to_numpy(float)
+                        + pd.to_numeric(_og_g[_og_fn], errors="coerce").fillna(0).to_numpy(float)
+                        + pd.to_numeric(_og_g[_og_tn], errors="coerce").fillna(0).to_numpy(float)
+                    )
+                elif _og_area is not None:
+                    _og_w = pd.to_numeric(_og_g[_og_area], errors="coerce").fillna(0).to_numpy(float)
+                else:
+                    _og_w = np.ones(len(_og_g), float)
+
+                def _og_wm(colname):
+                    c = _find_col_ci(_og_g, colname)
+                    if c is None:
+                        return float("nan")
+                    return _weighted_mean(_og_g[c], _og_w)
+
+                _og_region = {"Precision": _og_wm("precision"), "Recall": _og_wm("recall"), "F1": _og_wm("f1"), "IoU": _og_wm("iou")}
+                _og_boundary = {"Boundary Precision": _og_wm("boundary_precision"), "Boundary Recall": _og_wm("boundary_recall"), "Boundary F1": _og_wm("boundary_f1")}
+                _og_tp_s = float(pd.to_numeric(_og_g[_og_tp], errors="coerce").fillna(0).sum()) if _og_tp else 0.0
+                _og_fp_s = float(pd.to_numeric(_og_g[_og_fp], errors="coerce").fillna(0).sum()) if _og_fp else 0.0
+                _og_fn_s = float(pd.to_numeric(_og_g[_og_fn], errors="coerce").fillna(0).sum()) if _og_fn else 0.0
+                _og_tn_s = float(pd.to_numeric(_og_g[_og_tn], errors="coerce").fillna(0).sum()) if _og_tn else 0.0
+                _og_cm = np.array([[_og_tp_s, _og_fn_s], [_og_fp_s, _og_tn_s]], float)
+
+                _og_triplet_rows.append({
+                    "variant": str(_og_variant), "n_rows": len(_og_g),
+                    "precision_wmean": _og_region["Precision"], "recall_wmean": _og_region["Recall"],
+                    "f1_wmean": _og_region["F1"], "iou_wmean": _og_region["IoU"],
+                    "boundary_precision_wmean": _og_boundary["Boundary Precision"],
+                    "boundary_recall_wmean": _og_boundary["Boundary Recall"],
+                    "boundary_f1_wmean": _og_boundary["Boundary F1"],
+                    "ASSD_mean": _og_wm("ASSD"), "HD95_mean": _og_wm("HD95"),
+                })
+
+                _og_png = os.path.join(_og_triplet_dir, f"dataset_mask_triplet_origgt_{_safe_file_tag(str(_og_variant))}.png")
+                _plot_mask_triplet_variant(
+                    region=_og_region, boundary=_og_boundary, cm=_og_cm,
+                    out_png=_og_png, title=f"Mask Metrics (Orig GT) - {_og_variant}",
+                )
+
+            if _og_triplet_rows:
+                _og_tdf = pd.DataFrame(_og_triplet_rows).sort_values("variant")
+                _og_tcsv = os.path.join(_og_dir, "dataset_mask_triplet_summary_orig_gt.csv")
+                _og_tdf.to_csv(_og_tcsv, index=False)
+                outputs["mask_orig_gt_triplet_csv"] = _og_tcsv
+
+                # IoU bar
+                _og_iou_col = "iou_wmean" if "iou_wmean" in _og_tdf.columns else None
+                _og_bf1_col = "boundary_f1_wmean" if "boundary_f1_wmean" in _og_tdf.columns else None
+                _og_var_labels = _og_tdf["variant"].astype(str).tolist()
+                # Color ET blue, baselines green — same scheme as main plots
+                _KNOWN_BL = {"crackscopenet","crackscopenet_large","crackscopenet_small","hrsegnet","sam3","segnet","unet"}
+                _og_colors = ["#1f77b4" if v.upper() == "ET" else "#2ca02c" if v.lower() in _KNOWN_BL else "#7f7f7f" for v in _og_var_labels]
+                _og_legend = [("ET (edited GT)", "#1f77b4"), ("Baselines (orig GT)", "#2ca02c")]
+                if _og_iou_col:
+                    _og_iou_png = os.path.join(_og_dir, "dataset_mask_total_iou_orig_gt.png")
+                    _save_bar(_og_var_labels, _og_tdf[_og_iou_col].astype(float).tolist(),
+                              colors=_og_colors, color_legend=_og_legend,
+                              out_png=_og_iou_png, title="Dataset TOTAL IoU — edited images only",
+                              ylabel="IoU",
+                              subtitle="★ ET on edited GT  |  Baselines on original GT")
+                    outputs["mask_orig_gt_iou_png"] = _og_iou_png
+                if _og_bf1_col:
+                    _og_bf1_png = os.path.join(_og_dir, "dataset_mask_total_boundary_f1_orig_gt.png")
+                    _save_bar(_og_var_labels, _og_tdf[_og_bf1_col].astype(float).tolist(),
+                              colors=_og_colors, color_legend=_og_legend,
+                              out_png=_og_bf1_png, title="Dataset TOTAL Boundary F1 — edited images only",
+                              ylabel="Boundary F1",
+                              subtitle="★ ET on edited GT  |  Baselines on original GT")
+                    outputs["mask_orig_gt_bf1_png"] = _og_bf1_png
+
+        _log(verbose, f"[summarize] mask orig_gt plots written to {_og_dir}")
+
     return outputs
 
 
