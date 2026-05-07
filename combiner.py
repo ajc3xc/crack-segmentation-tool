@@ -95,6 +95,7 @@ def plot_greedy_branch_debug(
     connected_comp_size,
     group_id,
     debug_dir,
+    original_image=None,
 ):
     """
     Optional 2-panel debug plot for greedy branch construction.
@@ -127,12 +128,20 @@ def plot_greedy_branch_debug(
         S = np.asarray(a.get("poly", []), float)
         if S.ndim == 2 and len(S) >= 2:
             ax_a.plot(S[:, 0], S[:, 1], color="lightgray", linewidth=1.0)
+            # Label with atomic_id in black at midpoint
+            mid = S[len(S) // 2]
+            ax_a.text(
+                float(mid[0]), float(mid[1]),
+                str(a.get("atomic_id", "?")),
+                color="black", fontsize=6, ha="center", va="center", zorder=20,
+                bbox=dict(boxstyle="round,pad=0.1", facecolor="white", edgecolor="none", alpha=0.75),
+            )
 
     junction_pts = [k for k, d in (endpoint_graph_deg or {}).items() if int(d) >= 3]
     if junction_pts:
         jp = np.asarray(junction_pts, float)
         if jp.ndim == 2 and jp.shape[1] == 2:
-            ax_a.scatter(jp[:, 0], jp[:, 1], c="red", s=12)
+            ax_a.scatter(jp[:, 0], jp[:, 1], c="red", s=12, zorder=30)
 
     ax_a.set_title("A - Atomic Crack Topology")
     ax_a.set_aspect("equal", adjustable="box")
@@ -193,6 +202,171 @@ def plot_greedy_branch_debug(
     plt.tight_layout()
     plt.savefig(out_path, dpi=100)
     plt.close(fig)
+
+    # -------------------------------------------------------
+    # Panel C: image-overlay stitch debug (saved separately)
+    # Shows each branch coloured on the real image, with stitch
+    # join points coloured by join distance (green=ok, red=gap)
+    # and junction nodes marked as stars.
+    # -------------------------------------------------------
+    if original_image is None:
+        return
+
+    try:
+        img_rgb = np.asarray(original_image)
+        if img_rgb.ndim == 3 and img_rgb.shape[2] == 3:
+            # assume BGR from OpenCV
+            img_rgb = img_rgb[:, :, ::-1].copy()
+        elif img_rgb.ndim != 3:
+            return
+
+        H_img, W_img = img_rgb.shape[:2]
+
+        # Compute crop around all atomics + padding
+        all_pts = []
+        for a in atomics:
+            S = np.asarray(a.get("poly", []), float)
+            if S.ndim == 2 and len(S) >= 2:
+                all_pts.append(S)
+        if not all_pts:
+            return
+        all_xy = np.vstack(all_pts)
+        pad_px = 40
+        x0 = max(0, int(all_xy[:, 0].min()) - pad_px)
+        y0 = max(0, int(all_xy[:, 1].min()) - pad_px)
+        x1 = min(W_img, int(all_xy[:, 0].max()) + pad_px + 1)
+        y1 = min(H_img, int(all_xy[:, 1].max()) + pad_px + 1)
+        if x1 <= x0 or y1 <= y0:
+            return
+        img_crop = img_rgb[y0:y1, x0:x1]
+
+        fig2, ax_c = plt.subplots(1, 1, figsize=(max(10.0, (x1-x0)/80.0), max(8.0, (y1-y0)/80.0)), dpi=150)
+        ax_c.imshow(img_crop)
+
+        cmap2 = plt.get_cmap("tab10")
+        junction_keys = {k for k, d in (endpoint_graph_deg or {}).items() if int(d) >= 3}
+        TELEPORT_THRESH = 10.0
+
+        for b_idx, branch in enumerate(branches):
+            color = cmap2(int(b_idx % 10))
+            aid_labels = [atomics[i]["atomic_id"] for i in branch]
+
+            # Draw each atomic midline in branch colour
+            for atomic_idx in branch:
+                S = np.asarray(atomics[atomic_idx]["poly"], float)
+                if S.ndim != 2 or len(S) < 2:
+                    continue
+                ax_c.plot(S[:, 0] - x0, S[:, 1] - y0, color=color, linewidth=2.0, alpha=0.85, zorder=10)
+
+                # Mark endpoints
+                for ep in [S[0], S[-1]]:
+                    ax_c.plot(ep[0] - x0, ep[1] - y0, "o", color=color, markersize=5, zorder=15)
+
+            # Greedy stitch simulation: show join distances between consecutive atomics
+            # (mirror the stitch algorithm to find actual join points and distances)
+            if len(branch) >= 2:
+                segs = []
+                for atomic_idx in branch:
+                    S = np.asarray(atomics[atomic_idx]["poly"], float)
+                    if S.ndim == 2 and len(S) >= 2:
+                        segs.append(S)
+
+                if len(segs) >= 2:
+                    # Replicate nearest-neighbour chain to find join points
+                    used = set()
+                    chain = [segs[0]]
+                    used.add(0)
+                    while len(used) < len(segs):
+                        cur_end = chain[-1][-1]
+                        cur_start = chain[0][0]
+                        best_j, best_dist, best_oriented, best_action = None, float("inf"), None, None
+                        for j, sj in enumerate(segs):
+                            if j in used:
+                                continue
+                            a_, b_ = sj[0], sj[-1]
+                            for dist, oriented, flipped, action in [
+                                (np.linalg.norm(cur_end - a_), sj, False, "append"),
+                                (np.linalg.norm(cur_end - b_), sj[::-1], True, "append"),
+                                (np.linalg.norm(b_ - cur_start), sj, False, "prepend"),
+                                (np.linalg.norm(a_ - cur_start), sj[::-1], True, "prepend"),
+                            ]:
+                                if dist < best_dist:
+                                    best_dist, best_j, best_oriented, best_action = dist, j, oriented, action
+                        if best_j is None:
+                            break
+                        # Draw the join gap line
+                        if best_action == "append":
+                            p1 = chain[-1][-1]
+                            p2 = best_oriented[0]
+                        else:
+                            p1 = best_oriented[-1]
+                            p2 = chain[0][0]
+                        join_color = "lime" if best_dist <= TELEPORT_THRESH else "red"
+                        ax_c.plot(
+                            [p1[0] - x0, p2[0] - x0],
+                            [p1[1] - y0, p2[1] - y0],
+                            color=join_color, linewidth=2.5, linestyle="--", zorder=20,
+                        )
+                        ax_c.annotate(
+                            f"{best_dist:.1f}px",
+                            xy=((p1[0]+p2[0])/2 - x0, (p1[1]+p2[1])/2 - y0),
+                            fontsize=5, color=join_color, ha="center", zorder=25,
+                            bbox=dict(boxstyle="round,pad=0.1", facecolor="black", alpha=0.5),
+                        )
+                        if best_action == "append":
+                            chain.append(best_oriented)
+                        else:
+                            chain.insert(0, best_oriented)
+                        used.add(best_j)
+
+            # Label the branch at centroid
+            all_branch_pts = []
+            for atomic_idx in branch:
+                S = np.asarray(atomics[atomic_idx]["poly"], float)
+                if S.ndim == 2 and len(S) >= 2:
+                    all_branch_pts.append(S)
+            if all_branch_pts:
+                centre = np.vstack(all_branch_pts).mean(axis=0)
+                ax_c.text(
+                    centre[0] - x0, centre[1] - y0,
+                    f"b{b_idx}\n{aid_labels}",
+                    fontsize=5, color="white", ha="center", va="center", zorder=30,
+                    bbox=dict(boxstyle="round,pad=0.15", facecolor=color[:3], alpha=0.75),
+                )
+
+        # Junction nodes (degree >= 3) as yellow stars
+        for k in junction_keys:
+            ax_c.plot(k[0] - x0, k[1] - y0, "*", color="yellow", markersize=12, zorder=35,
+                      markeredgecolor="black", markeredgewidth=0.5)
+
+        ax_c.set_title(
+            f"C - ET Stitch Debug  |  group={group_id}\n"
+            f"green dashes=clean join (≤{TELEPORT_THRESH}px)  red dashes=teleport gap  ★=junction node",
+            fontsize=7,
+        )
+        ax_c.axis("off")
+
+        from matplotlib.lines import Line2D
+        legend_elements = [
+            Line2D([0], [0], color="lime", linestyle="--", linewidth=2, label=f"clean join ≤{TELEPORT_THRESH}px"),
+            Line2D([0], [0], color="red", linestyle="--", linewidth=2, label="teleport gap"),
+            Line2D([0], [0], marker="*", color="yellow", markersize=8, linestyle="none", label="junction node (deg≥3)"),
+        ] + [
+            Line2D([0], [0], color=cmap2(i % 10), linewidth=2,
+                   label=f"b{i}: {[atomics[j]['atomic_id'] for j in br]}")
+            for i, br in enumerate(branches)
+        ]
+        ax_c.legend(handles=legend_elements, fontsize=5, loc="lower right", framealpha=0.7)
+
+        plt.tight_layout()
+        out_path_c = os.path.join(debug_dir, f"et_stitch_debug_group_{safe_gid}.png")
+        fig2.savefig(out_path_c, bbox_inches="tight")
+        plt.close(fig2)
+        print(f"[ET STITCH DBG] wrote: {out_path_c}")
+
+    except Exception as _e:
+        print(f"[ET STITCH DBG] failed: {_e}")
+        import traceback; traceback.print_exc()
 
 
 '''def _split_lines(geom):
@@ -673,6 +847,7 @@ def dominant_segments_from_group(
     window_half_size,
     debug_dir=None,
     debug_tag="dominance_grouping",
+    original_image=None,
 ):
     """
     FINAL dominance logic (portable version) + OPSEC metadata.
@@ -926,6 +1101,15 @@ def dominant_segments_from_group(
         restarted = True
         while restarted:
             restarted = False
+            endpoint_history = []  # reset on each greedy pass (restarted or fresh)
+            # Recalculate open endpoints by replaying the current branch
+            b_start, b_end = _endpoints(atomics[branch[0]]["poly"])
+            for _seg in branch[1:]:
+                _S = atomics[_seg]["poly"]
+                _s, _e = _endpoints(_S)
+                # flip if segment's END matches current tail (segment needs reversing to attach)
+                _Sf = _S[::-1] if _pts_close(_e, b_end) else _S
+                _, b_end = _endpoints(_Sf)
 
             grew = True
             while grew:
@@ -986,6 +1170,7 @@ def dominant_segments_from_group(
                 if best_j is not None:
                     side, flip = best_attach_mode
 
+                    endpoint_history.append((b_start.copy(), b_end.copy()))
                     unused.remove(best_j)
                     branch.append(best_j)
 
@@ -1023,6 +1208,9 @@ def dominant_segments_from_group(
 
                     popped = branch.pop()
                     attach_orders.pop(int(popped), None)
+                    # Restore endpoints from history
+                    if endpoint_history:
+                        b_start, b_end = endpoint_history.pop()
                     # Singleton guard: if this was the only segment, save it as solo.
                     if len(branch) == 0:
                         branches.append([popped])
@@ -1033,17 +1221,14 @@ def dominant_segments_from_group(
                         )
                         break  # restarted stays False; outer while unused picks next segment
                     if len(branch) >= 1:
-                        if side_check == "end":
-                            b_end = _endpoints(atomics[branch[-1]]["poly"])[1]
-                        else:
-                            b_start = _endpoints(atomics[branch[-1]]["poly"])[0]
-                    if len(branch) >= 1:
                         pop_s, pop_e = _endpoints(atomics[popped]["poly"])
                         pop_other = pop_e if _pts_close(pop_s, terminal) else pop_s
                         last_s, last_e = _endpoints(atomics[branch[-1]]["poly"])
                         if _pts_close(last_s, pop_other) or _pts_close(last_e, pop_other):
                             pulled = branch.pop()
                             attach_orders.pop(int(pulled), None)
+                            if endpoint_history:
+                                b_start, b_end = endpoint_history.pop()
                             branches.append([pulled, popped])
                             attach_orders[int(pulled)] = 1
                             attach_orders[int(popped)] = 2
@@ -1051,12 +1236,7 @@ def dominant_segments_from_group(
                                 f"[LOOP_BACKSTEP] saved [{atomics[pulled]['atomic_id']},{atomics[popped]['atomic_id']}] as pair",
                                 flush=True
                             )
-                            # Refresh terminal after pulling - branch[-1] is now the new tip.
-                            if len(branch) >= 1:
-                                if side_check == "end":
-                                    b_end = _endpoints(atomics[branch[-1]]["poly"])[1]
-                                else:
-                                    b_start = _endpoints(atomics[branch[-1]]["poly"])[0]
+                            # b_start/b_end already restored from endpoint_history above
                         else:
                             branches.append([popped])
                             attach_orders[int(popped)] = 1
@@ -1118,7 +1298,32 @@ def dominant_segments_from_group(
         connected_comp_size=connected_comp_size,
         group_id=debug_tag,
         debug_dir=debug_dir,
+        original_image=original_image,
     )
+
+    # Write branch summary CSV to combine_debug dir (sibling of pairwise_debug.csv)
+    if debug_dir:
+        try:
+            import os, pandas as pd
+            _branch_rows = []
+            for _bi, _br in enumerate(branches):
+                for _order, _idx in enumerate(_br):
+                    _branch_rows.append({
+                        "branch_id": _bi,
+                        "position": _order,
+                        "atomic_id": atomics[_idx]["atomic_id"],
+                        "n_atomics_in_branch": len(_br),
+                    })
+            if _branch_rows:
+                _bdf = pd.DataFrame(_branch_rows)
+                # Put alongside pairwise_debug.csv in the combine_debug subdir
+                _combine_debug_dir = os.path.join(os.path.dirname(debug_dir), "combine_debug")
+                os.makedirs(_combine_debug_dir, exist_ok=True)
+                _bcsv = os.path.join(_combine_debug_dir, "greedy_branches.csv")
+                _bdf.to_csv(_bcsv, index=False)
+                print(f"[GREEDY_BRANCHES] wrote {_bcsv}", flush=True)
+        except Exception as _be:
+            print(f"[GREEDY_BRANCHES] CSV write failed: {_be}", flush=True)
 
     # -----------------------------
     # 3) per-branch user length + seg lists
@@ -3120,6 +3325,7 @@ def build_combined_crack_stateless(
         window_half_size=window_half_size,
         debug_dir=debug_dir,
         debug_tag="dominance_grouping",
+        original_image=original_image,
     )
 
     midline_segments_meta = dom_meta.get("segments_meta", [])
@@ -3540,6 +3746,18 @@ def build_combined_crack_stateless(
             max_jump=10.0,
             allow_teleport=allow_teleport,
         )
+
+        # If stitch failed and topology is non-chain (Y-junction etc.), retry with teleport tolerated.
+        # This gracefully handles branching crack tips that can't form a single Eulerian path.
+        if not ok and not chain_like:
+            print(f"[STITCH RETRY] branch={branch_id} non-chain topology ({reason}) — retrying with allow_teleport=True")
+            S_branch, ok, reason = shared_stitch_branch_segments(
+                seg_list,
+                max_jump=10.0,
+                allow_teleport=True,
+            )
+            if ok:
+                print(f"[STITCH RETRY] branch={branch_id} succeeded with teleport tolerance")
         print(
             f"[STITCH RESULT] branch={branch_id} ok={ok} reason={reason} "
             f"n={len(S_branch) if S_branch is not None else 0} "

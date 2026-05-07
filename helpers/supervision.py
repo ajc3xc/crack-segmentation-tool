@@ -4657,6 +4657,7 @@ def export_gt_supervision_for_image(
             window_half_size=50,
             debug_dir=debug_dir,
             debug_tag=tag,
+            original_image=original_image,
         )
         dom_meta = dom_meta if isinstance(dom_meta, dict) else {}
         tag_name = str(tag)

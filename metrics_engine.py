@@ -814,7 +814,10 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             t_sync0 = time.perf_counter()
             if not skip_recomputing_midlines:
                 self._purge_metrics_for_current_image()
-            self._sync_metrics_snapshot_from_authoring(refresh_combine=True, persist=True)
+            self._sync_metrics_snapshot_from_authoring(
+                refresh_combine=not skip_recomputing_midlines,
+                persist=True,
+            )
             timing_breakdown["snapshot_sync_s"] = float(time.perf_counter() - t_sync0)
 
             atomic = dict(self._metric_atomic() or {})
@@ -971,10 +974,96 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         #resolved_indices = [9,20,101,110,116]
         #resolved_indices = [41]
         resolved_indices= None
-        #base_names = ["10"]
+        base_names = None
         SKIP_ALREADY_PROCESSED = False
-        SKIP_PASS1 = False   # skip GT supervision export (pass1) - use when supervision already exists
+        SKIP_PASS1 = True
         FAST_RUN_EDGE_SWEEP = False
+        MASK_ONLY = False
+
+        # ------------------------------------------------------------------
+        # MASK_ONLY pass for all 30 edited images — refreshes mask_metrics.csv
+        # with orig_gt rows. Width CSVs untouched. Run then summarize.
+        # ------------------------------------------------------------------
+        _ALL_EDITED = [
+            "6","8","14","17","18","29","30","33","34","35","37","39","43","44",
+            "87","88","89","92","98","100","101","102","108","110","111","117",
+            "128","129","130","12"
+        ]
+        # These need full recompute (ET + width + mask) — run WITHOUT mask_only_mode
+        _NEED_FULL = {"117"}
+        _MASK_ONLY_IMAGES = []
+        _FULL_IMAGES      = [x for x in _ALL_EDITED if x in _NEED_FULL]
+
+        # --- Step 1: Full recompute for images ---
+        if _FULL_IMAGES:
+            _default_edge = {"window_half_size": 45, "mu": 0.0, "l": 5, "p": 14, "seg_mode": "new"}
+            idxs_full = self._resolve_metrics_image_indices(image_indices=None, base_names=_FULL_IMAGES)
+            print(f"[RECOVERY] Full recompute for {len(idxs_full)} images: {_FULL_IMAGES}")
+            orig_n2 = int(getattr(self, "n", 0))
+            try:
+                for _n, _idx in enumerate(idxs_full, 1):
+                    _bn = os.path.splitext(os.path.basename(str(self.image_names[int(_idx)])))[0] if 0 <= int(_idx) < len(getattr(self, "image_names", []) or []) else str(_idx)
+                    print(f"[RECOVERY FULL] {_n}/{len(idxs_full)}: {_bn}")
+                    try:
+                        self.n = int(_idx)
+                        self.change_image()
+                        print(f"[RECOVERY FULL] {_bn}: skipping ET (snapshots exist), calling compute_mask_and_width directly")
+                        # Wipe stale combined_* dirs and combine_debug so plots/CSVs regenerate cleanly
+                        try:
+                            import shutil, glob as _glob
+                            _metrics_img_dir = os.path.join(self.save_folder, "metrics", _bn)
+                            for _d in _glob.glob(os.path.join(_metrics_img_dir, "combined_*")):
+                                if os.path.isdir(_d):
+                                    shutil.rmtree(_d, ignore_errors=True)
+                            _cbd = os.path.join(_metrics_img_dir, "combine_debug")
+                            if os.path.isdir(_cbd):
+                                shutil.rmtree(_cbd, ignore_errors=True)
+                        except Exception as _we:
+                            print(f"[RECOVERY FULL] {_bn}: wipe warning: {_we}")
+                        self.compute_mask_and_width_metrics_for_image(
+                            display=False,
+                            export_supervision=False,
+                            best_method_key="dt_depth",
+                        )
+                    except Exception as _e:
+                        print(f"[RECOVERY FULL] {_bn} failed: {_e}")
+                        import traceback; traceback.print_exc()
+            finally:
+                try:
+                    self.n = orig_n2
+                    self.change_image()
+                except Exception:
+                    pass
+            print("[RECOVERY] Full recompute done.")
+
+        # --- Step 2: MASK_ONLY for remaining 22 edited images ---
+        idxs_edited = self._resolve_metrics_image_indices(image_indices=None, base_names=_MASK_ONLY_IMAGES)
+        print(f"[MASK_ONLY] refreshing mask_metrics.csv for {len(idxs_edited)} edited images")
+        orig_n = int(getattr(self, "n", 0))
+        self._mask_only_mode = True
+        try:
+            for _n, _idx in enumerate(idxs_edited, 1):
+                _bn = os.path.splitext(os.path.basename(str(self.image_names[int(_idx)])))[0] if 0 <= int(_idx) < len(getattr(self, "image_names", []) or []) else str(_idx)
+                print(f"[MASK_ONLY] {_n}/{len(idxs_edited)}: {_bn}")
+                try:
+                    self.n = int(_idx)
+                    self.change_image()
+                    self.compute_mask_and_width_metrics_for_image(
+                        display=False,
+                        export_supervision=False,
+                    )
+                except Exception as _e:
+                    print(f"[MASK_ONLY] {_bn} failed: {_e}")
+                    import traceback; traceback.print_exc()
+        finally:
+            self._mask_only_mode = False
+            try:
+                self.n = orig_n
+                self.change_image()
+            except Exception:
+                pass
+        print("[RECOVERY] Done.")
+        return {"ok": True, "recovery": True}
 
         idxs = self._resolve_metrics_image_indices(image_indices=resolved_indices, base_names=base_names)
         if not idxs:
@@ -1201,6 +1290,39 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         pass1_rows = []
         pass2b_rows = []
         pass2c_rows = []
+
+        # ------------------------------------------------------------------
+        # MASK_ONLY fast path: just recompute mask_metrics.csv per image.
+        # No purge, no ET, no combined rebuild, no width eval, no timing.
+        # ------------------------------------------------------------------
+        if MASK_ONLY:
+            print(f"[batch dt_best_et] MASK_ONLY mode — recomputing mask metrics for {len(idxs)} image(s)")
+            orig_n = int(getattr(self, "n", 0))
+            self._mask_only_mode = True
+            try:
+                for n, idx in enumerate(idxs, 1):
+                    base = _base(idx)
+                    print(f"[MASK_ONLY] {n}/{len(idxs)}: {base}")
+                    try:
+                        self.n = int(idx)
+                        self.change_image()
+                        self.compute_mask_and_width_metrics_for_image(
+                            run_edge_tracking=False,
+                            skip_recomputing_midlines=True,
+                        )
+                    except Exception as _e:
+                        print(f"[MASK_ONLY] {base} failed: {_e}")
+                        import traceback; traceback.print_exc()
+            finally:
+                self._mask_only_mode = False
+                try:
+                    self.n = orig_n
+                    self.change_image()
+                except Exception:
+                    pass
+            elapsed = float(time.perf_counter() - t0)
+            print(f"[batch dt_best_et] MASK_ONLY done in {elapsed:.1f}s")
+            return {"ok": True, "mask_only": True, "elapsed_s": elapsed}
 
         _t_sec = time.perf_counter()
         print(f"[batch dt_best_et] pass1 GT supervision export on {len(idxs)} image(s)")
@@ -2362,7 +2484,11 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 })
 
         t_cmb0 = time.perf_counter()
-        combined_map = _rebuild_combined_map_for_mode(mode_label="ET", atomic_src=atomic)
+        try:
+            combined_map = _rebuild_combined_map_for_mode(mode_label="ET", atomic_src=atomic)
+        except Exception as _cmb_e:
+            print(f"[DEBUG METRICS] _rebuild_combined_map ET failed: {_cmb_e} — continuing with empty combined_map")
+            combined_map = {}
         _record_driver_timing("rebuild_combined_ET_s", time.perf_counter() - t_cmb0)
 
         auto_combined_map = {}
@@ -2964,6 +3090,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             return agg
 
         # ---- ET masks ----
+        print(f"[DEBUG MASK] computing ET atomic+combined metrics")
         agg_manual = _compute_and_record_atomic_metrics(
             atomic_src=atomic,
             combined_src=combined_map,
@@ -2971,6 +3098,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             supervision="ET",
             method="geodesic",
         )
+        print(f"[DEBUG MASK] ET atomic done, agg_manual_px={int(agg_manual.sum())}")
         agg_manual |= _compute_and_record_combined_metrics(
             combined_src=combined_map,
             atomic_src_for_auto=None,
@@ -2978,6 +3106,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             supervision="ET",
             method="geodesic",
         )
+        print(f"[DEBUG MASK] ET combined done, agg_manual_px={int(agg_manual.sum())}")
 
         # TOTAL (ET)
         if int(agg_manual.sum()) > 0:
@@ -3051,22 +3180,28 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             getattr(self, "mask_baseline_root", None)
             or getattr(self, "mask_baseline_folder", None)
         )
+        print(f"[DEBUG MASK] baseline_root={baseline_root}")
         if baseline_root:
             print(f"[DEBUG MASK] loading baselines from: {baseline_root}")
             t_baseline0 = time.perf_counter()
             baseline_pred_masks = _load_baseline_masks_for_image(baseline_root, base_name)
 
-            # Load original unedited GT if this image was edited
+            # Load original unedited GT if this image was edited.
+            # Check the canonical location: edited masks live next to the
+            # original GT masks in edited_gt_masks/{base}_modified.png
             original_gt = None
             original_gt_path = getattr(self, "current_gt_source_path", None)
-            modified_gt_path = getattr(self, "current_modified_gt_path", None)
-            if modified_gt_path and original_gt_path and os.path.isfile(original_gt_path):
-                try:
-                    original_gt = self._load_binary_mask_from_path(original_gt_path)
-                    print(f"[BASELINE] image was edited — also computing vs original GT: {original_gt_path}")
-                except Exception as _e:
-                    print(f"[BASELINE] could not load original GT: {_e}")
-                    original_gt = None
+            if original_gt_path:
+                _gt_dir = os.path.dirname(str(original_gt_path))
+                _modified_path = os.path.join(_gt_dir, "edited_gt_masks", f"{base_name}_modified.png")
+                if os.path.isfile(_modified_path):
+                    # Image was edited — original GT is the unmodified source mask
+                    try:
+                        original_gt = self._load_binary_mask_from_path(original_gt_path)
+                        print(f"[BASELINE] edited image — computing vs original GT: {original_gt_path}")
+                    except Exception as _e:
+                        print(f"[BASELINE] could not load original GT: {_e}")
+                        original_gt = None
 
             for method_name, pred_full in baseline_pred_masks.items():
                 # Standard: vs edited GT (or original if not edited)
@@ -3090,6 +3225,13 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         out_csv = os.path.join(metrics_dir, "mask_metrics.csv")
         df_mask.to_csv(out_csv, index=False)
         print(f"[DEBUG MASK] wrote → {out_csv}")
+        print(f"[DEBUG MASK] mask_rows={len(mask_rows)} agg_manual_px={int(agg_manual.sum())}")
+
+        # Early exit when only mask metrics are needed (MASK_ONLY batch mode).
+        # Width CSVs, combined rebuild, and timing are intentionally skipped.
+        if getattr(self, "_mask_only_mode", False):
+            print(f"[DEBUG MASK] _mask_only_mode=True — skipping width eval, returning early")
+            return {"ok": True, "mask_only": True}
 
         # ------------------------------------------------------------------
         # 8) WIDTH DIFF CHARTS (ET + optional auto) — unified prep
