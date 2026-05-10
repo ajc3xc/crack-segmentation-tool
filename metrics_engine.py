@@ -974,11 +974,18 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         #resolved_indices = [9,20,101,110,116]
         #resolved_indices = [41]
         resolved_indices= None
-        base_names = None
-        SKIP_ALREADY_PROCESSED = True
+        base_names = [
+            # Critical (combined coverage < 0.80 or catastrophic branches)
+            '6','10','17','21','29','32','33','42','129',
+            # HIGH complexity not yet clean
+            '117','39',
+            # MEDIUM complexity additions
+            '111','108','8','12','92','102',
+        ]
+        SKIP_ALREADY_PROCESSED = False   # force full rerun for all targets
         # When True: pass2c runs ET width eval only (skips DT/dt_depth/B1 if they exist)
         ET_ONLY_WIDTH = True
-        SKIP_PASS1 = True
+        SKIP_PASS1 = False               # run supervision export + ET for all targets
         FAST_RUN_EDGE_SWEEP = True
         MASK_ONLY = False
 
@@ -992,7 +999,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         ]
         _NEED_FULL = set()   # empty — full batch pipeline handles everything
         _MASK_ONLY_IMAGES = []
-        _FULL_IMAGES      = ["17", "21", "42", "117"]
+        _FULL_IMAGES      = []  # disabled — SKIP_PASS1=False handles full rerun
 
         # --- Step 1: Full recompute for images ---
         if _FULL_IMAGES:

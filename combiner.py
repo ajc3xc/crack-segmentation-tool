@@ -1123,6 +1123,12 @@ def dominant_segments_from_group(
         dy = min(float(pt[1]) - _grp_ymin, _grp_ymax - float(pt[1]))
         return min(dx, dy)
 
+    # Pre-compute combine_debug dir for junction plots
+    _combine_debug_dir = None
+    if debug_dir is not None:
+        _combine_debug_dir = os.path.join(os.path.dirname(debug_dir), "combine_debug")
+        os.makedirs(_combine_debug_dir, exist_ok=True)
+
     unused = set(range(len(atomics)))
     branches = []  # list[list[atomic indices]]
     attach_orders = {}  # atomic_idx -> order within branch (1-based)
@@ -1298,13 +1304,18 @@ def dominant_segments_from_group(
                     turn_deg = _turn_angle_deg(incoming, outgoing)
 
 
-                    # DEBUG PLOT — call subfunction for any junction of interest
+                    # DEBUG PLOT — save junction plot to combine_debug for all junctions
                     _dbg_jx2 = round(float(attach_pt[0]), 1) if attach_pt is not None else None
                     _dbg_jy2 = round(float(attach_pt[1]), 1) if attach_pt is not None else None
-                    if _dbg_jx2 == 747.6 and _dbg_jy2 == 659.2 and len(valid_candidates) >= 1:
+                    if (_dbg_jx2 is not None and apt_key in junction_pts
+                            and len(valid_candidates) == 0  # only on first candidate at this junction
+                            and _combine_debug_dir is not None):
+                        _jplot_path = os.path.join(
+                            _combine_debug_dir, f"junction_{_dbg_jx2}_{_dbg_jy2}.png"
+                        )
                         _dbg_plot_junction(
                             _dbg_jx2, _dbg_jy2, _full_branch, incoming, valid_candidates, atomics,
-                            r'C:\Users\13144\Documents\Masters_Thesis\CURRENT_PROJECT_CODE\junction_dir_debug_img8.png'
+                            _jplot_path
                         )
 
                     valid_candidates.append((j, mode, apt_key, turn_deg))
@@ -1312,7 +1323,7 @@ def dominant_segments_from_group(
 
                 # --- Per-junction angle filter: at each junction with multiple candidates,
                 #     if any candidate has turn <= 300°, exclude >300° ones from this pass ---
-                SHARP_TURN_THRESHOLD = 140.0  # 0-180 range (equiv. 280 deg CW): exclude near-U-turns at junctions
+                SHARP_TURN_THRESHOLD = 150.0  # 0-180 range (equiv. 300 deg CW): exclude near-U-turns at junctions
                 from collections import defaultdict as _dd
                 by_junction = _dd(list)
                 for cand in valid_candidates:
@@ -1453,67 +1464,6 @@ def dominant_segments_from_group(
                         b_start = j_start
 
                     grew = True
-
-            # AFTER while grew exits: check if a sub-ring formed.
-            # A sub-ring means the current terminal has landed on a point that is
-            # strictly interior to the branch — i.e. a handoff point between two
-            # non-adjacent segments. We detect this by checking endpoints of
-            # branch[:-2]: all segments except the last two (last segment is the
-            # one that just attached; second-to-last is its attachment partner).
-            # This correctly catches A>B>C>D>B (terminal B is in branch[:-2])
-            # but NOT A>B>C>D where D's far end is a new dead-end junction.
-            for side_check, terminal in [("end", b_end), ("start", b_start)]:
-                tk = (round(float(terminal[0]), 1), round(float(terminal[1]), 1))
-                if tk in junction_pts and len(branch) >= 1:
-                    interior_keys = set()
-                    for idx in branch[1:-2]:  # exclude seed, last two segments
-                        s, e = _endpoints(atomics[idx]["poly"])
-                        interior_keys.add((round(float(s[0]), 1), round(float(s[1]), 1)))
-                        interior_keys.add((round(float(e[0]), 1), round(float(e[1]), 1)))
-                    if tk not in interior_keys:
-                        break  # genuine dead-end, not a sub-ring
-
-                    popped = branch.pop()
-                    attach_orders.pop(int(popped), None)
-                    # Restore endpoints from history
-                    if endpoint_history:
-                        b_start, b_end = endpoint_history.pop()
-                    # Singleton guard: if this was the only segment, save it as solo.
-                    if len(branch) == 0:
-                        branches.append([popped])
-                        attach_orders[int(popped)] = 1
-                        print(
-                            f"[LOOP_SOLO] saved [{atomics[popped]['atomic_id']}] as solo (singleton)",
-                            flush=True
-                        )
-                        break  # restarted stays False; outer while unused picks next segment
-                    if len(branch) >= 1:
-                        pop_s, pop_e = _endpoints(atomics[popped]["poly"])
-                        pop_other = pop_e if _pts_close(pop_s, terminal) else pop_s
-                        last_s, last_e = _endpoints(atomics[branch[-1]]["poly"])
-                        if _pts_close(last_s, pop_other) or _pts_close(last_e, pop_other):
-                            pulled = branch.pop()
-                            attach_orders.pop(int(pulled), None)
-                            if endpoint_history:
-                                b_start, b_end = endpoint_history.pop()
-                            branches.append([pulled, popped])
-                            attach_orders[int(pulled)] = 1
-                            attach_orders[int(popped)] = 2
-                            print(
-                                f"[LOOP_BACKSTEP] saved [{atomics[pulled]['atomic_id']},{atomics[popped]['atomic_id']}] as pair",
-                                flush=True
-                            )
-                            # b_start/b_end already restored from endpoint_history above
-                        else:
-                            branches.append([popped])
-                            attach_orders[int(popped)] = 1
-                            print(
-                                f"[LOOP_SOLO] saved [{atomics[popped]['atomic_id']}] as solo",
-                                flush=True
-                            )
-                    if branch:  # only restart if branch still has segments
-                        restarted = True  # re-run greedy on trimmed branch
-                    break
 
         if branch:
             branches.append(branch)
@@ -2301,11 +2251,16 @@ def dominant_segments_from_group(
 
         # same 5 colors as PRE (identity only)
         branch_colors = [
-            "#2ecc71",  # green
-            "#e67e22",  # orange
-            "#3498db",  # blue
-            "#9b59b6",  # purple
-            "#1abc9c",  # teal
+            "#F77F00",  # vivid orange
+            "#2DC653",  # bright green
+            "#CC00CC",  # magenta
+            "#FFD100",  # vivid yellow
+            "#00BCD4",  # cyan
+            "#7B2FBE",  # deep violet
+            "#8BC34A",  # lime
+            "#A0522D",  # sienna brown
+            "#FF5C8A",  # rose pink
+            "#009688",  # teal
         ]
 
         # --- bite (make it visible) ---
@@ -2399,7 +2354,8 @@ def dominant_segments_from_group(
                 mx, my,
                 label,
                 fontsize=7,
-                color="black",
+                color=branch_colors[bi % len(branch_colors)],
+                fontweight="bold",
                 ha="center",
                 va="center",
                 zorder=20,
@@ -2407,7 +2363,7 @@ def dominant_segments_from_group(
                     boxstyle="round,pad=0.2",
                     facecolor="white",
                     edgecolor="none",
-                    alpha=0.9,
+                    alpha=0.75,
                 ),
             )
 
@@ -2537,11 +2493,16 @@ def plot_branch_territory_debug_pre(
     ax.imshow(plot_mask[y0:y1, x0:x1], cmap="gray", zorder=0)
 
     branch_colors = [
-        np.array([0.18, 0.80, 0.32]),  # green
-        np.array([0.93, 0.54, 0.16]),  # orange
-        np.array([0.20, 0.50, 0.90]),  # blue
-        np.array([0.62, 0.35, 0.75]),  # purple
-        np.array([0.10, 0.75, 0.70]),  # teal
+        np.array([0.97, 0.50, 0.00]),  # vivid orange
+        np.array([0.18, 0.78, 0.33]),  # bright green
+        np.array([0.80, 0.00, 0.80]),  # magenta
+        np.array([1.00, 0.82, 0.00]),  # vivid yellow
+        np.array([0.00, 0.74, 0.83]),  # cyan
+        np.array([0.48, 0.18, 0.75]),  # deep violet
+        np.array([0.55, 0.76, 0.29]),  # lime
+        np.array([0.63, 0.32, 0.18]),  # sienna brown
+        np.array([1.00, 0.36, 0.54]),  # rose pink
+        np.array([0.00, 0.59, 0.53]),  # teal
     ]
 
     for bi, terr in branch_terr_masks.items():
@@ -2585,7 +2546,8 @@ def plot_branch_territory_debug_pre(
                     mx, my,
                     f"{int(branch_user_len[bi])} px",
                     fontsize=8,
-                    color="black",
+                    color=branch_colors[bi % len(branch_colors)],
+                    fontweight="bold",
                     ha="center",
                     va="center",
                     zorder=z + 0.2,
@@ -2593,7 +2555,7 @@ def plot_branch_territory_debug_pre(
                         boxstyle="round,pad=0.25",
                         facecolor="white",
                         edgecolor="none",
-                        alpha=0.85,
+                        alpha=0.75,
                     ),
                 )
 
