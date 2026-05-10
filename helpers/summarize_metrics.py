@@ -6376,25 +6376,31 @@ def summarize_dataset_metrics(
                         fig, ax = plt.subplots(
                             figsize=(max(8.0, 1.5 * len(_bins_order)), 4.8), dpi=170
                         )
-                        for mi, method in enumerate(_methods_present):
-                            sub = _strat_df[_strat_df["method"] == method]
-                            vals = [
-                                float(sub.loc[sub["gt_width_bin"] == b, _col].iloc[0])
-                                if len(sub[sub["gt_width_bin"] == b]) > 0 else np.nan
-                                for b in _bins_order
-                            ]
-                            xpos = _x - 0.4 + (mi + 0.5) * _bar_w
-                            _col_c = _strat_method_colors.get(str(method), "#888888")
-                            _alpha = max(0.4, 1.0 - mi * 0.08)
-                            ax.bar(xpos, vals, width=_bar_w, color=_col_c,
-                                   alpha=_alpha, label=method)
-                        ax.set_xticks(_x)
+                        for bi, b in enumerate(_bins_order):
+                            # rank methods by their value in this bin (low→high)
+                            sub = _strat_df[_strat_df["gt_width_bin"] == b]
+                            pairs = []
+                            for m in _methods_present:
+                                row = sub[sub["method"] == m]
+                                v = float(row[_col].iloc[0]) if len(row) else np.nan
+                                pairs.append((m, v))
+                            pairs.sort(key=lambda t: t[1] if np.isfinite(t[1]) else 1e9)
+                            _methods_ordered = [p[0] for p in pairs]
+                            for mi, method in enumerate(_methods_ordered):
+                                row = sub[sub["method"] == method]
+                                v = float(row[_col].iloc[0]) if len(row) else np.nan
+                                xpos = bi - 0.4 + (mi + 0.5) * _bar_w
+                                _col_c = _strat_method_colors.get(str(method), "#888888")
+                                _alpha = max(0.4, 1.0 - mi * 0.08)
+                                ax.bar(xpos, v, width=_bar_w, color=_col_c,
+                                       alpha=_alpha,
+                                       label=method if bi == 0 else "_nolegend_")
+                        ax.set_xticks(np.arange(len(_bins_order), dtype=float))
                         ax.set_xticklabels(_bins_order)
                         ax.set_xlabel("GT crack width bin")
                         ax.set_ylabel(_ylabel)
                         ax.set_title(
-                            f"Width {_metric} by GT Width Bin\n"
-                            f"(length-weighted, n_samples per bin)"
+                            f"Width {_metric} by GT Width Bin"
                         )
                         ax.legend(fontsize=7, framealpha=0.9, ncol=2)
                         ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
@@ -6420,33 +6426,36 @@ def summarize_dataset_metrics(
                             if not _strat_df_no_et.empty:
                                 _methods_no_et = [m for m in _methods_present
                                                   if not _is_et_like(str(m))]
+                                _bar_w_ne = 0.8 / max(1, len(_methods_no_et))
                                 fig_ne, ax_ne = plt.subplots(
                                     figsize=(max(8.0, 1.5 * len(_bins_order)), 4.8), dpi=170
                                 )
-                                _bar_w_ne = 0.8 / max(1, len(_methods_no_et))
-                                for mi, method in enumerate(_methods_no_et):
-                                    sub = _strat_df_no_et[_strat_df_no_et["method"] == method]
-                                    vals = [
-                                        float(sub.loc[sub["gt_width_bin"] == b, _col].iloc[0])
-                                        if len(sub[sub["gt_width_bin"] == b]) > 0 else np.nan
-                                        for b in _bins_order
-                                    ]
-                                    xpos = _x - 0.4 + (mi + 0.5) * _bar_w_ne
-                                    ax_ne.bar(
-                                        xpos,
-                                        vals,
-                                        width=_bar_w_ne,
-                                        color=_strat_method_colors.get(str(method), "#888888"),
-                                        alpha=max(0.4, 1.0 - mi * 0.08),
-                                        label=method,
-                                    )
-                                ax_ne.set_xticks(_x)
+                                for bi, b in enumerate(_bins_order):
+                                    sub = _strat_df_no_et[_strat_df_no_et["gt_width_bin"] == b]
+                                    pairs = []
+                                    for m in _methods_no_et:
+                                        row = sub[sub["method"] == m]
+                                        v = float(row[_col].iloc[0]) if len(row) else np.nan
+                                        pairs.append((m, v))
+                                    pairs.sort(key=lambda t: t[1] if np.isfinite(t[1]) else 1e9)
+                                    _methods_ordered_ne = [p[0] for p in pairs]
+                                    for mi, method in enumerate(_methods_ordered_ne):
+                                        row = sub[sub["method"] == method]
+                                        v = float(row[_col].iloc[0]) if len(row) else np.nan
+                                        xpos = bi - 0.4 + (mi + 0.5) * _bar_w_ne
+                                        ax_ne.bar(
+                                            xpos, v,
+                                            width=_bar_w_ne,
+                                            color=_strat_method_colors.get(str(method), "#888888"),
+                                            alpha=max(0.4, 1.0 - mi * 0.08),
+                                            label=method if bi == 0 else "_nolegend_",
+                                        )
+                                ax_ne.set_xticks(np.arange(len(_bins_order), dtype=float))
                                 ax_ne.set_xticklabels(_bins_order)
                                 ax_ne.set_xlabel("GT crack width bin")
                                 ax_ne.set_ylabel(_ylabel)
                                 ax_ne.set_title(
-                                    f"Width {_metric} by GT Width Bin (no ET)\n"
-                                    f"(length-weighted, n_samples per bin)"
+                                    f"Width {_metric} by GT Width Bin (no ET)"
                                 )
                                 ax_ne.legend(fontsize=7, framealpha=0.9, ncol=2)
                                 ax_ne.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
@@ -6454,13 +6463,9 @@ def summarize_dataset_metrics(
                                 for bi, b in enumerate(_bins_order):
                                     _ns = int(_strat_df_no_et[_strat_df_no_et["gt_width_bin"] == b]["n_samples"].sum())
                                     ax_ne.text(
-                                        bi,
-                                        ax_ne.get_ylim()[1] * 0.97,
-                                        f"n={_ns:,}",
-                                        ha="center",
-                                        va="top",
-                                        fontsize=6,
-                                        color="#555555",
+                                        bi, ax_ne.get_ylim()[1] * 0.97,
+                                        f"n={_ns:,}", ha="center", va="top",
+                                        fontsize=6, color="#555555",
                                     )
                                 plt.tight_layout()
                                 _png_ne = os.path.join(
