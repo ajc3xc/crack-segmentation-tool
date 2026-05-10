@@ -1061,6 +1061,44 @@ def dominant_segments_from_group(
         crack_mask = None
 
     # -----------------------------
+    def _dbg_plot_junction(jx, jy, full_branch, incoming, valid_candidates, atomics_ref, save_path, N=30):
+        """Debug plot: show incoming direction and candidate outgoing directions at a junction."""
+        try:
+            import matplotlib; matplotlib.use('Agg')
+            import matplotlib.pyplot as _plt
+            fig, ax = _plt.subplots(figsize=(8, 8))
+            tail60 = full_branch[-min(60, len(full_branch)):]
+            ax.plot(tail60[:,0], tail60[:,1], '-', color='#AAAAAA', lw=1.5, label='branch tail (60 pts)')
+            tailN = full_branch[-min(N, len(full_branch)):]
+            ax.plot(tailN[:,0], tailN[:,1], '-', color='#E8A020', lw=3, label=f'local tail ({N} pts)')
+            ax.plot(jx, jy, 'ko', ms=10, zorder=6, label='junction')
+            inc_n = incoming / (np.linalg.norm(incoming) + 1e-9) * 50
+            ax.annotate('', xy=(jx+inc_n[0], jy+inc_n[1]), xytext=(jx, jy),
+                        arrowprops=dict(arrowstyle='->', color='#E8A020', lw=2.5))
+            cols = ['#2A9D5C', '#C83030', '#1166CC', '#AA44AA', '#CC8800']
+            for ci, (cj, cmode, capt, cturn) in enumerate(valid_candidates):
+                if (round(float(capt[0]),1), round(float(capt[1]),1)) != (jx, jy):
+                    continue
+                col = cols[ci % len(cols)]
+                Sjc = np.asarray(atomics_ref[cj]['poly'], float)
+                if cmode[1]: Sjc = Sjc[::-1]
+                headN = Sjc[:min(N, len(Sjc))]
+                ax.plot(headN[:,0], headN[:,1], '-', color=col, lw=2,
+                        label=f'cid{atomics_ref[cj]["atomic_id"]} turn={cturn:.1f}deg')
+                ov = headN[-1] - headN[0] if len(headN) > 1 else np.array([1, 0])
+                on = ov / (np.linalg.norm(ov) + 1e-9) * 50
+                ax.annotate('', xy=(jx+on[0], jy+on[1]), xytext=(jx, jy),
+                            arrowprops=dict(arrowstyle='->', color=col, lw=2.2))
+                ax.text(jx+on[0]+3, jy+on[1], f'cid{atomics_ref[cj]["atomic_id"]}\n{cturn:.1f}deg', fontsize=8, color=col)
+            ax.set_aspect('equal'); ax.invert_yaxis()
+            ax.legend(fontsize=8); ax.set_title(f'Junction ({jx},{jy}) N={N}', fontsize=10)
+            _plt.tight_layout()
+            _plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='white')
+            _plt.close(fig)
+            print(f'[DBG_JUNCTION] saved {save_path}', flush=True)
+        except Exception as _de:
+            print(f'[DBG_JUNCTION] failed: {_de}', flush=True)
+
     # 2) build branches greedily in atomic space
     # -----------------------------
     def _endpoints(S):
@@ -1068,6 +1106,22 @@ def dominant_segments_from_group(
 
     def _pts_close(a, b, tol=.2):
         return float(np.linalg.norm(a - b)) <= tol
+
+    # Pre-compute group bounding box from all atomic endpoints
+    _all_eps = []
+    for _a in atomics:
+        _s, _e = _endpoints(_a["poly"])
+        _all_eps.extend([_s, _e])
+    _all_eps = np.array(_all_eps)
+    _grp_xmin, _grp_ymin = _all_eps[:,0].min(), _all_eps[:,1].min()
+    _grp_xmax, _grp_ymax = _all_eps[:,0].max(), _all_eps[:,1].max()
+    _EDGE_THRESH = 5.0  # px — far endpoint within this distance of group bbox edge gets priority
+
+    def _dist_to_group_edge(pt):
+        """Distance from pt to nearest edge of the group bbox."""
+        dx = min(float(pt[0]) - _grp_xmin, _grp_xmax - float(pt[0]))
+        dy = min(float(pt[1]) - _grp_ymin, _grp_ymax - float(pt[1]))
+        return min(dx, dy)
 
     unused = set(range(len(atomics)))
     branches = []  # list[list[atomic indices]]
@@ -1102,14 +1156,32 @@ def dominant_segments_from_group(
         while restarted:
             restarted = False
             endpoint_history = []  # reset on each greedy pass (restarted or fresh)
-            # Recalculate open endpoints by replaying the current branch
+            # Recalculate open endpoints by replaying the current branch.
+            # Segments may have attached at EITHER b_end or b_start, so check both.
             b_start, b_end = _endpoints(atomics[branch[0]]["poly"])
             for _seg in branch[1:]:
                 _S = atomics[_seg]["poly"]
                 _s, _e = _endpoints(_S)
-                # flip if segment's END matches current tail (segment needs reversing to attach)
-                _Sf = _S[::-1] if _pts_close(_e, b_end) else _S
-                _, b_end = _endpoints(_Sf)
+                if _pts_close(_e, b_end) or _pts_close(_s, b_end):
+                    # segment attaches at b_end - update b_end
+                    _Sf = _S[::-1] if _pts_close(_e, b_end) else _S
+                    _, b_end = _endpoints(_Sf)
+                elif _pts_close(_e, b_start) or _pts_close(_s, b_start):
+                    # segment attaches at b_start - update b_start
+                    _Sf = _S[::-1] if _pts_close(_s, b_start) else _S
+                    b_start, _ = _endpoints(_Sf)
+
+            def _turn_angle_deg(incoming_dir, outgoing_dir):
+                """Compute absolute turn angle in degrees [0, 180] between two direction vectors.
+                Uses the minimum of CW and CCW rotation so a slight clockwise turn
+                reads as ~24 deg, not ~336 deg."""
+                if np.linalg.norm(incoming_dir) < 1e-9 or np.linalg.norm(outgoing_dir) < 1e-9:
+                    return 0.0
+                a_in  = float(np.arctan2(incoming_dir[1], incoming_dir[0]))
+                a_out = float(np.arctan2(outgoing_dir[1], outgoing_dir[0]))
+                diff  = (a_out - a_in) % (2 * np.pi)
+                # Return the smaller of CCW and CW rotation (0-180 range)
+                return float(np.degrees(min(diff, 2 * np.pi - diff)))
 
             grew = True
             while grew:
@@ -1117,6 +1189,9 @@ def dominant_segments_from_group(
                 best_j = None
                 best_len = -1.0
                 best_attach_mode = None  # ("start"/"end", flip_bool)
+
+                # --- Collect all valid candidates first (for per-junction angle filtering) ---
+                valid_candidates = []  # list of (j, mode, apt_key, turn_deg)
                 for j in list(unused):
                     if j in loop_rejected:
                         print(
@@ -1152,22 +1227,210 @@ def dominant_segments_from_group(
 
                     attach_pt = b_end if mode[0] == "end" else b_start
                     apt_key = (round(float(attach_pt[0]), 1), round(float(attach_pt[1]), 1))
+
+                    # Compute turn angle at this attach point using local tail/head direction
+                    # Use last/first N points of the branch polyline for a robust local direction
+                    _N_LOCAL = 30  # 20-40 pts for stable local direction at junction
+                    def _local_dir(poly, from_end=True):
+                        """Local direction at the end (from_end=True) or start of a polyline."""
+                        P = np.asarray(poly, float)
+                        n = max(2, min(_N_LOCAL, len(P)))
+                        if from_end:
+                            return P[-1] - P[-n]
+                        else:
+                            return P[n-1] - P[0]
+
+                    # Build the current branch polyline in order to get local tail direction
+                    # Replay branch to get oriented segments
+                    _branch_pts_end = None
+                    _branch_pts_start = None
+                    _cur_b_end = _endpoints(atomics[branch[0]]["poly"])[1]
+                    _seg_oriented = [atomics[branch[0]]["poly"]]
+                    for _bi in branch[1:]:
+                        _Sb = atomics[_bi]["poly"]
+                        _sb, _eb = _endpoints(_Sb)
+                        if _pts_close(_eb, _cur_b_end):
+                            _Sb = _Sb[::-1]
+                        _seg_oriented.append(_Sb)
+                        _cur_b_end = _endpoints(_Sb)[1]
+                    _full_branch = np.concatenate([np.asarray(s, float) for s in _seg_oriented], axis=0)
+
+                    # incoming: local direction of travel arriving AT the attach point.
+                    # Scan branch in reverse for the last segment whose endpoint IS
+                    # the attach point, oriented so its tail points INTO that point.
+                    # This works correctly for BOTH b_end and b_start, and avoids
+                    # the _full_branch orientation bug when the branch has grown on
+                    # both sides (b_start segments would corrupt the b_end tail).
+                    _attach_terminal = b_end if mode[0] == "end" else b_start
+                    _incoming_seg = None
+                    for _ri in reversed(branch):
+                        _Rs = np.asarray(atomics[_ri]["poly"], float)
+                        _rs, _re = _endpoints(_Rs)
+                        if _pts_close(_re, _attach_terminal):
+                            _incoming_seg = _Rs        # end = attach_pt, tail approaches it
+                            break
+                        elif _pts_close(_rs, _attach_terminal):
+                            _incoming_seg = _Rs[::-1]  # flip so end = attach_pt
+                            break
+                    if _incoming_seg is not None:
+                        incoming = _local_dir(_incoming_seg, from_end=True)
+                    else:
+                        # fallback: use full branch tail/head
+                        if mode[0] == "end":
+                            incoming = _local_dir(_full_branch, from_end=True)
+                        else:
+                            incoming = -_local_dir(_full_branch, from_end=False)
+
+                    # outgoing: local direction LEAVING the junction into candidate segment
+                    Sj_arr = np.asarray(atomics[j]["poly"], float)
+                    if mode[0] == "end":
+                        # attaching to b_end
+                        if not mode[1]:  # j_start matches b_end → seg departs forward from junction
+                            outgoing = _local_dir(Sj_arr, from_end=False)
+                        else:           # j_end matches b_end → seg departs reversed from junction
+                            outgoing = _local_dir(Sj_arr[::-1], from_end=False)
+                    else:
+                        # attaching to b_start
+                        if not mode[1]:  # j_end matches b_start → seg departs from j_end toward j_start (reversed)
+                            outgoing = _local_dir(Sj_arr[::-1], from_end=False)
+                        else:           # j_start matches b_start → seg departs naturally from j_start toward j_end
+                            outgoing = _local_dir(Sj_arr, from_end=False)
+                    turn_deg = _turn_angle_deg(incoming, outgoing)
+
+
+                    # DEBUG PLOT — call subfunction for any junction of interest
+                    _dbg_jx2 = round(float(attach_pt[0]), 1) if attach_pt is not None else None
+                    _dbg_jy2 = round(float(attach_pt[1]), 1) if attach_pt is not None else None
+                    if _dbg_jx2 == 747.6 and _dbg_jy2 == 659.2 and len(valid_candidates) >= 1:
+                        _dbg_plot_junction(
+                            _dbg_jx2, _dbg_jy2, _full_branch, incoming, valid_candidates, atomics,
+                            r'C:\Users\13144\Documents\Masters_Thesis\CURRENT_PROJECT_CODE\junction_dir_debug_img8.png'
+                        )
+
+                    valid_candidates.append((j, mode, apt_key, turn_deg))
+
+
+                # --- Per-junction angle filter: at each junction with multiple candidates,
+                #     if any candidate has turn <= 300°, exclude >300° ones from this pass ---
+                SHARP_TURN_THRESHOLD = 140.0  # 0-180 range (equiv. 280 deg CW): exclude near-U-turns at junctions
+                from collections import defaultdict as _dd
+                by_junction = _dd(list)
+                for cand in valid_candidates:
+                    by_junction[cand[2]].append(cand)
+
+                filtered_candidates = []
+                for apt_key, group in by_junction.items():
+                    if apt_key in junction_pts and len(group) > 1:
+                        has_gentle = any(c[3] <= SHARP_TURN_THRESHOLD for c in group)
+                        for c in group:
+                            if has_gentle and c[3] > SHARP_TURN_THRESHOLD:
+                                print(
+                                    f"[SHARP_TURN_FILTER] branch_so_far={[atomics[i]['atomic_id'] for i in branch]} "
+                                    f"candidate={atomics[c[0]]['atomic_id']} apt_key={apt_key} "
+                                    f"turn={c[3]:.1f}° excluded (alternatives exist at junction)",
+                                    flush=True
+                                )
+                            else:
+                                filtered_candidates.append(c)
+                    else:
+                        filtered_candidates.extend(group)
+
+                # --- Pick best: edge-proximity first, then length ---
+                # Compute far endpoint (the end NOT at the attach point) for each candidate
+                best_edge_dist = float('inf')
+                for j, mode, apt_key, turn_deg in filtered_candidates:
+                    Sj_ep = atomics[j]["poly"]
+                    js, je = _endpoints(Sj_ep)
+                    attach_pt = b_end if mode[0] == "end" else b_start
+                    far_pt = je if _pts_close(attach_pt, js) else js
+                    edge_dist = _dist_to_group_edge(far_pt)
+                    if edge_dist < best_edge_dist:
+                        best_edge_dist = edge_dist
+
+                for j, mode, apt_key, turn_deg in filtered_candidates:
+                    Sj_ep = atomics[j]["poly"]
+                    js, je = _endpoints(Sj_ep)
+                    attach_pt = b_end if mode[0] == "end" else b_start
+                    far_pt = je if _pts_close(attach_pt, js) else js
+                    edge_dist = _dist_to_group_edge(far_pt)
                     print(
                         f"[GREEDY_DBG] branch_so_far={[atomics[i]['atomic_id'] for i in branch]} "
                         f"candidate={atomics[j]['atomic_id']} "
                         f"b_start={b_start.tolist()} b_end={b_end.tolist()} "
-                        f"j_start={j_start.tolist()} j_end={j_end.tolist()} "
-                        f"attach_pt={attach_pt.tolist() if attach_pt is not None else None} "
-                        f"in_junction={attach_pt is not None and apt_key in junction_pts}",
+                        f"j_start={js.tolist()} j_end={je.tolist()} "
+                        f"attach_pt={attach_pt.tolist()} "
+                        f"in_junction={apt_key in junction_pts} "
+                        f"turn={turn_deg:.1f}° edge_dist={edge_dist:.1f}px",
                         flush=True
                     )
-
+                    # Edge-proximity overrides length: if any candidate is within
+                    # _EDGE_THRESH of the group bbox edge, only those compete by length.
+                    # If none are within threshold, all compete by length as before.
+                    candidate_near_edge = best_edge_dist <= _EDGE_THRESH
+                    if candidate_near_edge and edge_dist > _EDGE_THRESH:
+                        continue  # skip — a better edge candidate exists
                     if atomics[j]["length"] > best_len:
                         best_len = atomics[j]["length"]
                         best_j = j
                         best_attach_mode = mode
 
                 if best_j is not None:
+                    # --- Prospective loop check ---
+                    # Would adding best_j land its far endpoint on an interior junction
+                    # already in the branch? Same logic as the reactive backstep but
+                    # checked BEFORE accepting. Interior = branch[1:-1] endpoints,
+                    # excluding the current two terminals (b_start, b_end).
+                    _Sj_chk = atomics[best_j]["poly"]
+                    _js_chk, _je_chk = _endpoints(_Sj_chk)
+                    _attach_chk = b_end if best_attach_mode[0] == "end" else b_start
+                    _far_chk = _je_chk if _pts_close(_attach_chk, _js_chk) else _js_chk
+                    _far_key = (round(float(_far_chk[0]), 1), round(float(_far_chk[1]), 1))
+                    # Interior = all branch endpoints except the two current terminals
+                    _b_start_key = (round(float(b_start[0]), 1), round(float(b_start[1]), 1))
+                    _b_end_key   = (round(float(b_end[0]),   1), round(float(b_end[1]),   1))
+                    _interior_keys = set()
+                    for _bi in branch[1:-1]:
+                        _bs, _be = _endpoints(atomics[_bi]["poly"])
+                        _interior_keys.add((round(float(_bs[0]), 1), round(float(_bs[1]), 1)))
+                        _interior_keys.add((round(float(_be[0]), 1), round(float(_be[1]), 1)))
+                    _interior_keys.discard(_b_start_key)
+                    _interior_keys.discard(_b_end_key)
+                    if _far_key in _interior_keys:
+                        # Mirror the reactive backstep exactly:
+                        # best_j is the would-be loop closer — treat it like the
+                        # reactive "popped" segment. The last segment in branch is
+                        # its attachment partner — treat it like "pulled".
+                        # Save them as a pair (or solo) and restart on trimmed branch.
+                        _popped = best_j
+                        unused.discard(_popped)  # keep it out of unused — it's going to a new branch
+                        if len(branch) >= 1:
+                            _pop_s, _pop_e = _endpoints(atomics[_popped]["poly"])
+                            _pop_attach = b_end if best_attach_mode[0] == "end" else b_start
+                            _pop_other = _pop_e if _pts_close(_pop_attach, _pop_s) else _pop_s
+                            _last_s, _last_e = _endpoints(atomics[branch[-1]]["poly"])
+                            if _pts_close(_last_s, _pop_other) or _pts_close(_last_e, _pop_other):
+                                _pulled = branch.pop()
+                                attach_orders.pop(int(_pulled), None)
+                                if endpoint_history:
+                                    b_start, b_end = endpoint_history.pop()
+                                unused.discard(_pulled)
+                                branches.append([_pulled, _popped])
+                                attach_orders[int(_pulled)] = 1
+                                attach_orders[int(_popped)] = 2
+                                print(f"[PROSP_LOOP] saved [{atomics[_pulled]['atomic_id']},{atomics[_popped]['atomic_id']}] as pair", flush=True)
+                            else:
+                                branches.append([_popped])
+                                attach_orders[int(_popped)] = 1
+                                print(f"[PROSP_LOOP] saved [{atomics[_popped]['atomic_id']}] as solo", flush=True)
+                        else:
+                            branches.append([_popped])
+                            attach_orders[int(_popped)] = 1
+                            print(f"[PROSP_LOOP] saved [{atomics[_popped]['atomic_id']}] as solo (empty branch)", flush=True)
+                        if branch:
+                            restarted = True
+                        grew = False
+                        break
+
                     side, flip = best_attach_mode
 
                     endpoint_history.append((b_start.copy(), b_end.copy()))
@@ -1191,20 +1454,24 @@ def dominant_segments_from_group(
 
                     grew = True
 
-            # AFTER while grew exits: check if terminal landed on a junction
+            # AFTER while grew exits: check if a sub-ring formed.
+            # A sub-ring means the current terminal has landed on a point that is
+            # strictly interior to the branch — i.e. a handoff point between two
+            # non-adjacent segments. We detect this by checking endpoints of
+            # branch[:-2]: all segments except the last two (last segment is the
+            # one that just attached; second-to-last is its attachment partner).
+            # This correctly catches A>B>C>D>B (terminal B is in branch[:-2])
+            # but NOT A>B>C>D where D's far end is a new dead-end junction.
             for side_check, terminal in [("end", b_end), ("start", b_start)]:
                 tk = (round(float(terminal[0]), 1), round(float(terminal[1]), 1))
                 if tk in junction_pts and len(branch) >= 1:
-                    # Only treat this as a loop/backstep event if the same
-                    # junction appears elsewhere in THIS branch (excluding
-                    # the terminal segment itself).
-                    branch_endpoint_keys = set()
-                    for idx in branch[:-1]:
+                    interior_keys = set()
+                    for idx in branch[1:-2]:  # exclude seed, last two segments
                         s, e = _endpoints(atomics[idx]["poly"])
-                        branch_endpoint_keys.add((round(float(s[0]), 1), round(float(s[1]), 1)))
-                        branch_endpoint_keys.add((round(float(e[0]), 1), round(float(e[1]), 1)))
-                    if tk not in branch_endpoint_keys:
-                        break  # genuine dead-end tip at a globally-shared junction
+                        interior_keys.add((round(float(s[0]), 1), round(float(s[1]), 1)))
+                        interior_keys.add((round(float(e[0]), 1), round(float(e[1]), 1)))
+                    if tk not in interior_keys:
+                        break  # genuine dead-end, not a sub-ring
 
                     popped = branch.pop()
                     attach_orders.pop(int(popped), None)
@@ -1244,7 +1511,8 @@ def dominant_segments_from_group(
                                 f"[LOOP_SOLO] saved [{atomics[popped]['atomic_id']}] as solo",
                                 flush=True
                             )
-                    restarted = True  # re-run greedy on trimmed branch
+                    if branch:  # only restart if branch still has segments
+                        restarted = True  # re-run greedy on trimmed branch
                     break
 
         if branch:
@@ -4287,11 +4555,13 @@ def build_combined_crack_stateless(
     )
 
     # --------------------------------------------------------
-    # Split derived per-branch runs into per-atomic segments
+    # One stitched derived segment per branch (seg_idx=0), matching GT supervision structure.
+    # Per-atomic splitting was removed — it caused key mismatches in compare_widths_for_aligned_cracks.
     # --------------------------------------------------------
     derived_midline_segments = []
     derived_midline_segments_meta = []
 
+    # Build branch_to_mid for atomic_id lookup (used for meta only)
     branch_to_mid = {}
     for S, m in zip(segs, midline_segments_meta):
         if S is None or len(S) < 2:
@@ -4311,54 +4581,26 @@ def build_combined_crack_stateless(
         runs_np = [np.asarray(r, float) for r in runs if r is not None and len(r) >= 2]
         if not runs_np:
             continue
+        # Use longest derived run as the single stitched segment for this branch
         runs_np.sort(key=lambda a: int(len(a)), reverse=True)
         D = runs_np[0]
 
         mid_pack = branch_to_mid.get(bi, {"segs": [], "meta": []})
-        mid_segs_b = mid_pack["segs"]
         mid_meta_b = mid_pack["meta"]
+        # Collect all atomic_ids for this branch from meta
+        atomic_ids = [str((mx if isinstance(mx, dict) else {}).get("atomic_id", "")) for mx in mid_meta_b]
+        atomic_ids = [a for a in atomic_ids if a]
 
-        try:
-            _c_log(3, f"[MID META DBG] branch={bi} mid_segs_b={len(mid_segs_b)} mid_meta_b={len(mid_meta_b)}")
-            for ii, (Sx, mx) in enumerate(zip(mid_segs_b, mid_meta_b)):
-                Sx = np.asarray(Sx, float)
-                mm = mx if isinstance(mx, dict) else {}
-                _c_log(3, (
-                    f"[MID META DBG]  seg{ii}: n={len(Sx)} "
-                    f"atomic_id={mm.get('atomic_id')} branch_id={mm.get('branch_id')} seg_idx={mm.get('seg_idx')}"
-                ))
-            if len(mid_segs_b) != len(mid_meta_b):
-                _c_log(3, f"[MID META DBG] branch={bi} WARNING len mismatch segs={len(mid_segs_b)} meta={len(mid_meta_b)}")
-        except Exception as _e:
-            _c_log(3, f"[MID META DBG] branch={bi} failed: {_e}")
-
-        d_segs, d_meta = _split_derived_by_atomic_junctions(
-            branch_id=bi,
-            derived_run_xy=D,
-            mid_segs=mid_segs_b,
-            mid_meta=mid_meta_b,
-            tol_shared=2.5,
-        )
-        try:
-            _c_log(3, f"[DERIVED SPLIT CALL] branch={bi} sources={[((mm if isinstance(mm, dict) else {}) or {}).get('source') for mm in (d_meta or [])]}")
-            _c_log(3, f"[DERIVED SPLIT CALL] branch={bi} atomic_ids={[((mm if isinstance(mm, dict) else {}) or {}).get('atomic_id') for mm in (d_meta or [])]}")
-        except Exception as _e:
-            _c_log(3, f"[DERIVED SPLIT CALL] branch={bi} debug failed: {_e}")
-        # Enforce continuity + deterministic branch direction on split derived segments.
-        if d_segs:
-            d_assoc = [dict(mm if isinstance(mm, dict) else {}) for mm in d_meta]
-            d_segs, d_assoc = enforce_branch_continuity(d_segs, associated_data=d_assoc)
-            d_segs, d_assoc, flipped_branch = canonicalize_branch_direction(d_segs, associated_data=d_assoc)
-            if flipped_branch:
-                if _VERBOSE_DEBUG:
-                    print(f"[CANON] combine branch={bi} flipped split-derived branch orientation")
-            assert_direction_consistency(d_segs)
-            for j in range(len(d_assoc)):
-                d_assoc[j]["branch_id"] = int(bi)
-                d_assoc[j]["seg_idx"] = int(j)
-            d_meta = d_assoc
-        derived_midline_segments.extend(d_segs)
-        derived_midline_segments_meta.extend(d_meta)
+        # One segment per branch, seg_idx=0 — matches GT supervision key structure
+        seg_meta = {
+            "branch_id": int(bi),
+            "seg_idx": 0,
+            "stitched": True,
+            "atomic_ids": atomic_ids,
+            "atomic_id": atomic_ids[0] if atomic_ids else None,
+        }
+        derived_midline_segments.append(D)
+        derived_midline_segments_meta.append(seg_meta)
 
     if len(derived_midline_segments) != len(derived_midline_segments_meta):
         raise RuntimeError(

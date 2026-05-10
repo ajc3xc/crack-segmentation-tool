@@ -1075,11 +1075,18 @@ def edge_param_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
             if n_w >= 2 else []
         )
 
+        # Save mask_crop to a temp file to avoid pickling large arrays across process boundary
+        import tempfile, os as _os
+        _mask_arr = np.asarray(mask_crop, dtype=np.uint8)
+        _mask_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".npy")
+        np.save(_mask_tmp.name, _mask_arr)
+        _mask_tmp.close()
+
         result: Dict[str, Any] = {
             "status": "ok",
             "bbox": [x, y, w, h],
             "mask_bbox": [x, y, w, h],
-            "mask_crop": np.asarray(mask_crop).tolist(),
+            "mask_crop_path": _mask_tmp.name,  # caller loads and deletes this
             "midline": np.asarray(mid_xy_g, float).tolist(),
             "midline_global": np.asarray(mid_xy_g, float).tolist(),
             "derived_midline_crop": np.asarray(derived_midline_crop).tolist(),

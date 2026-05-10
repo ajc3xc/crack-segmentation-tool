@@ -113,6 +113,7 @@ def _save_bar(
     ylabel: str,
     subtitle: Optional[str] = None,
     rotate: int = 30,
+    y_floor: bool = False,
 ) -> None:
     if not labels or not values:
         return
@@ -128,7 +129,7 @@ def _save_bar(
     vals = vals[order]
     labs = [labs[i] for i in order]
     fig_w = max(7.0, 0.45 * len(labs))
-    plt.figure(figsize=(fig_w, 4.2), dpi=180)
+    fig, ax = plt.subplots(figsize=(fig_w, 4.2), dpi=180)
     xs = np.arange(len(labs))
     bar_kwargs = {}
     if colors is not None:
@@ -139,20 +140,27 @@ def _save_bar(
                 bar_kwargs["color"] = color_arr
         except Exception:
             pass
-    plt.bar(xs, vals, **bar_kwargs)
-    plt.xticks(xs, labs, rotation=rotate, ha="right")
-    plt.ylabel(_clean_plot_label(ylabel))
-    plt.title(_clean_plot_label(title))
-    plt.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
-    plt.gca().set_axisbelow(True)
+    if y_floor and len(vals) > 0:
+        ymin = max(0.0, float(vals.min()) * 0.90)
+        bar_kwargs["bottom"] = ymin
+        ax.bar(xs, vals - ymin, **bar_kwargs)
+        ax.set_ylim(bottom=ymin)
+    else:
+        ax.bar(xs, vals, **bar_kwargs)
+    ax.set_xticks(xs)
+    ax.set_xticklabels(labs, rotation=rotate, ha="right")
+    ax.set_ylabel(_clean_plot_label(ylabel))
+    ax.set_title(_clean_plot_label(title))
+    ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
+    ax.set_axisbelow(True)
     if color_legend:
         handles = [Patch(facecolor=c, edgecolor="none", label=str(lbl)) for lbl, c in color_legend]
-        plt.legend(handles=handles, loc="best", framealpha=0.9, fontsize=8)
-    plt.tight_layout(rect=[0, 0.04 if subtitle else 0, 1, 1])
+        ax.legend(handles=handles, loc="best", framealpha=0.9, fontsize=8)
+    fig.tight_layout(rect=[0, 0.04 if subtitle else 0, 1, 1])
     if subtitle:
-        plt.gcf().text(0.5, 0.01, subtitle, ha="center", va="bottom", fontsize=7, style="italic", color="#555555")
-    plt.savefig(out_png)
-    plt.close()
+        fig.text(0.5, 0.01, subtitle, ha="center", va="bottom", fontsize=7, style="italic", color="#555555")
+    fig.savefig(out_png)
+    plt.close(fig)
 
 
 def _display_timing_component_name(name: str) -> str:
@@ -549,6 +557,87 @@ def _display_midline_label(midline_type: str) -> str:
     return _display_method_name(s)
 
 
+def _plot_mask_comparison_suite(
+    tdf: "pd.DataFrame",
+    out_dir: str,
+    *,
+    subtitle: str,
+    outputs: dict,
+    output_prefix: str,
+    colors: list,
+    legend: list,
+    title_suffix: str = "",
+    y_floor: bool = False,
+) -> None:
+    """
+    Emit IoU bar, BF1 bar, and ASSD/HD95 two-panel for a triplet dataframe.
+    tdf must have columns: variant, iou_wmean, boundary_f1_wmean, ASSD_wmean, HD95_wmean.
+    All three plots use identical colour/style so main / orig_gt / full_orig_gt look the same.
+    """
+    var_labels = tdf["variant"].astype(str).tolist()
+    _PALETTE = ["#f28e2b", "#2ca02c", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+
+    def _bar_cols(labs):
+        cols, bi = [], 0
+        for lab in labs:
+            if lab == "ET":
+                cols.append("#4c78a8")
+            else:
+                cols.append(_PALETTE[bi % len(_PALETTE)])
+                bi += 1
+        return cols
+
+    # -- IoU bar --
+    if "iou_wmean" in tdf.columns:
+        iou_vals = tdf["iou_wmean"].astype(float).tolist()
+        _save_bar(var_labels, iou_vals, colors=colors, color_legend=legend,
+                  out_png=os.path.join(out_dir, f"dataset_mask_total_iou{output_prefix}.png"),
+                  title=f"Dataset TOTAL IoU{title_suffix}", ylabel="IoU",
+                  subtitle=subtitle, y_floor=y_floor)
+        outputs[f"mask{output_prefix}_iou_png"] = os.path.join(out_dir, f"dataset_mask_total_iou{output_prefix}.png")
+
+    # -- BF1 bar --
+    if "boundary_f1_wmean" in tdf.columns:
+        bf1_vals = tdf["boundary_f1_wmean"].astype(float).tolist()
+        _save_bar(var_labels, bf1_vals, colors=colors, color_legend=legend,
+                  out_png=os.path.join(out_dir, f"dataset_mask_total_bf1{output_prefix}.png"),
+                  title=f"Dataset TOTAL Boundary F1{title_suffix}", ylabel="Boundary F1",
+                  subtitle=subtitle, y_floor=y_floor)
+        outputs[f"mask{output_prefix}_bf1_png"] = os.path.join(out_dir, f"dataset_mask_total_bf1{output_prefix}.png")
+
+    # -- ASSD / HD95 two-panel (independently sorted) --
+    if "ASSD_wmean" in tdf.columns and "HD95_wmean" in tdf.columns:
+        assd_vals = pd.to_numeric(tdf["ASSD_wmean"], errors="coerce").tolist()
+        hd95_vals = pd.to_numeric(tdf["HD95_wmean"], errors="coerce").tolist()
+        # filter non-finite pairs
+        valid = [(v, a, h) for v, a, h in zip(var_labels, assd_vals, hd95_vals)
+                 if np.isfinite(a) and np.isfinite(h)]
+        if valid:
+            vl, av, hv = zip(*valid)
+            vl, av, hv = list(vl), list(av), list(hv)
+            ao = np.argsort(av); al = [vl[i] for i in ao]; avals = [av[i] for i in ao]; acols = _bar_cols(al)
+            ho = np.argsort(hv); hl = [vl[i] for i in ho]; hvals = [hv[i] for i in ho]; hcols = _bar_cols(hl)
+            fw = max(6.0, 0.7 * len(vl))
+            x = np.arange(len(vl), dtype=float)
+            fig, axes = plt.subplots(1, 2, figsize=(fw * 2, 4.2), dpi=180)
+            axes[0].bar(x, avals, color=acols, alpha=0.88)
+            axes[0].set_title("ASSD"); axes[0].set_ylabel("ASSD (px)")
+            axes[0].set_xticks(x); axes[0].set_xticklabels(al, rotation=20, ha="right")
+            axes[0].grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0); axes[0].set_axisbelow(True)
+            axes[1].bar(x, hvals, color=hcols, alpha=0.88)
+            axes[1].set_title("HD95"); axes[1].set_ylabel("HD95 (px)")
+            axes[1].set_xticks(x); axes[1].set_xticklabels(hl, rotation=20, ha="right")
+            axes[1].grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0); axes[1].set_axisbelow(True)
+            if subtitle:
+                fig.text(0.5, 0.01, subtitle, ha="center", va="bottom", fontsize=7, style="italic", color="#555555")
+            fig.suptitle(f"Dataset Mask ASSD / HD95{title_suffix}", fontsize=11, fontweight="bold")
+            plt.tight_layout(rect=[0, 0.04, 1, 1])
+            out_png = os.path.join(out_dir, f"dataset_mask_assd_hd95{output_prefix}.png")
+            fig.savefig(out_png, bbox_inches="tight")
+            plt.close(fig)
+            outputs[f"mask{output_prefix}_assd_hd95_png"] = out_png
+
+
 def _aggregate_mask_metrics(
     image_dirs: List[str],
     out_dir: str,
@@ -680,7 +769,7 @@ def _aggregate_mask_metrics(
             os.makedirs(orig_gt_dir, exist_ok=True)
             orig_gt_df.to_csv(os.path.join(orig_gt_dir, "dataset_mask_metrics_orig_gt_all.csv"), index=False)
             outputs["mask_orig_gt_all_csv"] = os.path.join(orig_gt_dir, "dataset_mask_metrics_orig_gt_all.csv")
-            _log(verbose, f"[summarize] mask: {int(orig_gt_mask.sum())} orig_gt baseline rows + {int(et_ref_mask.sum())} ET ref rows → {orig_gt_dir}")
+            _log(verbose, f"[summarize] mask: {int(orig_gt_mask.sum())} orig_gt baseline rows + {int(et_ref_mask.sum())} ET ref rows -> {orig_gt_dir}")
         # Remove orig_gt rows from main analysis so they don't contaminate regular summaries
         all_df = all_df.loc[~orig_gt_mask].copy()
 
@@ -873,7 +962,7 @@ def _aggregate_mask_metrics(
                     out_png=out_png,
                     title="Dataset TOTAL IoU by variant",
                     ylabel="IoU",
-                    subtitle="★ ET evaluated on edited GT  |  Baselines on edited GT",
+                    subtitle="* ET evaluated on edited GT  |  Baselines on edited GT",
                 )
                 outputs["mask_total_iou_png"] = out_png
             if bf1_col:
@@ -886,7 +975,7 @@ def _aggregate_mask_metrics(
                     out_png=out_png,
                     title="Dataset TOTAL boundary F1 by variant",
                     ylabel="Boundary F1",
-                    subtitle="★ ET evaluated on edited GT  |  Baselines on edited GT",
+                    subtitle="* ET evaluated on edited GT  |  Baselines on edited GT",
                 )
                 outputs["mask_total_bf1_png"] = out_png
 
@@ -956,44 +1045,33 @@ def _aggregate_mask_metrics(
                     hd95_vals.append(h)
 
                 if labels:
-                    palette = ["#f28e2b", "#2ca02c", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
-                    base_idx = 0
-                    bar_cols = []
-                    for lab in labels:
-                        if lab == "ET":
-                            bar_cols.append("#4c78a8")
-                        else:
-                            bar_cols.append(palette[base_idx % len(palette)])
-                            base_idx += 1
-                    fig_w = max(6.0, 0.7 * len(labels))
-                    x = np.arange(len(labels), dtype=float)
-                    fig, axes = plt.subplots(1, 2, figsize=(fig_w * 2, 4.2), dpi=180, sharex=True)
-                    axes[0].bar(x, assd_vals, color=bar_cols, alpha=0.88)
-                    axes[0].set_title("ASSD")
-                    axes[0].set_ylabel("ASSD")
-                    axes[0].grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
-                    axes[0].set_axisbelow(True)
-                    axes[1].bar(x, hd95_vals, color=bar_cols, alpha=0.88)
-                    axes[1].set_title("HD95")
-                    axes[1].set_ylabel("HD95")
-                    axes[1].grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
-                    axes[1].set_axisbelow(True)
-                    for ax in axes:
-                        ax.set_xticks(x)
-                        ax.set_xticklabels(labels, rotation=20, ha="right")
-                    fig.suptitle("Dataset Mask ASSD / HD95", fontsize=11, fontweight="bold")
-                    plt.tight_layout()
-                    out_png = os.path.join(mask_dir, "dataset_mask_assd_hd95.png")
-                    fig.savefig(out_png, bbox_inches="tight")
-                    plt.close(fig)
-                    outputs["mask_assd_hd95_compare_png"] = out_png
+                    # Build a minimal tdf for the suite function
+                    _main_tdf = pd.DataFrame({
+                        "variant": labels,
+                        "ASSD_wmean": assd_vals,
+                        "HD95_wmean": hd95_vals,
+                    })
+                    _main_cols = ["#4c78a8" if l == "ET" else "#2ca02c" for l in labels]
+                    _main_legend = [("ET", "#4c78a8"), ("Baselines", "#2ca02c")]
+                    _plot_mask_comparison_suite(
+                        _main_tdf, mask_dir,
+                        subtitle="",
+                        outputs=outputs,
+                        output_prefix="",
+                        colors=_main_cols,
+                        legend=_main_legend,
+                        title_suffix="",
+                    )
+                    # Keep legacy key for backwards compat
+                    if "mask_assd_hd95_png" in outputs:
+                        outputs["mask_assd_hd95_compare_png"] = outputs["mask_assd_hd95_png"]
 
     _log(verbose, f"[summarize] mask metrics rows={len(all_df)}")
 
     # ----------------------------------------------------------------
     # Second pass: repeat key plots for orig_gt subset (edited images)
     # ----------------------------------------------------------------
-    # Load orig_gt df — use the in-memory copy if available, else fall back to CSV
+    # Load orig_gt df -- use the in-memory copy if available, else fall back to CSV
     orig_gt_df_for_plots = orig_gt_df
     if orig_gt_df_for_plots is None:
         _ogcsv = outputs.get("mask_orig_gt_all_csv")
@@ -1080,28 +1158,150 @@ def _aggregate_mask_metrics(
                 _og_iou_col = "iou_wmean" if "iou_wmean" in _og_tdf.columns else None
                 _og_bf1_col = "boundary_f1_wmean" if "boundary_f1_wmean" in _og_tdf.columns else None
                 _og_var_labels = _og_tdf["variant"].astype(str).tolist()
-                # Color ET blue, baselines green — same scheme as main plots
+                # Color ET blue, baselines green -- same scheme as main plots
                 _KNOWN_BL = {"crackscopenet","crackscopenet_large","crackscopenet_small","hrsegnet","sam3","segnet","unet"}
                 _og_colors = ["#1f77b4" if v.upper() == "ET" else "#2ca02c" if v.lower() in _KNOWN_BL else "#7f7f7f" for v in _og_var_labels]
                 _og_legend = [("ET (edited GT)", "#1f77b4"), ("Baselines (orig GT)", "#2ca02c")]
-                if _og_iou_col:
-                    _og_iou_png = os.path.join(_og_dir, "dataset_mask_total_iou_orig_gt.png")
-                    _save_bar(_og_var_labels, _og_tdf[_og_iou_col].astype(float).tolist(),
-                              colors=_og_colors, color_legend=_og_legend,
-                              out_png=_og_iou_png, title="Dataset TOTAL IoU — edited images only",
-                              ylabel="IoU",
-                              subtitle="★ ET on edited GT  |  Baselines on original GT")
-                    outputs["mask_orig_gt_iou_png"] = _og_iou_png
-                if _og_bf1_col:
-                    _og_bf1_png = os.path.join(_og_dir, "dataset_mask_total_boundary_f1_orig_gt.png")
-                    _save_bar(_og_var_labels, _og_tdf[_og_bf1_col].astype(float).tolist(),
-                              colors=_og_colors, color_legend=_og_legend,
-                              out_png=_og_bf1_png, title="Dataset TOTAL Boundary F1 — edited images only",
-                              ylabel="Boundary F1",
-                              subtitle="★ ET on edited GT  |  Baselines on original GT")
-                    outputs["mask_orig_gt_bf1_png"] = _og_bf1_png
+                _plot_mask_comparison_suite(
+                    _og_tdf.rename(columns={
+                        _og_iou_col: "iou_wmean",
+                        _og_bf1_col: "boundary_f1_wmean",
+                        "ASSD_mean": "ASSD_wmean",
+                        "HD95_mean": "HD95_wmean",
+                    }) if _og_iou_col or _og_bf1_col else _og_tdf,
+                    _og_dir,
+                    subtitle="* ET on edited GT  |  Baselines on original GT",
+                    outputs=outputs,
+                    output_prefix="_orig_gt",
+                    colors=_og_colors,
+                    legend=_og_legend,
+                    title_suffix=" (edited images, unedited GT baseline)",
+                )
+                # keep legacy keys
+                if "mask_orig_gt_iou_png" not in outputs and "mask_orig_gt_png" in outputs:
+                    outputs["mask_orig_gt_iou_png"] = outputs.get("mask_orig_gt_png")
 
         _log(verbose, f"[summarize] mask orig_gt plots written to {_og_dir}")
+
+    # ----------------------------------------------------------------
+    # Third pass: full-dataset comparison (all 130 images)
+    # ET on edited GT vs baselines on best-available original GT
+    # For each image: prefer external_mask_orig_gt for baselines, else external_mask
+    # ----------------------------------------------------------------
+    try:
+        # Reload the full concatenated df before any splits
+        _all_csvs = [
+            os.path.join(d, "mask_metrics.csv")
+            for d in image_dirs
+            if os.path.isfile(os.path.join(d, "mask_metrics.csv"))
+        ]
+        if _all_csvs:
+            _fd_raw = pd.concat([pd.read_csv(f) for f in _all_csvs], ignore_index=True)
+            # Apply same variant_raw preservation + _make_variant_label
+            if "variant" in _fd_raw.columns:
+                _fd_raw["variant_raw"] = _fd_raw["variant"].astype(str)
+            else:
+                _fd_raw["variant_raw"] = ""
+
+            def _fd_variant_label(row):
+                sup = str(row.get("supervision", "") or "").strip().lower()
+                method = str(row.get("method", "") or "").strip()
+                if sup == "baseline":
+                    return method
+                if sup == "et" or (method and method.upper() == "ET"):
+                    return "ET"
+                return method if method else sup
+
+            _fd_raw["variant"] = _fd_raw.apply(_fd_variant_label, axis=1)
+            ct_col_fd = _find_col_ci(_fd_raw, "crack_type")
+            if ct_col_fd is not None:
+                _fd_raw = _fd_raw[_fd_raw[ct_col_fd].astype(str).str.upper() == "TOTAL"].copy()
+
+            # ET rows: variant_raw == "main"
+            _fd_et = _fd_raw[_fd_raw["variant_raw"] == "main"].copy()
+
+            # Baseline rows: per image, prefer _orig_gt variant, else external_mask
+            _fd_bl_all = _fd_raw[
+                _fd_raw["variant_raw"].isin(["external_mask", "external_mask_orig_gt"])
+            ].copy()
+
+            # For each (image, method): prefer _orig_gt if available
+            _fd_bl_rows = []
+            img_col = _find_col_ci(_fd_bl_all, "image")
+            mth_col = _find_col_ci(_fd_bl_all, "method")
+            if img_col and mth_col:
+                for (img, mth), grp in _fd_bl_all.groupby([img_col, mth_col], dropna=False):
+                    has_og = grp[grp["variant_raw"] == "external_mask_orig_gt"]
+                    if not has_og.empty:
+                        _fd_bl_rows.append(has_og.iloc[0])
+                    else:
+                        fallback = grp[grp["variant_raw"] == "external_mask"]
+                        if not fallback.empty:
+                            _fd_bl_rows.append(fallback.iloc[0])
+
+            if _fd_bl_rows and not _fd_et.empty:
+                _fd_bl = pd.DataFrame(_fd_bl_rows)
+                _fd_combined = pd.concat([_fd_et, _fd_bl], ignore_index=True)
+
+                _fd_dir = os.path.join(mask_dir, "full_dataset_orig_gt")
+                os.makedirs(_fd_dir, exist_ok=True)
+                _fd_combined.to_csv(os.path.join(_fd_dir, "dataset_mask_metrics_full_orig_gt.csv"), index=False)
+
+                # Weighted-mean aggregation per variant
+                _KNOWN_BL2 = {"crackscopenet","crackscopenet_large","crackscopenet_small","hrsegnet","sam3","segnet","unet"}
+                _fd_rows = []
+                for _var, _grp in _fd_combined.groupby("variant", dropna=False):
+                    _fd_cols = {c: _find_col_ci(_grp, c) for c in
+                                ["tp","fp","fn","tn","gt_area_px","iou","precision","recall","f1",
+                                 "boundary_precision","boundary_recall","boundary_f1","ASSD","HD95"]}
+                    _tp = _fd_cols["tp"]; _fp = _fd_cols["fp"]
+                    _fn = _fd_cols["fn"]; _tn = _fd_cols["tn"]
+                    _area = _fd_cols["gt_area_px"]
+                    if all(c is not None for c in (_tp, _fp, _fn, _tn)):
+                        _w = sum([pd.to_numeric(_grp[c], errors="coerce").fillna(0) for c in (_tp,_fp,_fn,_tn)]).to_numpy(float)
+                    elif _area:
+                        _w = pd.to_numeric(_grp[_area], errors="coerce").fillna(0).to_numpy(float)
+                    else:
+                        _w = np.ones(len(_grp), float)
+                    def _wm2(col):
+                        c = _find_col_ci(_grp, col)
+                        if c is None: return float("nan")
+                        return _weighted_mean(_grp[c], _w)
+                    _fd_rows.append({
+                        "variant": str(_var),
+                        "n_images": len(_grp),
+                        "iou_wmean": _wm2("iou"),
+                        "f1_wmean": _wm2("f1"),
+                        "boundary_f1_wmean": _wm2("boundary_f1"),
+                        "ASSD_wmean": _wm2("ASSD"),
+                        "HD95_wmean": _wm2("HD95"),
+                    })
+
+                if _fd_rows:
+                    _fd_tdf = pd.DataFrame(_fd_rows).sort_values("variant")
+                    _fd_tdf.to_csv(os.path.join(_fd_dir, "dataset_mask_triplet_full_orig_gt.csv"), index=False)
+
+                    _fd_var_labels = _fd_tdf["variant"].astype(str).tolist()
+                    _fd_colors = ["#1f77b4" if v.upper()=="ET" else "#2ca02c" if v.lower() in _KNOWN_BL2 else "#7f7f7f"
+                                  for v in _fd_var_labels]
+                    _fd_legend = [("ET (edited GT)", "#1f77b4"), ("Baselines (orig GT)", "#2ca02c")]
+                    _fd_note = "* ET on edited GT  |  Baselines on original GT  |  All 130 images"
+
+                    _plot_mask_comparison_suite(
+                        _fd_tdf,
+                        _fd_dir,
+                        subtitle=_fd_note,
+                        outputs=outputs,
+                        output_prefix="_full_orig_gt",
+                        colors=_fd_colors,
+                        legend=_fd_legend,
+                        title_suffix=" (unedited GT baseline, all 130 images)",
+                        y_floor=False,
+                    )
+
+                    _log(verbose, f"[summarize] mask full-dataset orig_gt plots written to {_fd_dir}")
+    except Exception as _fde:
+        _log(verbose, f"[summarize] mask full-dataset orig_gt pass failed: {_fde}")
 
     return outputs
 
@@ -2427,21 +2627,72 @@ def _aggregate_edge_rs3_selection(
     # Edge family aggregation across images
     edge_frames = []
     edge_all_frames = []
+    # Collect edge_parallel_results.csv rows for fallback path (new pipeline)
+    _parallel_frames: List[pd.DataFrame] = []
     for img_dir in image_dirs:
         image = os.path.basename(img_dir)
         p = os.path.join(img_dir, "edge_sweep_family_agg.csv")
         df = _safe_read_csv(p)
-        if df is None:
-            continue
-        d = df.copy()
-        d["image"] = image
-        edge_frames.append(d)
-        p_all = os.path.join(img_dir, "edge_sweep_all.csv")
-        df_all = _safe_read_csv(p_all)
-        if df_all is not None:
-            da = df_all.copy()
-            da["image"] = image
-            edge_all_frames.append(da)
+        if df is not None:
+            # Old-pipeline file present -- use it directly
+            d = df.copy()
+            d["image"] = image
+            edge_frames.append(d)
+            p_all = os.path.join(img_dir, "edge_sweep_all.csv")
+            df_all = _safe_read_csv(p_all)
+            if df_all is not None:
+                da = df_all.copy()
+                da["image"] = image
+                edge_all_frames.append(da)
+        else:
+            # New-pipeline fallback: read edge_parallel_results.csv
+            p_par = os.path.join(img_dir, "edge_parallel_results.csv")
+            df_par = _safe_read_csv(p_par)
+            if df_par is not None:
+                df_par = df_par.copy()
+                df_par["image"] = image
+                _parallel_frames.append(df_par)
+
+    # Build family-agg from parallel results when old files were absent
+    if _parallel_frames and not edge_frames:
+        _par_all = pd.concat(_parallel_frames, ignore_index=True)
+        # Filter to successful rows only
+        if "status" in _par_all.columns:
+            _par_ok = _par_all[_par_all["status"] == "ok"].copy()
+        else:
+            _par_ok = _par_all.copy()
+        # Compute dataset-level medians for normalisation
+        # edge_score ~= (1-boundary_f1) + 0.50*(ASSD/med_ASSD) + 0.25*(HD95/med_HD95)
+        _med_assd = float(_par_ok["ASSD"].median()) if "ASSD" in _par_ok.columns and len(_par_ok) else 1.0
+        _med_hd95 = float(_par_ok["HD95"].median()) if "HD95" in _par_ok.columns and len(_par_ok) else 1.0
+        _med_assd = max(_med_assd, 1e-6)
+        _med_hd95 = max(_med_hd95, 1e-6)
+        _par_ok = _par_ok.copy()
+        _par_ok["_edge_score"] = (
+            (1.0 - pd.to_numeric(_par_ok.get("boundary_f1", 0), errors="coerce").fillna(1.0))
+            + 0.50 * pd.to_numeric(_par_ok.get("ASSD", 0), errors="coerce").fillna(0.0) / _med_assd
+            + 0.25 * pd.to_numeric(_par_ok.get("HD95", 0), errors="coerce").fillna(0.0) / _med_hd95
+        )
+        _par_ok["_weight"] = (
+            pd.to_numeric(_par_ok.get("gt_area_px", 1), errors="coerce").fillna(1.0).clip(lower=1.0)
+        )
+        fam_cols_par = ["param_window_half_size", "param_mu", "param_l", "param_p", "param_seg_mode", "image"]
+        fam_cols_par_valid = [c for c in fam_cols_par if c in _par_ok.columns]
+        _agg_rows = []
+        for grp_keys, grp in _par_ok.groupby(fam_cols_par_valid, dropna=False):
+            w = grp["_weight"].to_numpy(float)
+            s = grp["_edge_score"].to_numpy(float)
+            wmean = float((s * w).sum() / w.sum()) if w.sum() > 0 else float(s.mean())
+            if not isinstance(grp_keys, tuple):
+                grp_keys = (grp_keys,)
+            row = dict(zip(fam_cols_par_valid, grp_keys))
+            row["edge_score_wmean"] = wmean
+            row["n_rows"] = len(grp)
+            row["n_cracks"] = len(grp)
+            row["weight_sum"] = float(w.sum())
+            _agg_rows.append(row)
+        if _agg_rows:
+            edge_frames.append(pd.DataFrame(_agg_rows))
 
     if edge_frames:
         edge_df = pd.concat(edge_frames, ignore_index=True)
@@ -2565,7 +2816,10 @@ def _aggregate_edge_rs3_selection(
                     for bar in (bars1[i], bars2[i], bars3[i]):
                         bar.set_edgecolor(mode_edge[i])
                         bar.set_linewidth(2.6)
-                ax.plot(x, total_vals, "o", color="black", markersize=4, label="edge_score_wmean_mean")
+                # Dot: use stack sum for consistency; fall back to total_vals if needed
+                _dot_vals = cb + ca + ch
+                _dot_vals = np.where(np.isfinite(_dot_vals), _dot_vals, total_vals)
+                ax.plot(x, _dot_vals, "o", color="black", markersize=4, zorder=5, label="edge score (total)")
             else:
                 ax.bar(x, total_vals, color="#4c78a8", alpha=0.85)
                 for i, p in enumerate(ax.patches):
@@ -2584,15 +2838,17 @@ def _aggregate_edge_rs3_selection(
                 Patch(facecolor="#39b54a", edgecolor="none", label="mode=old (outline)"),
             ]
             if has_decomp:
+                from matplotlib.lines import Line2D as _Line2D
                 legend_handles = [
                     Patch(facecolor="#e15759", edgecolor="none", label="boundary term"),
                     Patch(facecolor="#b07aa1", edgecolor="none", label="ASSD term"),
                     Patch(facecolor="#f28e2b", edgecolor="none", label="HD95 term"),
+                    _Line2D([0], [0], marker="o", color="black", linestyle="none", markersize=4, label="edge score (total)"),
                     Patch(facecolor="#1f77b4", edgecolor="none", label="mode=new (outline)"),
                     Patch(facecolor="#39b54a", edgecolor="none", label="mode=old (outline)"),
                 ]
             ax.legend(handles=legend_handles, loc="lower right", framealpha=0.9, fontsize=8)
-            plt.tight_layout()
+            plt.tight_layout(rect=[0, 0.08, 1, 1])
             fig.savefig(out_png, bbox_inches="tight")
             plt.close(fig)
             outputs["edge_family_scores_png"] = out_png
@@ -2672,6 +2928,13 @@ def _aggregate_baseline_timings(
     for root in roots:
         p1 = os.path.join(root, "width_baseline_timings.csv")
         p2 = os.path.join(root, "width_baseline_timings_summary.csv")
+        # Also check for baseline_timings.csv (alternative naming)
+        if not os.path.isfile(p1):
+            _alt = os.path.join(root, "baseline_timings.csv")
+            if os.path.isfile(_alt): p1 = _alt
+        if not os.path.isfile(p2):
+            _alt2 = os.path.join(root, "baseline_timings_summary.csv")
+            if os.path.isfile(_alt2): p2 = _alt2
         if os.path.isfile(p1):
             timing_files.append(p1)
         if os.path.isfile(p2):
@@ -2734,7 +2997,7 @@ def _aggregate_baseline_timings(
             if c in all_df.columns and pd.api.types.is_numeric_dtype(all_df[c])
         ]
         # mat_width_raw and mat_width_dse have no separate timing (DT*2, negligible)
-        # but they share the shared_mat_gpu_s precompute cost — add it to each
+        # but they share the shared_mat_gpu_s precompute cost -- add it to each
         _col_display = {
             "shared_mat_gpu_s": "MAT",
             "skeleton_dse_s": "DSE pruning",
@@ -3904,14 +4167,20 @@ def _plot_dataset_full_timing_overview(
                 _add(sum_rows, label, v_sum, "baseline_width", err_sum)
 
     # Manual / auto pipeline from stage timing rows.
-    df_edge = _safe_read(os.path.join(out_dir, "dataset_edge_tracking_stage_all.csv"))
+    df_edge = _safe_read(os.path.join(timing_dir, "dataset_edge_tracking_stage_all.csv"))
     if df_edge is not None and not df_edge.empty and "supervision" in df_edge.columns:
         weight_col = next((c for c in ["length_px", "finite_len_px", "crack_px"] if c in df_edge.columns), None)
-        for sup in ("manual", "auto"):
+        for sup in ("ET", "auto"):
             g = df_edge[df_edge["supervision"].astype(str) == sup].copy()
             if g.empty:
                 continue
-            comp_cols = [c for c in ["edge_masks_sec", "edges_tracking_sec", "build_combined_sec"] if c in g.columns]
+            if sup == "ET":
+                # Use edge tracking wall-clock only (combined cracks)
+                comp_cols = [c for c in ["combine_edge_tracking_sec"] if c in g.columns]
+                # Only use combined rows
+                g = g[g["crack_type"].astype(str) == "combined"].copy()
+            else:
+                comp_cols = [c for c in ["edge_masks_sec", "edges_tracking_sec", "build_combined_sec"] if c in g.columns]
             if sup == "auto":
                 comp_cols += [c for c in ["os_cost_sec", "midline_tracking_sec"] if c in g.columns]
             if not comp_cols:
@@ -3943,8 +4212,8 @@ def _plot_dataset_full_timing_overview(
                     mean_sec = float(np.sum(per_row[ok] * w[ok]) / np.sum(w[ok])) if np.any(ok) else float(np.nanmean(per_row))
                 else:
                     mean_sec = float(np.nanmean(per_row))
-            method_label = "ET" if sup == "manual" else sup
-            category_label = "ET" if sup == "manual" else sup
+            method_label = sup
+            category_label = sup
             _add(mean_rows, method_label, mean_sec, category_label, s)
             _add(sum_rows, method_label, total_sec, category_label, float(s * np.sqrt(max(1, n))))
     # GT supervision timing rollup (dataset-level): explicit atomic/combined rows.
@@ -4499,10 +4768,10 @@ def _plot_dataset_full_timing_overview(
             )
             ax_left.set_xticks(lx)
             ax_left.set_xticklabels(bar_labels, rotation=30, ha="right", fontsize=9)
-            ax_left.set_ylabel("seconds (mean per combined crack)")
+            ax_left.set_ylabel("seconds (wall-clock, mean per combined crack)")
             ax_left.set_title(
-                "ET Timing - Phase 1: per-segment (orange), Phase 2: per-combined-crack (blue)\n"
-                "P1 ET = tracking + normals. TOTAL stacks estimated P1 + measured P2."
+                "ET Timing: wall-clock per combined crack (parallel execution)\n"
+                "Phase 1 (orange) = per-segment parallel; Phase 2 (blue) = combined pass"
             )
             ax_left.legend(fontsize=8, loc="upper left")
             ax_left.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
@@ -4510,11 +4779,18 @@ def _plot_dataset_full_timing_overview(
             # Right panel
             if ax_right is not None and right_vals:
                 rx = np.arange(len(right_labels))
-                ax_right.bar(rx, right_vals, color="#f28e2b", alpha=0.85)
+                # Sort left (least) to right (most), then append TOTAL in red
+                _rt_order  = np.argsort(right_vals)
+                _rt_labels = [right_labels[i] for i in _rt_order] + ["TOTAL"]
+                _rt_vals   = [right_vals[i]   for i in _rt_order] + [float(np.nansum(right_vals))]
+                _rt_errs   = [right_errs[i]   for i in _rt_order] + [float(np.sqrt(np.nansum(np.array(right_errs)**2)))]
+                _rt_colors = ["#f28e2b"] * len(right_vals) + ["#e15759"]
+                rx = np.arange(len(_rt_labels))
+                ax_right.bar(rx, _rt_vals, color=_rt_colors, alpha=0.85)
                 ax_right.errorbar(
                     rx,
-                    right_vals,
-                    yerr=np.asarray(right_errs, float),
+                    _rt_vals,
+                    yerr=np.asarray(_rt_errs, float),
                     fmt="none",
                     ecolor="black",
                     elinewidth=1.1,
@@ -4522,10 +4798,11 @@ def _plot_dataset_full_timing_overview(
                     zorder=3,
                 )
                 ax_right.set_xticks(rx)
-                ax_right.set_xticklabels(right_labels, rotation=30, ha="right", fontsize=9)
-                ax_right.set_ylabel("seconds (mean per crack)")
+                ax_right.set_xticklabels(_rt_labels, rotation=30, ha="right", fontsize=9)
+                ax_right.set_ylabel("seconds (mean per crack, sequential)")
                 ax_right.set_title(
-                    f"ET edge_tracking Decomposition\n{right_note}"
+                    f"ET edge-tracking stage breakdown (per-crack worker time)\n"
+                    f"Note: lower than left panel -- left shows parallel wall-clock\n{right_note}"
                 )
                 ax_right.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
                 ax_right.set_axisbelow(True)
@@ -4971,7 +5248,18 @@ def _plot_multicue_ablation(
     ax0.set_xticklabels(method_display, rotation=25, ha="right")
     ax0.set_title("Multi-Cue Ablation - RS3 Score decomposition\n(combined cracks, per-crack mean)")
     ax0.set_ylabel("RS3 Score")
-    ax0.legend(loc="best", fontsize=8, framealpha=0.9)
+    # Add dot at top of each stack (RS3 total)
+    _rs3_totals_plot = np.where(np.isfinite(bottoms), bottoms, np.nan)
+    ax0.plot(np.arange(len(methods)), _rs3_totals_plot, "o", color="black", markersize=5, zorder=5)
+    from matplotlib.lines import Line2D as _L2D_mc
+    from matplotlib.patches import Patch as _Patch_mc
+    _abl_handles = [
+        _Patch_mc(facecolor="#e15759", edgecolor="none", label="nn_mean"),
+        _Patch_mc(facecolor="#b07aa1", edgecolor="none", label="hausdorff_p95"),
+        _Patch_mc(facecolor="#f28e2b", edgecolor="none", label="coverage_min"),
+        _L2D_mc([0],[0], marker="o", color="black", linestyle="none", markersize=5, label="RS3 score (total)"),
+    ]
+    ax0.legend(handles=_abl_handles, loc="lower right", fontsize=8, framealpha=0.9)
     ax0.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
     ax0.set_axisbelow(True)
     metric_sources = []
@@ -5042,7 +5330,7 @@ def _plot_multicue_ablation(
         ax1.set_ylabel("mean +/- IQR")
         ax1.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
         ax1.set_axisbelow(True)
-        ax1.legend(loc="best", fontsize=7, ncol=2)
+        ax1.legend(loc="upper right", fontsize=7, ncol=2)
 
     plt.tight_layout()
     out_png = os.path.join(out_dir, "dataset_multicue_ablation.png")
@@ -5083,9 +5371,9 @@ def _plot_gt_supervision_timing_detail(out_dir: str, *, verbose: bool = False) -
             ax.legend(loc="best", fontsize=8)
             plt.tight_layout()
             out_png = os.path.join(out_dir, "dataset_timing_gt_centering.png")
-            fig.savefig(out_png, bbox_inches="tight")
+            # Disabled: per-image scatter not needed for publication
             plt.close(fig)
-            outputs["dataset_timing_gt_centering_png"] = out_png
+            # outputs["dataset_timing_gt_centering_png"] = out_png
 
     if df_multi is not None and not df_multi.empty:
         _mc_wanted = (
@@ -5131,13 +5419,18 @@ def _plot_gt_supervision_timing_detail(out_dir: str, *, verbose: bool = False) -
                         "multi_cue_postprocess_s": "postprocess",
                     }
                     labels.append(_mc_label_map.get(c, re.sub(r"(_s|_sec)$", "", str(c))))
-                    sums.append(float(np.sum(vals)))
+                    sums.append(float(np.mean(vals)))
             if sums:
-                fig, ax = plt.subplots(figsize=(max(8.0, 0.45 * len(labels)), 4.2), dpi=170)
-                ax.bar(np.arange(len(labels)), sums, color="#59a14f", alpha=0.88)
-                ax.set_xticks(np.arange(len(labels)))
-                ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
-                ax.set_ylabel("total seconds")
+                # Sort left (least) to right (most), then append TOTAL in red
+                _mc_order  = np.argsort(sums)
+                _mc_labels = [labels[i] for i in _mc_order] + ["TOTAL"]
+                _mc_sums   = [sums[i]   for i in _mc_order] + [float(np.nansum(sums))]
+                _mc_colors = ["#59a14f"] * len(sums) + ["#e15759"]
+                fig, ax = plt.subplots(figsize=(max(8.0, 0.45 * len(_mc_labels)), 4.2), dpi=170)
+                ax.bar(np.arange(len(_mc_labels)), _mc_sums, color=_mc_colors, alpha=0.88)
+                ax.set_xticks(np.arange(len(_mc_labels)))
+                ax.set_xticklabels(_mc_labels, rotation=35, ha="right", fontsize=8)
+                ax.set_ylabel("mean time per image (s)")
                 ax.set_title("Per multi-cue method total time")
                 ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
                 ax.set_axisbelow(True)
@@ -5167,7 +5460,16 @@ def _plot_gt_supervision_timing_detail(out_dir: str, *, verbose: bool = False) -
                 errs.append(0.0)
 
         if labels:
-            bar_colors = ["#4c78a8"] * (len(labels) - 1) + ["#d62728"]
+            # Sort left (least) to right (most), keep Total last
+            _total_mask = ["total" in l.lower() for l in labels]
+            _non_total = [(l, v, e) for l, v, e, m in zip(labels, vals, errs, _total_mask) if not m]
+            _total_items = [(l, v, e) for l, v, e, m in zip(labels, vals, errs, _total_mask) if m]
+            _sort_order = sorted(range(len(_non_total)), key=lambda i: _non_total[i][1])
+            _sorted = [_non_total[i] for i in _sort_order] + _total_items
+            labels = [x[0] for x in _sorted]
+            vals   = [x[1] for x in _sorted]
+            errs   = [x[2] for x in _sorted]
+            bar_colors = ["#4c78a8"] * (len(labels) - len(_total_items)) + ["#d62728"] * len(_total_items)
             fig, ax = plt.subplots(figsize=(max(6.0, 0.9 * len(labels)), 4.2), dpi=180)
             x = np.arange(len(labels))
             ax.bar(x, vals, color=bar_colors, alpha=0.88)
@@ -5323,9 +5625,10 @@ def _aggregate_calibration_ablation(
             legend_handles.append(Patch(facecolor=color, edgecolor="none", label=lbl))
             bottoms += vals
         if total_col:
-            tv = np.where(np.isfinite(total_vals), total_vals, np.nan)
-            ax.plot(x, tv, "o", color="black", markersize=5, zorder=5, label="RS3 score (wmean)")
-            legend_handles.append(Patch(facecolor="black", edgecolor="none", label="RS3 score (wmean)"))
+            _rs3_dot = np.where(np.isfinite(bottoms), bottoms, np.nan)
+            ax.plot(x, _rs3_dot, "o", color="black", markersize=5, zorder=5, label="RS3 score (wmean)")
+            from matplotlib.lines import Line2D as _L2D_rs3
+            legend_handles.append(_L2D_rs3([0],[0], marker="o", color="black", linestyle="none", markersize=5, label="RS3 score (wmean)"))
         ax.legend(handles=legend_handles, loc="best", framealpha=0.9, fontsize=8)
     else:
         tv = np.where(np.isfinite(total_vals), total_vals, 0.0)
@@ -5582,7 +5885,7 @@ def _aggregate_gt_centering_displacement(
             dpi=180, height_ratios=[1.1, 1.0],
         )
 
-        # Top — RS3 stacked decomp
+        # Top -- RS3 stacked decomp
         x0 = np.arange(len(groups), dtype=float)
         bottoms = np.zeros(len(groups), dtype=float)
         legend_handles = []
@@ -5613,11 +5916,11 @@ def _aggregate_gt_centering_displacement(
         ax0.set_xticks(x0)
         ax0.set_xticklabels([g[0] for g in groups], fontsize=11)
         ax0.set_ylabel("RS3 Score")
-        ax0.set_title("GT Centering — RS3 Score Decomposition")
+        ax0.set_title("GT Centering -- RS3 Score Decomposition")
         ax0.legend(handles=legend_handles, loc="best", fontsize=8, framealpha=0.9)
         ax0.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
         ax0.set_axisbelow(True)
-        # Bottom — all metrics grouped bars
+        # Bottom -- all metrics grouped bars
         x1 = np.arange(len(all_metric_cols), dtype=float)
         bar_w = 0.8 / max(1, len(groups))
         for i, (grp_label, sub) in enumerate(groups):
@@ -5646,7 +5949,7 @@ def _aggregate_gt_centering_displacement(
         ax1.set_xticks(x1)
         ax1.set_xticklabels(all_metric_cols, rotation=25, ha="right", fontsize=8)
         ax1.set_ylabel("mean +/- IQR")
-        ax1.set_title("GT Centering — Full Metric Breakdown")
+        ax1.set_title("GT Centering -- Full Metric Breakdown")
         ax1.legend(loc="best", fontsize=8, framealpha=0.9)
         ax1.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
         ax1.set_axisbelow(True)
@@ -5739,7 +6042,7 @@ def _aggregate_gt_centering_displacement(
             ax_nn.axhline(dataset_lw_mean, color="#e45756", lw=2.0,
                           linestyle="--",
                           label=f"Centering NN mean = {dataset_lw_mean:.2f} px")
-            ax_nn.set_ylabel("Centering displacement — NN mean (px)",
+            ax_nn.set_ylabel("Centering displacement -- NN mean (px)",
                              color="#e45756")
             ax_nn.tick_params(axis="y", labelcolor="#e45756")
             ax_nn.set_ylim(bottom=0)

@@ -185,3 +185,7 @@ C:\Users\13144\Documents\Masters_Thesis\CURRENT_PROJECT_CODE\.claude\worktrees\g
 metrics_engine.py
 debug*.txt
 most_recent_outputs.txt
+_*
+._*
+journal.txt
+handoff_*

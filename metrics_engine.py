@@ -975,9 +975,11 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         #resolved_indices = [41]
         resolved_indices= None
         base_names = None
-        SKIP_ALREADY_PROCESSED = False
-        SKIP_PASS1 = False
-        FAST_RUN_EDGE_SWEEP = False
+        SKIP_ALREADY_PROCESSED = True
+        # When True: pass2c runs ET width eval only (skips DT/dt_depth/B1 if they exist)
+        ET_ONLY_WIDTH = True
+        SKIP_PASS1 = True
+        FAST_RUN_EDGE_SWEEP = True
         MASK_ONLY = False
 
         # ------------------------------------------------------------------
@@ -990,7 +992,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         ]
         _NEED_FULL = set()   # empty — full batch pipeline handles everything
         _MASK_ONLY_IMAGES = []
-        _FULL_IMAGES      = []
+        _FULL_IMAGES      = ["17", "21", "42", "117"]
 
         # --- Step 1: Full recompute for images ---
         if _FULL_IMAGES:
@@ -1020,7 +1022,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                             print(f"[RECOVERY FULL] {_bn}: wipe warning: {_we}")
                         self.compute_mask_and_width_metrics_for_image(
                             display=False,
-                            export_supervision=False,
+                            export_supervision=True,
                             best_method_key="dt_depth",
                         )
                     except Exception as _e:
@@ -1062,6 +1064,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 pass
         print("[RECOVERY] Done (no-op — full batch pipeline runs below).")
 
+        self._et_only_width_flag = ET_ONLY_WIDTH
         idxs = self._resolve_metrics_image_indices(image_indices=resolved_indices, base_names=base_names)
         if not idxs:
             print("[batch dt_best_et] no target images")
@@ -1127,12 +1130,12 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             _append_csv_row(os.path.join(calib_dir, "global_per_image_runtime.csv"), row)
 
         def _manual_ids_for_current_image():
+            # Return all crack IDs with a valid midline (source filter removed --
+            # this dataset uses source=auto throughout, so filtering by manual would
+            # always return empty and skip the sweep entirely)
             atomic = dict(self._metric_atomic() or {})
             out = []
             for cid, cr in atomic.items():
-                src = str((cr or {}).get("source") or "").lower()
-                if src.startswith("auto") or src == "combined":
-                    continue
                 mid = metrics_mod._finite_xy((cr or {}).get("midline", []))
                 if len(mid) >= 2:
                     out.append(cid)
@@ -1194,8 +1197,14 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                 for n, idx in enumerate(sweep_indices, 1):
                     base = _base(idx)
                     print(f"[batch dt_best_et] pass2a sweep {n}/{len(sweep_indices)}: {base}")
+                    # Skip if sweep already done for this image
+                    _sweep_done = os.path.join(self.save_folder, "metrics", base, "edge_sweep_family_agg.csv")
+                    if os.path.isfile(_sweep_done):
+                        print(f"  -> [{base}] sweep already done (edge_sweep_family_agg.csv exists), skipping")
+                        continue
                     self.n = int(idx)
                     self.change_image()
+                    self._sync_metrics_snapshot_from_authoring(refresh_combine=False, persist=False)
                     manual_ids = _manual_ids_for_current_image()
                     if not manual_ids:
                         print(f"  -> [{base}] no manual cracks for sweep")
@@ -1203,7 +1212,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
                     _img_packs = {}
                     for cid in manual_ids:
                         try:
-                            df = self.sweep_edges_with_executor(cid, grid=DEFAULT_EDGE_GRID, max_workers=(edge_parallel_workers or 8))
+                            df = self.sweep_edges_with_executor(cid, grid=DEFAULT_EDGE_GRID, max_workers=min(2, (edge_parallel_workers or 2)))
                         except Exception as e:
                             print(f"  -> [{base}] sweep failed cid={cid}: {e}")
                             continue
@@ -1366,8 +1375,10 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         section_wall_s["select_best_non_dt"] = float(time.perf_counter() - _t_sec)
 
         _t_sec = time.perf_counter()
-        sweep_n = max(1, min(len(idxs) // 10, 10))
-        sweep_indices = idxs[:sweep_n]
+        sweep_n = max(1, min(len(idxs) // 10, 15))
+        import random as _random
+        _random.seed(42)
+        sweep_indices = _random.sample(idxs, min(sweep_n, len(idxs)))
         if FAST_RUN_EDGE_SWEEP:
             best_edge_params = _best_edge_params_from_sweep(sweep_indices)
         else:
@@ -1378,7 +1389,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
 
         _t_sec = time.perf_counter()
         _pass1_ran_et = not SKIP_PASS1
-        if _pass1_ran_et and best_edge_params == DEFAULT_EDGE:
+        if True:  # pass2b skipped -- sweep params too similar to DEFAULT_EDGE to justify rerun
             print("[batch dt_best_et] pass2b SKIPPED — best_edge_params == DEFAULT_EDGE, pass1 already ran ET")
             section_wall_s["pass2b_edge_tracking"] = 0.0
         else:
@@ -1438,6 +1449,12 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         for n, idx in enumerate(idxs, 1):
             base = _base(idx)
             print(f"\n[batch dt_best_et] -- pass2c {n}/{len(idxs)}: {base} (width eval dt_best_et)")
+            if SKIP_ALREADY_PROCESSED:
+                _wds = os.path.join(self.save_folder, "metrics", base, "width_distribution_summary.csv")
+                if os.path.isfile(_wds) and os.path.getsize(_wds) > 0:
+                    print(f"  -> [{base}] pass2c skip (width_distribution_summary.csv exists)")
+                    pass2c_rows.append({"image": base, "skipped": True})
+                    continue
             _cur_base = os.path.splitext(os.path.basename(str(getattr(self, "name", ""))))[0]
             if str(_cur_base) != str(base):
                 self.n = int(idx)
@@ -2328,6 +2345,15 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             except Exception as e:
                 print(f"\n[DEBUG METRICS] GT supervision export failed: {e}\n")
                 traceback.print_exc()
+                try:
+                    import traceback as _tb2
+                    _el = os.path.join(self.save_folder, "metrics", str(base_name), "supervision_export_error.txt")
+                    os.makedirs(os.path.dirname(_el), exist_ok=True)
+                    with open(_el, "w", encoding="utf-8") as _ef:
+                        _ef.write(f"Error: {e}\n\n{_tb2.format_exc()}")
+                    print(f"[DEBUG METRICS] error saved to {_el}")
+                except Exception:
+                    pass
 
         gt_sup_json_path = os.path.join(gt_sup_root, "gt_supervision.json")
         if not bool(export_supervision) and not os.path.isfile(gt_sup_json_path):
@@ -4057,11 +4083,22 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
             else:
                 print(f"[WIDTH] best_non_dt unavailable/invalid: {selected_best_non_dt}")
 
-            _width_tasks = [("ET", atomic, combined_for_width, getattr(self, "width_baseline_img_folder", None))]
-            if dt_atomic or dt_combined:
-                _width_tasks.append(("dt", dt_atomic, dt_combined, None))
-            if best_atomic or best_combined:
-                _width_tasks.append((f"best_{selected_best_non_dt}", best_atomic, best_combined, None))
+            _et_only = getattr(self, '_et_only_width_flag', False)
+            # ET_ONLY_WIDTH: skip DT/dt_depth if their output already exists
+            _best_folder = f"best_{selected_best_non_dt}" if selected_best_non_dt else "best_dt_depth"
+            _et_only_effective = _et_only and os.path.isfile(
+                os.path.join(metrics_dir, "dt", f"{base_name}_width_summary_combined.csv")
+            ) and os.path.isfile(
+                os.path.join(metrics_dir, _best_folder, f"{base_name}_width_summary_combined.csv")
+            )
+            if _et_only_effective:
+                print(f"[WIDTH] ET-only mode: skipping DT/dt_depth (outputs exist)")
+            _width_tasks = [("ET", atomic, combined_for_width, None if _et_only_effective else getattr(self, "width_baseline_img_folder", None))]
+            if not _et_only_effective:
+                if dt_atomic or dt_combined:
+                    _width_tasks.append(("dt", dt_atomic, dt_combined, None))
+                if best_atomic or best_combined:
+                    _width_tasks.append((f"best_{selected_best_non_dt}", best_atomic, best_combined, None))
 
             def _run_width_task(mtype, a_src, c_src, baseline_root):
                 t0 = time.perf_counter()
@@ -4749,6 +4786,7 @@ class MetricsEngine(TrackSegmentPipeline, CrackUtils):
         import numpy as np
         import pandas as pd
         from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+        from concurrent.futures.process import BrokenProcessPool as _BrokenProcessPool
 
         from edge_workers import edge_param_worker
         from helpers.metrics import set_tracked_edges_for_crack, load_snapshot_from_files

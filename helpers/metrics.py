@@ -5287,6 +5287,32 @@ def compare_widths_for_aligned_cracks(
             mid_meta[i].setdefault("branch_id", int(_safe_int(mid_meta[i].get("branch_id"), i)))
             mid_meta[i].setdefault("seg_idx", int(i))
 
+        # Consolidate mid_segs to one stitched segment per branch (seg_idx=0),
+        # matching GT supervision's one-segment-per-branch key structure.
+        # Without this, multi-atomic branches produce (branch_id, 1), (branch_id, 2)...
+        # which have no GT counterpart and cause no_gt_match_strict skips.
+        _branch_to_mid_segs = {}
+        _branch_to_mid_meta = {}
+        for _s, _m in zip(mid_segs, mid_meta):
+            _bid = int(_m.get("branch_id", 0))
+            _branch_to_mid_segs.setdefault(_bid, []).append(_s)
+            _branch_to_mid_meta.setdefault(_bid, _m)
+        mid_segs_consolidated = []
+        mid_meta_consolidated = []
+        for _bid in sorted(_branch_to_mid_segs.keys()):
+            _parts = [np.asarray(p, float) for p in _branch_to_mid_segs[_bid] if p is not None and len(p) >= 2]
+            if not _parts:
+                continue
+            _stitched = np.vstack(_parts) if len(_parts) > 1 else _parts[0]
+            _m0 = dict(_branch_to_mid_meta[_bid])
+            _m0["branch_id"] = int(_bid)
+            _m0["seg_idx"] = 0
+            mid_segs_consolidated.append(_stitched)
+            mid_meta_consolidated.append(_m0)
+        if mid_segs_consolidated:
+            mid_segs = mid_segs_consolidated
+            mid_meta = mid_meta_consolidated
+
         # --- Derived geometry (explicit per-segment representation only) ---
         derived_segs_raw = crack.get("derived_midline_segments")
         derived_meta = crack.get("derived_midline_segments_meta")

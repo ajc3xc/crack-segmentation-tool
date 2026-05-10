@@ -76,7 +76,7 @@ def edge_masks(
             print("[edge_mask] ⚙️ running in CPU mode (no CUDA device detected)")
 
         img_h, img_w = image_gray.shape
-        edge_mask = np.zeros_like(image_gray, dtype=float)
+        edge_mask = np.zeros_like(image_gray, dtype=np.float32)
         center_line_length = 3
         n_skipped = 0
 
@@ -146,7 +146,7 @@ def edge_masks(
     # ------------------------------------------------------------------
     # NOTE: this intentionally keeps the old x/y usage and window logic.
     mode = "old"
-    edge_mask = np.zeros_like(image_gray, dtype=float)
+    edge_mask = np.zeros_like(image_gray, dtype=np.float32)
     center_line_length = 3
     n_skipped = 0
     H, W = image_gray.shape
@@ -850,10 +850,10 @@ def edges_tracking(
         em2 = np.squeeze(edge_mask2_cropp)
     else:
         def _norm01(m):
-            m = m.astype(np.float64)
+            m = m.astype(np.float32)
             m -= float(m.min())
             mx = float(m.max())
-            return m / (mx + 1e-12) if mx > 0 else m
+            return (m / (mx + 1e-12) if mx > 0 else m).astype(np.float64)
         em1 = _norm01(np.squeeze(edge_mask1_cropp))
         em2 = _norm01(np.squeeze(edge_mask2_cropp))
     t_mask_norm = time.perf_counter() - t0
@@ -1007,17 +1007,20 @@ def edges_tracking(
 
     # --- Debug plot ---
     if debug_dir:
-        _save_stage5c_debug_plot(
-            e1=e1,
-            e2=e2,
-            orig_mid_xy=midline,
-            derived_mid_xy=derived_midline,
-            debug_dir=debug_dir,
-            mode=mode,
-            mu=mu,
-            l=l,
-            p=p,
-        )
+        try:
+            _save_stage5c_debug_plot(
+                e1=e1,
+                e2=e2,
+                orig_mid_xy=midline,
+                derived_mid_xy=derived_midline,
+                debug_dir=debug_dir,
+                mode=mode,
+                mu=mu,
+                l=l,
+                p=p,
+            )
+        except Exception as _dbg_err:
+            print(f"[edges_tracking] stage5c plot failed (non-fatal): {_dbg_err}")
 
     t_midline = time.perf_counter() - t0
 
@@ -1462,17 +1465,20 @@ def generate_mask_from_edges(
         overlay[mask == 1] = (0.95, 0.95, 0.95)
         blended = cv2.addWeighted(overlay, 0.8, dark_base, 0.2, 0.0)
 
-        plot_edges_and_normals(
-            base_image=(blended * 255).astype(np.uint8),
-            midline_segs=[],
-            derived_midline_segs=[mid] if len(mid) >= 2 else [],
-            edge1_segs=[e1_plot],
-            edge2_segs=[e2_plot],
-            norm1_segs=[],
-            norm2_segs=[],
-            out_png=os.path.join(out_dir, f"{tag}_mask_overlay.png"),
-            title=f"{tag} — mask overlay",
-        )
+        try:
+            plot_edges_and_normals(
+                base_image=(blended * 255).astype(np.uint8),
+                midline_segs=[],
+                derived_midline_segs=[mid] if len(mid) >= 2 else [],
+                edge1_segs=[e1_plot],
+                edge2_segs=[e2_plot],
+                norm1_segs=[],
+                norm2_segs=[],
+                out_png=os.path.join(out_dir, f"{tag}_mask_overlay.png"),
+                title=f"{tag} — mask overlay",
+            )
+        except Exception as _plot_err:
+            print(f"[generate_mask_from_edges] plot failed (non-fatal): {_plot_err}")
 
     return mask
 

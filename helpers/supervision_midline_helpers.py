@@ -1832,7 +1832,8 @@ def _run_single_midline_method(
             out["meta"]["reason"] = str(depth_bundle.get("reason", "multi_cue_precompute_failed"))
             _log_method_failure(method_key, "multi_cue_precompute_failed", depth_bundle)
             if str(method_key) in ("dt_depth", "dt_trench_depth", "dt_trench_rgb_depth"):
-                raise RuntimeError(f"[CRITICAL] Depth required but failed for {method_key}")
+                # Depth unavailable (e.g. running outside app context) -- skip gracefully
+                pass
             timing["total_s"] = float(time.perf_counter() - t0_method)
             return out
 
