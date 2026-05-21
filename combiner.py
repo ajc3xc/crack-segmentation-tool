@@ -1965,6 +1965,7 @@ def dominant_segments_from_group(
         )
         first_used_parent = False
         parent_stat = branch_stats_map.get(int(bi), {})
+        stolen_aids = set()   # track atomic_ids claimed by synthetic sub-branches
         for sg in subgroups:
             if not sg:
                 continue
@@ -1992,6 +1993,7 @@ def dominant_segments_from_group(
                     if a and a not in seen_a:
                         aids.append(a)
                         seen_a.add(a)
+                        stolen_aids.add(a)
                     seg = np.asarray((it or {}).get("seg", []), float)
                     if seg.ndim == 2 and seg.shape[1] == 2 and len(seg) >= 2:
                         kept_len += float(_linestring_length(seg))
@@ -2005,6 +2007,24 @@ def dominant_segments_from_group(
                         "suppressed": False,
                     }
                 )
+            else:
+                # Update the parent branch's stats to reflect only this subgroup's atomics.
+                parent_aids = []
+                seen_pa = set()
+                parent_kept_len = 0.0
+                for it in sg:
+                    a = str((it or {}).get("atomic_id", ""))
+                    if a and a not in seen_pa:
+                        parent_aids.append(a)
+                        seen_pa.add(a)
+                    seg = np.asarray((it or {}).get("seg", []), float)
+                    if seg.ndim == 2 and seg.shape[1] == 2 and len(seg) >= 2:
+                        parent_kept_len += float(_linestring_length(seg))
+                for r in branch_stats:
+                    if isinstance(r, dict) and int(r.get("branch_id", -1)) == int(bi):
+                        r["atomic_ids"] = parent_aids
+                        r["kept_len"]   = float(parent_kept_len)
+                        break
             # Ensure territory exists for both parent-retained and synthetic branches.
             syn_terr = _build_branch_territory_from_items(sg)
             branch_terr_masks[int(out_bid)] = syn_terr

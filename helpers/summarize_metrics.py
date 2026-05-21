@@ -102,6 +102,58 @@ def _aggregate_numeric(
     return df.groupby(group_cols, dropna=False).agg(**agg_spec).reset_index()
 
 
+def _lw_aggregate_numeric(
+    df: pd.DataFrame,
+    *,
+    group_cols: List[str],
+    numeric_cols: List[str],
+    weight_col: str = "length_px",
+) -> pd.DataFrame:
+    """
+    Length-weighted aggregation. For each group, computes np.average(col, weights=length_px).
+    Produces the same {col}_mean / {col}_median / {col}_std column names as _aggregate_numeric
+    so downstream code requires no changes.
+    Falls back to plain mean for any row where weight is missing/zero.
+    """
+    if df.empty:
+        return pd.DataFrame()
+    missing_group = [c for c in group_cols if c not in df.columns]
+    if missing_group:
+        return pd.DataFrame()
+    if weight_col not in df.columns:
+        return _aggregate_numeric(df, group_cols=group_cols, numeric_cols=numeric_cols)
+
+    if "image" not in df.columns:
+        df = df.copy()
+        df["image"] = "unknown"
+
+    rows = []
+    for keys, g in df.groupby(group_cols, dropna=False):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        row = dict(zip(group_cols, keys))
+        row["n_rows"] = int(len(g))
+        row["n_images"] = int(g["image"].nunique())
+        row["total_length_px"] = float(pd.to_numeric(g[weight_col], errors="coerce").sum())
+        w = pd.to_numeric(g[weight_col], errors="coerce").fillna(0.0).to_numpy(float)
+        for col in numeric_cols:
+            vals = pd.to_numeric(g[col], errors="coerce").to_numpy(float)
+            ok = np.isfinite(vals) & np.isfinite(w) & (w > 0)
+            if not np.any(ok):
+                row[f"{col}_mean"] = np.nan
+                row[f"{col}_median"] = np.nan
+                row[f"{col}_std"] = np.nan
+            else:
+                wmean = float(np.average(vals[ok], weights=w[ok]))
+                row[f"{col}_mean"] = wmean
+                row[f"{col}_median"] = float(np.median(vals[ok]))
+                row[f"{col}_std"] = float(
+                    np.sqrt(np.average((vals[ok] - wmean) ** 2, weights=w[ok]))
+                )
+        rows.append(row)
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
 def _save_bar(
     labels: List[str],
     values: List[float],
@@ -1707,7 +1759,17 @@ def _aggregate_width_metrics(
                 continue
             ad = np.abs(diff)
             sd = np.square(diff)
-            _img_abs = g.groupby("image")["abs_bias_per_image"].first().dropna().to_numpy(float)
+            # Bias: per-image signed mean first (length-weighted within image since rows ≈ 1px),
+            # then abs per image, then length-weighted mean across images (weighted by n_rows per
+            # image ≈ total crack length). Taking abs AFTER per-image grouping prevents cross-image
+            # sign cancellation where over-predicting images and under-predicting images would
+            # falsely cancel to near-zero in a naive pooled |mean(all diff)|.
+            _img_groups = g.groupby("image", dropna=False)
+            _img_signed = _img_groups["diff_px"].mean()
+            _img_sizes = _img_groups["diff_px"].count().reindex(_img_signed.index).fillna(1)
+            _img_abs = _img_signed.abs().to_numpy(float)
+            _img_w = _img_sizes.to_numpy(float)
+            _ok = np.isfinite(_img_abs) & (_img_w > 0)
             rows.append(
                 {
                     "method": str(display_label),
@@ -1719,9 +1781,9 @@ def _aggregate_width_metrics(
                     "rmse_px": float(np.sqrt(np.mean(sd))),
                     "rmse_q1": float(np.sqrt(np.percentile(sd, 25))),
                     "rmse_q3": float(np.sqrt(np.percentile(sd, 75))),
-                    "bias_px": float(np.mean(_img_abs)) if _img_abs.size > 0 else np.nan,
-                    "bias_q1": float(np.percentile(_img_abs, 25)) if _img_abs.size > 0 else np.nan,
-                    "bias_q3": float(np.percentile(_img_abs, 75)) if _img_abs.size > 0 else np.nan,
+                    "bias_px": float(np.average(_img_abs[_ok], weights=_img_w[_ok])) if _ok.any() else np.nan,
+                    "bias_q1": float(np.percentile(_img_abs[_ok], 25)) if _ok.any() else np.nan,
+                    "bias_q3": float(np.percentile(_img_abs[_ok], 75)) if _ok.any() else np.nan,
                 }
             )
         if not rows:
@@ -1775,20 +1837,146 @@ def _aggregate_width_metrics(
             if companion_cols:
                 p[companion_cols].to_csv(companion_csv, index=False)
 
-        _plot_lw(lw_df, "mae_px", "mae_q1", "mae_q3", os.path.join(length_weighted_dir, "dataset_width_lw_mae.png"), "Length-weighted width MAE", "MAE (px)")
+        _plot_lw(lw_df, "mae_px", "mae_q1", "mae_q3", os.path.join(length_weighted_dir, "dataset_width_lw_mae.png"), "Pooled width MAE", "MAE (px)")
         lw_outputs["width_lw_mae_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_mae.png")
-        _plot_lw(lw_df, "rmse_px", "rmse_q1", "rmse_q3", os.path.join(length_weighted_dir, "dataset_width_lw_rmse.png"), "Length-weighted width RMSE", "RMSE (px)")
+        _plot_lw(lw_df, "rmse_px", "rmse_q1", "rmse_q3", os.path.join(length_weighted_dir, "dataset_width_lw_rmse.png"), "Pooled width RMSE", "RMSE (px)")
         lw_outputs["width_lw_rmse_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_rmse.png")
-        _plot_lw(lw_df, "abs_bias_px", "abs_bias_q1", "abs_bias_q3", os.path.join(length_weighted_dir, "dataset_width_lw_bias.png"), "Length-weighted width |bias|", "|bias| (px)")
+        _plot_lw(lw_df, "abs_bias_px", "abs_bias_q1", "abs_bias_q3", os.path.join(length_weighted_dir, "dataset_width_lw_bias.png"), "Pooled width |bias|", "|bias| (px)")
         lw_outputs["width_lw_bias_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_bias.png")
 
-        lw_no_et = lw_df[~lw_df["method"].astype(str).map(_is_et_like)].copy()
-        _plot_lw(lw_no_et, "mae_px", "mae_q1", "mae_q3", os.path.join(length_weighted_dir, "dataset_width_lw_mae_no_et.png"), "Length-weighted width MAE (no ET)", "MAE (px)")
-        lw_outputs["width_lw_mae_no_et_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_mae_no_et.png")
-        _plot_lw(lw_no_et, "rmse_px", "rmse_q1", "rmse_q3", os.path.join(length_weighted_dir, "dataset_width_lw_rmse_no_et.png"), "Length-weighted width RMSE (no ET)", "RMSE (px)")
-        lw_outputs["width_lw_rmse_no_et_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_rmse_no_et.png")
-        _plot_lw(lw_no_et, "abs_bias_px", "abs_bias_q1", "abs_bias_q3", os.path.join(length_weighted_dir, "dataset_width_lw_bias_no_et.png"), "Length-weighted width |bias| (no ET)", "|bias| (px)")
-        lw_outputs["width_lw_bias_no_et_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_bias_no_et.png")
+        # LW no-ET: same pooled length-weighted computation, ET filtered out.
+        lw_no_et_df = lw_df[~lw_df["source_class"].astype(str).eq("ET")].copy()
+        if not lw_no_et_df.empty:
+            _plot_lw(lw_no_et_df, "mae_px", "mae_q1", "mae_q3", os.path.join(length_weighted_dir, "dataset_width_lw_mae_no_et_pooled.png"), "Pooled width MAE", "MAE (px)")
+            lw_outputs["width_lw_mae_no_et_pooled_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_mae_no_et_pooled.png")
+            _plot_lw(lw_no_et_df, "rmse_px", "rmse_q1", "rmse_q3", os.path.join(length_weighted_dir, "dataset_width_lw_rmse_no_et_pooled.png"), "Pooled width RMSE", "RMSE (px)")
+            lw_outputs["width_lw_rmse_no_et_pooled_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_rmse_no_et_pooled.png")
+            _plot_lw(lw_no_et_df, "abs_bias_px", "abs_bias_q1", "abs_bias_q3", os.path.join(length_weighted_dir, "dataset_width_lw_bias_no_et_pooled.png"), "Pooled width |bias|", "|bias| (px)")
+            lw_outputs["width_lw_bias_no_et_pooled_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_bias_no_et_pooled.png")
+
+        # Build image → total GT crack length from midline metrics CSVs.
+        # Used to weight per-image means across images (genuinely LW per-image).
+        # Method-independent: GT crack length is the same regardless of prediction method.
+        _image_length_map: Dict[str, float] = {}
+        for _img_dir in image_dirs:
+            _img_name = os.path.basename(_img_dir)
+            _ml_files = glob.glob(os.path.join(_img_dir, "**", "*_midline_metrics_combined*.csv"), recursive=True)
+            if not _ml_files:
+                _ml_files = glob.glob(os.path.join(_img_dir, "**", "midline_metrics*.csv"), recursive=True)
+            for _mlf in _ml_files[:1]:
+                try:
+                    _mdf = _safe_read_csv(_mlf)
+                    if _mdf is not None and "length_px" in _mdf.columns:
+                        _total = pd.to_numeric(_mdf["length_px"], errors="coerce").dropna().sum()
+                        if np.isfinite(_total) and _total > 0:
+                            _image_length_map[_img_name] = float(_total)
+                except Exception:
+                    pass
+
+        # Image-mean aggregation (no ET): per-image mean first, then equal mean across images.
+        # This is intentionally different from lw_df which pools all crack-level diffs.
+        rows_im = []
+        for raw_method, g in d.groupby("_method", dropna=False):
+            raw_key = str(raw_method).strip().lower()
+            if _is_et_like(raw_key):
+                continue
+            if raw_key in _baseline_raw_keys:
+                src_class = "baseline"
+                display_label = _display_width_method_label(raw_key)
+            else:
+                src_class = "multi-cue"
+                display_label = _display_method_name(str(raw_method))
+            if "image" not in g.columns:
+                continue
+            per_img = (
+                g.groupby("image", dropna=False)
+                .agg(
+                    mae_px=("_abs_diff", "mean"),
+                    sq_mean=("_sq_diff", "mean"),
+                    bias_px=("diff_px", "mean"),
+                )
+                .dropna(subset=["mae_px"])
+            )
+            if per_img.empty:
+                continue
+            per_img["rmse_px"] = np.sqrt(per_img["sq_mean"].to_numpy(float))
+            # Image-mean bias: equal weight per crack within image (group by cid first),
+            # then mean of crack biases per image, then abs. This differs from lw_df which
+            # uses mean(all diff_px rows per image) — implicitly length-weighted since
+            # longer cracks contribute more rows.
+            if "cid" in g.columns:
+                per_crack_bias = (
+                    g.groupby(["image", "cid"], dropna=False)["diff_px"]
+                    .mean()
+                    .groupby(level="image")
+                    .mean()
+                )
+            else:
+                per_crack_bias = g.groupby("image", dropna=False)["diff_px"].mean()
+            per_img["abs_bias_px"] = per_crack_bias.reindex(per_img.index).abs().to_numpy(float)
+
+            def _im_stats(arr):
+                a = arr[np.isfinite(arr)]
+                if a.size == 0:
+                    return np.nan, np.nan, np.nan
+                return float(np.mean(a)), float(np.percentile(a, 25)), float(np.percentile(a, 75))
+
+            def _lw_im_stats(arr, img_index):
+                """Length-weighted per-image: weight each image by its total GT crack length."""
+                a = arr[np.isfinite(arr)]
+                if a.size == 0:
+                    return np.nan, np.nan, np.nan
+                w = np.array([_image_length_map.get(str(img), 0.0) for img in img_index])
+                w = w[np.isfinite(arr)]
+                ok = np.isfinite(a) & (w > 0)
+                if not ok.any():
+                    return float(np.mean(a)), float(np.percentile(a, 25)), float(np.percentile(a, 75))
+                return (
+                    float(np.average(a[ok], weights=w[ok])),
+                    float(np.percentile(a[ok], 25)),
+                    float(np.percentile(a[ok], 75)),
+                )
+
+            mae_mean, mae_q1, mae_q3 = _im_stats(per_img["mae_px"].to_numpy(float))
+            rmse_mean, rmse_q1, rmse_q3 = _im_stats(per_img["rmse_px"].to_numpy(float))
+            bias_mean, bias_q1, bias_q3 = _im_stats(per_img["abs_bias_px"].to_numpy(float))
+            lw_mae, lw_mae_q1, lw_mae_q3 = _lw_im_stats(per_img["mae_px"].to_numpy(float), per_img.index)
+            lw_rmse, lw_rmse_q1, lw_rmse_q3 = _lw_im_stats(per_img["rmse_px"].to_numpy(float), per_img.index)
+            lw_bias, lw_bias_q1, lw_bias_q3 = _lw_im_stats(per_img["abs_bias_px"].to_numpy(float), per_img.index)
+            if not np.isfinite(mae_mean):
+                continue
+            rows_im.append({
+                "method": str(display_label),
+                "source_class": src_class,
+                "n_samples": int(len(per_img)),
+                "mae_px": mae_mean, "mae_q1": mae_q1, "mae_q3": mae_q3,
+                "rmse_px": rmse_mean, "rmse_q1": rmse_q1, "rmse_q3": rmse_q3,
+                "abs_bias_px": bias_mean, "abs_bias_q1": bias_q1, "abs_bias_q3": bias_q3,
+                "lw_mae_px": lw_mae, "lw_mae_q1": lw_mae_q1, "lw_mae_q3": lw_mae_q3,
+                "lw_rmse_px": lw_rmse, "lw_rmse_q1": lw_rmse_q1, "lw_rmse_q3": lw_rmse_q3,
+                "lw_abs_bias_px": lw_bias, "lw_abs_bias_q1": lw_bias_q1, "lw_abs_bias_q3": lw_bias_q3,
+            })
+
+        if rows_im:
+            im_df = pd.DataFrame(rows_im).sort_values("mae_px", ascending=True)
+            im_csv = os.path.join(length_weighted_dir, "dataset_width_image_mean_summary_no_et.csv")
+            im_df.to_csv(im_csv, index=False)
+            lw_outputs["width_im_no_et_csv"] = im_csv
+            _plot_lw(im_df, "mae_px", "mae_q1", "mae_q3", os.path.join(length_weighted_dir, "dataset_width_lw_mae_no_et.png"), "Image-mean width MAE", "MAE (px)")
+            lw_outputs["width_lw_mae_no_et_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_mae_no_et.png")
+            _plot_lw(im_df, "rmse_px", "rmse_q1", "rmse_q3", os.path.join(length_weighted_dir, "dataset_width_lw_rmse_no_et.png"), "Image-mean width RMSE", "RMSE (px)")
+            lw_outputs["width_lw_rmse_no_et_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_rmse_no_et.png")
+            _plot_lw(im_df, "abs_bias_px", "abs_bias_q1", "abs_bias_q3", os.path.join(length_weighted_dir, "dataset_width_lw_bias_no_et.png"), "Image-mean width |bias|", "|bias| (px)")
+            lw_outputs["width_lw_bias_no_et_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_bias_no_et.png")
+            # Genuinely LW per-image: per-image mean weighted by total GT crack length per image.
+            if _image_length_map:
+                lw_im_df = im_df.copy()
+                _plot_lw(lw_im_df, "lw_mae_px", "lw_mae_q1", "lw_mae_q3", os.path.join(length_weighted_dir, "dataset_width_lw_im_mae_no_et.png"), "Length-weighted width MAE", "MAE (px)")
+                lw_outputs["width_lw_im_mae_no_et_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_im_mae_no_et.png")
+                _plot_lw(lw_im_df, "lw_rmse_px", "lw_rmse_q1", "lw_rmse_q3", os.path.join(length_weighted_dir, "dataset_width_lw_im_rmse_no_et.png"), "Length-weighted width RMSE", "RMSE (px)")
+                lw_outputs["width_lw_im_rmse_no_et_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_im_rmse_no_et.png")
+                _plot_lw(lw_im_df, "lw_abs_bias_px", "lw_abs_bias_q1", "lw_abs_bias_q3", os.path.join(length_weighted_dir, "dataset_width_lw_im_bias_no_et.png"), "Length-weighted width |bias|", "|bias| (px)")
+                lw_outputs["width_lw_im_bias_no_et_png"] = os.path.join(length_weighted_dir, "dataset_width_lw_im_bias_no_et.png")
         return lw_outputs
 
     outputs.update(_plot_width_metrics_with_without_et(all_df, no_et_dir, overview_dir, verbose=verbose))
@@ -1876,7 +2064,7 @@ def _plot_width_metrics_with_without_et(
                         df=df_bias_no_et,
                         metric_col="abs_bias_px",
                         out_png=os.path.join(out_dir, "dataset_width_bias_no_et.png"),
-                        title="Dataset width |bias| (mean + IQR + outliers, no ET)",
+                        title="Dataset width |bias| (mean + IQR + outliers)",
                         ylabel="|bias| (px)",
                         plot_type="bar",
                         color_map=color_map,
@@ -1891,7 +2079,7 @@ def _plot_width_metrics_with_without_et(
                     df=df_no_et,
                     metric_col="rmse_px",
                     out_png=os.path.join(out_dir, "dataset_width_rmse_no_et.png"),
-                    title="Dataset width RMSE (mean + IQR + outliers, no ET)",
+                    title="Dataset width RMSE (mean + IQR + outliers)",
                     ylabel="RMSE (px)",
                     plot_type="bar",
                     color_map=color_map,
@@ -2078,7 +2266,7 @@ def _aggregate_midline_metrics(
         "curvature_rms_ratio",
     ]
     metric_cols = [c for c in metric_candidates if c in all_df.columns]
-    grouped = _aggregate_numeric(all_df, group_cols=group_cols, numeric_cols=metric_cols)
+    grouped = _lw_aggregate_numeric(all_df, group_cols=group_cols, numeric_cols=metric_cols)
     if not grouped.empty:
         grp_csv = os.path.join(midline_dir, "dataset_midline_metrics_grouped.csv")
         grouped.to_csv(grp_csv, index=False)
@@ -2313,7 +2501,7 @@ def _aggregate_midline_metrics(
                     ax2.set_xticks(x2)
                     ax2.set_xticklabels(top_no_et["label"].astype(str).tolist(), rotation=35, ha="right", fontsize=8)
                     ax2.set_ylabel("RS3 Score")
-                    ax2.set_title("Dataset Midline RS3 Score (combined, no ET)")
+                    ax2.set_title("Dataset Midline RS3 Score (combined)")
                     ax2.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
                     ax2.set_axisbelow(True)
                     present_no_et = set(top_no_et["source_class"].astype(str).tolist())
@@ -3982,7 +4170,7 @@ def _plot_dataset_full_timing_overview(
         plt.close(fig)
         return out_png
 
-    def _plot_components_with_total(df, cols, title, out_png):
+    def _plot_components_with_total(df, cols, title, out_png, errs_override=None):
         """Like _plot_components but appends a TOTAL bar summing all components."""
         if df is None or df.empty:
             return None
@@ -3999,7 +4187,11 @@ def _plot_dataset_full_timing_overview(
                 continue
             pos = arr_clean[arr_clean > 0]
             v = _safe_num(np.mean(pos) if pos.size else 0.0)
-            e = _safe_num(np.std(pos) if pos.size else 0.0)
+            # Use pre-computed std if provided (avoids std=0 when df has single-row scalars)
+            if errs_override is not None and c in errs_override:
+                e = float(errs_override[c])
+            else:
+                e = _safe_num(np.std(pos) if pos.size else 0.0)
             if not np.isfinite(v):
                 continue
             disp = re.sub(r"(_s|_sec)$", "", c)
@@ -4014,10 +4206,22 @@ def _plot_dataset_full_timing_overview(
         if not vals:
             return None
 
+        # Sort components least → most (excluding TOTAL which is appended after)
+        _order = np.argsort(vals)
+        labels = [labels[i] for i in _order]
+        vals   = [vals[i]   for i in _order]
+        errs   = [errs[i]   for i in _order]
+
         if per_row_sum is not None and np.any(per_row_sum > 0):
             pos_total = per_row_sum[per_row_sum > 0]
             total_mean = _safe_num(float(np.mean(pos_total))) if pos_total.size else np.nan
-            total_err = _safe_num(float(np.std(pos_total))) if pos_total.size else 0.0
+            # When errs_override supplied, per_row_sum is single-element so std=0.
+            # Use RSS of component stds instead (correct for sum of independent variables).
+            if errs_override is not None and any(e > 0 for e in errs):
+                component_stds = [e for e in errs if e > 0]
+                total_err = float(np.sqrt(np.sum(np.array(component_stds) ** 2)))
+            else:
+                total_err = _safe_num(float(np.std(pos_total))) if pos_total.size else 0.0
             if np.isfinite(total_mean):
                 labels.append("TOTAL")
                 vals.append(float(total_mean))
@@ -4149,6 +4353,10 @@ def _plot_dataset_full_timing_overview(
                 _add(sum_rows, comp.split(":", 1)[1], v_sum, "baseline_seg", err_sum)
             elif any(k in comp for k in ("mat_", "pca_", "esd_", "eob_", "width", "skeleton_dse")) and "skeleton_graph" not in comp.lower():
                 comp_low = comp.lower()
+                # Skip the shared sub-components — they exist only to be folded into PCA/ESD/EOB.
+                # The overview chart should show MAT (raw), MAT (DSE), PCA, ESD, EOB as complete pipeline entries.
+                if comp_low.startswith("shared_mat_gpu") or comp_low.startswith("skeleton_dse"):
+                    continue
                 label = _display_timing_component_name(comp)
                 if any(k in comp_low for k in ("pca", "esd", "eob")):
                     if np.isfinite(base_wmean_shared):
@@ -4440,6 +4648,18 @@ def _plot_dataset_full_timing_overview(
             "Width / Midline Methods Timing",
         )
         outputs["overview_chart"] = outputs.get("dataset_algorithm_timing_overview_png")
+        
+        width_subset_no_et = df_mean[
+            df_mean["category"].isin(["baseline_width", "auto", "multi_cue", "gt_supervision"])
+            & ~(df_mean["method"].astype(str) == "gt_centering")
+        ].to_dict("records")
+        outputs["width_chart"] = _plot_algorithm_overview(
+            width_subset_no_et,
+            os.path.join(out_dir, "dataset_width_methods_no_et_centering_timing.png"),
+            "Width / Midline Methods Timing",
+        )
+        outputs["overview_chart"] = outputs.get("dataset_algorithm_timing_overview_png")
+        
 
     # Component charts
     _gt_cen_col_labels = {
@@ -4543,6 +4763,7 @@ def _plot_dataset_full_timing_overview(
     _mc_weighted = _safe_read(os.path.join(out_dir, "dataset_multi_cue_components_weighted.csv"))
     if _mc_weighted is not None and not _mc_weighted.empty and {"component", "wmean_s"}.issubset(_mc_weighted.columns):
         _mc_rebuilt = {}
+        _mc_errs_override = {}
         for col in multicue_comp_cols:
             src_col = col if col in _mc_weighted["component"].astype(str).values else ("normals_depth_s" if col == "normals_multi_cue_s" else None)
             if src_col is None:
@@ -4553,6 +4774,10 @@ def _plot_dataset_full_timing_overview(
             vv = float(pd.to_numeric(rr.iloc[0].get("wmean_s", np.nan), errors="coerce"))
             if np.isfinite(vv):
                 _mc_rebuilt[col] = [vv]
+            # Pull std_s from the weighted CSV so error bars are non-zero
+            std_v = float(pd.to_numeric(rr.iloc[0].get("std_s", np.nan), errors="coerce"))
+            if np.isfinite(std_v) and std_v > 0:
+                _mc_errs_override[col] = std_v
         _df_mc_plot = pd.DataFrame(_mc_rebuilt) if _mc_rebuilt else pd.DataFrame()
         _mc_plot_cols = list(_df_mc_plot.columns)
         outputs["multi_cue_components_chart"] = _plot_components_with_total(
@@ -4560,6 +4785,7 @@ def _plot_dataset_full_timing_overview(
             _mc_plot_cols,
             "Multi-Cue Dataset Components (length-weighted mean per image)",
             os.path.join(out_dir, "dataset_multi_cue_components.png"),
+            errs_override=_mc_errs_override,
         )
     else:
         outputs["multi_cue_components_chart"] = _plot_components_with_total(
@@ -6455,7 +6681,7 @@ def summarize_dataset_metrics(
                                 ax_ne.set_xlabel("GT crack width bin")
                                 ax_ne.set_ylabel(_ylabel)
                                 ax_ne.set_title(
-                                    f"Width {_metric} by GT Width Bin (no ET)"
+                                    f"Width {_metric} by GT Width Bin"
                                 )
                                 ax_ne.legend(fontsize=7, framealpha=0.9, ncol=2)
                                 ax_ne.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4, zorder=0)
