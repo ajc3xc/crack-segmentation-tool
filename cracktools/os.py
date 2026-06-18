@@ -474,8 +474,14 @@ def LeftInvariantDerivative(osObj,sigmaSpatial,sigmaOD,order,symmetry,anglesMatr
 
     return tensor'''
 
-import cupy as cp
-import cupyx.scipy.ndimage as nd
+try:
+    import cupy as cp
+    import cupyx.scipy.ndimage as nd
+    HAS_CUPY = True
+except ImportError:
+    cp = None
+    nd = None
+    HAS_CUPY = False
 #from cupyx import fuse
 
 '''@cp.fuse()

@@ -307,34 +307,13 @@ def plot_greedy_branch_debug(
                             [p1[1] - y0, p2[1] - y0],
                             color=join_color, linewidth=2.5, linestyle="--", zorder=20,
                         )
-                        ax_c.annotate(
-                            f"{best_dist:.1f}px",
-                            xy=((p1[0]+p2[0])/2 - x0, (p1[1]+p2[1])/2 - y0),
-                            fontsize=5, color=join_color, ha="center", zorder=25,
-                            bbox=dict(boxstyle="round,pad=0.1", facecolor="black", alpha=0.5),
-                        )
                         if best_action == "append":
                             chain.append(best_oriented)
                         else:
                             chain.insert(0, best_oriented)
                         used.add(best_j)
 
-            # Label the branch at centroid
-            all_branch_pts = []
-            for atomic_idx in branch:
-                S = np.asarray(atomics[atomic_idx]["poly"], float)
-                if S.ndim == 2 and len(S) >= 2:
-                    all_branch_pts.append(S)
-            if all_branch_pts:
-                centre = np.vstack(all_branch_pts).mean(axis=0)
-                ax_c.text(
-                    centre[0] - x0, centre[1] - y0,
-                    f"b{b_idx}\n{aid_labels}",
-                    fontsize=5, color="white", ha="center", va="center", zorder=30,
-                    bbox=dict(boxstyle="round,pad=0.15", facecolor=color[:3], alpha=0.75),
-                )
-
-        # Junction nodes (degree >= 3) as yellow stars
+            # Junction nodes (degree >= 3) as yellow stars
         for k in junction_keys:
             ax_c.plot(k[0] - x0, k[1] - y0, "*", color="yellow", markersize=12, zorder=35,
                       markeredgecolor="black", markeredgewidth=0.5)
@@ -1442,6 +1421,51 @@ def dominant_segments_from_group(
                         grew = False
                         break
 
+                    # 2-hop triangle check: if best_j's far endpoint is an exact
+                    # endpoint of an unused segment whose OTHER endpoint is in
+                    # interior_keys, then best_j + that connector form a closed
+                    # 3-segment triangle with a segment already in the branch.
+                    # Save best_j + connector as a pair branch without touching
+                    # the current branch.
+                    # Use ALL branch segment endpoints (not just [1:-1]) minus
+                    # the current growth tip — this handles 2-element branches
+                    # where branch[1:-1] is empty but the interior junction exists.
+                    _all_branch_keys = set()
+                    for _bi in branch:
+                        _abs, _abe = _endpoints(atomics[_bi]["poly"])
+                        _all_branch_keys.add((round(float(_abs[0]), 1), round(float(_abs[1]), 1)))
+                        _all_branch_keys.add((round(float(_abe[0]), 1), round(float(_abe[1]), 1)))
+                    _all_branch_keys.discard(_b_start_key)  # current growth tip only
+                    _hop2_connector = None
+                    for _uc in list(unused):
+                        if _uc == best_j:
+                            continue
+                        _uc_s, _uc_e = _endpoints(atomics[_uc]["poly"])
+                        _uc_s_key = (round(float(_uc_s[0]), 1), round(float(_uc_s[1]), 1))
+                        _uc_e_key = (round(float(_uc_e[0]), 1), round(float(_uc_e[1]), 1))
+                        if _pts_close(_uc_s, _far_chk) and _uc_e_key in _all_branch_keys:
+                            _hop2_connector = _uc
+                            break
+                        if _pts_close(_uc_e, _far_chk) and _uc_s_key in _all_branch_keys:
+                            _hop2_connector = _uc
+                            break
+                    if _hop2_connector is not None:
+                        unused.discard(best_j)
+                        unused.discard(_hop2_connector)
+                        branches.append([best_j, _hop2_connector])
+                        attach_orders[int(best_j)] = 1
+                        attach_orders[int(_hop2_connector)] = 2
+                        print(
+                            f"[PROSP_LOOP_2HOP] saved "
+                            f"[{atomics[best_j]['atomic_id']},{atomics[_hop2_connector]['atomic_id']}]"
+                            f" as triangle pair",
+                            flush=True
+                        )
+                        if branch:
+                            restarted = True
+                        grew = False
+                        break
+
                     side, flip = best_attach_mode
 
                     endpoint_history.append((b_start.copy(), b_end.copy()))
@@ -2422,11 +2446,10 @@ def dominant_segments_from_group(
         
         leg = ax.legend(
             handles=legend_items,
-            loc="upper left",
-            bbox_to_anchor=(1.02, 1.0),
-            borderaxespad=0.0,
-            fontsize=7,
-            framealpha=0.2,
+            loc="upper right",
+            borderaxespad=0.5,
+            fontsize=11,
+            framealpha=0.85,
         )
         leg.set_zorder(100)
 
@@ -2621,11 +2644,10 @@ def plot_branch_territory_debug_pre(
 
     leg = ax.legend(
         handles=legend_items,
-        loc="upper left",
-        bbox_to_anchor=(1.02, 1.0),
-        borderaxespad=0.0,
-        fontsize=7,
-        framealpha=0.2,
+        loc="upper right",
+        borderaxespad=0.5,
+        fontsize=11,
+        framealpha=0.85,
     )
     leg.set_zorder(100)
 

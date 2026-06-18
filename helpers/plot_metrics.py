@@ -308,7 +308,7 @@ def plot_edges_and_normals(
         t.set_fontweight("bold")
 
     if title:
-        ax.set_title(title, fontsize=14)
+        ax.set_title(title, fontsize=11)
 
     ax.axis("off")
     plt.tight_layout(pad=0)
@@ -372,7 +372,7 @@ def plot_gt_normals_on_gtbw(gt_mask_u8, derived_midline_xy, midline_xy, e1, e2, 
     if handles:
         leg = ax.legend(
             handles=handles,
-            fontsize=10,
+            fontsize=11,
             title="Legend",
             title_fontsize=12,
             loc="lower right",
@@ -861,11 +861,11 @@ def plot_core_timing_bars(metrics_dir):
 
             ax2.set_xticks(xs)
             ax2.set_xticklabels([f"cid {c}" for c in crack_ids],
-                                fontsize=10, fontweight="bold")
+                                fontsize=11, fontweight="bold")
             ax2.set_ylabel("Time (s)")
             ax2.set_title(f"Atomic edges tracking breakdown — {supervision}",
-                          fontsize=13, fontweight="bold")
-            ax2.legend(fontsize=8, bbox_to_anchor=(1.05, 1), loc="upper left")
+                          fontsize=11, fontweight="bold")
+            ax2.legend(fontsize=11, bbox_to_anchor=(1.05, 1), loc="upper left")
 
             out_atomic = os.path.join(
                 metrics_dir, supervision, f"timings_edges_tracking_{supervision}.png"
@@ -922,11 +922,11 @@ def plot_core_timing_bars(metrics_dir):
 
             ax3.set_xticks(xs)
             ax3.set_xticklabels([f"comb_{l}" for l in labels],
-                                fontsize=10, fontweight="bold")
+                                fontsize=11, fontweight="bold")
             ax3.set_ylabel("Time (s)")
             ax3.set_title(f"Combined crack subtiming breakdown — {supervision}",
-                          fontsize=13, fontweight="bold")
-            ax3.legend(fontsize=8, bbox_to_anchor=(1.05, 1), loc="upper left")
+                          fontsize=11, fontweight="bold")
+            ax3.legend(fontsize=11, bbox_to_anchor=(1.05, 1), loc="upper left")
 
             out_comb = os.path.join(
                 metrics_dir, supervision, f"timings_combined_{supervision}.png"

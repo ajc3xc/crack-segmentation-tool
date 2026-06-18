@@ -192,3 +192,6 @@ handoff_*
 junction*
 greedy_hierarchy.png
 atomic_topology_*
+patch_*
+fix_*
+regen_*

@@ -23,13 +23,13 @@ DEBUG_LEVEL = 1
 # 1 = important only
 # 2 = per-crack summaries
 # 3 = full debug (rare)
-DEBUG_TARGET = "cid1"   # set failing image key
+DEBUG_TARGET = "42"   # set failing image key
 DEBUG_SPLIT = True      # branch -> segment split diagnostics
 DEBUG_SUPPRESS = True   # suppression diagnostics
 ENABLE_ABLATION_DEBUG_PLOTS = True
 ENABLE_COMBINED_METHOD_DEBUG_PLOTS = True
 DEBUG_LIGHT = True      # minimal high-level logs
-PER_ATOMIC_METHOD_DEBUG = False  # keep False: use aggregated atomic-all method plots instead
+PER_ATOMIC_METHOD_DEBUG = True  # keep False: use aggregated atomic-all method plots instead
 METHODS_RS3 = [
     "dt",
     "dt_depth",
@@ -88,6 +88,47 @@ def _save_debug_plot(fig, out_path):
     fig.savefig(out_path, bbox_inches="tight")
     from matplotlib import pyplot as plt
     plt.close(fig)
+
+
+def _save_atomic_debug_plot(dbg, atomic_id, method_key, base_name, out_root):
+    try:
+        out_dir = os.path.join(out_root, "atomic_debug", str(atomic_id), str(method_key))
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, "combined_side_by_side.png")
+        dt_norm = dbg.get("dt_norm", None)
+        costmap = dbg.get("costmap", None) or dbg.get("selected_cost", None)
+        if costmap is None:
+            cmaps = dbg.get("costmaps", {}) or {}
+            if isinstance(cmaps, dict):
+                sk = str(cmaps.get("selected_key", "dt"))
+                costmap = cmaps.get("selected", None) or cmaps.get(sk, None) or cmaps.get("dt", None)
+        midline = dbg.get("midline", None) or dbg.get("centered_midline", None)
+        fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+        ax0 = axes[0]
+        if dt_norm is not None:
+            dn = np.asarray(dt_norm, np.float32)
+            dn = np.where(np.isfinite(dn) & (dn < 1e5), dn, 0.0)
+            ax0.imshow(dn, cmap="viridis", interpolation="nearest")
+            ax0.set_title("dt_norm", fontsize=9)
+        else:
+            ax0.set_title("dt_norm: None", fontsize=9)
+        ax0.axis("off")
+        ax1 = axes[1]
+        if costmap is not None:
+            cm = np.asarray(costmap, np.float32)
+            cm = np.where(np.isfinite(cm) & (cm < 1e5), cm, 0.0)
+            ax1.imshow(cm, cmap="magma", interpolation="nearest")
+        ax1.set_title("costmap + midline", fontsize=9)
+        if midline is not None:
+            ml = np.asarray(midline, float)
+            if ml.ndim == 2 and ml.shape[1] == 2 and len(ml) >= 2:
+                ax1.plot(ml[:, 0], ml[:, 1], "c-", linewidth=1.5)
+        ax1.axis("off")
+        fig.suptitle(f"{base_name} | atomic={atomic_id} | {method_key}", fontsize=10)
+        fig.savefig(out_path, bbox_inches="tight", dpi=120)
+        plt.close(fig)
+    except Exception as _e:
+        print(f"[ATOMIC_DBG] save failed: {_e}", flush=True)
 
 
 def _rebuild_segs(flat):
@@ -519,7 +560,7 @@ def _plot_single_debug(entry, gt_mask_u8, original_image, out_path):
 
     ax.set_title(f"{kind} {crack_id} - Ablation Comparison")
     ax.axis("off")
-    ax.legend(loc="lower right", fontsize=9, framealpha=0.9)
+    ax.legend(loc="lower right", fontsize=11, framealpha=0.9)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.tight_layout()
     plt.savefig(out_path, bbox_inches="tight", pad_inches=0)
@@ -584,7 +625,7 @@ def _global_overview(entries, gt_mask, out_png, title="Global GT Overview"):
     # Title
     # ---------------------------
     if title:
-        ax.set_title(title, fontsize=15, fontweight="bold", color="blue")
+        ax.set_title(title, fontsize=11, fontweight="bold", color="blue")
 
     ax.set_xlim(0, W)
     ax.set_ylim(H, 0)
@@ -621,7 +662,7 @@ def _debug_plot_all_atomics_for_export(*, image_rgb, atomic_map, out_png, title=
                 x, y, bw, bh = [int(v) for v in bbox]
                 rect = plt.Rectangle((x, y), bw, bh, edgecolor="cyan", facecolor="none", linewidth=2)
                 ax.add_patch(rect)
-                ax.text(x, y - 5, f"ID {scid}", color="cyan", fontsize=9, weight="bold")
+                ax.text(x, y - 5, f"ID {scid}", color="cyan", fontsize=11, weight="bold")
                 ax.scatter(x + bw / 2.0, y + bh / 2.0, c="yellow", s=20)
             except Exception:
                 pass
@@ -1023,7 +1064,7 @@ def plot_midline_centering_debug(
         rgb0 = (0.75 * rgb0 + 0.25 * overlay).astype(np.uint8)
     ax0.imshow(rgb0)
     ax0.axis("off")
-    ax0.set_title(left_panel_title, fontsize=10)
+    ax0.set_title(left_panel_title, fontsize=11)
 
     if show_dt_panel:
         if T is not None:
@@ -1039,7 +1080,7 @@ def plot_midline_centering_debug(
         # Pure magma for DT
         ax1.imshow(dt_crop, cmap="magma")
         ax1.axis("off")
-        ax1.set_title(right_panel_title, fontsize=10)
+        ax1.set_title(right_panel_title, fontsize=11)
 
         # Territory overlay as pure white alpha mask (no colormap)
         if show_territory and T is not None:
@@ -1161,7 +1202,7 @@ def plot_midline_centering_debug(
         loc="center left",
         bbox_to_anchor=(0.845, 0.5),
         framealpha=0.9,
-        fontsize=9,
+        fontsize=11,
         title="Legend",
         title_fontsize=10,
     )
@@ -1203,7 +1244,7 @@ def plot_costmap_debug(
 
     axL.imshow(M[y0:y1, x0:x1], cmap="gray")
     axL.axis("off")
-    axL.set_title("Geometry", fontsize=10)
+    axL.set_title("Geometry", fontsize=11)
     for S in (manual_segs or []):
         S = np.asarray(S, float)
         if S.ndim == 2 and S.shape[1] == 2 and len(S) >= 2:
@@ -1226,7 +1267,7 @@ def plot_costmap_debug(
         if S.ndim == 2 and S.shape[1] == 2 and len(S) >= 2:
             axR.plot(S[:, 0] - x0, S[:, 1] - y0, "-", color="cyan", linewidth=2.0)
     axR.axis("off")
-    axR.set_title("Costmap", fontsize=10)
+    axR.set_title("Costmap", fontsize=11)
 
     normals_iter = []
     if isinstance(normals, dict):
@@ -1263,7 +1304,7 @@ def plot_costmap_debug(
         Line2D([], [], color=pred_color, lw=2.0, linestyle="-", label="Prediction"),
         Line2D([], [], color="blue", lw=1.2, linestyle="-", label="Normals"),
     ]
-    fig.legend(handles=handles, loc="lower center", ncol=3, framealpha=0.9, fontsize=9)
+    fig.legend(handles=handles, loc="lower center", ncol=3, framealpha=0.9, fontsize=11)
     fig.suptitle(str(title), fontsize=11)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
@@ -1352,8 +1393,8 @@ def plot_gt_normals_debug_global(
         Line2D([], [], color="orange", lw=2.0, linestyle="-", label="GT midline"),
         Line2D([], [], color="blue", lw=1.0, linestyle="-", label="GT normals"),
     ]
-    ax.legend(handles=handles, loc="lower right", framealpha=0.9, fontsize=9)
-    ax.set_title(str(title), fontsize=10)
+    ax.legend(handles=handles, loc="lower right", framealpha=0.9, fontsize=11)
+    ax.set_title(str(title), fontsize=11)
     ax.axis("off")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight", dpi=150)
@@ -1457,7 +1498,7 @@ def plot_combined_overlay_debug(
         Line2D([], [], color="orange", lw=2.0, linestyle="--", label="Manual"),
         Line2D([], [], color="blue", lw=1.0, linestyle="-", label="Normals"),
     ]
-    ax.legend(handles=handles, loc="lower right", framealpha=0.9, fontsize=9)
+    ax.legend(handles=handles, loc="lower right", framealpha=0.9, fontsize=11)
     ax.set_title(str(title))
     ax.axis("off")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -1547,8 +1588,8 @@ def plot_combined_overlay_and_costmap(
             if S.ndim == 2 and S.shape[1] == 2 and len(S) >= 2:
                 ax.plot(S[:, 0] - x0, S[:, 1] - y0, "-", color=compare_color, lw=2.4)
 
-    ax0.set_title("Territory + manual/prediction", fontsize=10)
-    ax1.set_title("Selected costmap + manual/prediction", fontsize=10)
+    ax0.set_title("Territory + manual/prediction", fontsize=11)
+    ax1.set_title("Selected costmap + manual/prediction", fontsize=11)
     ax0.axis("off")
     ax1.axis("off")
 
@@ -1557,7 +1598,7 @@ def plot_combined_overlay_and_costmap(
         Line2D([], [], color="orange", lw=2.0, linestyle="--", label="Manual"),
     ]
     fig.subplots_adjust(right=0.83)
-    fig.legend(handles=handles, loc="center left", bbox_to_anchor=(0.845, 0.5), framealpha=0.9, fontsize=9)
+    fig.legend(handles=handles, loc="center left", bbox_to_anchor=(0.845, 0.5), framealpha=0.9, fontsize=11)
     fig.suptitle(str(title), fontsize=11)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
@@ -1668,7 +1709,7 @@ def plot_atomic_ablation_debug(
         Line2D([], [], color=pred_color, lw=2.0, linestyle="-", label="Prediction"),
         Line2D([], [], color="blue", lw=1.2, linestyle="-", label="Normals"),
     ]
-    ax.legend(handles=handles, loc="lower right", framealpha=0.9, fontsize=9)
+    ax.legend(handles=handles, loc="lower right", framealpha=0.9, fontsize=11)
     ax.set_title(str(title))
     ax.axis("off")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -1929,18 +1970,24 @@ def _plot_branch_audit(
                 col = branch_colors.get(bi, (0.0, 1.0, 0.4, 1.0))
                 ax.plot(A[:, 0], A[:, 1], color=col, linewidth=3.0, alpha=0.95)
 
-        extra_handles = [
-            Line2D([0], [0], color="#d62728", lw=2, label="dropped/clipped"),
-            Line2D([0], [0], color="#111111", lw=1, label="raw input (thin)"),
-            Line2D([0], [0], color="#111111", lw=3, label="kept output (thick)"),
-        ]
+        extra_handles = []
+        # Only add dropped/clipped handle if any segments were actually dropped
+        any_dropped = any(
+            str(aid) not in kept_by_branch_atomic.get(int(bi), set())
+            for bi, segs in raw_branch_segs.items()
+            for aid, _ in segs
+        )
+        if any_dropped:
+            extra_handles.append(
+                Line2D([0], [0], color="#d62728", lw=2, label="dropped/clipped")
+            )
         ax.legend(
             handles=(branch_handles + extra_handles),
             loc="upper left",
-            fontsize=7,
-            framealpha=0.9,
+            fontsize=13,
+            framealpha=0.45,
         )
-        ax.set_title(f"Branch Audit - {tag_name}")
+        ax.set_title(f"Branch Audit - {tag_name}", fontsize=13)
         ax.axis("off")
         plt.tight_layout()
         fig.savefig(out_png, bbox_inches="tight")
@@ -2006,8 +2053,8 @@ def _plot_centering_audit_entry(
 
         branch_handles = [Line2D([0], [0], color=branch_colors[b], lw=3, label=f"GT branch {int(b)}") for b in branch_ids]
         method_handles = [Line2D([0], [0], color=method_colors[k], lw=2, label=f"{str(k)}") for k in method_keys]
-        ax.legend(handles=(branch_handles + method_handles), loc="upper left", fontsize=7, framealpha=0.9, ncol=2)
-        ax.set_title(f"Centering Audit - combined {entry.get('id', '')}")
+        ax.legend(handles=(branch_handles + method_handles), loc="upper left", fontsize=13, framealpha=0.9, ncol=2)
+        ax.set_title(f"Centering Audit - combined {entry.get('id', '')}", fontsize=13)
         ax.axis("off")
         plt.tight_layout()
         fig.savefig(out_png, bbox_inches="tight")
@@ -2110,7 +2157,7 @@ def _plot_territory_debug(
             gt_overlay[..., 3] = gt_crop.astype(float) * 0.60
             ax.imshow(gt_overlay)
             ax.contour(gt_crop.astype(float), levels=[0.5], colors=["white"], linewidths=0.5, alpha=0.5)
-            ax.set_title(title, fontsize=8)
+            ax.set_title(title, fontsize=11)
             ax.axis("off")
 
         branch_stats = {
@@ -2138,7 +2185,7 @@ def _plot_territory_debug(
                             float(np.mean(xs)),
                             float(np.mean(ys)),
                             f"b{bi}\n{aids}",
-                            fontsize=5,
+                            fontsize=11,
                             color="white",
                             ha="center",
                             va="center",
@@ -2168,9 +2215,9 @@ def _plot_territory_debug(
             for bi in order_use
         ]
         if handles:
-            axes[0].legend(handles=handles, fontsize=5, loc="lower right", framealpha=0.7)
+            axes[0].legend(handles=handles, fontsize=11, loc="lower right", framealpha=0.7)
 
-        plt.suptitle(f"Territory debug - {os.path.basename(out_png)}", fontsize=8)
+        plt.suptitle(f"Territory debug - {os.path.basename(out_png)}", fontsize=11)
         plt.tight_layout()
         fig.savefig(out_png, bbox_inches="tight")
         plt.close(fig)
@@ -2366,7 +2413,7 @@ def plot_depth_cost_diagnostic(
         cmap_obj.set_bad(color="black")
         cmap_obj.set_under(color="black")
         ax.imshow(arr_crop, cmap=cmap_obj, vmin=0.0, vmax=1.0)
-        ax.set_title(label, fontsize=10)
+        ax.set_title(label, fontsize=11)
         ax.axis("off")
 
     supt = str(title)
@@ -2701,7 +2748,7 @@ def save_global_cost_panel(
         cmap_obj.set_bad(color="black")
         cmap_obj.set_under(color="black")
         ax.imshow(arr_crop, cmap=cmap_obj, vmin=1e-6, vmax=1.0)
-        ax.set_title(label, fontsize=10)
+        ax.set_title(label, fontsize=11)
         ax.axis("off")
 
     fig.suptitle(str(title))
@@ -3291,6 +3338,10 @@ def export_gt_centering_metrics(
             "hausdorff_p95",
             "frechet_discrete_ds",
             "mean_tan_angle_error_deg",
+            "relative_length_error",
+            "orth_mean",
+            "orth_std",
+            "curvature_rms_ratio",
         ]
         if c in df_all.columns
     ]
@@ -5787,6 +5838,14 @@ def export_gt_supervision_for_image(
                                     "bx": int(bx),
                                     "by": int(by),
                                 })
+                                if PER_ATOMIC_METHOD_DEBUG and _dbg(base_name):
+                                    _save_atomic_debug_plot(
+                                        mm["plot_debug_branches"][-1],
+                                        blob_id,
+                                        mk,
+                                        base_name,
+                                        sup_root,
+                                    )
                     if DEBUG_SPLIT and _dbg(base_name):
                         _assigned = int(len(mm.get("midline_segments", []) or []))
                         _dlog(1, f"[ASSIGN] mk={str(mk)} assigned_segments={_assigned}")

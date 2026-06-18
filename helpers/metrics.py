@@ -3679,7 +3679,7 @@ def compute_projected_width_diffs(
                     ax.legend(
                         handles=legend_handles_cat,
                         loc="lower right",
-                        fontsize=7,
+                        fontsize=11,
                         framealpha=0.85,
                         markerscale=1.5,
                     )
@@ -3704,7 +3704,7 @@ def compute_projected_width_diffs(
             ax.set_title(
                 f"{support_method} - B1 projection diagnostics\n"
                 f"success={n_succ}  radius_reject={n_rej}  wmap_nan={n_nan}  no_support={n_nosupp}",
-                fontsize=9,
+                fontsize=11,
             )
 
             out_dir = os.path.join(
@@ -3750,14 +3750,14 @@ def compute_projected_width_diffs(
                     n_total = int(d_concat.size)
                     rej_pct = 100.0 * n_rejected / max(1, n_total)
                     ax_hist.set_xlim(0.0, xmax)
-                    ax_hist.set_xlabel("NN distance to skeleton (px)", fontsize=9)
-                    ax_hist.set_ylabel("# GT points", fontsize=9)
+                    ax_hist.set_xlabel("NN distance to skeleton (px)", fontsize=11)
+                    ax_hist.set_ylabel("# GT points", fontsize=11)
                     ax_hist.set_title(
                         f"{support_method} - NN distance distribution\n"
                         f"rejected: {n_rejected}/{n_total} ({rej_pct:.1f}%)",
-                        fontsize=9,
+                        fontsize=11,
                     )
-                    ax_hist.legend(fontsize=8)
+                    ax_hist.legend(fontsize=11)
                     ax_hist.grid(axis="y", alpha=0.3)
                 else:
                     ax_hist.text(0.5, 0.5, "No finite distances", ha="center", va="center", transform=ax_hist.transAxes)
@@ -3829,14 +3829,14 @@ def compute_projected_width_diffs(
                         from matplotlib.patches import Patch as _Patch
                         ax_dom.legend(handles=[
                             _Patch(facecolor="#33ee66", alpha=0.9, label="domain (kept)"),
-                            _Patch(facecolor="#ff8822", alpha=0.9, label="excl. by ribbon (in bbox, outside 2.5xmedian DT)"),
-                            _Patch(facecolor="#ff3333", alpha=0.9, label="excl. by bbox/no-touch"),
-                        ], loc="lower right", fontsize=7, framealpha=0.85)
+                            _Patch(facecolor="#ff3333", alpha=0.9, label="outside bbox/no-touch"),
+                            _Patch(facecolor="#ff8822", alpha=0.9, label="outside 2.5x median DT"),
+                        ], loc="lower right", fontsize=15, framealpha=0.5)
                         ax_dom.set_xlim(dx0, dx1)
                         ax_dom.set_ylim(dy1, dy0)
                         ax_dom.set_aspect("equal")
                         ax_dom.axis("off")
-                        ax_dom.set_title(f"{support_method} - domain mask coverage", fontsize=9)
+                        ax_dom.set_title(f"{support_method} - domain mask coverage", fontsize=13)
 
                         out_dom = os.path.join(out_dir, f"{base_name}_{support_method}_b1_domain_mask.png")
                         fig_dom.savefig(out_dom, dpi=180, bbox_inches="tight")
@@ -3889,12 +3889,12 @@ def compute_projected_width_diffs(
                             linewidths=0, label=f"kept ({int(np.count_nonzero(survived))})"
                         )
 
-                    ax_sk.legend(loc="lower right", fontsize=7, framealpha=0.85, markerscale=2)
+                    ax_sk.legend(loc="lower right", fontsize=13, framealpha=0.85, markerscale=2)
                     ax_sk.set_xlim(sx0, sx1)
                     ax_sk.set_ylim(sy1, sy0)
                     ax_sk.set_aspect("equal")
                     ax_sk.axis("off")
-                    ax_sk.set_title(f"{support_method} - skeleton pruning (domain filter)", fontsize=9)
+                    ax_sk.set_title(f"{support_method} - skeleton pruning (domain filter)", fontsize=13)
 
                     out_sk = os.path.join(out_dir, f"{base_name}_{support_method}_b1_skeleton_pruning.png")
                     fig_sk.savefig(out_sk, dpi=180, bbox_inches="tight")
@@ -4218,7 +4218,7 @@ def _debug_plot_correspondence_single(
             transform=ax_geom.transAxes,
             ha="left",
             va="top",
-            fontsize=8,
+            fontsize=11,
             color="darkred",
             bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="darkred", alpha=0.8),
         )
@@ -4513,17 +4513,17 @@ def plot_width_error_distribution(*, runs, title, out_path, bins=25):
 
     ax.axvline(mean, lw=1.2, linestyle="--", alpha=0.8)
 
-    ax.set_xlabel("Width error (pred − gt) [px]", fontsize=9)
-    ax.set_ylabel("Density", fontsize=9)
+    ax.set_xlabel("Width error (pred − gt) [px]", fontsize=11)
+    ax.set_ylabel("Density", fontsize=11)
     ax.grid(True, alpha=0.25)
-    #ax.legend(fontsize=8)
+    #ax.legend(fontsize=11)
 
     ax.text(
         0.02, 0.96,
         f"RMSE={rmse:.3f}px",
         transform=ax.transAxes,
         va="top",
-        fontsize=8,
+        fontsize=11,
         bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
     )
 
@@ -4633,7 +4633,7 @@ def plot_part2_width_signals_preservation(
         1, 2, figsize=(13.8, 5.2), dpi=200, sharex=True, sharey=True
     )
 
-    fig.suptitle(title, fontsize=14, fontweight="bold")
+    fig.suptitle(title, fontsize=11, fontweight="bold")
 
     # ---------------- GT panel ----------------
     if have_orig:
@@ -4651,11 +4651,11 @@ def plot_part2_width_signals_preservation(
     )
     axG.axhline(gtw1_mean, lw=1.3, alpha=0.35, ls="--", color="tab:orange")
 
-    axG.set_title("GT width vs arclength", fontsize=12)
+    axG.set_title("GT width vs arclength", fontsize=11)
     axG.set_xlabel("arclength s (px)", fontsize=11)
     axG.set_ylabel("width (px)", fontsize=11)
     axG.grid(True, alpha=0.25)
-    axG.legend(fontsize=10)
+    axG.legend(fontsize=11)
 
     # ---------------- Pred panel ----------------
     if have_orig:
@@ -4673,11 +4673,11 @@ def plot_part2_width_signals_preservation(
     )
     axP.axhline(pw1_mean, lw=1.3, alpha=0.35, ls="--", color="red")
 
-    axP.set_title("Predicted width vs arclength", fontsize=12)
+    axP.set_title("Predicted width vs arclength", fontsize=11)
     axP.set_xlabel("arclength s (px)", fontsize=11)
     axP.set_ylabel("width (px)", fontsize=11)
     axP.grid(True, alpha=0.25)
-    axP.legend(fontsize=10)
+    axP.legend(fontsize=11)
 
     # ---------------- Limits ----------------
     axG.set_xlim(0.0, s_max * 1.02)
@@ -7741,7 +7741,7 @@ def compare_widths_for_aligned_cracks(
                 axes[1].legend(
                     handles=legend_items,
                     loc="lower right",
-                    fontsize=6,
+                    fontsize=11,
                     framealpha=0.8,
                     markerscale=0.7,
                     handlelength=1.5,
@@ -7974,7 +7974,7 @@ def compare_widths_for_aligned_cracks(
                     return
 
             fig, ax = plt.subplots(figsize=(6, 6), dpi=100)
-            ax.set_title(title, fontsize=12)
+            ax.set_title(title, fontsize=11)
             ax.axis("off")
 
             ax.imshow(U.astype(np.uint8), cmap="hot", interpolation="nearest", alpha=0.95)
@@ -8330,8 +8330,8 @@ def compare_widths_for_aligned_cracks(
             1, 2, figsize=(12, 6), dpi=100, sharex=True, sharey=True
         )
 
-        axes[0].set_title("Stage 4 — GT supervision", fontsize=10)
-        axes[1].set_title("Stage 4 — Prediction", fontsize=10)
+        axes[0].set_title("Stage 4 — GT supervision", fontsize=11)
+        axes[1].set_title("Stage 4 — Prediction", fontsize=11)
 
         for ax in axes:
             ax.axis("off")
@@ -8432,9 +8432,9 @@ def compare_widths_for_aligned_cracks(
         if legend_handles:
             axes[1].legend(
                 handles=legend_handles,
-                loc="lower right",
-                fontsize=6,
-                framealpha=0.8,
+                loc="lower left",
+                fontsize=11,
+                framealpha=0.55,
                 markerscale=0.7,
                 handlelength=1.5,
                 borderpad=0.5,
@@ -9335,9 +9335,9 @@ def compare_widths_for_aligned_cracks(
             fig.patch.set_facecolor("#1a1a2e")
 
             axes[0].set_title("GT supervision (Stage 5, dominance-resolved)",
-                               fontsize=10, color="white", pad=6)
+                               fontsize=11, color="white", pad=6)
             axes[1].set_title("Prediction (Stage 5, dominance-resolved)",
-                               fontsize=10, color="white", pad=6)
+                               fontsize=11, color="white", pad=6)
 
             # Tint GT panel warm, Pred panel cool so they read as distinct
             gt_bg   = np.zeros((*mask_bin[y0:y1, x0:x1].shape, 3), dtype=np.uint8)
@@ -9435,7 +9435,7 @@ def compare_widths_for_aligned_cracks(
                 axes[1].legend(
                     handles=legend_items,
                     loc="lower right",
-                    fontsize=7,
+                    fontsize=11,
                     framealpha=0.6,
                     facecolor="#222222",
                     labelcolor="white",
@@ -9447,7 +9447,7 @@ def compare_widths_for_aligned_cracks(
 
             fig.suptitle(
                 f"Stage-5 Geometry Provenance (Dominance-resolved @ 4.5) — cid={cid}",
-                fontsize=12,
+                fontsize=11,
                 fontweight="bold",
                 color="white",
             )
@@ -10512,30 +10512,30 @@ def compare_widths_for_aligned_cracks(
 
                 axes[0].barh(y, rmse_v)
                 axes[0].axvline(global_rmse, lw=2, linestyle="--")
-                axes[0].set_title("Width RMSE (length-weighted)", fontsize=10, fontweight="bold")
-                axes[0].set_xlabel("px", fontsize=9)
+                axes[0].set_title("Width RMSE (length-weighted)", fontsize=11, fontweight="bold")
+                axes[0].set_xlabel("px", fontsize=11)
                 axes[0].grid(True, axis="x", alpha=0.25)
 
                 axes[1].barh(y, mae_v)
                 axes[1].axvline(global_mae, lw=2, linestyle="--")
-                axes[1].set_title("Width MAE (length-weighted)", fontsize=10, fontweight="bold")
-                axes[1].set_xlabel("px", fontsize=9)
+                axes[1].set_title("Width MAE (length-weighted)", fontsize=11, fontweight="bold")
+                axes[1].set_xlabel("px", fontsize=11)
                 axes[1].grid(True, axis="x", alpha=0.25)
 
                 axes[2].barh(y, bias_v)
                 axes[2].axvline(0.0, lw=1.5, linestyle="-")
                 axes[2].axvline(global_bias, lw=2, linestyle="--")
-                axes[2].set_title("Width Bias (length-weighted)", fontsize=10, fontweight="bold")
-                axes[2].set_xlabel("px (pred − gt)", fontsize=9)
+                axes[2].set_title("Width Bias (length-weighted)", fontsize=11, fontweight="bold")
+                axes[2].set_xlabel("px (pred − gt)", fontsize=11)
                 axes[2].grid(True, axis="x", alpha=0.25)
 
                 axes[3].barh(y, len_v)
-                axes[3].set_title("Finite length used (weight)", fontsize=10, fontweight="bold")
-                axes[3].set_xlabel("px", fontsize=9)
+                axes[3].set_title("Finite length used (weight)", fontsize=11, fontweight="bold")
+                axes[3].set_xlabel("px", fontsize=11)
                 axes[3].grid(True, axis="x", alpha=0.25)
 
                 axes[0].set_yticks(y)
-                axes[0].set_yticklabels(labels, fontsize=8)
+                axes[0].set_yticklabels(labels, fontsize=11)
                 axes[0].invert_yaxis()
 
                 fig.suptitle(
@@ -10660,13 +10660,13 @@ def compare_widths_for_aligned_cracks(
 
                         axH.hist(d_all, bins=25, density=True, alpha=0.85)
                         axH.axvline(0.0, lw=1.4)
-                        axH.set_title("Width error distribution after resampling", fontsize=10, fontweight="bold")
+                        axH.set_title("Width error distribution after resampling", fontsize=11, fontweight="bold")
                         axH.set_xlabel("d = pred − gt (px)")
                         axH.set_ylabel("density")
                         axH.grid(True, alpha=0.25)
 
                         axB.boxplot(run_rmse, vert=True)
-                        axB.set_title("Per-run width RMSE (resampled)", fontsize=10, fontweight="bold")
+                        axB.set_title("Per-run width RMSE (resampled)", fontsize=11, fontweight="bold")
                         axB.set_ylabel("RMSE (px)")
                         axB.grid(True, alpha=0.25)
 
@@ -10911,7 +10911,7 @@ def compare_widths_for_aligned_cracks(
     sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
     sm.set_array([])
     cb = plt.colorbar(sm, ax=ax, fraction=0.035, pad=0.02)
-    cb.set_label("Estimated width - GT width (px)", fontsize=10, fontweight="bold")
+    cb.set_label("Estimated width - GT width (px)", fontsize=11, fontweight="bold")
 
     ticks = list(cb.get_ticks())
     if len(ticks) >= 2:
@@ -10938,7 +10938,7 @@ def compare_widths_for_aligned_cracks(
         Patch(facecolor=(1, 1, 1, 0.95), edgecolor="black", label="GT mask"),
         Patch(facecolor=(0, 1, 0, 0.35), edgecolor="black", label="Pred mask"),
     ]
-    ax.legend(handles=legend_handles, loc="lower right", fontsize=6, framealpha=0.8)
+    ax.legend(handles=legend_handles, loc="lower right", fontsize=11, framealpha=0.8)
 
     os.makedirs(out_dir, exist_ok=True)
 

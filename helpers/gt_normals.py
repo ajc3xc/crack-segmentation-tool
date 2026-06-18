@@ -78,7 +78,7 @@ def export_gt_normals_for_image(
     print(f"[GT-NORMALS] ✅ wrote {len(rows)} normals → {csv_path}")
 
     # --- save visualization ---
-    plt.legend(loc="lower right", fontsize=6)
+    plt.legend(loc="lower right", fontsize=11)
     plt.axis("equal"); plt.tight_layout()
     plot_path = os.path.join(out_dir, "gt_normals_plot.png")
     plt.savefig(plot_path, dpi=200)

@@ -14,6 +14,7 @@ DEBUG_CC_TRACE = True
 DEBUG_TARGET_IMAGE = "42"
 DEBUG_TARGET_BRANCHES = None
 USE_CC_RESTRICT_FOR_SOLVER = False
+SAVE_PER_SEGMENT_VIZ = True
 # When domain has more than this many CCs, skip CC restriction (fragmented cracks should use full domain).
 CC_RESTRICT_MAX_LABELS = 5
 
@@ -1713,6 +1714,48 @@ def _precompute_method_shared_inputs(
     }
 
 
+def _save_seg_diag(dom, score_map, path_before, path_after, base_name, branch_id, method_key, step_name):
+    if not SAVE_PER_SEGMENT_VIZ:
+        return
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        from matplotlib import pyplot as _plt_seg
+        out_dir = os.path.join(
+            "Outputs", "supervision", str(base_name),
+            "per_segment_debug", str(method_key),
+        )
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, f"b{branch_id}_{step_name}.png")
+        fig, axes = _plt_seg.subplots(1, 2, figsize=(12, 6))
+        ax0 = axes[0]
+        if score_map is not None:
+            sm = np.asarray(score_map, np.float32)
+            sm = np.where(np.isfinite(sm) & (sm < 1e5), sm, 0.0)
+            ax0.imshow(sm, cmap="viridis", interpolation="nearest")
+            ax0.set_title(f"score_map: {step_name}", fontsize=9)
+        else:
+            ax0.set_title("score_map: None", fontsize=9)
+        ax0.axis("off")
+        ax1 = axes[1]
+        dom_arr = (np.asarray(dom) > 0).astype(np.uint8)
+        ax1.imshow(dom_arr, cmap="gray", vmin=0, vmax=1, interpolation="nearest")
+        if path_before is not None and len(path_before) >= 2:
+            pb = np.asarray(path_before, float)
+            ax1.plot(pb[:, 0], pb[:, 1], "b-", linewidth=1.5, label="before")
+        if path_after is not None and len(path_after) >= 2:
+            pa = np.asarray(path_after, float)
+            ax1.plot(pa[:, 0], pa[:, 1], "r-", linewidth=1.5, label="after")
+        ax1.set_title(f"domain + paths: {step_name}", fontsize=9)
+        ax1.legend(fontsize=7, loc="upper right")
+        ax1.axis("off")
+        fig.suptitle(f"{base_name} | b{branch_id} | {method_key} | {step_name}", fontsize=10)
+        fig.savefig(out_path, bbox_inches="tight", dpi=120)
+        _plt_seg.close(fig)
+    except Exception as _e:
+        print(f"[SEG_DIAG] save failed: {_e}", flush=True)
+
+
 def _run_single_midline_method(
     *,
     method_key,
@@ -1905,6 +1948,8 @@ def _run_single_midline_method(
 
     route_domain = np.asarray(dom, np.uint8).copy()
     route_costmap = np.asarray(costmap, np.float32)
+    if SAVE_PER_SEGMENT_VIZ and debug_base_name:
+        _save_seg_diag(dom, route_costmap, None, None, debug_base_name, debug_branch_id, method_key, "step1_costmap")
     print(
         f"[COORD_CHECK] mask={tuple(route_domain.shape)} "
         f"start={np.asarray(mid[0], float).tolist()} end={np.asarray(mid[-1], float).tolist()} "
@@ -1922,6 +1967,8 @@ def _run_single_midline_method(
         branch_id=debug_branch_id,
     )
     timing["dijkstra_s"] = float(dijkstra_meta.get("dijkstra_s", 0.0))
+    if SAVE_PER_SEGMENT_VIZ and debug_base_name:
+        _save_seg_diag(dom, route_costmap, path_raw, None, debug_base_name, debug_branch_id, method_key, "step2_dijkstra_raw")
     if path_raw is None or len(path_raw) < 2:
         out["meta"]["reason"] = "empty_path"
         out["meta"]["dijkstra"] = dijkstra_meta
@@ -1963,12 +2010,16 @@ def _run_single_midline_method(
             step=0.10,
         )
         timing["refine_s"] = float(time.perf_counter() - t_ref0)
+        if SAVE_PER_SEGMENT_VIZ and debug_base_name:
+            _save_seg_diag(dom, score_for_refine, path_raw, path_refined, debug_base_name, debug_branch_id, method_key, "step3_sobel_refined")
 
     path_post = np.asarray(path_refined, float)
     if bool(ENABLE_PATH_POSTPROCESS):
         t_post0 = time.perf_counter()
         path_post = _postprocess_midline_polyline(path_refined, keep_endpoints=True)
         timing["postprocess_s"] = float(time.perf_counter() - t_post0)
+        if SAVE_PER_SEGMENT_VIZ and debug_base_name:
+            _save_seg_diag(dom, score_for_refine, path_refined, path_post, debug_base_name, debug_branch_id, method_key, "step4_savgol")
     if path_post is None:
         out["meta"]["reason"] = "empty_path"
         _log_method_failure(method_key, "empty_path_postprocess")

@@ -130,7 +130,7 @@ def plot_width_summary_triplet(metrics_dir, base_name, out_png):
     ax0.set_xticklabels(methods, fontsize=10, fontweight="normal")  # <— NOT bold
     ax0.set_title("Width errors (px)", fontsize=14, fontweight="bold")
     ax0.set_ylabel("px")
-    ax0.legend(fontsize=9)
+    ax0.legend(fontsize=11)
 
     # annotate
     for bars in ax0.containers:
@@ -1328,7 +1328,7 @@ def plot_edge_sweep_summary(
                label="Weighted family mean")
     )
 
-    ax1.legend(handles=legend_items, fontsize=8, loc="best", frameon=True)
+    ax1.legend(handles=legend_items, fontsize=11, loc="best", frameon=True)
 
     ax1.set_xlabel("Boundary F1 ↑")
     ax1.set_ylabel("ASSD (px) ↓")
@@ -1367,7 +1367,7 @@ def plot_edge_sweep_summary(
     ax2.set_xticklabels(labels, rotation=90, fontsize=8)
     ax2.set_ylabel("Weighted mean normalized penalty")
     ax2.set_title("Edge score decomposition (parameter families)")
-    ax2.legend(fontsize=8)
+    ax2.legend(fontsize=11)
     ax2.grid(True, axis="y", alpha=0.25)
 
     fig.suptitle(
@@ -1734,7 +1734,7 @@ def _plot_single_crack_geometry(
         ax.set_ylim(ymax, ymin)  # inverted
         ax.set_aspect("equal")
         ax.set_title(label, fontsize=9)
-        ax.legend(fontsize=7, framealpha=0.9)
+        ax.legend(fontsize=11, framealpha=0.9)
 
     # Hide unused axes
     for ax in axes[len(new_variants):]:
@@ -1887,7 +1887,7 @@ def plot_rs3_sweep_summary(
     plt.grid(True, alpha=0.25)
     plt.legend(
         handles=legend_handles,
-        fontsize=7,
+        fontsize=11,
         frameon=True,
         title="os_mode,g11,g22,g33",
         title_fontsize=8,
@@ -1931,7 +1931,7 @@ def plot_rs3_sweep_summary(
     plt.xticks(x, [_pretty_xtick(f) for f in P["family"]], fontsize=8)
     plt.ylabel("Weighted mean score components")
     plt.title("RS3 score decomposition by family")
-    plt.legend(fontsize=8)
+    plt.legend(fontsize=11)
     plt.grid(True, axis="y", alpha=0.25)
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, "rs3_decomposition.png"), bbox_inches="tight")
@@ -1983,7 +1983,7 @@ def plot_rs3_sweep_summary(
     handles, labels = ax.get_legend_handles_labels()
     if any(lbl and not str(lbl).startswith("_") for lbl in labels):
         plt.legend(
-            fontsize=7,
+            fontsize=11,
             frameon=True,
             title="os_mode,g11,g22,g33",
             title_fontsize=8,
@@ -2134,7 +2134,7 @@ def plot_rs3_timing_summary(
         ax.set_xticks([0])
         ax.set_xticklabels([title])
         ax.set_ylabel(f"Runtime ({time_unit})")
-        ax.legend(fontsize=9)
+        ax.legend(fontsize=11)
         ax.grid(True, axis="y", alpha=0.25)
         fig.tight_layout()
         fig.savefig(outfile)
@@ -2365,7 +2365,7 @@ def plot_rs3_midline_diagnostics(
         if title_suffix:
             title += f" — {title_suffix}"
         plt.title(title)
-        plt.legend(fontsize=8, framealpha=0.9)
+        plt.legend(fontsize=11, framealpha=0.9)
         plt.tight_layout()
         plt.savefig(os.path.join(out_dir, filename))
         plt.close()
@@ -2515,7 +2515,7 @@ def plot_rs3_midline_decomposition(
     ax.set_ylabel("metric contribution (stacked)")
     ax.set_title(title)
     ax.grid(axis="y", alpha=0.2)
-    ax.legend(fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1.0))
+    ax.legend(fontsize=11, loc="upper left", bbox_to_anchor=(1.01, 1.0))
     plt.tight_layout()
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
@@ -2625,7 +2625,7 @@ def plot_midline_length_score_relationship(
         plt.ylabel(score_col)
         plt.title("Segment Length vs Midline Score")
         if len(keep_groups) <= 12:
-            plt.legend(fontsize=7, framealpha=0.9)
+            plt.legend(fontsize=11, framealpha=0.9)
         plt.grid(True, alpha=0.25)
         plt.tight_layout()
         plt.savefig(os.path.join(out_dir, f"{prefix}_scatter.png"))
@@ -2717,7 +2717,7 @@ def plot_midline_length_score_relationship(
             plt.ylabel(score_col)
             plt.title("Midline Score by Length Bin")
             if len(keep_groups) <= 12:
-                plt.legend(fontsize=7, framealpha=0.9)
+                plt.legend(fontsize=11, framealpha=0.9)
             plt.grid(True, alpha=0.25)
             plt.tight_layout()
             plt.savefig(os.path.join(out_dir, f"{prefix}_binned.png"))

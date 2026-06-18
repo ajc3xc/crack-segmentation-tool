@@ -241,7 +241,7 @@ def _plot_overview(
     if n == 1:
         axes = [axes]
 
-    for ax, (label, wmap, supp, _), (vmin, vmax) in zip(axes, panels, panel_limits):
+    for idx, (ax, (label, wmap, supp, _), (vmin, vmax)) in enumerate(zip(axes, panels, panel_limits)):
         ax.imshow(bw, cmap="gray", alpha=0.50)
         ys, xs = np.nonzero(supp)
         if len(xs) > 0:
@@ -257,7 +257,10 @@ def _plot_overview(
                 vmin=vmin,
                 vmax=vmax,
             )
-            cbar = plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.02, label="Width (px)")
+            is_last = (idx == len(panels) - 1)
+            cbar = plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.02)
+            if is_last:
+                cbar.set_label("Width (px)", fontsize=12)
             ticks = [float(vmin)]
             labels = [f"{vmin:.2f}"]
             # Show panel-local max only when clearly separated from global/family max.
@@ -272,8 +275,9 @@ def _plot_overview(
             ticks.append(float(vmax))
             labels.append(f"{vmax:.2f}")
             cbar.set_ticks(ticks)
-            cbar.set_ticklabels(labels)
-        ax.set_title(label)
+            cbar.set_ticklabels(labels, fontsize=10)
+            cbar.ax.tick_params(labelsize=10)
+        ax.set_title(label, fontsize=12)
         ax.axis("off")
 
     fig.suptitle("Width Baseline Comparison", y=1.02)
